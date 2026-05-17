@@ -1,4 +1,4 @@
-dw-terminal
+/dw-terminal
 *.exe
 *.test
 *.out
