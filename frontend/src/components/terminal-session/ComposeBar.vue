@@ -87,11 +87,11 @@ import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
 } from '@/composables/cli/useCliInputDiagnostics'
+import { useServerStore } from '@/composables/cli/useServerStore'
 
 const DRAFT_KEY = 'cli-compose-draft'
-const SNIPPETS_KEY = 'cli-compose-snippets'
-const HISTORY_KEY = 'cli-compose-history'
 const HISTORY_MAX = 15
+const serverStore = useServerStore()
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
@@ -114,15 +114,12 @@ function loadDraft() {
   try { text.value = localStorage.getItem(DRAFT_KEY) || '' } catch {}
 }
 
-// --- Snippets ---
+// --- Snippets (server-side, survives trycloudflare domain changes) ---
 function loadSnippets() {
-  try {
-    const raw = localStorage.getItem(SNIPPETS_KEY)
-    snippets.value = raw ? JSON.parse(raw) : []
-  } catch { snippets.value = [] }
+  snippets.value = serverStore.get<string[]>('snippets', [])
 }
 function saveSnippetsToStorage() {
-  try { localStorage.setItem(SNIPPETS_KEY, JSON.stringify(snippets.value)) } catch {}
+  serverStore.set('snippets', snippets.value)
 }
 function saveSnippet() {
   const t = text.value.trim()
@@ -150,15 +147,12 @@ function toggleSnippets() {
   if (showSnippets.value) showHistory.value = false
 }
 
-// --- Send History (auto-saved, separate from snippets) ---
+// --- Send History (server-side, survives trycloudflare domain changes) ---
 function loadHistory() {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY)
-    history.value = raw ? JSON.parse(raw) : []
-  } catch { history.value = [] }
+  history.value = serverStore.get<string[]>('history', [])
 }
 function saveHistoryToStorage() {
-  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history.value)) } catch {}
+  serverStore.set('history', history.value)
 }
 function pushHistory(t: string) {
   const trimmed = t.trim()
@@ -181,7 +175,7 @@ function insertFromHistory(h: string) {
 }
 function clearHistory() {
   history.value = []
-  try { localStorage.removeItem(HISTORY_KEY) } catch {}
+  serverStore.set('history', [])
 }
 function toggleHistory() {
   showHistory.value = !showHistory.value
@@ -274,6 +268,8 @@ function moveCursor(dir: 'up' | 'down' | 'left' | 'right' | 'home' | 'end') {
 
 onMounted(async () => {
   loadDraft()
+  // 先加载服务端数据，再填充 snippets/history
+  await serverStore.load()
   loadSnippets()
   loadHistory()
   await nextTick()

@@ -79,6 +79,64 @@ func (s *Server) saveWorkbenchToDisk(data json.RawMessage) {
 	os.WriteFile(path, data, 0644)        //nolint:errcheck
 }
 
+// store persistence — stores user input data (snippets, history) as JSON file
+var (
+	storeMu   sync.Mutex
+	storeData json.RawMessage
+)
+
+func (s *Server) handleGetStore(w http.ResponseWriter, r *http.Request) {
+	storeMu.Lock()
+	data := storeData
+	storeMu.Unlock()
+	if data == nil {
+		data = s.loadStoreFromDisk()
+	}
+	if data == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{}")) //nolint:errcheck
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data) //nolint:errcheck
+}
+
+func (s *Server) handleSaveStore(w http.ResponseWriter, r *http.Request) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	storeMu.Lock()
+	storeData = raw
+	storeMu.Unlock()
+	s.saveStoreToDisk(raw)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) storePath() string {
+	dir := s.config.DataDir
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".dw-terminal")
+	}
+	return filepath.Join(dir, "store.json")
+}
+
+func (s *Server) loadStoreFromDisk() json.RawMessage {
+	data, err := os.ReadFile(s.storePath())
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
+}
+
+func (s *Server) saveStoreToDisk(data json.RawMessage) {
+	path := s.storePath()
+	os.MkdirAll(filepath.Dir(path), 0755) //nolint:errcheck
+	os.WriteFile(path, data, 0644)        //nolint:errcheck
+}
+
 // handleSystem returns system info for the settings page.
 func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{

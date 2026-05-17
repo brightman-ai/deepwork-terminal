@@ -119,6 +119,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /tunnel/stop", wrap(s.handleTunnelStop))
 	s.mux.HandleFunc("GET /workbench", wrap(s.handleGetWorkbench))
 	s.mux.HandleFunc("PUT /workbench", wrap(s.handleSaveWorkbench))
+	s.mux.HandleFunc("GET /store", wrap(s.handleGetStore))
+	s.mux.HandleFunc("PUT /store", wrap(s.handleSaveStore))
 }
 
 // authWrap wraps a handler with auth checking.
