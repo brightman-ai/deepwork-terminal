@@ -1,0 +1,19 @@
+dw-terminal
+*.exe
+*.test
+*.out
+bin/
+*.pid
+frontend/--output
+frontend/node_modules/
+frontend/dist/
+# internal/spa/dist/ is pre-built and tracked — Go embed source, no Node.js needed to build
+.env
+.env.*
+*.key
+*.pem
+credentials.*
+docs/
+.DS_Store
+.idea/
+.vscode/
