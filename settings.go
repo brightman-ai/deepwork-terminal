@@ -96,21 +96,15 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"bufferSize":  s.config.BufferSize,
 		"maxSessions": s.config.MaxSessions,
 		"authCode":    s.config.AuthCode,
-		"tunnel": map[string]any{
-			"running":   s.tunnel.IsRunning(),
-			"publicURL": s.tunnel.PublicURL(),
-		},
+		"tunnel":      s.tunnel.Status(),
 	}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, settings)
 }
 
-// handleTunnelStatus returns the current tunnel state.
+// handleTunnelStatus returns the full tunnel state including download progress.
 func (s *Server) handleTunnelStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"running":   s.tunnel.IsRunning(),
-		"publicURL": s.tunnel.PublicURL(),
-	})
+	writeJSON(w, http.StatusOK, s.tunnel.Status())
 }
 
 // handleTunnelStart starts the cloudflare tunnel in the background.

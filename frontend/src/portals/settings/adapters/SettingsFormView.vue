@@ -41,10 +41,20 @@ const tunnel = reactive({
   running: false,
   starting: false,
   publicURL: '',
+  downloading: false,
+  downloadedBytes: 0,
+  totalBytes: -1,
+  downloadURL: '',
+  binPath: '',
 })
-const tunnelLog = ref<string[]>([])
+const tunnelError = ref('')
 let pollInterval: ReturnType<typeof setInterval> | null = null
-let pollTimeout: ReturnType<typeof setTimeout> | null = null
+let startDeadline: ReturnType<typeof setTimeout> | null = null // only for post-download start phase
+
+// Download speed tracking
+let lastPollBytes = 0
+let lastPollTime = 0
+const downloadSpeedBps = ref(0) // bytes/sec, EMA smoothed
 
 // ─── Load ─────────────────────────────────────────────────────────────────────
 const loading = ref(false)
@@ -83,77 +93,153 @@ async function loadSettings() {
   } catch { /* ignore */ }
 }
 
-// ─── Auth code copy ───────────────────────────────────────────────────────────
+// ─── Clipboard ────────────────────────────────────────────────────────────────
 const copySuccess = ref(false)
-async function copyAuthCode() {
+async function copyText(text: string) {
   try {
-    await navigator.clipboard.writeText(authCode.value)
+    await navigator.clipboard.writeText(text)
     copySuccess.value = true
     setTimeout(() => { copySuccess.value = false }, 2000)
   } catch { /* ignore */ }
 }
+function copyAuthCode() { copyText(authCode.value) }
 
 // ─── Tunnel controls ──────────────────────────────────────────────────────────
+function stopPolling() {
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+  if (startDeadline) { clearTimeout(startDeadline); startDeadline = null }
+}
+
+function applyStatus(status: {
+  running: boolean
+  publicURL?: string
+  downloading?: boolean
+  downloadedBytes?: number
+  totalBytes?: number
+  downloadURL?: string
+  binPath?: string
+}) {
+  tunnel.running = status.running
+  tunnel.publicURL = status.publicURL ?? ''
+  tunnel.downloading = status.downloading ?? false
+  tunnel.downloadedBytes = status.downloadedBytes ?? 0
+  tunnel.totalBytes = status.totalBytes ?? -1
+  tunnel.downloadURL = status.downloadURL ?? ''
+  tunnel.binPath = status.binPath ?? ''
+}
+
 async function startTunnel() {
   tunnel.starting = true
-  tunnelLog.value = ['Checking cloudflared binary...']
+  tunnelError.value = ''
 
   try {
     const resp = await cliFetch('/api/tunnel/start', { method: 'POST' })
     if (!resp.ok) {
-      tunnelLog.value.push('Failed to start tunnel')
+      tunnelError.value = 'Failed to request tunnel start'
       tunnel.starting = false
       return
     }
   } catch {
-    tunnelLog.value.push('Network error starting tunnel')
+    tunnelError.value = 'Network error — server unreachable'
     tunnel.starting = false
     return
   }
 
-  tunnelLog.value.push('Starting Cloudflare Tunnel...')
+  lastPollBytes = 0
+  lastPollTime = Date.now()
+  downloadSpeedBps.value = 0
 
-  // Poll for status until running
+  // Poll every second.
+  // Timeout logic: only applies to the cloudflared *start* phase (after download).
+  // While downloading, we never time out — download can take minutes.
   pollInterval = setInterval(async () => {
     try {
       const status = await cliFetch('/api/tunnel/status').then(r => r.json())
-      if (status.running) {
-        clearInterval(pollInterval!)
-        clearTimeout(pollTimeout!)
-        pollInterval = null
-        pollTimeout = null
-        tunnel.running = true
-        tunnel.starting = false
-        tunnel.publicURL = status.publicURL
-        tunnelLog.value.push(`Connected: ${status.publicURL}`)
-      }
-    } catch { /* ignore transient errors */ }
-  }, 1000)
+      applyStatus(status)
 
-  // Timeout after 60s
-  pollTimeout = setTimeout(() => {
-    if (!tunnel.running) {
-      if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
-      tunnel.starting = false
-      tunnelLog.value.push('Timeout — check console for errors')
-    }
-  }, 60000)
+      // ── Download progress ──
+      if (status.downloading) {
+        const now = Date.now()
+        const dt = (now - lastPollTime) / 1000
+        if (dt > 0) {
+          const instant = (status.downloadedBytes - lastPollBytes) / dt
+          // EMA smoothing (α=0.3) to avoid jitter
+          downloadSpeedBps.value = downloadSpeedBps.value === 0
+            ? instant
+            : 0.3 * instant + 0.7 * downloadSpeedBps.value
+        }
+        lastPollBytes = status.downloadedBytes
+        lastPollTime = now
+        // Cancel any start-phase deadline while still downloading
+        if (startDeadline) { clearTimeout(startDeadline); startDeadline = null }
+        return
+      }
+
+      // ── Cloudflared start phase ──
+      if (!status.running && !status.downloading) {
+        // Binary is ready; cloudflared is starting. Start 90s deadline once.
+        if (!startDeadline) {
+          startDeadline = setTimeout(() => {
+            if (!tunnel.running) {
+              stopPolling()
+              tunnel.starting = false
+              tunnelError.value = 'Timeout — cloudflared did not produce a URL in 90s. Check server logs.'
+            }
+          }, 90_000)
+        }
+        return
+      }
+
+      // ── Running ──
+      if (status.running) {
+        stopPolling()
+        tunnel.starting = false
+        downloadSpeedBps.value = 0
+      }
+    } catch { /* ignore transient poll errors */ }
+  }, 1000)
 }
 
 async function stopTunnel() {
-  try {
-    await cliFetch('/api/tunnel/stop', { method: 'POST' })
-  } catch { /* ignore */ }
+  stopPolling()
+  try { await cliFetch('/api/tunnel/stop', { method: 'POST' }) } catch { /* ignore */ }
   tunnel.running = false
+  tunnel.starting = false
   tunnel.publicURL = ''
-  tunnelLog.value = []
+  tunnel.downloading = false
+  tunnelError.value = ''
+  downloadSpeedBps.value = 0
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes >= 1 << 20) return `${bytes >> 20} MB`
-  if (bytes >= 1 << 10) return `${bytes >> 10} KB`
+  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`
+  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(0)} KB`
   return `${bytes} B`
 }
+
+function formatSpeed(bps: number): string {
+  if (bps <= 0) return '—'
+  if (bps >= 1 << 20) return `${(bps / (1 << 20)).toFixed(1)} MB/s`
+  if (bps >= 1 << 10) return `${(bps / (1 << 10)).toFixed(0)} KB/s`
+  return `${bps.toFixed(0)} B/s`
+}
+
+function formatEta(remainingBytes: number, bps: number): string {
+  if (bps <= 0 || remainingBytes <= 0) return '—'
+  const s = Math.round(remainingBytes / bps)
+  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+  if (s >= 60)   return `${Math.floor(s / 60)}m ${s % 60}s`
+  return `${s}s`
+}
+
+const downloadPct = computed(() => {
+  if (tunnel.totalBytes <= 0 || tunnel.downloadedBytes <= 0) return 0
+  return Math.min(100, Math.round((tunnel.downloadedBytes / tunnel.totalBytes) * 100))
+})
+
+const downloadEta = computed(() =>
+  formatEta(tunnel.totalBytes - tunnel.downloadedBytes, downloadSpeedBps.value)
+)
 
 // ─── FormPane sections ────────────────────────────────────────────────────────
 const categoryFieldIds: Record<string, string[]> = {
@@ -248,14 +334,45 @@ const formSections = computed(() => {
               <Globe :size="14" />
               Enable Internet Access
             </button>
+            <p v-if="tunnelError" class="tunnel-error">{{ tunnelError }}</p>
           </div>
 
-          <!-- Starting state -->
-          <div v-if="tunnel.starting" class="tunnel-starting">
-            <div class="progress-bar"><div class="progress-bar-fill" /></div>
-            <div class="tunnel-log">
-              <p v-for="(line, i) in tunnelLog" :key="i">{{ line }}</p>
+          <!-- Starting: downloading cloudflared -->
+          <div v-if="tunnel.starting && tunnel.downloading" class="tunnel-starting">
+            <div class="download-header">
+              <span class="download-label">Downloading cloudflared...</span>
+              <span class="download-pct">{{ downloadPct }}%</span>
             </div>
+            <div class="progress-bar">
+              <div class="progress-bar-fill--determinate" :style="{ width: downloadPct + '%' }" />
+            </div>
+            <div class="download-stats">
+              <span>{{ formatBytes(tunnel.downloadedBytes) }}{{ tunnel.totalBytes > 0 ? ` / ${formatBytes(tunnel.totalBytes)}` : '' }}</span>
+              <span>↓ {{ formatSpeed(downloadSpeedBps) }}</span>
+              <span v-if="tunnel.totalBytes > 0">ETA {{ downloadEta }}</span>
+            </div>
+            <div class="download-manual">
+              <span class="download-manual__label">慢？手动下载后重新点击 Enable：</span>
+              <div class="download-url-row">
+                <code class="download-url-text">{{ tunnel.downloadURL }}</code>
+                <button class="copy-btn" title="复制链接" @click="copyText(tunnel.downloadURL)">
+                  <ClipboardCopy :size="12" />
+                </button>
+              </div>
+              <div class="download-dest-row">
+                <span class="download-manual__label">放置路径：</span>
+                <code class="download-url-text">{{ tunnel.binPath }}</code>
+                <button class="copy-btn" title="复制路径" @click="copyText(tunnel.binPath)">
+                  <ClipboardCopy :size="12" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Starting: waiting for cloudflared URL -->
+          <div v-if="tunnel.starting && !tunnel.downloading" class="tunnel-starting">
+            <div class="progress-bar"><div class="progress-bar-fill--indeterminate" /></div>
+            <p class="tunnel-status-text">Starting Cloudflare Tunnel...</p>
           </div>
 
           <!-- Active state -->
@@ -263,6 +380,9 @@ const formSections = computed(() => {
             <div class="tunnel-url-row">
               <Globe :size="14" class="tunnel-url-icon" />
               <a :href="tunnel.publicURL" target="_blank" class="tunnel-url-link">{{ tunnel.publicURL }}</a>
+              <button class="copy-btn" title="复制链接" @click="copyText(tunnel.publicURL)">
+                <ClipboardCopy :size="12" />
+              </button>
             </div>
             <button class="btn-ghost" @click="stopTunnel">Disconnect</button>
           </div>
@@ -394,17 +514,42 @@ const formSections = computed(() => {
   margin-top: 6px;
 }
 
+.download-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 5px;
+}
+.download-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+}
+.download-pct {
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--primary));
+  font-variant-numeric: tabular-nums;
+}
+
 .progress-bar {
-  height: 3px;
+  height: 4px;
   background: hsl(var(--muted));
   border-radius: 2px;
   overflow: hidden;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
-.progress-bar-fill {
+.progress-bar-fill--determinate {
   height: 100%;
-  width: 40%;
+  background: hsl(var(--primary));
+  border-radius: 2px;
+  transition: width 0.8s linear;
+}
+
+.progress-bar-fill--indeterminate {
+  height: 100%;
+  width: 35%;
   background: hsl(var(--primary));
   border-radius: 2px;
   animation: progress-slide 1.4s ease-in-out infinite;
@@ -412,18 +557,56 @@ const formSections = computed(() => {
 
 @keyframes progress-slide {
   0%   { transform: translateX(-100%); }
-  100% { transform: translateX(350%); }
+  100% { transform: translateX(340%); }
 }
 
-.tunnel-log {
-  font-family: monospace;
+.download-stats {
+  display: flex;
+  gap: 14px;
   font-size: 11px;
   color: hsl(var(--muted-foreground));
-  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 10px;
 }
 
-.tunnel-log p {
+.download-manual {
+  border-top: 1px solid hsl(var(--border));
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.download-manual__label {
+  font-size: 10px;
+  color: hsl(var(--muted-foreground));
+}
+.download-url-row,
+.download-dest-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.download-url-text {
+  font-family: monospace;
+  font-size: 10px;
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted));
+  padding: 2px 5px;
+  border-radius: 3px;
+  word-break: break-all;
+  flex: 1;
+}
+
+.tunnel-status-text {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
   margin: 0;
+}
+
+.tunnel-error {
+  font-size: 11px;
+  color: hsl(0 65% 50%);
+  margin: 6px 0 0;
 }
 
 /* Tunnel: active */
