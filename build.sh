@@ -32,7 +32,10 @@ if [ "$SKIP_FRONTEND" -eq 0 ]; then
 
   cd frontend
 
-  if [ ! -d node_modules ]; then
+  # Check for vite binary specifically — a partial/interrupted install leaves
+  # node_modules/ present but empty, causing npm to fall back to system PATH
+  # and invoke any system binary named "vite" (e.g. the Debian trace-explorer).
+  if [ ! -x node_modules/.bin/vite ]; then
     # Skip browser downloads from Playwright/Puppeteer postinstall hooks
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     PUPPETEER_SKIP_DOWNLOAD=1 \
@@ -56,6 +59,9 @@ else
 fi
 
 echo "=== Building Go binary ==="
-go build -o dw-terminal ./cmd/dw-terminal/
+# Allow caller to override GOPROXY; default to goproxy.cn which works in China
+# and falls back to direct. Machines with direct access to proxy.golang.org can
+# override: GOPROXY=https://proxy.golang.org,direct ./build.sh
+GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go build -o dw-terminal ./cmd/dw-terminal/
 
 echo "=== Done: ./dw-terminal ==="
