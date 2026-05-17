@@ -14,7 +14,7 @@
  * eventQueue 继续保留给旧 HUD 使用。
  */
 
-import { createLogger } from '@/utils/obs'
+import { createLogger } from '@ce/utils/obs'
 
 const DEBUG_LOG_ENABLED =
   typeof localStorage !== 'undefined'

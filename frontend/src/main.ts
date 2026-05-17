@@ -2,7 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import router from './router'
 import App from './App.vue'
-import { configureRemoteSink, createLogger } from '@/utils/obs'
+import { configureRemoteSink, createLogger } from '@ce/utils/obs'
 import { reportCliInputDiagnostic } from '@/composables/cli/useCliInputDiagnostics'
 
 // Import Tailwind CSS

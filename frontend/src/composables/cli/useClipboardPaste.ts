@@ -9,7 +9,7 @@
  */
 import { ref } from 'vue'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { createLogger, traceHeaders, type TraceContext } from '@/utils/obs'
+import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 
 export interface PasteResult {
   type: 'text' | 'image' | 'file' | 'none'

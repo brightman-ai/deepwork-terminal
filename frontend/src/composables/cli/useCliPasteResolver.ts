@@ -1,7 +1,7 @@
 import { useCliAuth } from '@/composables/cli/useCliAuth'
 import { useClipboardPaste } from '@/composables/cli/useClipboardPaste'
 import { detectCliRuntimeProfile, type CliRuntimeMode } from '@/composables/cli/useCliRuntimeMode'
-import { createLogger, createTrace, traceHeaders, type TraceContext } from '@/utils/obs'
+import { createLogger, createTrace, traceHeaders, type TraceContext } from '@ce/utils/obs'
 
 type HudKind = 'state' | 'error'
 type PasteSource =

@@ -6,7 +6,7 @@
  */
 import { ref, reactive, onUnmounted } from 'vue'
 import type { WSConnectionStatus, WSControlMessage } from '@/types/terminal'
-import { wsUrl } from '@/utils/runtimeBase'
+import { wsUrl } from '@ce/utils/runtimeBase'
 
 export interface WebSocketClientOptions {
   authToken?: string

@@ -4,7 +4,7 @@
  * [Ref: CAP-hud-diagnostics S3, DDC-14]
  */
 import { ref, reactive, readonly } from 'vue'
-import { apiUrl } from '@/utils/runtimeBase'
+import { apiUrl } from '@ce/utils/runtimeBase'
 
 export type HudEventType = 'focus' | 'keyboard' | 'touch' | 'ws' | 'state' | 'resize' | 'error'
 

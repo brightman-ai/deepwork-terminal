@@ -7,7 +7,7 @@
  * [Ref: BUG-2 security fix]
  */
 import { ref } from 'vue'
-import { apiUrl } from '@/utils/runtimeBase'
+import { apiUrl } from '@ce/utils/runtimeBase'
 
 const AUTH_STORAGE_KEY = 'cli_auth_code'
 

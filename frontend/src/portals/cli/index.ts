@@ -10,7 +10,7 @@ export { cliLayoutPolicy } from './cliLayoutPolicy'
 export { cliRoutes } from './routes'
 export { CliTabBar, CliAgentStatusStrip, CliTerminalView, CliCompanion } from './adapters'
 // Re-export useAgentStatus so CLI portal consumers have a single import point.
-export { useAgentStatus } from '@ce/composables/channel'
+export { useAgentStatus } from '@/composables/channel/useAgentStatus'
 
 const cliPortalDescriptor = definePortal({
   id: 'cli',

@@ -1,4 +1,4 @@
-import { createLogger } from '@/utils/obs'
+import { createLogger } from '@ce/utils/obs'
 
 const log = createLogger('cli-input')
 const QUERY_KEY = 'cli_diag'

@@ -24,7 +24,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { apiUrl } from '@/utils/runtimeBase'
+import { apiUrl } from '@ce/utils/runtimeBase'
 
 const props = defineProps<{
   visible: boolean

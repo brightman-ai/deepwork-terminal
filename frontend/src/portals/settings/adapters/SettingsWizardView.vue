@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { FormPane } from '@ce/components/pane'
-import { apiUrl } from '@/utils/runtimeBase'
+import { apiUrl } from '@ce/utils/runtimeBase'
 import { CheckCircle2, XCircle, AlertCircle, RefreshCw, PlayCircle } from 'lucide-vue-next'
 
 interface StepSummary {

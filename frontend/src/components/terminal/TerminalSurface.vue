@@ -26,7 +26,7 @@ import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import 'xterm/css/xterm.css'
-import { useTerminalChannel } from '@ce/composables/channel/useTerminalChannel'
+import { useTerminalChannel } from '@/composables/channel/useTerminalChannel'
 import type { AgentState } from '@/types/terminal'
 
 // ─── Props & Emits ─────────────────────────────────────────────────────────────
