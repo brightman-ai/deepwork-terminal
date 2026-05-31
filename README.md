@@ -18,7 +18,7 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 
 多端共享同一终端会话，手机和 PC 可随时接管或抢占控制权，无缝远程切换操作。
 
-![会话接管与抢占](screenshots/支持接管和抢占会话，便于手机+pc随时远程切换操作.png)
+![会话接管与抢占](screenshots/support-session-takeover.png)
 
 ---
 
@@ -26,7 +26,7 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 
 内置多行文本输入框，发送历史持久保留，复杂命令编辑更方便，告别误触清空的烦恼。
 
-![Textarea 输入](screenshots/支持textarea文本输入，发送历史不怕丢失.png)
+![Textarea 输入](screenshots/support-textarea-input.png)
 
 ---
 
@@ -34,7 +34,7 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 
 针对移动端优化的快捷键盘面板，常用控制键一触即达（Ctrl、Esc、Tab、方向键等）。
 
-![快捷键盘](screenshots/支持快捷键盘输入.png)
+![快捷键盘](screenshots/support-quick-keyboard.png)
 
 ---
 
@@ -42,7 +42,7 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 
 保存常用命令片段，点击即插入，减少重复输入，提升效率。
 
-![Snippets 管理](screenshots/支持snippets记录，快捷输入.png)
+![Snippets 管理](screenshots/support-snippets.png)
 
 ---
 
@@ -50,7 +50,7 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 
 内置 tmux 集成面板，直观展示所有 pane，一键切换，无需记忆 tmux 快捷键。
 
-![tmux 面板](screenshots/支持tmux专项面板，快捷切换tmux pane.png)
+![tmux 面板](screenshots/support-tmux-panel.png)
 
 ---
 
@@ -58,9 +58,9 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 
 从 PC 浏览器或移动端上传截图和文件，自动转为图片链接，供 AI 工具（Codex / Claude）直接访问，快速排查问题。
 
-![文件上传](screenshots/支持上传截图或文件变成图片—pc browser和mobie都支持.png)
+![文件上传](screenshots/support-file-upload.png)
 
-![移动端上传](screenshots/支持移动端快速上传截图和文件，供codex和claude访问，快速排查.png)
+![移动端上传](screenshots/support-mobile-upload.png)
 
 ## Quick Start (as a library)
 
