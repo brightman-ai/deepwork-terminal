@@ -55,6 +55,13 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+// Service returns the in-process terminal session service owned by this server.
+// Hosts should depend on this interface for product integrations such as agent
+// state enrichment instead of reaching into SessionManager internals.
+func (s *Server) Service() TerminalSessionService {
+	return NewInProcessService(s.mgr)
+}
+
 // ListenAndServe starts the standalone server (API + SPA).
 // The SPA is the embedded Vue frontend (built by build.sh).
 func (s *Server) ListenAndServe(ctx context.Context) error {

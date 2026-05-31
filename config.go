@@ -39,5 +39,5 @@ func WithHooks(h Hooks) Option { return func(s *Server) { s.hooks = h } }
 // WithAddr sets the listen address.
 func WithAddr(addr string) Option { return func(s *Server) { s.config.Addr = addr } }
 
-// WithAuthCode sets the auth code (empty = no auth).
+// WithAuthCode sets the auth code. When left empty, NewServer generates one.
 func WithAuthCode(code string) Option { return func(s *Server) { s.config.AuthCode = code } }
