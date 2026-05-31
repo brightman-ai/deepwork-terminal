@@ -69,7 +69,9 @@ func pipePTYFactoryFunc() (PTYFactory, *SafeWriteEnds) {
 	return factory, writeEnds
 }
 
-// NewTestCLIServer creates a test HTTP server with terminal routes (no auth).
+const testAuthCode = "test-auth-token"
+
+// NewTestCLIServer creates a test HTTP server with terminal routes.
 // Returns the server, SessionManager, and write-end pipes for data injection.
 func NewTestCLIServer(t *testing.T) (*httptest.Server, *SessionManager, *SafeWriteEnds) {
 	t.Helper()
@@ -82,7 +84,7 @@ func NewTestCLIServer(t *testing.T) (*httptest.Server, *SessionManager, *SafeWri
 		DefaultShell: "/bin/sh",
 		BufferSize:   4096,
 		MaxSessions:  10,
-		AuthCode:     "test-no-auth-bypass",
+		AuthCode:     testAuthCode,
 	}))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -101,8 +103,6 @@ func NewTestCLIServer(t *testing.T) (*httptest.Server, *SessionManager, *SafeWri
 }
 
 // NewTestCLIServerWithAuth creates a test server with a specific auth code.
-// Note: in tests, requests go through httptest which connects from 127.0.0.1,
-// so auth is bypassed automatically for localhost connections.
 func NewTestCLIServerWithAuth(t *testing.T, authCode string) (*httptest.Server, *SessionManager, *SafeWriteEnds) {
 	t.Helper()
 
@@ -135,6 +135,9 @@ func NewTestCLIServerWithAuth(t *testing.T, authCode string) (*httptest.Server, 
 // DialTestWS opens a WebSocket connection to the test server for the given session.
 func DialTestWS(t *testing.T, server *httptest.Server, sessionID string, token string) *websocket.Conn {
 	t.Helper()
+	if token == "" {
+		token = testAuthCode
+	}
 
 	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) +
 		"/sessions/" + sessionID + "/ws"
@@ -208,6 +211,9 @@ func WaitForPTYReady(t *testing.T, sm *SessionManager, sessionID string, timeout
 
 // httpGet performs a GET request with optional auth header.
 func httpGet(url string, authToken string) (*http.Response, error) {
+	if authToken == "" {
+		authToken = testAuthCode
+	}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -220,6 +226,9 @@ func httpGet(url string, authToken string) (*http.Response, error) {
 
 // httpPost performs a POST request with JSON body.
 func httpPost(url string, body string, authToken string) (*http.Response, error) {
+	if authToken == "" {
+		authToken = testAuthCode
+	}
 	req, err := http.NewRequest("POST", url, strings.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -233,6 +242,9 @@ func httpPost(url string, body string, authToken string) (*http.Response, error)
 
 // httpDelete performs a DELETE request.
 func httpDelete(url string, authToken string) (*http.Response, error) {
+	if authToken == "" {
+		authToken = testAuthCode
+	}
 	req, err := http.NewRequest("DELETE", url, nil)
 	if err != nil {
 		return nil, err

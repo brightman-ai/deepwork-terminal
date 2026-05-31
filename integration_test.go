@@ -210,8 +210,7 @@ func TestIntegration_InvalidSessionID(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
-// TC-08-I-11: authWrap requires auth for non-localhost connections.
-// Localhost always bypasses auth; non-localhost requires the auth code.
+// TC-08-I-11: authWrap requires auth for every request.
 func TestIntegration_NoAuthToken(t *testing.T) {
 	srv, err := NewServer(WithConfig(Config{
 		Addr:         ":0",
@@ -246,12 +245,12 @@ func TestIntegration_NoAuthToken(t *testing.T) {
 	handler(w2, makeRemoteReq("/sessions", "secret123"))
 	assert.Equal(t, http.StatusOK, w2.Code)
 
-	// Localhost → always 200 (no auth needed).
+	// Localhost is not special-cased; the auth code remains the only gate.
 	reqLocal, _ := http.NewRequest("GET", "/sessions", nil)
 	reqLocal.RemoteAddr = "127.0.0.1:54321"
 	w3 := httptest.NewRecorder()
 	handler(w3, reqLocal)
-	assert.Equal(t, http.StatusOK, w3.Code)
+	assert.Equal(t, http.StatusUnauthorized, w3.Code)
 }
 
 // TC-08-I-12: HUD log upload.

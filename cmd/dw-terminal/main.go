@@ -13,10 +13,14 @@ import (
 func main() {
 	addr := flag.String("addr", ":8022", "listen address")
 	shell := flag.String("shell", "", "shell command (default: $SHELL)")
+	authCode := flag.String("auth-code", "", "auth code (default: generated)")
 	flag.Parse()
 
 	cfg := terminal.DefaultConfig()
 	cfg.Addr = *addr
+	if *authCode != "" {
+		cfg.AuthCode = *authCode
+	}
 	if *shell != "" {
 		cfg.DefaultShell = *shell
 	}
