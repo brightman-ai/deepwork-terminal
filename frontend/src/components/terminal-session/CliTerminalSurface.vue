@@ -349,11 +349,16 @@ watch(activeMode, () => {
 
 const coordMapper = useTerminalCoordMapper(() => {
   const term = xtermRef.value?.terminal?.()
-  const container = xtermRef.value?.$el as HTMLElement | undefined
-  if (!term || !container) {
+  // Map against xterm's actual rendered grid element (.xterm-screen): its rect is EXACTLY
+  // cols*cellWidth × rows*cellHeight and its origin is the true top-left of the char grid.
+  // The previous code used the outer container (.xterm-root) with rect.width/cols, which
+  // overcounts the scrollbar gutter (~15px) and FitAddon's sub-cell remainder, producing
+  // systematic drift that grows toward the right/bottom edges (mobile-only touch path).
+  const screenEl = term?.element?.querySelector('.xterm-screen') as HTMLElement | null
+  if (!term || !screenEl) {
     return { cols: 80, rows: 24, cellWidth: 9, cellHeight: 17, offsetX: 0, offsetY: 0 }
   }
-  const rect = container.getBoundingClientRect()
+  const rect = screenEl.getBoundingClientRect()
   return {
     cols: term.cols,
     rows: term.rows,
@@ -667,7 +672,7 @@ function onTouchballDoubleTap(x: number, y: number) {
   let start = cell.col, end = cell.col
   while (start > 0 && /\S/.test(lineStr[start - 1] || '')) start--
   while (end < lineStr.length - 1 && /\S/.test(lineStr[end + 1] || '')) end++
-  term.select(start, cell.row, end - start + 1)
+  term.select(start, cell.row + viewportY.value, end - start + 1)
   const startBuf = viewportY.value + cell.row
   anchorSM.enterSelection()
   anchorSM.placeAnchor1({ col: start, row: cell.row, bufferRow: startBuf })
@@ -675,16 +680,19 @@ function onTouchballDoubleTap(x: number, y: number) {
   hud.record('touch', `double-tap: select word at (${cell.col},${cell.row})`)
 }
 
-function onTouchballTripleTap(x: number, y: number) {
+function onTouchballTripleTap(_x: number, _y: number) {
   const term = xtermRef.value?.terminal?.()
   if (!term) return
-  const cell = coordMapper.screenToCell(x, y)
-  term.select(0, cell.row, term.cols)
-  const bufRow = viewportY.value + cell.row
-  anchorSM.enterSelection()
-  anchorSM.placeAnchor1({ col: 0, row: cell.row, bufferRow: bufRow })
-  anchorSM.placeAnchor2({ col: term.cols - 1, row: cell.row, bufferRow: bufRow })
-  hud.record('touch', `triple-tap: select line ${cell.row}`)
+  // Select the ENTIRE visible screen. Pairs with PgUp/PgDn paging: scroll a page, triple-tap
+  // to grab the whole screen, copy — no dependence on precise edge-scroll selection.
+  const top = viewportY.value
+  const bottom = top + term.rows - 1
+  term.select(0, top, term.rows * term.cols)
+  anchorSM.selectAll(
+    { col: 0, row: 0, bufferRow: top },
+    { col: term.cols - 1, row: term.rows - 1, bufferRow: bottom },
+  )
+  hud.record('touch', `triple-tap: select full screen (${term.rows}×${term.cols})`)
 }
 
 function onTouchballLongPress(x: number, y: number) {
@@ -705,20 +713,49 @@ function onTouchballLongPress(x: number, y: number) {
   hud.record('touch', `long-press: enter selection at (${cell.col},${cell.row})`)
 }
 
-function onSelectionCopy() {
+async function onSelectionCopy() {
   const term = xtermRef.value?.terminal?.()
-  if (term) {
-    const sel = term.getSelection()
-    if (sel) { clipboardWrite(sel); hud.record('state', `copy: ${sel.length} chars`) }
-    term.clearSelection()
+  if (!term) { anchorSM.cancel(); return }
+  const sel = term.getSelection()
+  if (!sel) {
+    hud.record('state', 'copy: empty selection')
+    term.clearSelection(); anchorSM.cancel(); return
   }
-  anchorSM.cancel()
+  const ok = await clipboardWrite(sel)
+  hud.record('state', ok ? `copy ok: ${sel.length} chars` : `copy FAILED (${sel.length} chars)`)
+  // Only drop the selection on success so the user can retry a failed copy.
+  if (ok) { term.clearSelection(); anchorSM.cancel() }
 }
 
 function onAnchorDrag(anchorId: 1 | 2, cell: CellCoord) {
+  const term = xtermRef.value?.terminal?.()
+  // Edge auto-scroll while selecting (D3): dragging an anchor onto the top/bottom row scrolls
+  // the view so the selection can extend to content that is currently off-screen.
+  if (term) {
+    if (cell.row <= 0) edgeScroll(term, -1)
+    else if (cell.row >= term.rows - 1) edgeScroll(term, 1)
+  }
   if (anchorId === 1) anchorSM.placeAnchor1(cell)
   else anchorSM.placeAnchor2(cell)
   applyXtermSelection()
+}
+
+let lastEdgeScrollAt = 0
+function edgeScroll(term: Terminal, dir: 1 | -1) {
+  const now = Date.now()
+  if (now - lastEdgeScrollAt < 120) return  // throttle
+  lastEdgeScrollAt = now
+  if (term.buffer.active.type === 'alternate') {
+    // Alt-screen TUI (tmux / claude-code): xterm holds NO scrollback here — history lives in
+    // the app/tmux. Nudge the app's own pager with PgUp/PgDn so the view scrolls. Caveat:
+    // the selection cannot extend across an app-managed scroll (off-screen lines are not in
+    // xterm's buffer).
+    sendBinary(encoder.encode(dir < 0 ? '\x1b[5~' : '\x1b[6~'))
+    hud.record('touch', 'copy-mode edge scroll → PgUp/PgDn (alt-screen)')
+  } else {
+    term.scrollLines(dir)
+    hud.record('touch', `copy-mode edge scroll ${dir > 0 ? 'down' : 'up'}`)
+  }
 }
 
 function applyXtermSelection() {
@@ -726,30 +763,50 @@ function applyXtermSelection() {
   if (!ordered) return
   const term = xtermRef.value?.terminal?.()
   if (!term) return
-  const startRow = (ordered.start.bufferRow ?? ordered.start.row) - viewportY.value
-  const endRow = (ordered.end.bufferRow ?? ordered.end.row) - viewportY.value
+  // xterm select(col, row, length): `row` is an ABSOLUTE buffer line (incl. scrollback),
+  // NOT a viewport-relative row (SelectionService uses buffer-absolute coords). Pass bufferRow
+  // directly; subtracting viewportY was harmless only in alt-screen (viewportY===0).
+  const startRow = ordered.start.bufferRow ?? ordered.start.row
+  const endRow = ordered.end.bufferRow ?? ordered.end.row
   term.select(ordered.start.col, startRow,
     (endRow - startRow) * term.cols + (ordered.end.col - ordered.start.col) + 1)
 }
 
 // ─── Clipboard helpers ────────────────────────────────────────────────────────
 
-function clipboardWrite(text: string) {
+function clipboardWrite(text: string): Promise<boolean> {
+  // Secure-context API (HTTPS / localhost). On iOS Safari over plain HTTP (e.g. a Tailscale
+  // http://host:PORT link) navigator.clipboard is UNDEFINED, so we fall through to execCommand,
+  // which must run synchronously inside the tap gesture.
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).catch(() => clipboardWriteFallback(text))
-  } else {
-    clipboardWriteFallback(text)
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => clipboardWriteFallback(text))
   }
+  return Promise.resolve(clipboardWriteFallback(text))
 }
 
-function clipboardWriteFallback(text: string) {
+function clipboardWriteFallback(text: string): boolean {
+  // iOS Safari requires a focused, contentEditable, selected element with an explicit range —
+  // a bare offscreen `ta.select()` silently no-ops. Keep it in-viewport but invisible.
   const ta = document.createElement('textarea')
   ta.value = text
-  ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0'
+  ta.readOnly = false
+  ta.contentEditable = 'true'
+  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px'
   document.body.appendChild(ta)
-  ta.select()
-  try { document.execCommand('copy') } catch {}
+  ta.focus()
+  const range = document.createRange()
+  range.selectNodeContents(ta)
+  const winSel = window.getSelection()
+  winSel?.removeAllRanges()
+  winSel?.addRange(range)
+  ta.setSelectionRange(0, text.length)
+  let threw = false
+  try { document.execCommand('copy') } catch { threw = true }
+  winSel?.removeAllRanges()
   document.body.removeChild(ta)
+  // iOS Safari's execCommand('copy') often returns false even when the copy succeeded, so its
+  // boolean is unreliable — treat "did not throw" as success. (HTTPS uses navigator.clipboard.)
+  return !threw
 }
 
 // ─── Expose for parent ────────────────────────────────────────────────────────

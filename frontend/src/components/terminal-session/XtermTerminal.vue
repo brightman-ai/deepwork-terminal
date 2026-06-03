@@ -167,6 +167,12 @@ function initTerminal() {
       background: '#1e1e1e',
       foreground: '#d4d4d4',
       cursor: '#aeafad',
+      // Explicit, clearly-visible selection color. Default is a faint rgba(255,255,255,0.3)
+      // that is easy to miss on a busy TUI; set both active + inactive so the selection
+      // stays visible even when the terminal loses focus (mobile copy mode blurs the
+      // helper textarea).
+      selectionBackground: 'rgba(80, 160, 255, 0.5)',
+      selectionInactiveBackground: 'rgba(80, 160, 255, 0.5)',
     },
     scrollback: 5000,
     convertEol: true,
