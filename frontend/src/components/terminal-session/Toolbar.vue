@@ -5,14 +5,13 @@
       Esc
     </button>
 
-    <!-- 2. TAB -->
-    <button class="tb-btn" @click="$emit('sendKey', '\t')" title="Tab">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 2. TAB (icon-only to save width; title tooltip + the standard ⇥ glyph keep it clear) -->
+    <button class="tb-btn tb-btn--tab" @click="$emit('sendKey', '\t')" title="Tab">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="4,7 10,12 4,17" />
         <line x1="10" y1="12" x2="20" y2="12" />
         <line x1="20" y1="7" x2="20" y2="17" />
       </svg>
-      <span>Tab</span>
     </button>
 
     <!-- 3. Numpad toggle -->
@@ -341,6 +340,12 @@ defineEmits<{
 
 .tb-btn--attach {
   color: #8ab4f8;
+}
+
+/* -- Tab: icon-only, slightly narrower than text buttons but still a safe touch target -- */
+.tb-btn--tab {
+  min-width: 40px;
+  padding: 0 8px;
 }
 
 /* -- Scroll fade hint on right edge ------------------------------- */
