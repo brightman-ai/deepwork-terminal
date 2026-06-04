@@ -1,6 +1,7 @@
 import { ref, computed, onMounted, reactive, nextTick } from 'vue'
 import { useWorkbench } from '@/composables/cli/useWorkbench'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 import type { AgentState, WSConnectionStatus } from '@/types/terminal'
 import type { NetStats } from '@/composables/cli/useWebSocketClient'
 import type { WorkbenchTab } from '@/types/workbench'
@@ -76,7 +77,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
   async function closeTab(tabId: string) {
     const tab = allTabs.value.find(t => t.id === tabId)
     if (tab?.sessionId) {
-      try { await cliFetch(`/api/sessions/${tab.sessionId}`, { method: 'DELETE' }) } catch { /* silent */ }
+      try { await cliFetch(cliApi(`/sessions/${tab.sessionId}`), { method: 'DELETE' }) } catch { /* silent */ }
     }
     delete tabRuntimes[tabId]
     delete surfaceRefs[tabId]
@@ -123,7 +124,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     if (allTabs.value.length === 0) return
     let liveSessions: Set<string> = new Set()
     try {
-      const resp = await cliFetch('/api/sessions')
+      const resp = await cliFetch(cliApi('/sessions'))
       if (resp.ok) {
         const list = await resp.json() as Array<{ id?: string; session_id?: string }>
         for (const s of list) {
@@ -143,7 +144,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     const orphans = allTabs.value.filter((t: WorkbenchTab) => !t.sessionId)
     for (const tab of orphans) {
       try {
-        const resp = await cliFetch('/api/sessions', {
+        const resp = await cliFetch(cliApi('/sessions'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: tab.name, cwd: tab.cwd || '~' }),
@@ -163,7 +164,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     if (!gid) return
     const tab = addTab(gid, { name: opts?.name, cwd: opts?.cwd || '~' })
     try {
-      const resp = await cliFetch('/api/sessions', {
+      const resp = await cliFetch(cliApi('/sessions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: tab.name, cwd: tab.cwd }),

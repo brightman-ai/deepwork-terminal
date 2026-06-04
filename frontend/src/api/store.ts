@@ -3,6 +3,7 @@
  * 通用 KV 持久化，数据存在服务端文件系统，跨域名（trycloudflare 等）不丢失。
  */
 import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 
 function getCliFetch() {
   const { cliFetch } = useCliAuth()
@@ -11,14 +12,14 @@ function getCliFetch() {
 
 export async function fetchStore(): Promise<Record<string, unknown>> {
   const cliFetch = getCliFetch()
-  const resp = await cliFetch('/api/store')
+  const resp = await cliFetch(cliApi('/store'))
   if (!resp.ok) return {}
   return resp.json() as Promise<Record<string, unknown>>
 }
 
 export async function saveStore(data: Record<string, unknown>): Promise<void> {
   const cliFetch = getCliFetch()
-  const resp = await cliFetch('/api/store', {
+  const resp = await cliFetch(cliApi('/store'), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),

@@ -1,7 +1,7 @@
 <template>
   <div v-if="visible" class="auth-overlay" @click.self="$emit('dismiss')">
     <div class="auth-dialog">
-      <h3>Terminal Authentication</h3>
+      <h3>{{ title }}</h3>
       <p class="auth-hint">Enter the auth code displayed in the server terminal.</p>
       <input
         ref="inputRef"
@@ -24,11 +24,13 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 import { apiUrl } from '@ce/utils/runtimeBase'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   visible: boolean
-}>()
+  title?: string
+}>(), { title: 'Terminal Authentication' })
 
 const emit = defineEmits<{
   (e: 'dismiss'): void
@@ -60,7 +62,7 @@ async function submit() {
   // Validate by making a test request with the code.
   try {
     const headers: HeadersInit = { 'X-Auth-Code': trimmed }
-    const resp = await fetch(apiUrl('/api/sessions'), { headers })
+    const resp = await fetch(apiUrl(cliApi('/sessions')), { headers })
     if (resp.ok) {
       setAuthCode(trimmed)
       error.value = ''

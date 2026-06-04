@@ -9,6 +9,7 @@
  */
 import { ref } from 'vue'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 
 export interface PasteResult {
@@ -107,7 +108,7 @@ export function useClipboardPaste(sessionId: () => string) {
       formData.append('file', blob, uploadName)
       formData.append('mime', mime)
 
-      const resp = await cliFetch(`/api/sessions/${sessionId()}/paste-upload`, {
+      const resp = await cliFetch(cliApi(`/sessions/${sessionId()}/paste-upload`), {
         method: 'POST',
         body: formData,
         headers: traceHeaders(options.trace),
