@@ -5,6 +5,7 @@
  */
 import { ref, reactive, readonly } from 'vue'
 import { apiUrl } from '@ce/utils/runtimeBase'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 
 export type HudEventType = 'focus' | 'keyboard' | 'touch' | 'ws' | 'state' | 'resize' | 'error'
 
@@ -78,7 +79,7 @@ export function useHudCollector() {
     }
 
     try {
-      await fetch(apiUrl('/api/debug/logs'), {
+      await fetch(apiUrl(cliApi('/debug/logs')), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),

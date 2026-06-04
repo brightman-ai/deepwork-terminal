@@ -5,6 +5,7 @@
 import type { WorkbenchConfig } from '@/types/workbench'
 import { createDefaultWorkbenchConfig } from '@/types/workbench'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 
 function getCliFetch() {
   const { cliFetch } = useCliAuth()
@@ -17,7 +18,7 @@ function getCliFetch() {
  */
 export async function fetchWorkbenchConfig(): Promise<WorkbenchConfig> {
   const cliFetch = getCliFetch()
-  const resp = await cliFetch('/api/workbench')
+  const resp = await cliFetch(cliApi('/workbench'))
   if (resp.status === 404) {
     return createDefaultWorkbenchConfig()
   }
@@ -36,7 +37,7 @@ export async function fetchWorkbenchConfig(): Promise<WorkbenchConfig> {
  */
 export async function saveWorkbenchConfig(config: WorkbenchConfig): Promise<void> {
   const cliFetch = getCliFetch()
-  const resp = await cliFetch('/api/workbench', {
+  const resp = await cliFetch(cliApi('/workbench'), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),

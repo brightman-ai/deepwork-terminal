@@ -7,6 +7,7 @@
 import { ref, reactive, onUnmounted } from 'vue'
 import type { WSConnectionStatus, WSControlMessage } from '@/types/terminal'
 import { wsUrl } from '@ce/utils/runtimeBase'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 
 export interface WebSocketClientOptions {
   authToken?: string
@@ -54,7 +55,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   let onControlMessage: ((msg: WSControlMessage) => void) | null = null
 
   function getWsUrl(): string {
-    let url = wsUrl(`/api/sessions/${sessionId()}/ws`)
+    let url = wsUrl(cliApi(`/sessions/${sessionId()}/ws`))
     const token = opts.authToken || localStorage.getItem('cli_auth_code') || ''
     if (token) url += `?auth=${encodeURIComponent(token)}`
     return url

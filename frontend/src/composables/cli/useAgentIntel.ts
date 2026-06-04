@@ -12,6 +12,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import type { AgentState, AgentIntelResponse } from '@/types/terminal'
 import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { cliApi } from '@/composables/cli/useCliApiPrefix'
 
 export function useAgentIntel(sessionId: () => string) {
   const agentState = ref<AgentState | null>(null)
@@ -36,7 +37,7 @@ export function useAgentIntel(sessionId: () => string) {
     const id = sessionId()
     if (!id) return
     try {
-      const resp = await cliFetch(`/api/sessions/${id}/agent-state`)
+      const resp = await cliFetch(cliApi(`/sessions/${id}/agent-state`))
       if (resp.ok) {
         apply(await resp.json() as AgentIntelResponse)
       }
