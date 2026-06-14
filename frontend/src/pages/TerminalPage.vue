@@ -8,11 +8,6 @@
       <span class="session-name">{{ sessionName }}</span>
       <ConnectionStatus :status="wsStatus" :rtt="netStats.rtt" :upload-bps="netStats.uploadBps" :download-bps="netStats.downloadBps" />
       <AgentStatusBadge :state="agentState" :notifications="notifications" />
-      <button
-        class="hud-toggle"
-        :class="{ 'hud-toggle--on': keystrokeHudVisible }"
-        @click="keystrokeHudVisible = !keystrokeHudVisible"
-      >HUD</button>
       <!-- WS7 primary entry — install/notify icon in the title row. -->
       <InstallNotifyIcon @open="installGuideOpen = true" />
       <SetupWizardIcon :inline="true" />
@@ -146,6 +141,23 @@
       :bottom-offset="keycastBottomOffset"
       data-testid="keystroke-hud"
     />
+
+    <!-- Left-edge HUD tab ("菜单按钮"): the keystroke-HUD toggle lifted out of the
+         header into a fixed left-edge affordance. Vertically draggable (useEdgeDrag,
+         same composable as the drawer handle) so it can be slid off covered text; a
+         short tap still toggles the HUD, a drag repositions + persists. -->
+    <Teleport to="body">
+      <button
+        ref="hudTabEl"
+        class="hud-edge-tab"
+        :class="{ 'hud-edge-tab--on': keystrokeHudVisible, 'is-mobile': isMobile }"
+        :style="hudTabStyle"
+        type="button"
+        title="按键 HUD（可上下拖动）"
+        data-testid="hud-edge-tab"
+        @click="keystrokeHudVisible = !keystrokeHudVisible"
+      >HUD</button>
+    </Teleport>
   </div>
 </template>
 
@@ -171,6 +183,7 @@ import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { useEdgeDrag } from '@terminal/composables/cli/useEdgeDrag'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { useFocusStateMachine } from '@terminal/composables/cli/useFocusStateMachine'
 import { useAnchorStateMachine } from '@terminal/composables/cli/useAnchorStateMachine'
@@ -392,6 +405,8 @@ watch(activeMode, () => {
 
 // ── Keystroke HUD — 3-layer diagnosis ───────────────────────────────────────
 const keystrokeHudVisible = ref(true)
+// Left-edge HUD tab: vertically draggable along the left edge (shared useEdgeDrag).
+const { el: hudTabEl, style: hudTabStyle } = useEdgeDrag({ storageKey: 'dw.hudTab.top' })
 interface HudEntry { key: string; l1: boolean; l2: boolean; l3: boolean; dt: number; ts: number }
 const keystrokeLog = ref<HudEntry[]>([])
 const decoder = new TextDecoder()
@@ -1003,9 +1018,34 @@ onMounted(fetchSessionDetails)
   pointer-events: none !important;
   opacity: 0 !important;
 }
-.hud-toggle {
-  font-size: 10px; padding: 1px 6px; border: 1px solid #444; border-radius: 3px;
-  background: transparent; color: #666; cursor: pointer; margin-left: 4px;
+/* Left-edge HUD tab — slim vertical affordance clinging to the LEFT viewport edge,
+   mirror of ResourceDrawer's .rd-handle. Draggable via useEdgeDrag (touch_action:none
+   so the gesture isn't stolen by page scroll). top:50%/translateY centers it until a
+   persisted drag offset overrides `top` (composable sets transform:none then). */
+.hud-edge-tab {
+  position: fixed;
+  top: 50%;
+  left: 0;
+  transform: translateY(-50%);
+  z-index: 290;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 54px;
+  padding: 0;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  background: #160f22;
+  border: 1px solid #3a2860;
+  border-left: none;
+  border-radius: 0 9px 9px 0;
+  color: #666;
+  cursor: pointer;
+  box-shadow: 4px 0 18px rgba(0, 0, 0, 0.45);
+  touch-action: none;
 }
-.hud-toggle--on { color: #4ade80; border-color: #4ade80; }
+.hud-edge-tab.is-mobile { width: 30px; height: 62px; }
+.hud-edge-tab:active { background: #1f1533; }
+.hud-edge-tab--on { color: #4ade80; border-color: #4ade80; }
 </style>
