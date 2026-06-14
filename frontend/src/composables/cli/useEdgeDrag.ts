@@ -113,6 +113,14 @@ export function useEdgeDrag(options: EdgeDragOptions): EdgeDragBinding {
     draggedPastThreshold = false
     startPointerY = e.clientY
     startTop = currentTop()
+    // Drive the rest of the gesture off WINDOW listeners, not the handle element.
+    // On iOS Safari, setPointerCapture() for TOUCH pointers is unreliable, so once the
+    // finger leaves the small handle the element would stop receiving pointermove and the
+    // drag would freeze. Listening on window tracks the finger anywhere in the viewport
+    // regardless of capture support. setPointerCapture is kept as a harmless bonus below.
+    window.addEventListener('pointermove', onPointerMove, { passive: false })
+    window.addEventListener('pointerup', endDrag)
+    window.addEventListener('pointercancel', endDrag)
     el.value?.setPointerCapture?.(e.pointerId)
   }
 
@@ -135,6 +143,10 @@ export function useEdgeDrag(options: EdgeDragOptions): EdgeDragBinding {
     }
     dragging = false
     activePointerId = null
+    // Tear down the per-gesture window listeners (added on pointerdown).
+    window.removeEventListener('pointermove', onPointerMove)
+    window.removeEventListener('pointerup', endDrag)
+    window.removeEventListener('pointercancel', endDrag)
     if (el.value?.hasPointerCapture?.(e.pointerId)) {
       el.value.releasePointerCapture(e.pointerId)
     }
@@ -164,10 +176,10 @@ export function useEdgeDrag(options: EdgeDragOptions): EdgeDragBinding {
   onMounted(() => {
     const node = el.value
     if (!node) return
+    // Only `pointerdown` + the click guard live on the handle. The move/up/cancel
+    // listeners are attached to WINDOW for the duration of each drag (see onPointerDown),
+    // so the gesture survives the finger leaving the small handle on iOS Safari.
     node.addEventListener('pointerdown', onPointerDown)
-    node.addEventListener('pointermove', onPointerMove, { passive: false })
-    node.addEventListener('pointerup', endDrag)
-    node.addEventListener('pointercancel', endDrag)
     node.addEventListener('click', onClickCapture, { capture: true })
     window.addEventListener('resize', onResize)
     // A restored offset may be stale if the viewport shrank since last session.
@@ -178,11 +190,12 @@ export function useEdgeDrag(options: EdgeDragOptions): EdgeDragBinding {
     const node = el.value
     if (node) {
       node.removeEventListener('pointerdown', onPointerDown)
-      node.removeEventListener('pointermove', onPointerMove)
-      node.removeEventListener('pointerup', endDrag)
-      node.removeEventListener('pointercancel', endDrag)
       node.removeEventListener('click', onClickCapture, { capture: true } as EventListenerOptions)
     }
+    // Defensively drop any in-flight gesture listeners (e.g. unmount mid-drag).
+    window.removeEventListener('pointermove', onPointerMove)
+    window.removeEventListener('pointerup', endDrag)
+    window.removeEventListener('pointercancel', endDrag)
     window.removeEventListener('resize', onResize)
   })
 
