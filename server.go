@@ -52,6 +52,12 @@ func NewServer(opts ...Option) (*Server, error) {
 	if s.tmuxProvider == nil {
 		s.tmuxProvider = newDefaultTmuxProvider()
 	}
+	// Native agent-state push so standalone streams per-session agent state over
+	// the existing WS transport without a host. A host-injected
+	// Hooks.AgentStatePush wins over this default (back-compat).
+	if s.hooks.AgentStatePush == nil {
+		s.hooks.AgentStatePush = nativeAgentStatePush(s.newAgentIntelMonitor())
+	}
 	// Web Push: load (or generate) persisted VAPID keys + subscriptions.
 	s.push = newPushStore(s.config.DataDir)
 	s.push.server = s
