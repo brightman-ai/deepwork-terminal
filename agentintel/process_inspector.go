@@ -75,7 +75,12 @@ func (pi *ProcessInspector) processSnapshot(ctx context.Context) []ProcessInfo {
 		return pi.cache
 	}
 
-	out, err := exec.CommandContext(ctx, "ps", "-ewwaxo", "pid=,ppid=,pgid=,command=").Output()
+	// -wwaxo (NOT -ewwaxo): the `a`/`x` flags already select every process, while
+	// the BSD `-e` flag additionally appends each process's full environment to the
+	// command= column. That env pollution silently breaks command matching — e.g.
+	// a `tmux` client carries TERM=tmux-256color/ZSH_TMUX_TERM in its environment,
+	// which made isTmuxClient's "tmux-" guard reject a genuine client. Argv only.
+	out, err := exec.CommandContext(ctx, "ps", "-wwaxo", "pid=,ppid=,pgid=,command=").Output()
 	if err != nil {
 		return pi.cache // stale is better than nil (includes context cancellation)
 	}

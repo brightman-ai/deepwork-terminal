@@ -48,6 +48,33 @@ func TestParseTmuxPanesLegacySpaceDelimited(t *testing.T) {
 	}
 }
 
+func TestIsTmuxClient(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{"tmux new -s probe", true},
+		{"tmux attach", true},
+		{"tmux attach -t probe", true},
+		{"/usr/bin/tmux", true},
+		// Server process must NOT be treated as a client.
+		{"tmux: server (/tmp/tmux-1001/default)", false},
+		// A non-tmux process whose argv merely mentions a tmux-flavored TERM.
+		{"/usr/bin/zsh -l", false},
+		// Regression: the ps `command` column must carry argv ONLY. If the
+		// environment leaks in (TERM=tmux-256color, ZSH_TMUX_*), the legacy
+		// "tmux-" guard wrongly rejected a genuine client. With argv-only ps
+		// output this string never occurs; assert the guard still holds for a
+		// clean client argv that has no env contamination.
+		{"tmux new-session -A -s main", true},
+	}
+	for _, tc := range cases {
+		if got := isTmuxClient(tc.cmd); got != tc.want {
+			t.Errorf("isTmuxClient(%q) = %v, want %v", tc.cmd, got, tc.want)
+		}
+	}
+}
+
 func TestProcessTreeIncludingRoot(t *testing.T) {
 	procs := []ProcessInfo{
 		{PID: 10, PPID: 1, Command: "tmux"},
