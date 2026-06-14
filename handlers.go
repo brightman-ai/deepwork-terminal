@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -18,6 +19,11 @@ import (
 const (
 	// wsWriteTimeout is the timeout for writing a single WS message.
 	wsWriteTimeout = 10 * time.Second
+
+	// tmuxStatePollInterval controls how often the WS writer recomputes tmux
+	// topology and pushes a tmux_state frame on change. Kept light (~1s) so the
+	// frontend stays current without a heavy poll; the provider is time-boxed.
+	tmuxStatePollInterval = 1 * time.Second
 )
 
 // writeJSON writes a JSON response with the given status code.
@@ -344,6 +350,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve this session's shell PID once for tmux state scoping.
+	sess.mu.Lock()
+	wsShellPID := sess.ShellPID()
+	sess.mu.Unlock()
+
+	// Light tmux-state poll: recompute on a ~1s tick, push only on change (diff).
+	// The provider call is time-boxed internally, so the tick stays cheap and the
+	// write loop is never blocked on tmux/ps subprocesses for long.
+	tmuxTicker := time.NewTicker(tmuxStatePollInterval)
+	defer tmuxTicker.Stop()
+	var lastTmuxState []byte
+
 	// Start writer goroutine: PTY output → WS binary frames + agent state → WS control.
 	writerDone := make(chan struct{})
 	go func() {
@@ -351,6 +369,29 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		localAgentCh := agentCh // local copy for nil-safe select
 		for {
 			select {
+			case <-tmuxTicker.C:
+				if s.tmuxProvider == nil {
+					continue
+				}
+				raw, terr := s.tmuxProvider.TmuxState(ctx, wsShellPID)
+				if terr != nil || raw == nil {
+					continue
+				}
+				if bytes.Equal(raw, lastTmuxState) {
+					continue // no change → no push
+				}
+				lastTmuxState = raw
+				msg, _ := json.Marshal(WSControlMessage{
+					Type:    MsgTypeTmuxState,
+					Payload: raw,
+				})
+				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
+				err := conn.Write(writeCtx, websocket.MessageText, msg)
+				writeCancel()
+				if err != nil {
+					logger.Debug("ws tmux_state write failed", "id", id, "error", err)
+					return
+				}
 			case data, ok := <-dataCh:
 				if !ok {
 					return

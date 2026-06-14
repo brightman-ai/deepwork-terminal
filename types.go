@@ -244,6 +244,7 @@ const (
 	MsgTypeTmuxNav      = "tmux_nav"     // client → server: navigate tmux windows/sessions
 	MsgTypeSessionMeta  = "session_meta" // server → client: pushed once after WS handshake
 	MsgTypeAgentState   = "agent_state"  // server → client: agent state push (replaces SSE)
+	MsgTypeTmuxState    = "tmux_state"   // server → client: tmux topology/prefix/agent-status push (terminal-owned)
 )
 
 // AgentStatePushFunc subscribes to agent state changes for a session.
