@@ -131,11 +131,15 @@ function onAnchorTouchStart(_e: TouchEvent, id: 1 | 2) {
 function onAnchorTouchMove(e: TouchEvent, id: 1 | 2) {
   if (draggingAnchor.value !== id) return
   const touch = e.touches[0]
+  if (!touch) return
+  // Snapshot viewportY ONCE and pair it with the cell mapped from the SAME touch, so a scroll
+  // firing mid-gesture can't split row vs. bufferRow. (The parent re-derives bufferRow from
+  // xterm's live scroll position; this keeps the emitted value self-consistent regardless.)
+  const vY = props.viewportY
   const cell = props.screenToCell(touch.clientX, touch.clientY)
-  // Add bufferRow for scroll-aware tracking
   const cellWithBuffer: CellCoord = {
     ...cell,
-    bufferRow: props.viewportY + cell.row,
+    bufferRow: vY + cell.row,
   }
   emit('anchorDrag', id, cellWithBuffer)
 }
