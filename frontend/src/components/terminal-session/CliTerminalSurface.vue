@@ -15,9 +15,17 @@
       class="terminal-body"
       data-testid="terminal-body"
       ref="terminalBodyRef"
+      :class="{ 'is-selecting': isSelecting }"
       @touchstart.passive="onTerminalTouchStart"
       @touchend.passive="onTerminalTouchEnd"
     >
+      <!-- tmux window tabs: directly under the workbench "终端 N" title row, above xterm.
+           Self-hides unless a tmux server is attached. The contextual notify bell
+           lives in its header (WS7 secondary entry). -->
+      <TmuxPaneBar :session-id="sessionId" @send-key="onSendKey" @open-notify="installGuideOpen = true" />
+      <!-- WS7 primary entry — always-visible install/notify icon, top-right of the
+           terminal surface (the workbench title row lives in the parent CliTabBar). -->
+      <InstallNotifyIcon class="surface-notify-icon" @open="installGuideOpen = true" />
       <XtermTerminal
         ref="xtermRef"
         :active="active"
@@ -32,7 +40,14 @@
 
     <!-- 底栏 (mobile only) -->
     <div v-if="isMobile" class="bottom-bar">
+      <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
+      <TmuxQuickBar
+        :session-id="sessionId"
+        @send-key="onSendKey"
+        @open-sheet="tmuxSheetOpen = true"
+      />
       <Toolbar
+        :session-id="sessionId"
         :sticky-shift="stickyShift"
         :sticky-ctrl="stickyCtrl"
         :sticky-alt="stickyAlt"
@@ -51,7 +66,7 @@
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
-      <TmuxPanel v-if="activeMode === 'tmux'" @send-key="onSendKey" @close="onToggleKeyboard" />
+      <TmuxPanel v-if="activeMode === 'tmux'" :session-id="sessionId" @send-key="onSendKey" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
 
@@ -78,6 +93,27 @@
       @close-hud="hudVisible = false"
       @clear-hud="hud.clear()"
       @upload-hud="hud.upload(sessionId)"
+    />
+
+    <!-- WS8: tmux status sheet (mobile bottom-sheet / desktop popover). -->
+    <TmuxStatusSheet
+      :session-id="sessionId"
+      :open="tmuxSheetOpen"
+      @close="tmuxSheetOpen = false"
+    />
+
+    <!-- WS5: 收纳抽屉 — images / files / input history. Send reuses the compose path. -->
+    <ResourceDrawer
+      :session-id="sessionId"
+      v-model:open="resourceDrawerOpen"
+      @send="onComposeSend"
+    />
+
+    <!-- WS7: platform-aware install + notification guide (shared by both entries). -->
+    <InstallGuideSheet
+      :session-id="sessionId"
+      :open="installGuideOpen"
+      @close="installGuideOpen = false"
     />
 
     <AuthDialog
@@ -113,6 +149,12 @@ import AuthDialog from '@/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@/components/terminal-session/MobileOverlay.vue'
 import Toolbar from '@/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@/components/terminal-session/KeyboardPanel.vue'
+import TmuxPaneBar from '@/components/terminal-session/TmuxPaneBar.vue'
+import TmuxQuickBar from '@/components/terminal-session/TmuxQuickBar.vue'
+import TmuxStatusSheet from '@/components/terminal-session/TmuxStatusSheet.vue'
+import ResourceDrawer from '@/components/terminal-session/ResourceDrawer.vue'
+import InstallGuideSheet from '@/components/terminal-session/InstallGuideSheet.vue'
+import InstallNotifyIcon from '@/components/terminal-session/InstallNotifyIcon.vue'
 import TmuxPanel from '@/components/terminal-session/TmuxPanel.vue'
 import ComposeBar from '@/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@/components/terminal-session/KeyCastrOverlay.vue'
@@ -125,7 +167,10 @@ import { useTerminalCoordMapper } from '@/composables/cli/useTerminalCoordMapper
 import { useComposeSendStrategy } from '@/composables/cli/useComposeSendStrategy'
 import { useHudCollector } from '@/composables/cli/useHudCollector'
 import { useCliPasteResolver } from '@/composables/cli/useCliPasteResolver'
+import { useClipboardText } from '@/composables/cli/useClipboardText'
 import { useAgentIntel } from '@/composables/cli/useAgentIntel'
+import { useTmuxState } from '@/composables/cli/useTmuxState'
+import { useForegroundAgentNotify } from '@/composables/cli/useForegroundAgentNotify'
 import { useKeyCastrHud } from '@/composables/cli/useKeyCastrHud'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@/composables/cli/useVisualKeyboardInset'
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@/composables/cli/useCliInputDiagnostics'
@@ -155,12 +200,19 @@ const { showAuthDialog, dismissAuthDialog } = useCliAuth()
 const focusSM = useFocusStateMachine()
 const anchorSM = useAnchorStateMachine()
 const anchorState = computed<AnchorState>(() => anchorSM.state.value ?? 'IDLE')
+// True whenever a copy-mode selection is being placed/adjusted. While selecting we suppress
+// the xterm viewport's own finger-scroll (Safari momentum scroll) so the gesture only moves
+// anchors; intentional view movement still flows through edgeScroll / PgUp-PgDn.
+const isSelecting = computed(() => anchorState.value !== 'IDLE')
 const anchor1 = computed<CellCoord | null>(() => anchorSM.anchor1.value ?? null)
 const anchor2 = computed<CellCoord | null>(() => anchorSM.anchor2.value ?? null)
 const composeSend = useComposeSendStrategy()
 const hud = useHudCollector()
 const hudVisible = ref(false)
 const { agentState, notifications, handleWSMessage: agentWSHandler } = useAgentIntel(() => props.sessionId)
+const tmux = useTmuxState(() => props.sessionId)
+// WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
+useForegroundAgentNotify(() => props.sessionId)
 const keyCastr = useKeyCastrHud()
 const keycastEntries = keyCastr.entries
 
@@ -174,6 +226,13 @@ const attachInputRef = ref<HTMLInputElement>()
 // ─── State ────────────────────────────────────────────────────────────────────
 
 const tmuxDetected = ref(false)
+const tmuxSheetOpen = ref(false)
+const installGuideOpen = ref(false) // WS7: install + notify guide sheet
+
+// WS5: resource drawer open state, persisted across reloads.
+const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
+const resourceDrawerOpen = ref(localStorage.getItem(RESOURCE_DRAWER_KEY) === '1')
+watch(resourceDrawerOpen, (v) => localStorage.setItem(RESOURCE_DRAWER_KEY, v ? '1' : '0'))
 const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'tmux' | 'compose'>('idle')
 const stickyShift = ref(false)
 const stickyCtrl = ref(false)
@@ -225,6 +284,12 @@ const pasteResolver = useCliPasteResolver({
   isActive: () => props.active,
   sendBinary: (data) => sendBinary(data, 'clipboard'),
   openAttachmentPicker: () => attachInputRef.value?.click(),
+  hudRecord: (kind, message) => hud.record(kind, message),
+})
+
+const clipboardText = useClipboardText({
+  surface: 'workbench',
+  sendBinary: (data) => sendBinary(data, 'clipboard'),
   hudRecord: (kind, message) => hud.record(kind, message),
 })
 
@@ -401,10 +466,21 @@ async function onClipboardPaste(e: ClipboardEvent) {
   await pasteResolver.handlePasteEvent(e)
 }
 
+// While a selection is active, swallow finger-drag scrolling on the terminal body so the
+// gesture adjusts anchors instead of scrolling the xterm viewport / page out from under the
+// selection (the source of the "selection jumps on Safari scroll" bug). Must be a NON-passive
+// listener — a `@touchmove.passive` template binding cannot call preventDefault. Intentional
+// scrolling still happens via edgeScroll (anchor at top/bottom edge) and the PgUp/PgDn keys.
+function onTerminalBodyTouchMove(e: TouchEvent) {
+  if (!isMobile.value || !isSelecting.value) return
+  e.preventDefault()
+}
+
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibilityChange)
   document.addEventListener('keydown', onKeydownDirect, { capture: true })
   document.addEventListener('paste', onClipboardPaste, { capture: true })
+  terminalBodyRef.value?.addEventListener('touchmove', onTerminalBodyTouchMove, { passive: false })
   window.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
   window.visualViewport?.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
   window.visualViewport?.addEventListener('resize', lockKeyboardViewportScroll)
@@ -414,6 +490,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (viewportScrollLockRaf) window.cancelAnimationFrame(viewportScrollLockRaf)
+  terminalBodyRef.value?.removeEventListener('touchmove', onTerminalBodyTouchMove)
   document.removeEventListener('keydown', onKeydownDirect, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
   document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -460,6 +537,9 @@ function onTerminalReady(terminal: Terminal) {
         case 'agent_state':
           agentWSHandler(msg.payload)
           break
+        case 'tmux_state':
+          tmux.handleWSMessage(msg.payload)
+          break
         case 'error':
           console.error('WS error:', msg.payload)
           break
@@ -477,6 +557,13 @@ function onTerminalData(data: Uint8Array) {
 function sendTerminalData(data: Uint8Array) {
   if (data.length === 1) {
     let byte = data[0]
+    // Ctrl-sticky + v/V → real OS-clipboard paste (universal Ctrl+V muscle memory),
+    // not the \x16 (quoted-insert) byte that Ctrl-masking would otherwise produce.
+    if (stickyCtrl.value && (byte === 0x76 || byte === 0x56)) {
+      stickyCtrl.value = false
+      void clipboardText.pasteFromClipboard('sticky-ctrl-v')
+      return
+    }
     if (stickyCtrl.value) { byte = byte & 0x1f; stickyCtrl.value = false }
     if (stickyAlt.value) { sendBinary(encoder.encode('\x1b'), 'sticky-alt'); stickyAlt.value = false }
     if (stickyShift.value) { if (byte >= 0x61 && byte <= 0x7a) byte -= 0x20; stickyShift.value = false }
@@ -576,6 +663,12 @@ function onSendKey(key: string) {
     else if (key.length === 1) { modified = key.toUpperCase(); stickyShift.value = false }
     else { stickyShift.value = false }
   }
+  if (stickyCtrl.value && (modified === 'v' || modified === 'V')) {
+    // Ctrl-sticky + v/V → real OS-clipboard paste, not the \x16 quoted-insert byte.
+    stickyCtrl.value = false
+    void clipboardText.pasteFromClipboard('sticky-ctrl-v')
+    return
+  }
   if (stickyCtrl.value) {
     if (modified.length === 1) modified = String.fromCharCode(modified.charCodeAt(0) & 0x1f)
     stickyCtrl.value = false
@@ -599,10 +692,7 @@ function onClipboard(op: string) {
       }
       break
     case 'paste':
-      navigator.clipboard.readText().then(text => {
-        if (text) sendBinary(encoder.encode(text))
-        hud.record('state', `clipboard paste: ${text.length} chars`)
-      }).catch(() => {})
+      void clipboardText.pasteFromClipboard('paste-button')
       break
     case 'undo':
       sendBinary(encoder.encode('\x1a'))
@@ -645,9 +735,16 @@ function onTerminalTouchEnd(e: TouchEvent) {
   }
 }
 
+// Live, authoritative viewport top. xterm's buffer is the source of truth; the reactive
+// `viewportY` ref (updated via term.onScroll) can lag a frame behind during momentum scroll,
+// which is why a default selection sometimes landed on the wrong line and "needed several tries".
+function liveViewportY(): number {
+  return xtermRef.value?.terminal?.()?.buffer.active.viewportY ?? viewportY.value
+}
+
 function onTouchballTap(x: number, y: number) {
   const cell = coordMapper.screenToCell(x, y)
-  const cellBuf: CellCoord = { ...cell, bufferRow: viewportY.value + cell.row }
+  const cellBuf: CellCoord = { ...cell, bufferRow: liveViewportY() + cell.row }
   if (anchorSM.state.value === 'IDLE') {
     hud.record('touch', `tap (idle) cell (${cell.col},${cell.row})`)
     return
@@ -665,15 +762,18 @@ function onTouchballTap(x: number, y: number) {
 function onTouchballDoubleTap(x: number, y: number) {
   const term = xtermRef.value?.terminal?.()
   if (!term) return
+  // Snapshot the live viewport top ONCE so getLine / select / anchors all agree on the same
+  // buffer row even if a scroll fires mid-handler.
+  const vY = term.buffer.active.viewportY
   const cell = coordMapper.screenToCell(x, y)
-  const line = term.buffer.active.getLine(cell.row + viewportY.value)
+  const line = term.buffer.active.getLine(cell.row + vY)
   if (!line) return
   const lineStr = line.translateToString(true)
   let start = cell.col, end = cell.col
   while (start > 0 && /\S/.test(lineStr[start - 1] || '')) start--
   while (end < lineStr.length - 1 && /\S/.test(lineStr[end + 1] || '')) end++
-  term.select(start, cell.row + viewportY.value, end - start + 1)
-  const startBuf = viewportY.value + cell.row
+  term.select(start, cell.row + vY, end - start + 1)
+  const startBuf = vY + cell.row
   anchorSM.enterSelection()
   anchorSM.placeAnchor1({ col: start, row: cell.row, bufferRow: startBuf })
   anchorSM.placeAnchor2({ col: end, row: cell.row, bufferRow: startBuf })
@@ -685,7 +785,7 @@ function onTouchballTripleTap(_x: number, _y: number) {
   if (!term) return
   // Select the ENTIRE visible screen. Pairs with PgUp/PgDn paging: scroll a page, triple-tap
   // to grab the whole screen, copy — no dependence on precise edge-scroll selection.
-  const top = viewportY.value
+  const top = term.buffer.active.viewportY
   const bottom = top + term.rows - 1
   term.select(0, top, term.rows * term.cols)
   anchorSM.selectAll(
@@ -706,7 +806,7 @@ function onTouchballLongPress(x: number, y: number) {
     return
   }
   const cell = coordMapper.screenToCell(x, y)
-  const cellBuf: CellCoord = { ...cell, bufferRow: viewportY.value + cell.row }
+  const cellBuf: CellCoord = { ...cell, bufferRow: liveViewportY() + cell.row }
   anchorSM.enterSelection()
   anchorSM.placeAnchor1(cellBuf)
   applyXtermSelection()
@@ -729,14 +829,22 @@ async function onSelectionCopy() {
 
 function onAnchorDrag(anchorId: 1 | 2, cell: CellCoord) {
   const term = xtermRef.value?.terminal?.()
+  // Re-derive bufferRow ATOMICALLY from xterm's authoritative scroll position at THIS instant,
+  // pairing it with the viewport-relative `cell.row` the overlay mapped from the same touch.
+  // The overlay's own `bufferRow` is computed from the reactive `viewportY` ref, which can lag
+  // xterm during Safari momentum scroll — using the ref there would split row vs. bufferRow and
+  // make the selection jump. We recompute here so the two are always consistent.
+  const resolved: CellCoord = term
+    ? { ...cell, bufferRow: term.buffer.active.viewportY + cell.row }
+    : cell
   // Edge auto-scroll while selecting (D3): dragging an anchor onto the top/bottom row scrolls
   // the view so the selection can extend to content that is currently off-screen.
   if (term) {
     if (cell.row <= 0) edgeScroll(term, -1)
     else if (cell.row >= term.rows - 1) edgeScroll(term, 1)
   }
-  if (anchorId === 1) anchorSM.placeAnchor1(cell)
-  else anchorSM.placeAnchor2(cell)
+  if (anchorId === 1) anchorSM.placeAnchor1(resolved)
+  else anchorSM.placeAnchor2(resolved)
   applyXtermSelection()
 }
 
@@ -830,6 +938,22 @@ defineExpose({ wsStatus, agentState, notifications, netStats })
   overflow: hidden;
   width: 100%;
   min-height: 0;
+}
+
+/* WS7 primary entry — floats top-right above xterm; small and unobtrusive so it
+   never covers terminal content the user is reading. */
+.surface-notify-icon {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  z-index: 40;
+}
+
+/* Copy-mode active: stop the browser from initiating a scroll/pan from a finger-drag on the
+   terminal, so the selection gesture cannot be hijacked by Safari's momentum scroll. */
+.terminal-body.is-selecting,
+.terminal-body.is-selecting :deep(.xterm-viewport) {
+  touch-action: none;
 }
 
 .preempted-banner {

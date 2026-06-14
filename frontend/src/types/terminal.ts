@@ -18,8 +18,39 @@ export interface TerminalSessionInfo {
 }
 
 export interface WSControlMessage {
-  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav'
+  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state'
   payload?: Record<string, unknown>
+}
+
+// ─── tmux topology (backend agentintel.TmuxState; see WS0 contract) ──────────────
+// Pushed via WS control frame { type: "tmux_state", payload: TmuxState } on ~1s diff,
+// and fetched once via GET /tmux/state on mount. prefix.bytes is base64 of the tmux
+// prefix control byte(s) — C-b → 0x02 ("Ag=="), C-a → 0x01 ("AQ==").
+export interface TmuxPrefix { display: string; bytes: string }
+export interface TmuxPaneState {
+  index: number
+  active: boolean
+  title?: string
+  agentTool?: AgentTool
+  agentStatus?: AgentStatusType
+}
+export interface TmuxWindowState {
+  index: number
+  name: string
+  active: boolean
+  panes: TmuxPaneState[]
+}
+export interface TmuxSessionState {
+  name: string
+  attached: boolean
+  windows: TmuxWindowState[]
+}
+export interface TmuxState {
+  installed: boolean
+  serverRunning: boolean
+  attached: boolean
+  prefix: TmuxPrefix
+  sessions: TmuxSessionState[]
 }
 
 // AgentState (legacy simplified) — use the full AgentState below instead.
