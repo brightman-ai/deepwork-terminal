@@ -29,6 +29,8 @@ export interface UploadItem {
   cwd: string
   /** Request path (no /api prefix, no auth) as returned by the server. */
   url: string
+  /** Absolute path on disk — the @-referenceable path for "插入对话" injection. */
+  path: string
 }
 
 export interface UploadsResponse {
@@ -78,4 +80,20 @@ export function rawUrl(id: string): string {
   const auth = getAuthCode()
   const authQ = auth ? `&auth=${encodeURIComponent(auth)}` : ''
   return `${base}${sep}id=${encodeURIComponent(id)}${authQ}`
+}
+
+/**
+ * Fetch a text-like upload's raw bytes as a string, for INLINE preview (no new
+ * browser tab). Uses the same authed cliFetch path as the list endpoints. Returns
+ * null on any failure so the caller can fall back to a download action.
+ */
+export async function fetchRawText(id: string): Promise<string | null> {
+  const { cliFetch } = useCliAuth()
+  try {
+    const resp = await cliFetch(cliApi(`/uploads/raw?id=${encodeURIComponent(id)}`))
+    if (!resp.ok) return null
+    return await resp.text()
+  } catch {
+    return null
+  }
 }

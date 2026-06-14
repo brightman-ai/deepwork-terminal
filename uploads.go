@@ -18,9 +18,11 @@ const (
 
 // uploadItem is one listed resource (image or file) in the CROSS-SESSION drawer.
 // Unlike the old session-scoped variant, it carries the originating session's
-// name/cwd + an opaque id so the client can re-use an old upload from any new
-// session, and so the raw endpoint can whitelist by id (no path ever leaves the
-// server).
+// name/cwd + an opaque id so the raw endpoint can whitelist by id (raw bytes are
+// fetched only via id — a client-supplied path never reaches the filesystem, so
+// traversal stays impossible). Path is the server's OWN recorded absPath, exposed
+// as read-only metadata so the drawer's "插入对话" can inject the same
+// @-referenceable path the clipboard-paste flow injects post-upload.
 type uploadItem struct {
 	ID          string `json:"id"`
 	Kind        string `json:"kind"` // "image" | "file"
@@ -30,7 +32,8 @@ type uploadItem struct {
 	SessionID   string `json:"sessionId"`
 	SessionName string `json:"sessionName"`
 	CWD         string `json:"cwd"`
-	URL         string `json:"url"` // raw-serving URL (request path, no /api prefix)
+	URL         string `json:"url"`  // raw-serving URL (request path, no /api prefix)
+	Path        string `json:"path"` // absolute path on disk — the @-referenceable path agents need
 }
 
 // uploadsResponse is the payload of GET /uploads.
@@ -69,6 +72,7 @@ func (s *Server) handleUploadsList(w http.ResponseWriter, r *http.Request) {
 			SessionName: e.SessionName,
 			CWD:         e.CWD,
 			URL:         rawBase + "?id=" + e.ID,
+			Path:        e.AbsPath,
 		})
 	}
 	writeJSON(w, http.StatusOK, uploadsResponse{Items: items})

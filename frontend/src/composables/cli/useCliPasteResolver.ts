@@ -467,9 +467,22 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     }, trace)
   }
 
+  /**
+   * Inject already-known filesystem paths into the PTY — the SAME chokepoint the
+   * post-upload paste flow uses (formatPathsForPty → shell-quote → sendBinary). The
+   * resource drawer's "插入对话" routes here so a re-used upload reaches claude/codex
+   * exactly as a fresh clipboard paste would. `source` defaults to manual-attach.
+   */
+  function injectKnownPaths(paths: string[], source: PasteSource = 'manual-attach'): void {
+    const clean = paths.filter(Boolean)
+    if (clean.length === 0) return
+    injectPaths(clean, source, createTrace('terminal/clipboard'))
+  }
+
   return {
     handlePasteEvent,
     uploadFilesFromInput,
+    injectKnownPaths,
     metrics,
   }
 }
