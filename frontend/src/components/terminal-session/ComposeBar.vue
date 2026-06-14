@@ -81,7 +81,7 @@
  * Enter = newline. Send button = submit. Draft persisted to localStorage.
  * Snippets stored in localStorage for quick-recall.
  */
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { focusWithoutViewportScroll, resetViewportScroll } from '@terminal/composables/cli/useVisualKeyboardInset'
 import {
   attachCliInputDiagnostics,
@@ -92,6 +92,14 @@ import { useServerStore } from '@terminal/composables/cli/useServerStore'
 const DRAFT_KEY = 'cli-compose-draft'
 const HISTORY_MAX = 15
 const serverStore = useServerStore()
+
+/**
+ * `draft` lets the host pre-fill the textarea for editing (e.g. ResourceDrawer's
+ * 重发 inserts a past prompt here instead of sending it directly). It is applied
+ * on mount and whenever it changes to a fresh value, REPLACING the current text so
+ * the user lands in an editable compose with the inserted text ready to refine.
+ */
+const props = defineProps<{ draft?: string }>()
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
@@ -113,6 +121,26 @@ function saveDraft() {
 function loadDraft() {
   try { text.value = localStorage.getItem(DRAFT_KEY) || '' } catch {}
 }
+
+// --- Injected draft (host-supplied, e.g. ResourceDrawer 重发) ---
+// Replace the textarea with the injected text and put the caret at the end so the
+// user can immediately edit before sending. Resize + persist so it behaves like
+// hand-typed content.
+function applyDraft(draft: string) {
+  if (draft == null) return
+  text.value = draft
+  saveDraft()
+  nextTick(() => {
+    autoResize()
+    const ta = textareaRef.value
+    if (ta) {
+      const end = ta.value.length
+      try { ta.setSelectionRange(end, end) } catch {}
+    }
+    focusWithoutViewportScroll(textareaRef.value)
+  })
+}
+watch(() => props.draft, (d) => { if (d != null) applyDraft(d) })
 
 // --- Snippets (server-side, survives trycloudflare domain changes) ---
 function loadSnippets() {
@@ -183,11 +211,15 @@ function toggleHistory() {
 }
 
 // --- Auto-resize + input handler ---
+// Grow with content up to ~50vh (half the screen — leaves room for the mobile
+// keyboard), then scroll internally. Measuring scrollHeight after resetting to
+// 'auto' lets the box shrink back when text is cleared, with no layout jank.
 function autoResize() {
   const ta = textareaRef.value
   if (!ta) return
+  const cap = Math.max(120, Math.round(window.innerHeight * 0.5))
   ta.style.height = 'auto'
-  ta.style.height = Math.min(ta.scrollHeight, 150) + 'px'
+  ta.style.height = Math.min(ta.scrollHeight, cap) + 'px'
 }
 function onInput() {
   autoResize()
@@ -268,6 +300,9 @@ function moveCursor(dir: 'up' | 'down' | 'left' | 'right' | 'home' | 'end') {
 
 onMounted(async () => {
   loadDraft()
+  // A host-supplied draft (ResourceDrawer 重发) takes precedence over the persisted
+  // local draft so the inserted prompt is what the user sees.
+  if (props.draft != null) text.value = props.draft
   // 先加载服务端数据，再填充 snippets/history
   await serverStore.load()
   loadSnippets()
@@ -546,7 +581,9 @@ onUnmounted(() => {
   outline: none;
   line-height: 1.4;
   min-height: 38px;
-  max-height: 150px;
+  /* Height cap is applied by autoResize() in JS (≈50vh) so the box can grow with
+     content yet still leave room for the mobile keyboard; overflow scrolls past it. */
+  max-height: 50vh;
   overflow-y: auto;
   transition: border-color 0.15s;
 }
