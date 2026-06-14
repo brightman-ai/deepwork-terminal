@@ -78,20 +78,17 @@
       Alt
     </button>
 
-    <!-- 8. tmux toggle (always shown, dimmed when not detected) -->
+    <!-- 8. Paste — pastes the OS clipboard into the terminal via the robust
+         paste path (handles iOS / HTTP fallback + HUD errors in the host). -->
     <button
-      class="tb-btn"
-      :class="{ 'tb-btn--panel-tmux': activePanel === 'tmux', 'tb-btn--dimmed': !tmuxDetected }"
-      @click="$emit('toggleTmux')"
-      title="tmux panel"
+      class="tb-btn tb-btn--paste"
+      @click="$emit('clipboard', 'paste')"
+      title="Paste from clipboard"
     >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="8" height="8" rx="1" />
-        <rect x="13" y="3" width="8" height="8" rx="1" />
-        <rect x="3" y="13" width="8" height="8" rx="1" />
-        <rect x="13" y="13" width="8" height="8" rx="1" />
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="8" y="2" width="8" height="4" rx="1" />
+        <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
       </svg>
-      <span class="tmux-label">tmux</span>
     </button>
 
     <!-- 9. Toggle system keyboard -->
@@ -130,7 +127,6 @@
     <!-- Page 2: quick-access keys (scroll right to see) -->
     <div class="tb-divider" />
     <button class="tb-btn tb-btn--extra tb-btn--del" @click="$emit('sendKey', '\x1b[3~')" title="Delete">Del</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', tmux.prefixSeq('['))" :title="`${pfxLabel}[ copy mode`">{{ pfxLabel }}[</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[5~')" title="Page Up">PgU</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[6~')" title="Page Down">PgD</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[A')" title="Arrow Up">↑</button>
@@ -151,37 +147,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-
-const props = defineProps<{
+defineProps<{
   sessionId: string
   stickyShift: boolean
   stickyCtrl: boolean
   keyboardUp: boolean
   stickyAlt: boolean
-  activePanel: 'none' | 'numpad' | 'tmux' | 'compose'
-  tmuxDetected: boolean
+  activePanel: 'none' | 'numpad' | 'compose'
 }>()
-
-const tmux = useTmuxState(() => props.sessionId)
-/** Caption matching the live tmux prefix (^B for C-b, ^A for C-a). */
-const pfxLabel = computed(() => {
-  const d = tmux.prefixDisplay.value
-  if (d === 'C-b') return '^B'
-  if (d === 'C-a') return '^A'
-  return d
-})
 
 defineEmits<{
   (e: 'sendKey', key: string): void
+  (e: 'clipboard', op: 'paste'): void
   (e: 'toggleNumpad'): void
   (e: 'toggleCompose'): void
   (e: 'toggleShift'): void
   (e: 'toggleCtrl'): void
   (e: 'toggleAlt'): void
   (e: 'toggleHud'): void
-  (e: 'toggleTmux'): void
   (e: 'toggleKeyboard'): void
   (e: 'attach'): void
 }>()
@@ -278,17 +261,6 @@ defineEmits<{
   background: #162a40;
 }
 
-/* -- tmux panel active (purple) ------------------------------------ */
-.tb-btn--panel-tmux {
-  background: #2a1040;
-  border-color: #5a2080;
-  border-bottom-color: #111;
-  color: #c080ff;
-}
-.tb-btn--panel-tmux:active {
-  background: #341450;
-}
-
 /* -- Debug button (subdued) ---------------------------------------- */
 .tb-btn--debug {
   color: #9090d0;
@@ -323,9 +295,6 @@ defineEmits<{
 .tb-btn--enter { color: #80c880; border-color: #2a4a2a; background: #0e1e0e; }
 .tb-btn--del { color: #ff8080; border-color: #4a2020; background: #1e0e0e; }
 
-/* -- Dimmed (tmux not yet detected) -------------------------------- */
-.tb-btn--dimmed { opacity: 0.4; }
-
 /* -- Active blue (keyboard toggle) --------------------------------- */
 .tb-btn--active-blue {
   background: #0e2040;
@@ -346,13 +315,13 @@ defineEmits<{
   background: #2a2a30;
 }
 
-/* -- tmux label smaller text -------------------------------------- */
-.tmux-label {
-  font-size: 0.6rem;
-}
-
 .tb-btn--attach {
   color: #8ab4f8;
+}
+
+/* -- Paste button (clipboard) -------------------------------------- */
+.tb-btn--paste {
+  color: #c080ff;
 }
 
 /* -- Tab: icon-only, slightly narrower than text buttons but still a safe touch target -- */
