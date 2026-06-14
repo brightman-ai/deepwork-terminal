@@ -13,6 +13,10 @@ frontend/dist/
 *.key
 *.pem
 credentials.*
+# runtime data dir (normally ~/.dw-terminal; can appear at repo root if HOME unset).
+# Holds the VAPID private key, push subscriptions, upload index — never commit.
+/.dw-terminal/
+screenshot.png
 docs/
 .DS_Store
 .idea/
