@@ -139,6 +139,9 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		if relPath == "" {
 			relPath = existing
 		}
+		// Record (idempotent: deduped by absPath) so the cross-session drawer
+		// lists this file with the session's name even on the dedup path.
+		s.recordUpload(sess, existing, isImage)
 		terminalClipboardUploadsTotal.Inc()
 		terminalClipboardUploadBytes.Add(uint64(len(data)))
 		terminalClipboardUploadDuration.Observe(time.Since(start).Seconds())
@@ -212,6 +215,11 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 
 	// NOTE: Do NOT inject path into PTY here. The frontend resolver owns the
 	// paste policy for browser, Wails, and mobile runtimes.
+
+	// Record in the cross-session upload index (~/.dw-terminal/uploads.json) so
+	// the resource drawer can list this file from ANY future session, annotated
+	// with this session's name + cwd + time.
+	s.recordUpload(sess, savePath, isImage)
 
 	terminalClipboardUploadsTotal.Inc()
 	terminalClipboardUploadBytes.Add(uint64(written))
@@ -328,6 +336,30 @@ func findDuplicateClipboard(dir string, hashHex string) string {
 		}
 	}
 	return ""
+}
+
+// recordUpload writes an entry into the cross-session upload index for a freshly
+// saved (or deduped) upload. The session annotation (name + cwd) is taken from
+// the live session that produced it; absPath dedups so re-uploads are idempotent.
+func (s *Server) recordUpload(sess *Session, absPath string, isImage bool) {
+	if s.uploads == nil || absPath == "" {
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return
+	}
+	s.uploads.put(uploadEntry{
+		Kind:         clipboardKindLabel(isImage),
+		AbsPath:      absPath,
+		Name:         filepath.Base(absPath),
+		Size:         info.Size(),
+		MtimeMs:      info.ModTime().UnixMilli(),
+		SessionID:    sess.ID,
+		SessionName:  sess.Name,
+		CWD:          sess.WorkingDir(),
+		UploadedAtMs: time.Now().UnixMilli(),
+	})
 }
 
 func cleanupOldClipboardFiles(dir string, ttl time.Duration) {
