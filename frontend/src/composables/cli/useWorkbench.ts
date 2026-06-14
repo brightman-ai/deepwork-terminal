@@ -5,9 +5,9 @@
  * [Ref: TH-0502-w6d Round 4-5]
  */
 import { ref, computed } from 'vue'
-import type { WorkbenchConfig, WorkbenchGroup, WorkbenchTab } from '@/types/workbench'
-import { createTab, createGroup, createDefaultWorkbenchConfig } from '@/types/workbench'
-import { fetchWorkbenchConfig, saveWorkbenchConfig } from '@/api/workbench'
+import type { WorkbenchConfig, WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
+import { createTab, createGroup, createDefaultWorkbenchConfig } from '@terminal/types/workbench'
+import { fetchWorkbenchConfig, saveWorkbenchConfig } from '@terminal/api/workbench'
 
 export function useWorkbench() {
   const config = ref<WorkbenchConfig | null>(null)

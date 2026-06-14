@@ -23,8 +23,8 @@
 
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { apiUrl } from '@ce/utils/runtimeBase'
 
 const props = withDefaults(defineProps<{

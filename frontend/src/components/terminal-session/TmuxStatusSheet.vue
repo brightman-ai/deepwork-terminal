@@ -98,9 +98,9 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { TmuxSessionState, TmuxWindowState } from '@/types/terminal'
-import { useTmuxState } from '@/composables/cli/useTmuxState'
-import { useDeviceDetection } from '@/composables/cli/useDeviceDetection'
+import type { TmuxSessionState, TmuxWindowState } from '@terminal/types/terminal'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 
 const props = defineProps<{ sessionId: string; open: boolean }>()
 defineEmits<{ (e: 'close'): void }>()

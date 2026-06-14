@@ -3,14 +3,14 @@ import { createPinia } from 'pinia'
 import router from './router'
 import App from './App.vue'
 import { configureRemoteSink, createLogger } from '@ce/utils/obs'
-import { reportCliInputDiagnostic } from '@/composables/cli/useCliInputDiagnostics'
+import { reportCliInputDiagnostic } from '@terminal/composables/cli/useCliInputDiagnostics'
 
 // Import Tailwind CSS
 import '@ce/assets/main.css'
 
 // ── Portal registrations (side-effect imports — must run before app mount) ────
-import '@/portals/cli'
-import '@/portals/settings'
+import '@terminal/portals/cli'
+import '@terminal/portals/settings'
 
 configureRemoteSink()
 const log = createLogger('main')
@@ -208,6 +208,6 @@ app.mount('#app')
 // usePushNotifications owns the registration (idempotent, feature-guarded). We
 // nudge it here so the SW is live before the user opens the install guide; on
 // platforms without serviceWorker this is a silent no-op.
-import('@/composables/cli/usePushNotifications')
+import('@terminal/composables/cli/usePushNotifications')
   .then(({ usePushNotifications }) => usePushNotifications().ensureRegistration())
   .catch((err) => log.warn('pwa.sw.register failed', { error: String(err) }))

@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { FormPane } from '@ce/components/pane'
 import { usePortalEvents } from '@ce/composables/layout/usePortalEvents'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { Globe, ClipboardCopy } from 'lucide-vue-next'
 
 interface Props {

@@ -8,8 +8,8 @@
  * Transport: REST multipart for images (not WS base64) to avoid blocking PTY frames.
  */
 import { ref } from 'vue'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 
 export interface PasteResult {

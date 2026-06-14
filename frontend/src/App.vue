@@ -10,8 +10,8 @@
 
 <script setup lang="ts">
 // Root application component — renders the active route view.
-import AuthDialog from '@/components/terminal-session/AuthDialog.vue'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
+import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 
 const { showAuthDialog, dismissAuthDialog } = useCliAuth()
 

@@ -175,8 +175,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { useDeviceDetection } from '@/composables/cli/useDeviceDetection'
-import { fetchUploads, fetchInputs, rawUrl, type UploadItem, type InputItem } from '@/api/uploads'
+import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { fetchUploads, fetchInputs, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 
 // sessionId is the RESEND TARGET (the live terminal the 重发 path injects into) — it is
 // no longer used to fetch resources, which are now global/cross-session.

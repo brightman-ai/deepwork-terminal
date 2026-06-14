@@ -68,7 +68,7 @@
  * [Ref: CAP-hud-diagnostics S2]
  */
 import { computed } from 'vue'
-import type { HudEvent, HudSnapshot } from '@/composables/cli/useHudCollector'
+import type { HudEvent, HudSnapshot } from '@terminal/composables/cli/useHudCollector'
 
 const props = defineProps<{
   visible: boolean

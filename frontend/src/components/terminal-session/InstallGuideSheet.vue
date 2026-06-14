@@ -184,8 +184,8 @@
 
 <script setup lang="ts">
 import { ref, computed, h, watch } from 'vue'
-import { useDeviceDetection } from '@/composables/cli/useDeviceDetection'
-import { usePushNotifications } from '@/composables/cli/usePushNotifications'
+import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 
 const props = defineProps<{ sessionId: string; open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()

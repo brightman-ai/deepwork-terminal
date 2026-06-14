@@ -3,7 +3,7 @@
  * Isolates access to xterm.js internal APIs behind a clean interface.
  * [Ref: CAP-touch-mouse S3, DDC-09]
  */
-import type { CellCoord } from '@/types/terminal'
+import type { CellCoord } from '@terminal/types/terminal'
 
 export interface TerminalDimensions {
   cols: number

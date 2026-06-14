@@ -1,6 +1,6 @@
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { useClipboardPaste } from '@/composables/cli/useClipboardPaste'
-import { detectCliRuntimeProfile, type CliRuntimeMode } from '@/composables/cli/useCliRuntimeMode'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { useClipboardPaste } from '@terminal/composables/cli/useClipboardPaste'
+import { detectCliRuntimeProfile, type CliRuntimeMode } from '@terminal/composables/cli/useCliRuntimeMode'
 import { createLogger, createTrace, traceHeaders, type TraceContext } from '@ce/utils/obs'
 
 type HudKind = 'state' | 'error'

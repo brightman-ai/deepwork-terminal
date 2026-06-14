@@ -56,7 +56,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useTmuxState } from '@/composables/cli/useTmuxState'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 
 const props = defineProps<{ sessionId: string }>()
 

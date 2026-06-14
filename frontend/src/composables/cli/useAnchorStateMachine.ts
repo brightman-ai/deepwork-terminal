@@ -4,7 +4,7 @@
  * [Ref: T5-B4.M4, CAP-selection-copy S2, DDC-08]
  */
 import { ref, readonly, computed } from 'vue'
-import type { AnchorState, CellCoord } from '@/types/terminal'
+import type { AnchorState, CellCoord } from '@terminal/types/terminal'
 
 export interface AnchorStateMachine {
   state: ReturnType<typeof readonly<ReturnType<typeof ref<AnchorState>>>>

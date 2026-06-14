@@ -1,10 +1,10 @@
 /**
  * frontendLogger.ts — compatibility wrapper over obs.ts.
  *
- * 新代码应直接使用 `@/utils/obs`。本文件仅保留旧调用点兼容层与 HUD eventQueue。
+ * 新代码应直接使用 `@terminal/utils/obs`。本文件仅保留旧调用点兼容层与 HUD eventQueue。
  *
  * 使用方式：
- *   import { flog } from '@/utils/frontendLogger'
+ *   import { flog } from '@terminal/utils/frontendLogger'
  *   flog('CommandDrawer', 'mounted', { isOpen: true, height: 220 })
  *
  * 日志开关：

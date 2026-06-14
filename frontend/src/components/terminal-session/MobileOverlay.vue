@@ -49,8 +49,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { AnchorState, CellCoord } from '@/types/terminal'
-import type { HudEvent, HudSnapshot } from '@/composables/cli/useHudCollector'
+import type { AnchorState, CellCoord } from '@terminal/types/terminal'
+import type { HudEvent, HudSnapshot } from '@terminal/composables/cli/useHudCollector'
 import SelectionOverlay from './SelectionOverlay.vue'
 import VirtualTouchball from './VirtualTouchball.vue'
 import HudPanel from './HudPanel.vue'

@@ -10,9 +10,9 @@
  * [Ref: TH-0501-m9j, 铁律 v2.0 Rule 1+2]
  */
 import { ref, onMounted, onUnmounted } from 'vue'
-import type { AgentState, AgentIntelResponse } from '@/types/terminal'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import type { AgentState, AgentIntelResponse } from '@terminal/types/terminal'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export function useAgentIntel(sessionId: () => string) {
   const agentState = ref<AgentState | null>(null)

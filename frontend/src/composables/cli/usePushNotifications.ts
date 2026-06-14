@@ -19,8 +19,8 @@
  * the backend can target the active tab, but the subscription itself is global.
  */
 import { ref, computed, type Ref, type ComputedRef } from 'vue'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export type PushPlatform = 'ios-safari' | 'ios-other' | 'chromium' | 'desktop-safari' | 'desktop-firefox' | 'other'
 export type PushPermission = 'default' | 'granted' | 'denied' | 'unsupported'

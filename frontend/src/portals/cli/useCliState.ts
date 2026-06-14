@@ -1,11 +1,11 @@
 import { ref, computed, onMounted, reactive, nextTick } from 'vue'
-import { useWorkbench } from '@/composables/cli/useWorkbench'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
-import type { AgentState, WSConnectionStatus } from '@/types/terminal'
-import type { NetStats } from '@/composables/cli/useWebSocketClient'
-import type { WorkbenchTab } from '@/types/workbench'
-import CliTerminalSurface from '@/components/terminal-session/CliTerminalSurface.vue'
+import { useWorkbench } from '@terminal/composables/cli/useWorkbench'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
+import type { NetStats } from '@terminal/composables/cli/useWebSocketClient'
+import type { WorkbenchTab } from '@terminal/types/workbench'
+import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
 import type { PortalRuntimeResult } from '@ce/composables/layout/usePortalRuntime'
 
 interface TabRuntime {

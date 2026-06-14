@@ -29,7 +29,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { AgentState, WSConnectionStatus } from '@/types/terminal'
+import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
 
 interface TabEntry {
   tabId: string

@@ -5,7 +5,7 @@
  * [Ref: T5-B4.M3, CAP-terminal-interaction S2, DDC-05]
  */
 import { ref, readonly } from 'vue'
-import type { FocusState } from '@/types/terminal'
+import type { FocusState } from '@terminal/types/terminal'
 
 export interface FocusStateMachine {
   /** Current focus state */

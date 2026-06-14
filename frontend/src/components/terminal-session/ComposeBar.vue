@@ -82,12 +82,12 @@
  * Snippets stored in localStorage for quick-recall.
  */
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
-import { focusWithoutViewportScroll, resetViewportScroll } from '@/composables/cli/useVisualKeyboardInset'
+import { focusWithoutViewportScroll, resetViewportScroll } from '@terminal/composables/cli/useVisualKeyboardInset'
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
-} from '@/composables/cli/useCliInputDiagnostics'
-import { useServerStore } from '@/composables/cli/useServerStore'
+} from '@terminal/composables/cli/useCliInputDiagnostics'
+import { useServerStore } from '@terminal/composables/cli/useServerStore'
 
 const DRAFT_KEY = 'cli-compose-draft'
 const HISTORY_MAX = 15

@@ -49,9 +49,9 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { TmuxWindowState } from '@/types/terminal'
-import { useTmuxState } from '@/composables/cli/useTmuxState'
-import { usePushNotifications } from '@/composables/cli/usePushNotifications'
+import type { TmuxWindowState } from '@terminal/types/terminal'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 
 const props = defineProps<{ sessionId: string }>()
 
