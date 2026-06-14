@@ -7,18 +7,18 @@
     <!-- Page 0: Pane / Window ops (uniform 3-col grid) -->
     <div v-if="currentPage === 0" class="tp-page">
       <div class="tp-grid">
-        <button class="tp-btn" @click="send('\x02z')"><span class="tp-key">^Bz</span> zoom</button>
-        <button class="tp-btn" @click="send('\x02h')"><span class="tp-key">^Bh</span> left</button>
-        <button class="tp-btn" @click="send('\x02k')"><span class="tp-key">^Bk</span> up</button>
-        <button class="tp-btn" @click="send('\x02q')"><span class="tp-key">^Bq</span> panes</button>
-        <button class="tp-btn" @click="send('\x02j')"><span class="tp-key">^Bj</span> down</button>
-        <button class="tp-btn" @click="send('\x02l')"><span class="tp-key">^Bl</span> right</button>
+        <button class="tp-btn" @click="send(pfx('z'))"><span class="tp-key">{{ pfxLabel }}z</span> zoom</button>
+        <button class="tp-btn" @click="send(pfx('h'))"><span class="tp-key">{{ pfxLabel }}h</span> left</button>
+        <button class="tp-btn" @click="send(pfx('k'))"><span class="tp-key">{{ pfxLabel }}k</span> up</button>
+        <button class="tp-btn" @click="send(pfx('q'))"><span class="tp-key">{{ pfxLabel }}q</span> panes</button>
+        <button class="tp-btn" @click="send(pfx('j'))"><span class="tp-key">{{ pfxLabel }}j</span> down</button>
+        <button class="tp-btn" @click="send(pfx('l'))"><span class="tp-key">{{ pfxLabel }}l</span> right</button>
         <button class="tp-btn tp-btn--danger" @click="send('\x03')">^C</button>
         <button class="tp-btn tp-btn--enter" @click="send('\r')">Enter</button>
-        <button class="tp-btn" @click="send('\x02c')"><span class="tp-key">^Bc</span> new</button>
+        <button class="tp-btn" @click="send(pfx('c'))"><span class="tp-key">{{ pfxLabel }}c</span> new</button>
       </div>
       <div class="tp-row tp-row--nums">
-        <button class="tp-btn tp-btn--num" v-for="n in 10" :key="n" @click="send('\x02' + String(n % 10))">{{ n % 10 }}</button>
+        <button class="tp-btn tp-btn--num" v-for="n in 10" :key="n" @click="send(pfx(String(n % 10)))">{{ n % 10 }}</button>
       </div>
       <div class="tp-row tp-row--indicator">
         <div class="tp-dots">
@@ -31,15 +31,15 @@
     <!-- Page 1: Copy / Session (uniform 3-col grid) -->
     <div v-else class="tp-page">
       <div class="tp-grid">
-        <button class="tp-btn" @click="send('\x02[')">^B[ copy</button>
+        <button class="tp-btn" @click="send(pfx('['))">{{ pfxLabel }}[ copy</button>
         <button class="tp-btn" @click="send('\x1b[5~')">PgUp</button>
         <button class="tp-btn" @click="send('\x1b[6~')">PgDn</button>
         <button class="tp-btn" @click="send('\x1b[H')">Home</button>
         <button class="tp-btn" @click="send('\x1b[F')">End</button>
         <button class="tp-btn tp-btn--danger" @click="send('\x03')">^C</button>
-        <button class="tp-btn" @click="send('\x02,')">^B, rename</button>
-        <button class="tp-btn" @click="send('\x02s')">^Bs sessions</button>
-        <button class="tp-btn" @click="send('\x02d')">^Bd detach</button>
+        <button class="tp-btn" @click="send(pfx(','))">{{ pfxLabel }}, rename</button>
+        <button class="tp-btn" @click="send(pfx('s'))">{{ pfxLabel }}s sessions</button>
+        <button class="tp-btn" @click="send(pfx('d'))">{{ pfxLabel }}d detach</button>
         <button class="tp-btn tp-btn--enter" @click="send('tmux attach\r')">attach</button>
         <button class="tp-btn tp-btn--enter" @click="send('\r')">Enter</button>
         <button class="tp-btn" @click="send('\x1b')">Esc</button>
@@ -55,12 +55,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
+import { useTmuxState } from '@/composables/cli/useTmuxState'
+
+const props = defineProps<{ sessionId: string }>()
 
 const emit = defineEmits<{
   (e: 'sendKey', key: string): void
   (e: 'close'): void
 }>()
+
+const tmux = useTmuxState(() => props.sessionId)
+/** Dynamic tmux prefix sequence (C-b / C-a / remap) — never hardcoded. */
+function pfx(suffix: string): string {
+  return tmux.prefixSeq(suffix)
+}
+/** Button caption matching the live prefix: "^B" for C-b, "^A" for C-a, else the display. */
+const pfxLabel = computed(() => {
+  const d = tmux.prefixDisplay.value
+  if (d === 'C-b') return '^B'
+  if (d === 'C-a') return '^A'
+  return d
+})
 
 const currentPage = ref(0)
 let touchStartX = 0

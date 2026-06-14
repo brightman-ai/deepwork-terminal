@@ -130,7 +130,7 @@
     <!-- Page 2: quick-access keys (scroll right to see) -->
     <div class="tb-divider" />
     <button class="tb-btn tb-btn--extra tb-btn--del" @click="$emit('sendKey', '\x1b[3~')" title="Delete">Del</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x02[')" title="^B[ copy mode">^B[</button>
+    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', tmux.prefixSeq('['))" :title="`${pfxLabel}[ copy mode`">{{ pfxLabel }}[</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[5~')" title="Page Up">PgU</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[6~')" title="Page Down">PgD</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[A')" title="Arrow Up">↑</button>
@@ -151,7 +151,11 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue'
+import { useTmuxState } from '@/composables/cli/useTmuxState'
+
+const props = defineProps<{
+  sessionId: string
   stickyShift: boolean
   stickyCtrl: boolean
   keyboardUp: boolean
@@ -159,6 +163,15 @@ defineProps<{
   activePanel: 'none' | 'numpad' | 'tmux' | 'compose'
   tmuxDetected: boolean
 }>()
+
+const tmux = useTmuxState(() => props.sessionId)
+/** Caption matching the live tmux prefix (^B for C-b, ^A for C-a). */
+const pfxLabel = computed(() => {
+  const d = tmux.prefixDisplay.value
+  if (d === 'C-b') return '^B'
+  if (d === 'C-a') return '^A'
+  return d
+})
 
 defineEmits<{
   (e: 'sendKey', key: string): void
