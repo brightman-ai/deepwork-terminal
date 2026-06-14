@@ -126,7 +126,10 @@
 
     <!-- Page 2: quick-access keys (scroll right to see) -->
     <div class="tb-divider" />
-    <button class="tb-btn tb-btn--extra tb-btn--del" @click="$emit('sendKey', '\x1b[3~')" title="Delete">Del</button>
+    <!-- Backspace (delete-left, \x7f) — needed when tmux is absent and the TmuxQuickBar
+         ⌫ is hidden. Distinct from Del below, which is forward-delete (\x1b[3~). -->
+    <button class="tb-btn tb-btn--extra tb-btn--bksp" @click="$emit('sendKey', '\x7f')" title="Backspace">⌫</button>
+    <button class="tb-btn tb-btn--extra tb-btn--del" @click="$emit('sendKey', '\x1b[3~')" title="Delete (forward)">Del</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[5~')" title="Page Up">PgU</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[6~')" title="Page Down">PgD</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[A')" title="Arrow Up">↑</button>
@@ -293,6 +296,8 @@ defineEmits<{
 }
 .tb-btn--extra:active { background: #162840; }
 .tb-btn--enter { color: #80c880; border-color: #2a4a2a; background: #0e1e0e; }
+/* Backspace (delete-left) — neutral tone, keeps the red reserved for forward-delete. */
+.tb-btn--bksp { color: #d0b0ff; border-color: #3a2a5a; background: #170e28; font-size: 0.82rem; }
 .tb-btn--del { color: #ff8080; border-color: #4a2020; background: #1e0e0e; }
 
 /* -- Active blue (keyboard toggle) --------------------------------- */
