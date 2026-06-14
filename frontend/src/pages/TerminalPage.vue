@@ -13,6 +13,8 @@
         :class="{ 'hud-toggle--on': keystrokeHudVisible }"
         @click="keystrokeHudVisible = !keystrokeHudVisible"
       >HUD</button>
+      <!-- WS7 primary entry — install/notify icon in the title row. -->
+      <InstallNotifyIcon @open="installGuideOpen = true" />
       <SetupWizardIcon :inline="true" />
     </div>
 
@@ -28,6 +30,9 @@
       @touchstart.passive="onTerminalTouchStart"
       @touchend.passive="onTerminalTouchEnd"
     >
+      <!-- tmux window tabs: under the title row, above xterm; self-hides without tmux.
+           Its header carries the WS7 contextual notify bell. -->
+      <TmuxPaneBar :session-id="sessionId" @send-key="onSendKey" @open-notify="installGuideOpen = true" />
       <XtermTerminal
         ref="xtermRef"
         :active="true"
@@ -42,7 +47,14 @@
 
     <!-- Bottom bar: flex child, NOT position:fixed — eliminates gap bugs -->
     <div v-if="isMobile" class="bottom-bar">
+      <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
+      <TmuxQuickBar
+        :session-id="sessionId"
+        @send-key="onSendKey"
+        @open-sheet="tmuxSheetOpen = true"
+      />
       <Toolbar
+        :session-id="sessionId"
         :sticky-shift="stickyShift"
         :sticky-ctrl="stickyCtrl"
         :sticky-alt="stickyAlt"
@@ -61,7 +73,7 @@
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
-      <TmuxPanel v-if="activeMode === 'tmux'" @send-key="onSendKey" @close="onToggleKeyboard" />
+      <TmuxPanel v-if="activeMode === 'tmux'" :session-id="sessionId" @send-key="onSendKey" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
 
@@ -88,6 +100,28 @@
       @close-hud="hudVisible = false"
       @clear-hud="hud.clear()"
       @upload-hud="hud.upload(sessionId)"
+    />
+
+    <!-- WS8: tmux status sheet (mobile bottom-sheet / desktop popover). -->
+    <TmuxStatusSheet
+      :session-id="sessionId"
+      :open="tmuxSheetOpen"
+      @close="tmuxSheetOpen = false"
+    />
+
+    <!-- WS5: 收纳抽屉 — images / files / input history. Send reuses the canonical
+         compose send path; edge handle (in the drawer) summons it. -->
+    <ResourceDrawer
+      :session-id="sessionId"
+      v-model:open="resourceDrawerOpen"
+      @send="onComposeSend"
+    />
+
+    <!-- WS7: platform-aware install + notification guide (shared by both entries). -->
+    <InstallGuideSheet
+      :session-id="sessionId"
+      :open="installGuideOpen"
+      @close="installGuideOpen = false"
     />
 
     <AuthDialog
@@ -128,6 +162,12 @@ import AuthDialog from '@/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@/components/terminal-session/MobileOverlay.vue'
 import Toolbar from '@/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@/components/terminal-session/KeyboardPanel.vue'
+import TmuxPaneBar from '@/components/terminal-session/TmuxPaneBar.vue'
+import TmuxQuickBar from '@/components/terminal-session/TmuxQuickBar.vue'
+import TmuxStatusSheet from '@/components/terminal-session/TmuxStatusSheet.vue'
+import ResourceDrawer from '@/components/terminal-session/ResourceDrawer.vue'
+import InstallGuideSheet from '@/components/terminal-session/InstallGuideSheet.vue'
+import InstallNotifyIcon from '@/components/terminal-session/InstallNotifyIcon.vue'
 import TmuxPanel from '@/components/terminal-session/TmuxPanel.vue'
 import ComposeBar from '@/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@/components/terminal-session/KeyCastrOverlay.vue'
@@ -141,7 +181,10 @@ import { useComposeSendStrategy } from '@/composables/cli/useComposeSendStrategy
 import { useHudCollector } from '@/composables/cli/useHudCollector'
 import { useKeyCastrHud } from '@/composables/cli/useKeyCastrHud'
 import { useCliPasteResolver } from '@/composables/cli/useCliPasteResolver'
+import { useClipboardText } from '@/composables/cli/useClipboardText'
 import { useAgentIntel } from '@/composables/cli/useAgentIntel'
+import { useTmuxState } from '@/composables/cli/useTmuxState'
+import { useForegroundAgentNotify } from '@/composables/cli/useForegroundAgentNotify'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@/composables/cli/useVisualKeyboardInset'
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@/composables/cli/useCliInputDiagnostics'
 import type { WSControlMessage, CellCoord, AnchorState, AgentState } from '@/types/terminal'
@@ -157,6 +200,13 @@ const attachInputRef = ref<HTMLInputElement>()
 const { isMobile } = useDeviceDetection()
 const { cliFetch, authCode, showAuthDialog, dismissAuthDialog } = useCliAuth()
 const tmuxDetected = ref(false)
+const tmuxSheetOpen = ref(false)
+const installGuideOpen = ref(false) // WS7: install + notify guide sheet
+
+// WS5: resource drawer open state, persisted across reloads.
+const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
+const resourceDrawerOpen = ref(localStorage.getItem(RESOURCE_DRAWER_KEY) === '1')
+watch(resourceDrawerOpen, (v) => localStorage.setItem(RESOURCE_DRAWER_KEY, v ? '1' : '0'))
 
 const focusSM = useFocusStateMachine()
 const anchorSM = useAnchorStateMachine()
@@ -169,6 +219,9 @@ const hudVisible = ref(false)
 const keyCastr = useKeyCastrHud()
 const keycastEntries = keyCastr.entries
 const { agentState, notifications, handleWSMessage: agentWSHandler } = useAgentIntel(() => sessionId.value)
+const tmux = useTmuxState(() => sessionId.value)
+// WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
+useForegroundAgentNotify(() => sessionId.value)
 
 watch([agentState, notifications], ([state, list]) => {
   if (hasTmuxAgentTopology(state, list)) tmuxDetected.value = true
@@ -244,6 +297,12 @@ const pasteResolver = useCliPasteResolver({
   surface: 'legacy',
   sendBinary: (data) => sendBinary(data, 'clipboard'),
   openAttachmentPicker: () => attachInputRef.value?.click(),
+  hudRecord: (kind, message) => hud.record(kind, message),
+})
+
+const clipboardText = useClipboardText({
+  surface: 'legacy',
+  sendBinary: (data) => sendBinary(data, 'clipboard'),
   hudRecord: (kind, message) => hud.record(kind, message),
 })
 
@@ -427,6 +486,13 @@ function onTerminalData(data: Uint8Array) {
 function sendTerminalData(data: Uint8Array) {
   if (data.length === 1) {
     let byte = data[0]
+    // Ctrl-sticky + v/V → real OS-clipboard paste (universal Ctrl+V muscle memory),
+    // not the \x16 (quoted-insert) byte that Ctrl-masking would otherwise produce.
+    if (stickyCtrl.value && (byte === 0x76 || byte === 0x56)) {
+      stickyCtrl.value = false
+      void clipboardText.pasteFromClipboard('sticky-ctrl-v')
+      return
+    }
     if (stickyCtrl.value) { byte = byte & 0x1f; stickyCtrl.value = false }
     if (stickyAlt.value) { sendBinary(encoder.encode('\x1b'), 'sticky-alt'); stickyAlt.value = false }
     if (stickyShift.value) { if (byte >= 0x61 && byte <= 0x7a) byte -= 0x20; stickyShift.value = false }
@@ -480,6 +546,9 @@ function onTerminalReady(terminal: Terminal) {
           break
         case 'agent_state':
           agentWSHandler(msg.payload)
+          break
+        case 'tmux_state':
+          tmux.handleWSMessage(msg.payload)
           break
         case 'error':
           console.error('WS error:', msg.payload)
@@ -585,6 +654,12 @@ function onSendKey(key: string) {
     else if (key.length === 1) { modified = key.toUpperCase(); stickyShift.value = false }
     else { stickyShift.value = false } // consume shift for multi-byte sequences
   }
+  if (stickyCtrl.value && (modified === 'v' || modified === 'V')) {
+    // Ctrl-sticky + v/V → real OS-clipboard paste, not the \x16 quoted-insert byte.
+    stickyCtrl.value = false
+    void clipboardText.pasteFromClipboard('sticky-ctrl-v')
+    return
+  }
   if (stickyCtrl.value) {
     if (modified.length === 1) {
       modified = String.fromCharCode(modified.charCodeAt(0) & 0x1f)
@@ -614,10 +689,7 @@ function onClipboard(op: string) {
       }
       break
     case 'paste':
-      navigator.clipboard.readText().then(text => {
-        if (text) sendBinary(encoder.encode(text))
-        hud.record('state', `clipboard paste: ${text.length} chars`)
-      }).catch(() => {})
+      void clipboardText.pasteFromClipboard('paste-button')
       break
     case 'undo':
       sendBinary(encoder.encode('\x1a')) // Ctrl+Z

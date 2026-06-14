@@ -203,3 +203,11 @@ app.use(pinia)
 app.use(router)
 
 app.mount('#app')
+
+// ── PWA: register the push service worker on load ─────────────────────────────
+// usePushNotifications owns the registration (idempotent, feature-guarded). We
+// nudge it here so the SW is live before the user opens the install guide; on
+// platforms without serviceWorker this is a silent no-op.
+import('@/composables/cli/usePushNotifications')
+  .then(({ usePushNotifications }) => usePushNotifications().ensureRegistration())
+  .catch((err) => log.warn('pwa.sw.register failed', { error: String(err) }))
