@@ -157,6 +157,39 @@
               </ol>
             </template>
 
+            <!-- ════════ STATE: insecure context — needs HTTPS ══════════════
+                 Plain HTTP over a LAN / Tailscale IP. Service Worker + Web Push
+                 are disabled by the browser, so the real (and only) fix is to
+                 access over HTTPS. Real, concrete options — no fake actions. -->
+            <template v-else-if="uiState === 'insecure'">
+              <div class="igs-status igs-status--off" data-testid="install-guide-insecure">
+                <span class="igs-status-mark">🔒</span>
+                <div class="igs-status-body">
+                  <span class="igs-status-t">通知需要 HTTPS</span>
+                  <span class="igs-status-d">
+                    当前通过不安全的 HTTP 访问（{{ host }}），Service Worker 与推送无法启用。请改用 HTTPS 访问：
+                  </span>
+                </div>
+              </div>
+              <ol class="igs-steps">
+                <li class="igs-step igs-step--compact">
+                  <span class="igs-step-n mono">1</span>
+                  <div class="igs-step-body"><span class="igs-step-t">Cloudflare 隧道（应用内置）</span></div>
+                </li>
+                <li class="igs-step igs-step--compact">
+                  <span class="igs-step-n mono">2</span>
+                  <div class="igs-step-body">
+                    <span class="igs-step-t">Tailscale Serve</span>
+                    <span class="igs-step-d mono">tailscale serve --bg --https=443 http://127.0.0.1:PORT</span>
+                  </div>
+                </li>
+                <li class="igs-step igs-step--compact">
+                  <span class="igs-step-n mono">3</span>
+                  <div class="igs-step-body"><span class="igs-step-t">本机 localhost</span></div>
+                </li>
+              </ol>
+            </template>
+
             <!-- ════════ STATE: unsupported ══════════════════════════════════ -->
             <template v-else>
               <p class="igs-note">
@@ -185,15 +218,23 @@ const busy = ref(false)
 const errorText = ref('')
 const testText = ref('')
 
+// Current host:port — shown verbatim in the insecure-context guidance so the user
+// recognises exactly which (HTTP) address they're on.
+const host = computed(() => (typeof location !== 'undefined' ? location.host : ''))
+
 // ── Single source of truth: one state, one primary action. ───────────────────
 // Order matters — earlier branches win. Reactively reflects every input so the
 // sheet updates itself when the user relaunches from the icon or returns from
 // Settings (the composable re-evaluates permission/subscribed/standalone on
 // visibilitychange + focus).
-type UiState = 'on' | 'enable' | 'denied' | 'ios-install' | 'ios-safari' | 'unsupported'
+type UiState = 'on' | 'enable' | 'denied' | 'ios-install' | 'ios-safari' | 'insecure' | 'unsupported'
 const uiState = computed<UiState>(() => {
   // Already on — highest priority, regardless of platform.
   if (push.subscribed.value || push.permission.value === 'granted') return 'on'
+  // Insecure context (plain HTTP over LAN/Tailscale IP): SW + Push are disabled by
+  // the browser, so NO platform advice (add-to-home, enable…) is actionable. Surface
+  // the real cause — needs HTTPS — above everything except an already-granted state.
+  if (!push.secureContext) return 'insecure'
   const p = push.platform.value
   // iOS in a non-Safari shell can't add to home → must switch to Safari first.
   if (p === 'ios-other' && !push.isStandalone.value) return 'ios-safari'
@@ -244,6 +285,7 @@ const headline = computed(() => {
     case 'denied': return '恢复通知权限'
     case 'ios-install':
     case 'ios-safari': return '安装与通知'
+    case 'insecure': return '通知需要 HTTPS'
     default: return '通知设置'
   }
 })
@@ -254,6 +296,7 @@ const lede = computed(() => {
     case 'denied': return ''
     case 'ios-install': return 'iOS 需先把页面添加到主屏并从图标打开，才能接收 agent 推送提醒。'
     case 'ios-safari': return '需要在 Safari 中打开才能添加到主屏并接收通知。'
+    case 'insecure': return ''
     case 'unsupported': return ''
     default:
       return push.isStandalone.value
