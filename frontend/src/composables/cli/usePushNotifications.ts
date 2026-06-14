@@ -57,6 +57,13 @@ export interface PushNotificationsApi {
   unsubscribe(): Promise<boolean>
   /** Re-read permission + existing subscription (e.g. on visibility regain). */
   refresh(): Promise<void>
+  /**
+   * Fire an end-to-end test notification so the user can verify the full chain.
+   *   'sent'   — POSTed /push/test (subscribed): real SW-delivered OS notification.
+   *   'local'  — not subscribed but permission granted: a local new Notification().
+   *   'failed' — neither path available (no permission / request failed).
+   */
+  sendTest(): Promise<'sent' | 'local' | 'failed'>
 }
 
 // ─── base64url → Uint8Array (applicationServerKey expects a raw byte array) ──────
@@ -143,6 +150,14 @@ function wireGlobalListeners(): void {
   window.matchMedia?.('(display-mode: standalone)')?.addEventListener?.('change', (ev) => {
     _standalone.value = ev.matches || detectStandalone()
   })
+  // Re-evaluate standalone + permission + subscription whenever the user returns to
+  // the page. This is the iOS-critical hook: a Safari tab cannot detect that the app
+  // was installed, but LAUNCHING from the home-screen icon mounts a fresh standalone
+  // context — and on desktop, focusing back after granting permission in the browser
+  // chrome updates the sheet without a manual reload. Cheap + idempotent.
+  const reEval = (): void => { void _singleton?.refresh() }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) reEval() })
+  window.addEventListener('focus', reEval)
 }
 
 function createApi(): PushNotificationsApi {
@@ -273,6 +288,26 @@ function createApi(): PushNotificationsApi {
     await syncExistingSubscription()
   }
 
+  async function sendTest(): Promise<'sent' | 'local' | 'failed'> {
+    // Preferred path: a real subscription exists → ask the backend to push, which
+    // exercises the entire SW + OS chain exactly as an agent-waiting event would.
+    if (_subscribed.value) {
+      try {
+        const resp = await cliFetch(cliApi('/push/test'), { method: 'POST' })
+        if (resp.ok) return 'sent'
+      } catch { /* fall through to local self-test */ }
+    }
+    // Fallback (e.g. desktop foreground-only, or backend test failed): if permission
+    // is granted we can still prove the OS-notification leg with a local Notification.
+    if (readPermission() === 'granted' && notificationSupported) {
+      try {
+        new Notification('✅ 测试通知', { body: 'Deepwork 推送已就绪（本地自检）', tag: 'dw-test', icon: '/pwa-192.png' })
+        return 'local'
+      } catch { /* quota / revoked mid-call — fall through */ }
+    }
+    return 'failed'
+  }
+
   // Kick off background registration + subscription sync (non-blocking).
   if (supported.value) void syncExistingSubscription()
 
@@ -289,6 +324,7 @@ function createApi(): PushNotificationsApi {
     subscribe,
     unsubscribe,
     refresh,
+    sendTest,
   }
 }
 
