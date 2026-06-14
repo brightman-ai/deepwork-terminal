@@ -7,8 +7,7 @@ import "context"
 // watcher: the host supplies a resolver that knows how to translate a session
 // ID into tmux/process state, and AgentSnapshotWatcher polls it.
 //
-// The richer pro orchestration (a monitor manager that adapts a terminal
-// SessionInfo getter into a resolver) lives in the host repo to keep this
-// package free of any host import — avoiding an import cycle when the host
-// depends on agentintel.
+// The orchestration that drives watchers (AgentIntelMonitorManager) lives in
+// this package too — decoupled from any host via the SessionActivity seam — so
+// the engine is self-contained with no import cycle when a host depends on it.
 type AgentStateResolver func(ctx context.Context, sessionID string) (AgentIntelResponse, error)
