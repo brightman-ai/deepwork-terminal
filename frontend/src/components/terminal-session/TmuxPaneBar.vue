@@ -1,10 +1,12 @@
 <template>
-  <!-- One compact line of tmux window tabs, mounted under the "终端 N" title row and
-       above the xterm surface. Renders only when a tmux server is running so it stays
-       invisible for plain shells. Topology is PUSHED (WS tmux_state) — each tap just
-       sends prefix+digit (select-window) or prefix+c (new-window); no server roundtrip
-       to learn the layout. -->
-  <div v-if="serverRunning && windows.length" class="tmux-pane-bar" data-testid="tmux-pane-bar">
+  <!-- One compact line of tmux window tabs that REPLACES the per-session status row
+       (终端 N idle) whenever THIS session's shell is attached to tmux. It mounts in the
+       header/status row — OUTSIDE the terminal body — so its taps never reach the
+       terminal's copy-mode touch handlers or the floating touchball. Gated on `attached`
+       (THIS shell is inside a tmux client), never on the machine-global serverRunning.
+       Topology is PUSHED (WS tmux_state); each tap just sends prefix+digit (select-window)
+       or prefix+c (new-window) — no server roundtrip to learn the layout. -->
+  <div v-if="attached && windows.length" class="tmux-pane-bar" data-testid="tmux-pane-bar">
     <span class="tpb-label">tmux</span>
     <button
       v-for="w in windows"
@@ -13,11 +15,19 @@
       :class="{ 'is-active': w.active }"
       :data-testid="`tmux-win-${w.index}`"
       @click="selectWindow(w.index)"
+      @pointerup.stop
+      @touchend.stop
     >
       <span class="tpb-idx">{{ w.index }}</span>
       <span v-if="dotClass(w)" class="tpb-dot" :class="dotClass(w)" />
     </button>
-    <button class="tpb-win tpb-add" data-testid="tmux-win-add" @click="newWindow">+</button>
+    <button
+      class="tpb-win tpb-add"
+      data-testid="tmux-win-add"
+      @click="newWindow"
+      @pointerup.stop
+      @touchend.stop
+    >+</button>
 
     <!-- WS7 secondary entry — contextual notify bell. Pushed to the right; badged
          when notifications are off, and a one-time inline hint pops near it the first
@@ -37,6 +47,8 @@
         aria-label="通知设置"
         data-testid="tmux-notify-bell"
         @click="onBellClick"
+        @pointerup.stop
+        @touchend.stop
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
@@ -61,7 +73,7 @@ const emit = defineEmits<{
 }>()
 
 const tmux = useTmuxState(() => props.sessionId)
-const serverRunning = tmux.serverRunning
+const attached = tmux.attached
 const windows = tmux.windows
 const push = usePushNotifications()
 

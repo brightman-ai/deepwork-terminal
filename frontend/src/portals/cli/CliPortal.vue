@@ -40,7 +40,19 @@
       </template>
     </CliTabBar>
 
+    <!-- The status row is single-occupancy: when the active session is attached to
+         tmux, the pane bar REPLACES the per-session "终端 N idle" strip (one row, no
+         duplication). It mounts here — outside the terminal body — so its taps never
+         reach copy-mode touch handlers or the floating touchball. -->
+    <TmuxPaneBar
+      v-if="activeAttached && activeSessionId"
+      :key="activeSessionId"
+      :session-id="activeSessionId"
+      @send-key="activeSendKey"
+      @open-notify="activeOpenInstallGuide"
+    />
     <CliAgentStatusStrip
+      v-else
       :tabs="stripTabs"
       :rtt="activeRtt"
       data-testid="cli-portal-status-strip"
@@ -61,12 +73,15 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { usePortalRuntime } from '@ce/composables/layout/usePortalRuntime'
 import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
+import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import { CliTabBar, CliAgentStatusStrip, CliTerminalView } from './adapters'
 
 const runtime = usePortalRuntime({
@@ -82,12 +97,21 @@ const {
   toggleGroupCollapsed,
   tabRuntimes, registerSurface,
   activeWsStatus, activeAgentState, activeAgentNotifications, activeRtt, activeNetStats,
+  activeSessionId, activeSendKey, activeOpenInstallGuide,
   allTabsWithSession, stripTabs,
   onTabAgentState, onTabAgentNotifications, onTabSessionExit, onTabConnectionChange,
   switchTab, closeTab,
   renamingTabId, renameValue, startRenameTab, commitRename, cancelRename,
   quickCreateTab,
 } = useCliState(runtime)
+
+// Is the ACTIVE session's shell attached to tmux? Resolve its per-session tmux
+// store reactively (stores are keyed by sessionId), so the status row flips to
+// the pane bar only for the foreground tab.
+const activeAttached = computed(() => {
+  const id = activeSessionId.value
+  return id ? useTmuxState(() => id).attached.value : false
+})
 </script>
 
 <style scoped>

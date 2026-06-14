@@ -54,7 +54,19 @@ export function useCliState(runtime: PortalRuntimeResult) {
     activeTab.value ? (surfaceRefs[activeTab.value.id]?.netStats ?? null) : null,
   )
   const activeRtt = computed<number>(() => activeNetStats.value?.rtt ?? 0)
+  const activeSessionId = computed<string | undefined>(() => activeTab.value?.sessionId)
   const allTabsWithSession = computed(() => allTabs.value.filter(t => !!t.sessionId))
+
+  // Route the relocated tmux pane bar's keystrokes to the active surface, which
+  // owns the WS / xterm and the tmux-aware key handling (PgUp/PgDn, nav, sticky).
+  function activeSendKey(key: string) {
+    if (activeTab.value) surfaceRefs[activeTab.value.id]?.onSendKey?.(key)
+  }
+
+  // Pane bar's notify bell opens the active surface's install/notify guide sheet.
+  function activeOpenInstallGuide() {
+    if (activeTab.value) surfaceRefs[activeTab.value.id]?.openInstallGuide?.()
+  }
 
   const stripTabs = computed(() =>
     allTabsWithSession.value.map(t => ({
@@ -194,6 +206,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     toggleGroupCollapsed,
     tabRuntimes, registerSurface,
     activeWsStatus, activeAgentState, activeAgentNotifications, activeRtt, activeNetStats,
+    activeSessionId, activeSendKey, activeOpenInstallGuide,
     allTabsWithSession, stripTabs,
     onTabAgentState, onTabAgentNotifications, onTabSessionExit, onTabConnectionChange,
     switchTab, closeTab,

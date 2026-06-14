@@ -81,6 +81,16 @@
       </div>
     </div>
 
+    <!-- tmux pane bar: its own row under the tab bar, OUTSIDE the surface body, shown
+         only when the active session's shell is attached to tmux. -->
+    <TmuxPaneBar
+      v-if="activeAttached && activeSessionId"
+      :key="activeSessionId"
+      :session-id="activeSessionId"
+      @send-key="activeSendKey"
+      @open-notify="activeOpenInstallGuide"
+    />
+
     <!-- Terminal 区域 -->
     <div class="workbench-terminal" data-testid="workbench-terminal">
       <div v-if="loading" class="workbench-state-msg" data-testid="workbench-loading">加载中…</div>
@@ -116,6 +126,8 @@ import { ref, computed, onMounted, reactive, nextTick } from 'vue'
 import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
 import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
+import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import SetupWizardIcon from '@ce/components/wizard/SetupWizardIcon.vue'
 import { useWorkbench } from '@terminal/composables/cli/useWorkbench'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
@@ -194,6 +206,19 @@ const activeNetStats = computed<NetStats | null>(() => {
 const allTabsWithSession = computed(() =>
   allTabs.value.filter(t => !!t.sessionId)
 )
+
+// ─── tmux pane bar (replaces the per-session status row when attached) ──────────
+const activeSessionId = computed<string | undefined>(() => activeTab.value?.sessionId)
+const activeAttached = computed(() => {
+  const id = activeSessionId.value
+  return id ? useTmuxState(() => id).attached.value : false
+})
+function activeSendKey(key: string) {
+  if (activeTab.value) (surfaceRefs[activeTab.value.id] as any)?.onSendKey?.(key)
+}
+function activeOpenInstallGuide() {
+  if (activeTab.value) (surfaceRefs[activeTab.value.id] as any)?.openInstallGuide?.()
+}
 
 // ─── Tab agent dot class ──────────────────────────────────────────────────────
 
