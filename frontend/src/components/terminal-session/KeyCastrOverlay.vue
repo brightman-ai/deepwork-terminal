@@ -12,7 +12,7 @@
 </template>
 
 <script setup lang="ts">
-import type { KeyCastrEntry } from '@/composables/cli/useKeyCastrHud'
+import type { KeyCastrEntry } from '@terminal/composables/cli/useKeyCastrHud'
 
 defineProps<{
   entries: readonly KeyCastrEntry[]

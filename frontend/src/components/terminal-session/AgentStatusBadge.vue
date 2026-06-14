@@ -24,7 +24,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onUnmounted, nextTick, watch } from 'vue'
-import type { AgentState } from '@/types/terminal'
+import type { AgentState } from '@terminal/types/terminal'
 
 interface CircleItem {
   id: string

@@ -86,9 +86,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import type { TerminalSessionInfo } from '@/types/terminal'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import AuthDialog from '@/components/terminal-session/AuthDialog.vue'
+import type { TerminalSessionInfo } from '@terminal/types/terminal'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 
 const router = useRouter()
 const { cliFetch, showAuthDialog, dismissAuthDialog } = useCliAuth()

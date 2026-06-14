@@ -2,8 +2,8 @@
  * Store API client — GET/PUT /api/store
  * 通用 KV 持久化，数据存在服务端文件系统，跨域名（trycloudflare 等）不丢失。
  */
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 function getCliFetch() {
   const { cliFetch } = useCliAuth()

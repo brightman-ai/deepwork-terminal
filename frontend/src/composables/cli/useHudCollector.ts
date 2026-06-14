@@ -5,7 +5,7 @@
  */
 import { ref, reactive, readonly } from 'vue'
 import { apiUrl } from '@ce/utils/runtimeBase'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export type HudEventType = 'focus' | 'keyboard' | 'touch' | 'ws' | 'state' | 'resize' | 'error'
 

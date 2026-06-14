@@ -16,9 +16,9 @@
  * hardcode \x02.
  */
 import { ref, computed, type Ref, type ComputedRef } from 'vue'
-import type { TmuxState, TmuxWindowState } from '@/types/terminal'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import type { TmuxState, TmuxWindowState } from '@terminal/types/terminal'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 const DEFAULT_PREFIX = new Uint8Array([0x02]) // C-b
 

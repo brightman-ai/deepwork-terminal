@@ -14,8 +14,8 @@
  * <img>/<a> elements cannot carry headers, so rawUrl() appends ?auth=<code>,
  * which the backend authWrap also accepts.
  */
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { apiUrl } from '@ce/utils/runtimeBase'
 
 export interface UploadItem {

@@ -65,8 +65,8 @@ import { usePortalRuntime } from '@ce/composables/layout/usePortalRuntime'
 import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
-import ConnectionStatus from '@/components/terminal-session/ConnectionStatus.vue'
-import AgentStatusBadge from '@/components/terminal-session/AgentStatusBadge.vue'
+import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
+import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import { CliTabBar, CliAgentStatusStrip, CliTerminalView } from './adapters'
 
 const runtime = usePortalRuntime({

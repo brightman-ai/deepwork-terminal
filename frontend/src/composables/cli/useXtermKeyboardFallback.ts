@@ -1,4 +1,4 @@
-import { reportCliInputDiagnostic, summarizeBytes, summarizeText } from '@/composables/cli/useCliInputDiagnostics'
+import { reportCliInputDiagnostic, summarizeBytes, summarizeText } from '@terminal/composables/cli/useCliInputDiagnostics'
 
 type Timer = number
 

@@ -1,8 +1,8 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
 
 // ── Portal 注册 (静态 import 保证在 portalRegistry.getAll() 前执行) ─────────────
-import "@/portals/cli";
-import "@/portals/settings";
+import "@terminal/portals/cli";
+import "@terminal/portals/settings";
 
 import { portalRegistry, isPortalEnabled } from "@ce/framework/portal";
 
@@ -20,7 +20,7 @@ const staticChildren: RouteRecordRaw[] = [
   {
     path: "/cli",
     name: "cli-workbench",
-    component: () => import("@/pages/TerminalWorkbenchPage.vue"),
+    component: () => import("@terminal/pages/TerminalWorkbenchPage.vue"),
     meta: { scrollMode: "contained" },
   },
 ];
@@ -40,12 +40,12 @@ const routes: RouteRecordRaw[] = [
   {
     path: "/cli/:id",
     name: "cli-terminal",
-    component: () => import("@/pages/TerminalPage.vue"),
+    component: () => import("@terminal/pages/TerminalPage.vue"),
     props: true,
   },
   {
     path: "/:catchAll(.*)*",
-    component: () => import("@/pages/ErrorNotFound.vue"),
+    component: () => import("@terminal/pages/ErrorNotFound.vue"),
   },
 ];
 

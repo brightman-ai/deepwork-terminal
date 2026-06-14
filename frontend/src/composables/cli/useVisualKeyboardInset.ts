@@ -1,5 +1,5 @@
 import { onMounted, onUnmounted, ref } from 'vue'
-import { detectCliRuntimeProfile } from '@/composables/cli/useCliRuntimeMode'
+import { detectCliRuntimeProfile } from '@terminal/composables/cli/useCliRuntimeMode'
 
 interface KeyboardInsetInput {
   innerHeight: number

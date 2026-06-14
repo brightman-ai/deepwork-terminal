@@ -3,7 +3,7 @@
  * [Ref: CAP-mobile-interaction S2]
  */
 import { ref, onMounted } from 'vue'
-import { detectCliRuntimeProfile } from '@/composables/cli/useCliRuntimeMode'
+import { detectCliRuntimeProfile } from '@terminal/composables/cli/useCliRuntimeMode'
 
 export function useDeviceDetection() {
   const isMobile = ref(false)

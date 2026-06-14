@@ -7,7 +7,7 @@
  */
 import { ref, computed, watch } from 'vue'
 import type { Ref, ComputedRef } from 'vue'
-import { useAgentIntel } from '@/composables/cli/useAgentIntel'
+import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 
 export interface AgentStatus {
   id: string

@@ -14,7 +14,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { WSConnectionStatus } from '@/types/terminal'
+import type { WSConnectionStatus } from '@terminal/types/terminal'
 
 const props = defineProps<{
   status: WSConnectionStatus

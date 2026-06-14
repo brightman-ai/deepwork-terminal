@@ -72,7 +72,7 @@
 </template>
 
 <script setup lang="ts">
-import type { WorkbenchGroup } from '@/types/workbench'
+import type { WorkbenchGroup } from '@terminal/types/workbench'
 
 interface TabRuntime {
   agentState: { status?: string } | null

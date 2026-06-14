@@ -55,7 +55,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { CellCoord } from '@/types/terminal'
+import type { CellCoord } from '@terminal/types/terminal'
 
 const props = defineProps<{
   visible: boolean

@@ -25,7 +25,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { usePushNotifications } from '@/composables/cli/usePushNotifications'
+import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 
 defineEmits<{ (e: 'open'): void }>()
 const push = usePushNotifications()

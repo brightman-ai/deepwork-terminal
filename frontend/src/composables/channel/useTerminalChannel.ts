@@ -13,9 +13,9 @@
  */
 import { computed, type Ref } from 'vue'
 import { Terminal } from 'xterm'
-import { useWebSocketClient, type WebSocketClientOptions } from '@/composables/cli/useWebSocketClient'
-import { useAgentIntel } from '@/composables/cli/useAgentIntel'
-import type { AgentState, WSControlMessage } from '@/types/terminal'
+import { useWebSocketClient, type WebSocketClientOptions } from '@terminal/composables/cli/useWebSocketClient'
+import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
+import type { AgentState, WSControlMessage } from '@terminal/types/terminal'
 
 export interface TerminalChannelOptions {
   /** Reactive session ID (null = no active session) */

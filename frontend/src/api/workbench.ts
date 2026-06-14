@@ -2,10 +2,10 @@
  * Workbench API client — GET/PUT /api/cli/workbench
  * 使用 cliFetch 自动携带 X-CLI-Auth 头，并处理 401 未认证场景。
  */
-import type { WorkbenchConfig } from '@/types/workbench'
-import { createDefaultWorkbenchConfig } from '@/types/workbench'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import type { WorkbenchConfig } from '@terminal/types/workbench'
+import { createDefaultWorkbenchConfig } from '@terminal/types/workbench'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 function getCliFetch() {
   const { cliFetch } = useCliAuth()

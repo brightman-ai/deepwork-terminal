@@ -5,9 +5,9 @@
  * [Ref: CAP-terminal-io S3, DDC-02]
  */
 import { ref, reactive, onUnmounted } from 'vue'
-import type { WSConnectionStatus, WSControlMessage } from '@/types/terminal'
+import type { WSConnectionStatus, WSControlMessage } from '@terminal/types/terminal'
 import { wsUrl } from '@ce/utils/runtimeBase'
-import { cliApi } from '@/composables/cli/useCliApiPrefix'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export interface WebSocketClientOptions {
   authToken?: string

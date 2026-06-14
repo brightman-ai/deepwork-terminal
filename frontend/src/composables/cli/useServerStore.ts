@@ -11,7 +11,7 @@
  *   store.set('snippets', newValue)   // 500ms debounce 写入服务端
  */
 import { ref } from 'vue'
-import { fetchStore, saveStore } from '@/api/store'
+import { fetchStore, saveStore } from '@terminal/api/store'
 
 // 模块级单例 — 所有组件实例共享同一份数据，避免重复请求
 const data = ref<Record<string, unknown>>({})

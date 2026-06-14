@@ -14,9 +14,9 @@
  *    push lands too the OS collapses them onto one notification instead of two.
  */
 import { watch, onUnmounted } from 'vue'
-import type { TmuxState } from '@/types/terminal'
-import { useTmuxState } from '@/composables/cli/useTmuxState'
-import { usePushNotifications } from '@/composables/cli/usePushNotifications'
+import type { TmuxState } from '@terminal/types/terminal'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 
 interface PaneKey { window: number; pane: number }
 function keyOf(k: PaneKey): string { return `${k.window}:${k.pane}` }

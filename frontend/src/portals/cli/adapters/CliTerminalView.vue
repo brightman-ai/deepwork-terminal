@@ -38,8 +38,8 @@
 </template>
 
 <script setup lang="ts">
-import CliTerminalSurface from '@/components/terminal-session/CliTerminalSurface.vue'
-import type { AgentState, WSConnectionStatus } from '@/types/terminal'
+import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
+import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
 
 interface TabWithSession {
   id: string

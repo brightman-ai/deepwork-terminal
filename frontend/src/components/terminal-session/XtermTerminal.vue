@@ -35,8 +35,8 @@ import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
   summarizeText,
-} from '@/composables/cli/useCliInputDiagnostics'
-import { useXtermKeyboardFallback } from '@/composables/cli/useXtermKeyboardFallback'
+} from '@terminal/composables/cli/useCliInputDiagnostics'
+import { useXtermKeyboardFallback } from '@terminal/composables/cli/useXtermKeyboardFallback'
 import 'xterm/css/xterm.css'
 
 const props = defineProps<{

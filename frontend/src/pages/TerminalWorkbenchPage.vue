@@ -113,15 +113,15 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, reactive, nextTick } from 'vue'
-import CliTerminalSurface from '@/components/terminal-session/CliTerminalSurface.vue'
-import ConnectionStatus from '@/components/terminal-session/ConnectionStatus.vue'
-import AgentStatusBadge from '@/components/terminal-session/AgentStatusBadge.vue'
+import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
+import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
+import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import SetupWizardIcon from '@ce/components/wizard/SetupWizardIcon.vue'
-import { useWorkbench } from '@/composables/cli/useWorkbench'
-import { useDeviceDetection } from '@/composables/cli/useDeviceDetection'
-import { useCliAuth } from '@/composables/cli/useCliAuth'
-import type { AgentState, WSConnectionStatus } from '@/types/terminal'
-import type { NetStats } from '@/composables/cli/useWebSocketClient'
+import { useWorkbench } from '@terminal/composables/cli/useWorkbench'
+import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
+import type { NetStats } from '@terminal/composables/cli/useWebSocketClient'
 
 const { isMobile } = useDeviceDetection()
 const { cliFetch } = useCliAuth()
