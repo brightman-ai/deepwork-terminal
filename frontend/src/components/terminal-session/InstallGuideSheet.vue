@@ -62,6 +62,12 @@
                   >{{ busy ? '请稍候…' : '开启通知' }}</button>
                 </div>
                 <p v-if="errorText" class="igs-error">{{ errorText }}</p>
+                <TestRow
+                  v-if="canTest"
+                  :busy="busy"
+                  :result="testText"
+                  @test="onSendTest"
+                />
               </div>
             </template>
 
@@ -105,6 +111,12 @@
                 </li>
               </ol>
               <p v-if="errorText" class="igs-error">{{ errorText }}</p>
+              <TestRow
+                v-if="canTest"
+                :busy="busy"
+                :result="testText"
+                @test="onSendTest"
+              />
             </template>
 
             <!-- ── iOS Safari: illustrated Add-to-Home-Screen steps ─────────── -->
@@ -127,12 +139,24 @@
                 <li class="igs-step">
                   <span class="igs-step-n mono">3</span>
                   <div class="igs-step-body">
-                    <span class="igs-step-t">从主屏打开后开启通知</span>
-                    <span class="igs-step-d">iOS 仅对已安装的应用授予推送；安装后回到本面板点“开启通知”。</span>
+                    <span class="igs-step-t">从主屏图标打开本应用</span>
+                    <span class="igs-step-d">iOS 仅对已安装的应用授予推送，且只有从主屏图标启动的窗口才算“已安装”。</span>
+                  </div>
+                </li>
+                <li class="igs-step">
+                  <span class="igs-step-n mono">4</span>
+                  <div class="igs-step-body">
+                    <span class="igs-step-t">回到本面板开启通知</span>
+                    <span class="igs-step-d">在主屏启动的应用里再次打开本面板，即可看到“开启通知”。</span>
                   </div>
                 </li>
               </ol>
-              <p class="igs-note mono">iOS 16.4+ 支持 Web Push，但只在“添加到主屏幕”后生效。</p>
+              <p class="igs-note igs-note--warn" data-testid="install-guide-ios-callout">
+                <b>已添加？</b>请从主屏的图标打开本应用，再回到这里开启通知 —— 当前的 Safari 标签页无法检测到安装。
+              </p>
+              <p class="igs-note mono">
+                iOS 16.4+ 支持 Web Push，但只在“添加到主屏幕”后生效。首次从主屏启动时存储是隔离的，可能需要重新输入一次授权码。
+              </p>
             </template>
 
             <!-- ── iOS non-Safari: must switch to Safari ────────────────────── -->
@@ -148,31 +172,49 @@
             </template>
 
             <!-- ── Desktop Safari / Firefox / other ─────────────────────────── -->
+            <!-- Desktop = no install required: Chrome/Edge/Firefox + Safari 16+ do
+                 Web Push in a normal tab. "开启通知" is the primary, front-and-center
+                 action; install/add-to-dock is not gated in front of it. -->
             <template v-else>
               <div class="igs-section">
-                <div class="igs-section-lbl mono">通知</div>
-                <p class="igs-lede" v-if="push.supported.value">
-                  此浏览器支持 Web Push，可直接开启通知；安装为应用可获得独立窗口。
-                </p>
-                <p class="igs-note" v-else>
-                  当前浏览器不支持 Web Push。可在 Chrome / Edge 或已“添加到主屏幕”的 iOS Safari 中开启。
-                </p>
-                <div class="igs-toggle-row">
+                <div class="igs-toggle-row" data-testid="install-guide-notify-toggle">
+                  <div class="igs-toggle-meta">
+                    <span class="igs-toggle-state" :class="notifyStateClass">{{ notifyStateText }}</span>
+                    <span class="igs-toggle-hint mono">{{ permissionHint }}</span>
+                  </div>
                   <button
-                    v-if="push.subscribed.value"
+                    v-if="!push.supported.value"
+                    class="igs-btn igs-btn--ghost"
+                    disabled
+                  >不支持</button>
+                  <button
+                    v-else-if="push.subscribed.value"
                     class="igs-btn igs-btn--ghost"
                     :disabled="busy"
+                    data-testid="install-guide-notify-off"
                     @click="onUnsubscribe"
                   >关闭通知</button>
                   <button
                     v-else
                     class="igs-btn igs-btn--accent"
-                    :disabled="!push.supported.value || busy || push.permission.value === 'denied'"
+                    :disabled="busy || push.permission.value === 'denied'"
                     data-testid="install-guide-notify-on"
                     @click="onSubscribe"
                   >{{ push.permission.value === 'denied' ? '已被拒绝' : (busy ? '请稍候…' : '开启通知') }}</button>
                 </div>
+                <p class="igs-note" v-if="push.supported.value">
+                  无需安装即可直接开启通知；安装为应用可获得独立窗口（可选）。
+                </p>
+                <p class="igs-note" v-else>
+                  当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
+                </p>
                 <p v-if="errorText" class="igs-error">{{ errorText }}</p>
+                <TestRow
+                  v-if="canTest"
+                  :busy="busy"
+                  :result="testText"
+                  @test="onSendTest"
+                />
               </div>
             </template>
           </div>
@@ -195,6 +237,15 @@ const push = usePushNotifications()
 
 const busy = ref(false)
 const errorText = ref('')
+const testText = ref('')
+
+// The end-to-end test is offered the moment a test could actually land: either a
+// real subscription (→ backend /push/test → SW → OS) or, as a foreground-only
+// fallback, granted permission (→ local Notification). Single button, single flow.
+const canTest = computed(() =>
+  push.subscribed.value ||
+  (push.permission.value === 'granted' && push.supported.value),
+)
 
 // Inline glyphs referenced from the iOS step copy (no icon dep needed).
 const IconShare = () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: '#7aa0ff', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'vertical-align:-2px' }, [
@@ -204,8 +255,23 @@ const IconPlusSquare = () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 
   h('rect', { x: 3, y: 3, width: 18, height: 18, rx: 3 }), h('path', { d: 'M12 8v8M8 12h8' }),
 ])
 
+// Shared "发送测试通知" row — appears in every branch where a test can land
+// (standalone / chromium / desktop). Emits 'test'; the parent owns the flow.
+const TestRow = (props: { busy: boolean; result: string }, { emit }: { emit: (e: 'test') => void }) =>
+  h('div', { class: 'igs-test' }, [
+    h('button', {
+      class: 'igs-btn igs-btn--ghost',
+      disabled: props.busy,
+      'data-testid': 'install-guide-test',
+      onClick: () => emit('test'),
+    }, props.busy ? '发送中…' : '发送测试通知'),
+    props.result ? h('p', { class: 'igs-test-result mono' }, props.result) : null,
+  ])
+TestRow.props = ['busy', 'result']
+TestRow.emits = ['test']
+
 // Refresh permission + subscription state whenever the sheet opens.
-watch(() => props.open, (o) => { if (o) { errorText.value = ''; void push.refresh() } })
+watch(() => props.open, (o) => { if (o) { errorText.value = ''; testText.value = ''; void push.refresh() } })
 
 const headline = computed(() => (push.isStandalone.value ? '通知设置' : '安装与通知'))
 
@@ -262,6 +328,21 @@ async function onInstall(): Promise<void> {
   const outcome = await push.promptInstall()
   if (outcome === 'unavailable') {
     errorText.value = '安装提示不可用（可能已安装，或浏览器未触发）。'
+  }
+}
+
+async function onSendTest(): Promise<void> {
+  busy.value = true
+  testText.value = ''
+  try {
+    const r = await push.sendTest()
+    testText.value = r === 'sent'
+      ? '已发送测试推送，请留意系统通知。'
+      : r === 'local'
+        ? '已触发本地测试通知（此设备为前台通知，未走后台推送）。'
+        : '测试发送失败，请确认已开启通知后重试。'
+  } finally {
+    busy.value = false
   }
 }
 </script>
@@ -432,6 +513,18 @@ async function onInstall(): Promise<void> {
   font-size: 0.72rem;
   line-height: 1.5;
 }
+
+/* End-to-end test row */
+.igs-test {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #2c2c31;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.igs-test-result { color: #8a8a92; font-size: 0.68rem; line-height: 1.5; }
 
 /* Sheet enter/leave */
 .igs-fade-enter-active, .igs-fade-leave-active { transition: opacity 0.18s ease; }
