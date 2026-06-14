@@ -131,6 +131,13 @@ export function useClipboardPaste(sessionId: () => string) {
       }
 
       const data = await resp.json() as { path: string; relPath: string; size: number; filename?: string; dedup?: boolean }
+      // Single chokepoint for "an upload landed on disk": let the resource drawer
+      // (and any other listener) refresh its /uploads listing without coupling.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('dw:upload-success', {
+          detail: { sessionId: sessionId(), relPath: data.relPath, kind: uploadKind },
+        }))
+      }
       log.info('cli.clipboard.upload_completed', {
         source: options.source || 'unknown',
         upload_kind: uploadKind,
