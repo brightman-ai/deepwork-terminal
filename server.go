@@ -16,13 +16,16 @@ import (
 // Standalone: ListenAndServe() runs API + SPA.
 // Embedded: Handler() returns API routes for a host to mount.
 type Server struct {
-	mux      *http.ServeMux
-	mgr      *SessionManager
-	hooks    Hooks
-	config   Config
-	listener net.Listener
-	tunnel   *Tunnel
-	mu       sync.Mutex
+	mux          *http.ServeMux
+	mgr          *SessionManager
+	hooks        Hooks
+	config       Config
+	listener     net.Listener
+	tunnel       *Tunnel
+	tmuxProvider TmuxStateProvider
+	push         *pushStore
+	uploads      *uploadIndex
+	mu           sync.Mutex
 }
 
 // NewServer creates a terminal session server.
@@ -42,10 +45,34 @@ func NewServer(opts ...Option) (*Server, error) {
 		s.config.AuthCode = generateAuthCode()
 	}
 	s.tunnel = NewTunnel(s.config.DataDir)
+	s.uploads = newUploadIndex(s.config.DataDir)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
+	// Default in-process tmux provider so standalone gets tmux state without a host.
+	// An injected provider (WithTmuxProvider) wins over the default.
+	if s.tmuxProvider == nil {
+		s.tmuxProvider = newDefaultTmuxProvider()
+	}
+	// Web Push: load (or generate) persisted VAPID keys + subscriptions.
+	s.push = newPushStore(s.config.DataDir)
+	s.push.server = s
+	// If subscriptions survived a restart, resume the background notifier so
+	// push keeps working with no browser tab and no fresh subscribe call.
+	if s.push.count() > 0 {
+		s.push.ensureNotifier()
+	}
 	s.mux = http.NewServeMux()
 	s.registerRoutes()
 	return s, nil
+}
+
+// tmuxInstalled reports whether tmux is available, via the default provider's
+// service when present. Used to gate the push notifier (don't poll without tmux).
+func (s *Server) tmuxInstalled() bool {
+	if p, ok := s.tmuxProvider.(*defaultTmuxProvider); ok {
+		return p.svc.TmuxInstalled()
+	}
+	// A host-injected provider implies a tmux-aware environment.
+	return s.tmuxProvider != nil
 }
 
 // Handler returns the API routes (no SPA) for embedding into a host server.
@@ -101,8 +128,11 @@ func (s *Server) Port() int {
 	return s.listener.Addr().(*net.TCPAddr).Port
 }
 
-// Close shuts down all sessions.
+// Close shuts down all sessions and stops the background push notifier.
 func (s *Server) Close() error {
+	if s.push != nil {
+		s.push.stopNotifier()
+	}
 	return s.mgr.CloseAll()
 }
 
@@ -118,6 +148,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /sessions/{id}/input", wrap(s.handleInput))
 	s.mux.HandleFunc("GET /sessions/{id}/ws", wrap(s.handleWebSocket))
 	s.mux.HandleFunc("POST /sessions/{id}/paste-upload", wrap(s.handleClipboardPasteUpload))
+	// Cross-session resource drawer (WS5): global, top-level, not session-scoped.
+	// Uploads come from the persisted index; inputs from claude/codex transcripts.
+	s.mux.HandleFunc("GET /uploads", wrap(s.handleUploadsList))
+	s.mux.HandleFunc("GET /uploads/raw", wrap(s.handleUploadsRaw))
+	s.mux.HandleFunc("GET /inputs", wrap(s.handleInputs))
 	s.mux.HandleFunc("POST /debug/logs", wrap(s.handleHudLog))
 	s.mux.HandleFunc("GET /settings", wrap(s.handleGetSettings))
 	s.mux.HandleFunc("GET /system", wrap(s.handleSystem))
@@ -128,6 +163,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /workbench", wrap(s.handleSaveWorkbench))
 	s.mux.HandleFunc("GET /store", wrap(s.handleGetStore))
 	s.mux.HandleFunc("PUT /store", wrap(s.handleSaveStore))
+	s.mux.HandleFunc("GET /tmux/state", wrap(s.handleTmuxState))
+	s.mux.HandleFunc("GET /tmux/prefix", wrap(s.handleTmuxPrefix))
+	s.mux.HandleFunc("GET /push/vapid", wrap(s.handlePushVAPID))
+	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
+	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
 }
 
 // authWrap wraps a handler with auth checking.
