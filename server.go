@@ -174,6 +174,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /push/vapid", wrap(s.handlePushVAPID))
 	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
 	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
+	s.mux.HandleFunc("POST /push/test", wrap(s.handlePushTest))
 }
 
 // authWrap wraps a handler with auth checking.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
@@ -193,38 +192,9 @@ func (n *pushNotifier) notify(ev notifyEvent) {
 		},
 	})
 
-	priv := store.privateKey()
-	pub := store.PublicKey()
-	if priv == "" || pub == "" {
-		return
-	}
-
-	var prune []string
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for _, sub := range subs {
-		wg.Add(1)
-		go func(sub pushSubscription) {
-			defer wg.Done()
-			gone := sendPush(payload, sub, pub, priv)
-			if gone {
-				mu.Lock()
-				prune = append(prune, sub.Endpoint)
-				mu.Unlock()
-			}
-		}(sub)
-	}
-	wg.Wait()
-
-	for _, ep := range prune {
-		store.remove(ep)
-		logger.Info("push pruned gone subscription", "endpoint_tail", endpointTail(ep))
-	}
-	if store.count() == 0 {
-		// All subscriptions pruned mid-flight → stop polling.
-		go store.stopNotifier()
-	}
-	logger.Info("push sent", "pane", ev.paneID, "subs", len(subs), "pruned", len(prune))
+	// Single source of truth for fan-out delivery + prune (shared with /push/test).
+	pruned := store.broadcast(payload, subs)
+	logger.Info("push sent", "pane", ev.paneID, "subs", len(subs), "pruned", pruned)
 }
 
 // sendPush delivers one notification. Returns true iff the endpoint is gone
