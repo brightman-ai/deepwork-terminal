@@ -35,6 +35,14 @@ interface BeforeInstallPromptEvent extends Event {
 export interface PushNotificationsApi {
   /** SW + PushManager + Notification all present (platform CAN do Web Push). */
   supported: ComputedRef<boolean>
+  /**
+   * Running in a SECURE CONTEXT (HTTPS or localhost). Web Push / Service Workers
+   * are gated on this by every browser, so over plain HTTP on a LAN/Tailscale IP
+   * `navigator.serviceWorker` is absent and registration silently fails. When this
+   * is false the UI must surface the real "needs HTTPS" reason, not a generic
+   * "unsupported" — it is the dominant cause of "notifications don't work".
+   */
+  secureContext: boolean
   /** Notification.permission, or 'unsupported' when the API is absent. */
   permission: Ref<PushPermission>
   /** A live PushSubscription exists and has been POSTed to the backend. */
@@ -129,7 +137,11 @@ let _registration: ServiceWorkerRegistration | null = null
 let _wiredGlobalListeners = false
 let _singleton: PushNotificationsApi | null = null
 
-const swSupported = typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+// Secure context (HTTPS / localhost) is the hard prerequisite: without it the
+// browser hides serviceWorker/PushManager entirely. Detect it FIRST so the UI can
+// give the real reason ("needs HTTPS") instead of a generic "unsupported".
+const secureContext = typeof window === 'undefined' || window.isSecureContext !== false
+const swSupported = secureContext && typeof navigator !== 'undefined' && 'serviceWorker' in navigator
 const pushSupported = typeof window !== 'undefined' && 'PushManager' in window
 const notificationSupported = typeof window !== 'undefined' && 'Notification' in window
 
@@ -369,6 +381,7 @@ function createApi(): PushNotificationsApi {
 
   return {
     supported,
+    secureContext,
     permission: _permission,
     subscribed: _subscribed,
     isStandalone,
