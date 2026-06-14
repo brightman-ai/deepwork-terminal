@@ -17,12 +17,6 @@ const staticChildren: RouteRecordRaw[] = [
     redirect: defaultPortalPath,
   },
   { path: '/settings', redirect: '/portal/settings' },
-  {
-    path: "/cli",
-    name: "cli-workbench",
-    component: () => import("@terminal/pages/TerminalWorkbenchPage.vue"),
-    meta: { scrollMode: "contained" },
-  },
 ];
 
 // ── 从 registry 生成 portal 路由 (portal 的 index.ts 是唯一事实源) ───────────────
@@ -36,12 +30,6 @@ const routes: RouteRecordRaw[] = [
     path: "/",
     component: () => import("@ce/layouts/MainLayout.vue"),
     children: [...staticChildren, ...portalRoutes],
-  },
-  {
-    path: "/cli/:id",
-    name: "cli-terminal",
-    component: () => import("@terminal/pages/TerminalPage.vue"),
-    props: true,
   },
   {
     path: "/:catchAll(.*)*",
