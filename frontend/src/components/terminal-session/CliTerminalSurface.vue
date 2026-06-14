@@ -10,6 +10,43 @@
       <button class="btn-reconnect" data-testid="btn-reconnect" @click="wsReconnect()">重新连接</button>
     </div>
 
+    <!-- Per-surface status row — the SSOT. A SIBLING directly above .terminal-body (NOT
+         inside it, so its taps never reach copy-mode touch handlers / the touchball). It
+         is single-occupancy: when THIS session's shell is attached to tmux the pane bar
+         REPLACES the single-session "终端 N idle" strip (one row, never stacked); otherwise
+         the strip + connection/agent badges show. This is the exact dedup the hosts used
+         to do — now owned by the surface so every host gets it for free. -->
+    <div class="surface-status-row" data-testid="surface-status-row">
+      <TmuxPaneBar
+        v-if="tmuxAttached"
+        :session-id="sessionId"
+        @send-key="onSendKey"
+        @open-notify="openInstallGuide"
+      />
+      <div v-else class="surface-status-single">
+        <CliAgentStatusStrip
+          :tabs="surfaceStripTabs"
+          :rtt="netStats.rtt ?? 0"
+          data-testid="surface-status-strip"
+        />
+        <div class="surface-status-badges">
+          <ConnectionStatus
+            :status="wsStatus"
+            :rtt="netStats.rtt ?? 0"
+            :upload-bps="netStats.uploadBps ?? 0"
+            :download-bps="netStats.downloadBps ?? 0"
+            data-testid="surface-connection-status"
+          />
+          <AgentStatusBadge
+            v-if="agentState || notifications.length > 0"
+            :state="agentState"
+            :notifications="notifications"
+            data-testid="surface-agent-status"
+          />
+        </div>
+      </div>
+    </div>
+
     <!-- 终端区域 -->
     <div
       class="terminal-body"
@@ -19,9 +56,6 @@
       @touchstart.passive="onTerminalTouchStart"
       @touchend.passive="onTerminalTouchEnd"
     >
-      <!-- The tmux pane bar moved OUT of .terminal-body into the host's status row
-           (CliPortal) so its taps no longer hit copy-mode touch handlers / touchball,
-           and it replaces the per-session "终端 N idle" strip when attached. -->
       <!-- WS7 primary entry — always-visible install/notify icon, top-right of the
            terminal surface (the workbench title row lives in the parent CliTabBar). -->
       <InstallNotifyIcon class="surface-notify-icon" @open="installGuideOpen = true" />
@@ -168,6 +202,13 @@ import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.vue'
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
+import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
+import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
+import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
+// Single-session status strip ("终端 N <status>"). This pure presentational component
+// (tabs[] + rtt → row) lives under the cli portal's adapters but has no portal coupling;
+// the surface feeds it a ONE-entry tabs[] built from its own props so the SSOT owns the row.
+import CliAgentStatusStrip from '@terminal/portals/cli/adapters/CliAgentStatusStrip.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
@@ -227,6 +268,10 @@ const hud = useHudCollector()
 const hudVisible = ref(false)
 const { agentState, notifications, handleWSMessage: agentWSHandler } = useAgentIntel(() => props.sessionId)
 const tmux = useTmuxState(() => props.sessionId)
+// Drives the single-occupancy status row: pane bar when THIS shell is attached to a tmux
+// client, else the single-session "终端 N <status>" strip — the exact mutual exclusion the
+// hosts used to wire up, now owned by the surface (SSOT).
+const tmuxAttached = computed(() => tmux.attached.value)
 // WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
 useForegroundAgentNotify(() => props.sessionId)
 const keyCastr = useKeyCastrHud()
@@ -300,6 +345,17 @@ const inputTelemetry = useCliTerminalInputTelemetry({
   surface: 'workbench',
   sessionId: () => props.sessionId,
 })
+
+// Single-entry feed for the per-surface "终端 N <status>" strip. The strip is a generic
+// multi-tab component, but a surface owns exactly ONE session, so we hand it a one-element
+// tabs[] built from this surface's own props/state. The strip self-hides when there is
+// nothing to show (no agent state + not connected), keeping the row clean while idle.
+const surfaceStripTabs = computed(() => [{
+  tabId: props.sessionId,
+  tabName: props.sessionName,
+  agentState: agentState.value,
+  wsStatus: wsStatus.value,
+}])
 
 function sendBinary(data: Uint8Array, route = 'direct'): void {
   inputTelemetry.recordSend(data, route)
@@ -993,6 +1049,38 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   overflow: hidden;
   width: 100%;
   min-height: 0;
+}
+
+/* Per-surface status row (SSOT). Sibling above .terminal-body — single-occupancy: either
+   the TmuxPaneBar (full-width, brings its own border/bg) OR the single-session row (strip +
+   trailing badges). flex-shrink:0 so it never eats terminal height. */
+.surface-status-row {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.surface-status-row :deep(.tmux-pane-bar) { flex: 1; min-width: 0; }
+
+/* Single-session branch: the "终端 N <status>" strip grows; connection/agent badges cling
+   to the trailing edge. The row carries the strip's chrome so it stays a clean full-width
+   bar even when the strip itself self-hides (idle + disconnected). */
+.surface-status-single {
+  display: flex;
+  align-items: stretch;
+  background: hsl(var(--muted, 240 4% 16%));
+  border-bottom: 1px solid hsl(var(--border, 240 4% 24%));
+}
+.surface-status-single :deep(.cli-agent-status-strip) {
+  flex: 1;
+  min-width: 0;
+  border-bottom: none;
+}
+.surface-status-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  flex-shrink: 0;
 }
 
 /* WS7 primary entry — floats top-right above xterm; small and unobtrusive so it

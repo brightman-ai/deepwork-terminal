@@ -35,17 +35,15 @@ export const terminalPortalMeta: PortalMeta = {
 }
 
 const TerminalPlugin = {
-  install(app: App, options: TerminalPluginOptions) {
+  install(_app: App, options: TerminalPluginOptions) {
     const { router, routePrefix = '/terminal' } = options
 
+    // The terminal UI is the canonical CliPortal (the SSOT host that mounts CliTabBar +
+    // CliTerminalSurface, which now owns its own status row). The legacy TerminalListPage /
+    // TerminalPage forks were removed; the embedded host mounts the same portal standalone uses.
     router.addRoute({
       path: routePrefix,
-      component: () => import('./pages/TerminalListPage.vue'),
-    })
-
-    router.addRoute({
-      path: `${routePrefix}/:id`,
-      component: () => import('./pages/TerminalPage.vue'),
+      component: () => import('./portals/cli/CliPortal.vue'),
     })
   },
 }
