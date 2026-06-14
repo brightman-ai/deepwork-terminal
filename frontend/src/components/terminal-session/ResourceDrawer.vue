@@ -118,6 +118,7 @@
                     </span>
                   </span>
                   <span class="rd-file-actions">
+                    <button class="rd-act rd-act--send" type="button" title="插入到对话" @click="injectItem(f)">插入对话</button>
                     <button v-if="isPreviewable(f.name)" class="rd-act" type="button" title="预览" @click="previewFile(f)">预览</button>
                     <a class="rd-act" :href="rawUrl(f.id)" target="_blank" rel="noopener" :download="f.name" title="下载">下载</a>
                     <button class="rd-act" type="button" title="复制文件名" @click="copyText(f.name)">复制</button>
@@ -146,7 +147,7 @@
                   <div class="rd-input-text" :class="{ 'is-clamped': expandedInput !== i }">{{ item.text }}</div>
                   <div class="rd-input-actions" @click.stop>
                     <button class="rd-act" type="button" title="复制" @click="copyText(item.text)">复制</button>
-                    <button class="rd-act rd-act--send" type="button" title="重发到终端" @click="resend(item.text)">重发</button>
+                    <button class="rd-act rd-act--send" type="button" title="载入输入框编辑后发送" @click="resend(item.text)">重发</button>
                   </div>
                 </li>
               </ul>
@@ -158,15 +159,47 @@
       </div>
     </Transition>
 
-    <!-- Lightbox: larger image preview. -->
+    <!-- Lightbox: larger image preview with pinch-zoom + pan (mobile) / click-to-close (desktop). -->
     <Transition name="rd-fade">
-      <div v-if="lightbox" class="rd-lightbox" data-testid="resource-drawer-lightbox" @click="lightbox = null">
-        <img class="rd-lightbox-img" :src="rawUrl(lightbox.id)" :alt="lightbox.name" @click.stop />
-        <div class="rd-lightbox-bar mono" @click.stop>
+      <div
+        v-if="lightbox"
+        class="rd-lightbox"
+        data-testid="resource-drawer-lightbox"
+        @click="onLightboxBackdrop"
+        @touchstart="onLightboxTouchStart"
+        @touchmove.prevent="onLightboxTouchMove"
+        @touchend="onLightboxTouchEnd"
+      >
+        <div class="rd-lightbox-stage" @click.stop>
+          <img
+            class="rd-lightbox-img"
+            :class="{ 'is-zoomed': zoom.scale > 1 }"
+            :style="{ transform: imgTransform }"
+            :src="rawUrl(lightbox.id)"
+            :alt="lightbox.name"
+            draggable="false"
+          />
+        </div>
+        <div class="rd-lightbox-bar mono" @click.stop @touchstart.stop @touchend.stop>
           <span class="rd-lightbox-name">{{ lightbox.name }}</span>
           <span class="rd-lightbox-size">{{ fmtSize(lightbox.size) }}</span>
+          <button class="rd-act rd-act--send" type="button" @click="injectItem(lightbox)">插入对话</button>
           <a class="rd-act" :href="rawUrl(lightbox.id)" target="_blank" rel="noopener" :download="lightbox.name">下载</a>
           <button class="rd-act" type="button" @click="lightbox = null">关闭</button>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Inline text preview: scrollable monospaced panel (replaces window.open). -->
+    <Transition name="rd-fade">
+      <div v-if="textPreview" class="rd-lightbox rd-textview" data-testid="resource-drawer-textview" @click="textPreview = null">
+        <pre class="rd-textview-body mono" @click.stop>{{ textPreview.content }}</pre>
+        <div class="rd-lightbox-bar mono" @click.stop>
+          <span class="rd-lightbox-name">{{ textPreview.item.name }}</span>
+          <span class="rd-lightbox-size">{{ fmtSize(textPreview.item.size) }}</span>
+          <button class="rd-act rd-act--send" type="button" @click="injectItem(textPreview.item)">插入对话</button>
+          <a class="rd-act" :href="rawUrl(textPreview.item.id)" target="_blank" rel="noopener" :download="textPreview.item.name">下载</a>
+          <button class="rd-act" type="button" @click="textPreview = null">关闭</button>
         </div>
       </div>
     </Transition>
@@ -176,14 +209,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
-import { fetchUploads, fetchInputs, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
+import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 
-// sessionId is the RESEND TARGET (the live terminal the 重发 path injects into) — it is
+// sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
 // no longer used to fetch resources, which are now global/cross-session.
 const props = defineProps<{ sessionId: string; open: boolean }>()
 const emit = defineEmits<{
   (e: 'update:open', v: boolean): void
-  (e: 'send', text: string): void
+  // inject: re-use an uploaded image/file — host routes the path to the SAME
+  // clipboard-paste inject chokepoint (插入对话).
+  (e: 'inject', path: string): void
+  // compose-draft: open the ComposeBar with this text inserted for editing (重发).
+  (e: 'compose-draft', text: string): void
 }>()
 
 const { isMobile } = useDeviceDetection()
@@ -253,6 +290,91 @@ const lightbox = ref<UploadItem | null>(null)
 const toast = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
+// ── Lightbox pinch-zoom + pan (hand-rolled, minimal). scale/tx/ty drive a CSS
+// transform on the <img>. Two touches → pinch (distance ratio → scale about the
+// gesture midpoint). One touch while zoomed → pan. Double-tap toggles 1×/2.5×.
+// Clamped to [MIN,MAX]; reset whenever the lightbox opens/closes. Desktop click to
+// close is preserved (only fires when not zoomed / not mid-gesture). ──
+const MIN_SCALE = 1
+const MAX_SCALE = 5
+const zoom = ref({ scale: 1, tx: 0, ty: 0 })
+const imgTransform = computed(
+  () => `translate(${zoom.value.tx}px, ${zoom.value.ty}px) scale(${zoom.value.scale})`,
+)
+let pinchStartDist = 0
+let pinchStartScale = 1
+let panStartX = 0
+let panStartY = 0
+let panStartTx = 0
+let panStartTy = 0
+let gestureMoved = false
+let lastTapAt = 0
+
+function resetZoom(): void {
+  zoom.value = { scale: 1, tx: 0, ty: 0 }
+}
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v))
+}
+function touchDist(t0: Touch, t1: Touch): number {
+  return Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY)
+}
+
+function onLightboxTouchStart(e: TouchEvent): void {
+  if (e.touches.length === 2) {
+    e.preventDefault()
+    pinchStartDist = touchDist(e.touches[0], e.touches[1])
+    pinchStartScale = zoom.value.scale
+    gestureMoved = true
+  } else if (e.touches.length === 1) {
+    const t = e.touches[0]
+    panStartX = t.clientX
+    panStartY = t.clientY
+    panStartTx = zoom.value.tx
+    panStartTy = zoom.value.ty
+    gestureMoved = false
+  }
+}
+
+function onLightboxTouchMove(e: TouchEvent): void {
+  if (e.touches.length === 2 && pinchStartDist > 0) {
+    e.preventDefault()
+    const dist = touchDist(e.touches[0], e.touches[1])
+    zoom.value = { ...zoom.value, scale: clamp((dist / pinchStartDist) * pinchStartScale, MIN_SCALE, MAX_SCALE) }
+    gestureMoved = true
+  } else if (e.touches.length === 1 && zoom.value.scale > MIN_SCALE) {
+    // Pan only when zoomed in; otherwise let the tap/close behaviour stand.
+    e.preventDefault()
+    const t = e.touches[0]
+    const dx = t.clientX - panStartX
+    const dy = t.clientY - panStartY
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) gestureMoved = true
+    zoom.value = { ...zoom.value, tx: panStartTx + dx, ty: panStartTy + dy }
+  }
+}
+
+function onLightboxTouchEnd(e: TouchEvent): void {
+  if (e.touches.length === 0) {
+    pinchStartDist = 0
+    if (zoom.value.scale <= MIN_SCALE) resetZoom() // snap pan back when fully zoomed out
+    // Double-tap toggles zoom (only when this wasn't a pinch/pan gesture).
+    if (!gestureMoved) {
+      const now = Date.now()
+      if (now - lastTapAt < 300) {
+        zoom.value = zoom.value.scale > MIN_SCALE ? { scale: 1, tx: 0, ty: 0 } : { scale: 2.5, tx: 0, ty: 0 }
+        lastTapAt = 0
+      } else {
+        lastTapAt = now
+      }
+    }
+  }
+}
+
+// Desktop / tap-to-close: only close when not zoomed and the gesture was a clean tap.
+function onLightboxBackdrop(): void {
+  if (zoom.value.scale <= MIN_SCALE && !gestureMoved) lightbox.value = null
+}
+
 async function refresh(): Promise<void> {
   loading.value = true
   try {
@@ -276,6 +398,8 @@ watch(() => props.open, (isOpen) => {
     void refresh()
   } else {
     lightbox.value = null
+    textPreview.value = null
+    resetZoom()
   }
 })
 
@@ -290,21 +414,38 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer)
 })
 
-function openLightbox(img: UploadItem): void { lightbox.value = img }
+function openLightbox(img: UploadItem): void { lightbox.value = img; resetZoom() }
 
-function previewFile(f: UploadItem): void {
-  // Images preview in the lightbox; text-like files open in a new tab (raw url).
-  if (isImageName(f.name)) { lightbox.value = f; return }
-  window.open(rawUrl(f.id), '_blank', 'noopener')
+// Inline text preview (no new browser tab). For text-like files we FETCH the raw
+// bytes and show them in a scrollable monospaced panel; images go to the lightbox;
+// anything else (binary) falls back to a download (handled in the row template).
+const textPreview = ref<{ item: UploadItem; content: string } | null>(null)
+
+async function previewFile(f: UploadItem): Promise<void> {
+  if (isImageName(f.name)) { openLightbox(f); return }
+  const content = await fetchRawText(f.id)
+  if (content == null) { showToast('预览失败'); return }
+  textPreview.value = { item: f, content }
 }
 
 function toggleInput(i: number): void {
   expandedInput.value = expandedInput.value === i ? null : i
 }
 
+// "插入对话" — re-use an already-uploaded item. It carries an absolute on-disk path
+// (item.path); we emit it to the host, which routes it through the SAME inject
+// chokepoint the clipboard-paste flow uses post-upload. One source of truth.
+function injectItem(item: UploadItem): void {
+  if (!item.path) { showToast('无法插入：缺少路径'); return }
+  emit('inject', item.path)
+  showToast('已插入对话')
+}
+
+// 重发 — open the ComposeBar with the text inserted for editing (NOT a direct send).
 function resend(text: string): void {
-  emit('send', text)
-  showToast('已重发到终端')
+  emit('compose-draft', text)
+  emit('update:open', false)
+  showToast('已插入输入框')
 }
 
 async function copyText(text: string): Promise<void> {
@@ -588,6 +729,9 @@ function glyphClass(name: string): string {
 .rd-input-text.is-clamped {
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+/* Expanded: show the FULL prompt; cap height so a huge prompt scrolls instead of
+   pushing the list, keeping the drawer usable. */
+.rd-input.is-expanded .rd-input-text { max-height: 46vh; overflow-y: auto; }
 .rd-input-actions { display: flex; gap: 5px; margin-top: 6px; }
 
 /* shared small action button */
@@ -615,9 +759,31 @@ function glyphClass(name: string): string {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 12px; padding: 24px;
 }
+/* Stage clips the zoomed/panned image so it never escapes the viewport bounds. */
+.rd-lightbox-stage {
+  max-width: min(92vw, 1100px); max-height: 80vh;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; touch-action: none;
+}
 .rd-lightbox-img {
   max-width: min(92vw, 1100px); max-height: 80vh; object-fit: contain;
   border-radius: 8px; box-shadow: 0 12px 60px rgba(0, 0, 0, 0.7);
+  transform-origin: center center;
+  transition: transform 0.08s ease-out;
+  will-change: transform;
+  -webkit-user-select: none; user-select: none; -webkit-user-drag: none;
+}
+.rd-lightbox-img.is-zoomed { cursor: grab; transition: none; }
+
+/* Inline text preview */
+.rd-textview-body {
+  max-width: min(94vw, 1000px); max-height: 78vh; overflow: auto;
+  margin: 0; padding: 14px 16px;
+  background: #120c1c; border: 1px solid #3a2860; border-radius: 10px;
+  color: #d8c4f0; font-size: 0.72rem; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.7);
+  -webkit-overflow-scrolling: touch;
 }
 .rd-lightbox-bar {
   display: flex; align-items: center; gap: 10px;
