@@ -9,12 +9,17 @@
  * permission + user gesture). The swallowed error meant the user saw *nothing*.
  *
  * Fallback chain (no silent failures):
+ *   0. INSECURE-CONTEXT GUARD: on plain HTTP over a LAN/Tailscale IP the async
+ *      Clipboard API is unavailable. We do NOT fall through to the execCommand
+ *      path there — focusing a hidden input to capture a native paste pops the
+ *      mobile system keyboard and does NOT auto-paste. Instead we surface a clear
+ *      HUD message telling the user to switch to HTTPS (or long-press paste with
+ *      the system keyboard). One-tap paste is an HTTPS-only capability.
  *   1. navigator.clipboard.readText()  — secure context, fast path.
  *   2. Hidden contentEditable + native `paste` event capture via
- *      document.execCommand('paste') — works on insecure HTTP / WebKit where the
- *      async Clipboard API is blocked but the legacy execCommand paste is allowed
- *      *inside a user gesture*. We read clipboardData.getData('text') from the
- *      genuine paste event (execCommand's return value is unreliable, the event is not).
+ *      document.execCommand('paste') — only reached on a SECURE context where the
+ *      async API exists but rejected (e.g. iOS permission denial). The native paste
+ *      event's clipboardData.getData('text') is reliable; execCommand's bool is not.
  *   3. Total failure → surface a visible HUD error. Never swallow.
  *
  * Transport: text is sent raw via the injected sendBinary. We do NOT wrap with
@@ -58,8 +63,23 @@ export function useClipboardText(options: ClipboardTextOptions) {
 
   /** @returns text on success, '' for empty clipboard, null on hard failure (HUD already updated). */
   async function readClipboardText(source: string): Promise<string | null> {
+    const canReadAsync = typeof navigator.clipboard?.readText === 'function'
+
+    // Tier 0: insecure-context guard. On plain HTTP (LAN / Tailscale IP) the async
+    // Clipboard API is unavailable. Do NOT fall through to the execCommand path — it
+    // focuses a hidden input to capture a native paste, which pops the mobile system
+    // keyboard and does not auto-paste. Surface a clear, actionable HUD message instead.
+    if (!canReadAsync && !window.isSecureContext) {
+      options.hudRecord?.(
+        'error',
+        '一键粘贴需要 HTTPS（当前 HTTP 无法读取剪贴板）。改用 HTTPS 访问，或用系统键盘长按粘贴。',
+      )
+      log.warn('cli.clipboard.read_insecure_context', { surface: options.surface, source })
+      return null
+    }
+
     // Tier 1: async Clipboard API (secure context only).
-    if (typeof navigator.clipboard?.readText === 'function') {
+    if (canReadAsync) {
       try {
         const text = await navigator.clipboard.readText()
         log.info('cli.clipboard.read_async_ok', { surface: options.surface, source, chars: text.length })
@@ -70,11 +90,13 @@ export function useClipboardText(options: ClipboardTextOptions) {
           source,
           error: err instanceof Error ? err.name || err.message : String(err),
         })
-        // fall through to legacy path (covers iOS permission denial)
+        // fall through to legacy path (covers iOS permission denial on a SECURE context)
       }
     }
 
-    // Tier 2: hidden contentEditable + legacy execCommand('paste').
+    // Tier 2: hidden contentEditable + legacy execCommand('paste'). Only reached on a
+    // SECURE context (the insecure guard above already returned). Safe to focus a hidden
+    // input here — the async API exists, this covers a transient secure-context rejection.
     try {
       const text = await readViaExecCommand()
       if (text != null) {
