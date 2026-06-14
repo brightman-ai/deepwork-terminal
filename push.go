@@ -240,6 +240,64 @@ func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": n})
 }
 
+// handlePushTest handles POST /push/test → sends one canned web push to every
+// stored subscription so the user can verify the full chain (permission →
+// subscribe → SW push → OS notification) on demand, without waiting for an
+// agent-waiting event. Reuses the notifier's send + 404/410 prune path.
+//
+// Returns 200 even with zero subscriptions (nothing to send is not an error;
+// the frontend offers a local self-test in that case).
+func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
+	subs := s.push.snapshot()
+	payload, _ := json.Marshal(map[string]any{
+		"title": "✅ 测试通知",
+		"body":  "Deepwork 推送已就绪",
+		"tag":   "dw-test",
+		"data":  map[string]any{"url": "/"},
+	})
+	pruned := s.push.broadcast(payload, subs)
+	logger.Info("push test", "subs", len(subs), "pruned", pruned)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sent": len(subs) - pruned, "pruned": pruned})
+}
+
+// broadcast sends payload to every subscription concurrently and prunes any that
+// report gone (404/410). Returns the number pruned. The single source of truth
+// for fan-out delivery — both the test endpoint and the background notifier route
+// here via sendPush. Caller passes a snapshot so we never hold the lock across I/O.
+func (s *pushStore) broadcast(payload []byte, subs []pushSubscription) int {
+	if len(subs) == 0 {
+		return 0
+	}
+	pub := s.PublicKey()
+	priv := s.privateKey()
+	if pub == "" || priv == "" {
+		return 0
+	}
+	var prune []string
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, sub := range subs {
+		wg.Add(1)
+		go func(sub pushSubscription) {
+			defer wg.Done()
+			if sendPush(payload, sub, pub, priv) {
+				mu.Lock()
+				prune = append(prune, sub.Endpoint)
+				mu.Unlock()
+			}
+		}(sub)
+	}
+	wg.Wait()
+	for _, ep := range prune {
+		s.remove(ep)
+		logger.Info("push pruned gone subscription", "endpoint_tail", endpointTail(ep))
+	}
+	if s.count() == 0 {
+		go s.stopNotifier()
+	}
+	return len(prune)
+}
+
 // handlePushUnsubscribe handles POST /push/unsubscribe. Body = { endpoint }.
 func (s *Server) handlePushUnsubscribe(w http.ResponseWriter, r *http.Request) {
 	var req struct {
