@@ -81,14 +81,22 @@
       </div>
     </div>
 
-    <!-- tmux pane bar: its own row under the tab bar, OUTSIDE the surface body, shown
-         only when the active session's shell is attached to tmux. -->
+    <!-- Single-occupancy status row under the tab bar, OUTSIDE the surface body.
+         When the active session's shell is attached to tmux the pane bar REPLACES
+         the per-session "终端 N idle" strip (one row, never stacked); otherwise the
+         agent-status strip shows. Mounting here keeps taps off copy-mode handlers. -->
     <TmuxPaneBar
       v-if="activeAttached && activeSessionId"
       :key="activeSessionId"
       :session-id="activeSessionId"
       @send-key="activeSendKey"
       @open-notify="activeOpenInstallGuide"
+    />
+    <CliAgentStatusStrip
+      v-else
+      :tabs="stripTabs"
+      :rtt="activeNetStats?.rtt ?? 0"
+      data-testid="workbench-status-strip"
     />
 
     <!-- Terminal 区域 -->
@@ -127,6 +135,7 @@ import CliTerminalSurface from '@terminal/components/terminal-session/CliTermina
 import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
+import CliAgentStatusStrip from '@terminal/portals/cli/adapters/CliAgentStatusStrip.vue'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import SetupWizardIcon from '@ce/components/wizard/SetupWizardIcon.vue'
 import { useWorkbench } from '@terminal/composables/cli/useWorkbench'
@@ -205,6 +214,20 @@ const activeNetStats = computed<NetStats | null>(() => {
 // Tabs that have a session bound (safe to render CliTerminalSurface)
 const allTabsWithSession = computed(() =>
   allTabs.value.filter(t => !!t.sessionId)
+)
+
+// Per-tab entries for the agent-status strip (the "终端 N idle" row). The strip
+// itself self-hides when no tab is connected, so this is the single status row
+// shown whenever the active session is NOT attached to tmux.
+const stripTabs = computed(() =>
+  allTabs.value
+    .filter(t => !!t.sessionId)
+    .map(t => ({
+      tabId: t.id,
+      tabName: t.name,
+      agentState: tabRuntimes[t.id]?.agentState ?? null,
+      wsStatus: tabRuntimes[t.id]?.wsStatus ?? 'disconnected',
+    })),
 )
 
 // ─── tmux pane bar (replaces the per-session status row when attached) ──────────
