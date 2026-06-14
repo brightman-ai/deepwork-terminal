@@ -11,6 +11,8 @@
     :aria-label="title"
     data-testid="install-notify-icon"
     @click="$emit('open')"
+    @pointerup.stop
+    @touchend.stop
   >
     <!-- standalone → bell (notifications), else → install/download glyph -->
     <svg v-if="push.isStandalone.value" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -58,6 +60,7 @@ const title = computed(() => {
   color: #8a8a92;
   cursor: pointer;
   flex-shrink: 0;
+  touch-action: manipulation;
   transition: color 0.1s, background 0.1s;
 }
 .ini-btn:hover { color: #e8e8ec; background: rgba(255, 255, 255, 0.06); }
