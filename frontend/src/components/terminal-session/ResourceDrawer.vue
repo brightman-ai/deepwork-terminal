@@ -7,13 +7,17 @@
        · sort · search) narrows any tab. Desktop = a collapsible right column reached via a slim
        edge handle; mobile (≤768px) = a slide-out sheet from the right with a scrim. -->
   <Teleport to="body">
-    <!-- Edge handle: always present so the drawer can be summoned; hidden while open. -->
+    <!-- Edge handle: always present so the drawer can be summoned; hidden while open.
+         Vertically draggable (useEdgeDrag) so it can be moved off covered text; a
+         short tap still opens the drawer, a drag repositions + persists. -->
     <button
       v-if="!open"
+      ref="handleEl"
       class="rd-handle"
       :class="{ 'is-mobile': isMobile }"
+      :style="handleStyle"
       type="button"
-      title="收纳抽屉"
+      title="收纳抽屉（可上下拖动）"
       data-testid="resource-drawer-handle"
       @click="$emit('update:open', true)"
     >
@@ -142,6 +146,9 @@
                   <div class="rd-input-head">
                     <span class="rd-badge" :class="`is-${item.source}`">{{ item.source }}</span>
                     <span v-if="item.project" class="rd-input-proj mono">{{ item.project }}</span>
+                    <!-- trace 总结: size of the (possibly clamped) prompt, so the user
+                         knows how much is hidden before expanding. -->
+                    <span class="rd-input-metric" :title="`${textLines(item.text)} 行 · ${textChars(item.text)} 字`">{{ textLines(item.text) }} 行 · {{ textChars(item.text) }} 字</span>
                     <span class="rd-input-time">{{ relTime(item.tsMs) }}</span>
                   </div>
                   <div class="rd-input-text" :class="{ 'is-clamped': expandedInput !== i }">{{ item.text }}</div>
@@ -209,6 +216,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { useEdgeDrag } from '@terminal/composables/cli/useEdgeDrag'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 
 // sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
@@ -224,6 +232,10 @@ const emit = defineEmits<{
 }>()
 
 const { isMobile } = useDeviceDetection()
+
+// The summon handle is vertically draggable along the right edge so it can be moved
+// off whatever terminal text it overlaps; offset persists per-handle.
+const { el: handleEl, style: handleStyle } = useEdgeDrag({ storageKey: 'dw.rdHandle.top' })
 
 type TabKey = 'images' | 'files' | 'inputs'
 const activeTab = ref<TabKey>('images')
@@ -474,6 +486,16 @@ function showToast(msg: string): void {
   toastTimer = setTimeout(() => { toast.value = '' }, 1600)
 }
 
+// --- input "trace 总结" metrics (lightweight, per-string) ---
+// 行 = newline-delimited line count; 字 = non-whitespace character count, which is a
+// meaningful "size" for both Chinese (per-char) and English (collapses spacing) text.
+function textLines(text: string): number {
+  return text ? text.split('\n').length : 0
+}
+function textChars(text: string): number {
+  return text ? text.replace(/\s/g, '').length : 0
+}
+
 // --- formatting / glyph helpers ---
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -545,6 +567,7 @@ function glyphClass(name: string): string {
   color: #c080ff;
   cursor: pointer;
   box-shadow: -4px 0 18px rgba(0, 0, 0, 0.45);
+  touch-action: none; /* own the vertical drag (useEdgeDrag); no page scroll hijack */
 }
 .rd-handle:active { background: #1f1533; }
 .rd-handle.is-mobile { width: 30px; height: 62px; }
@@ -721,6 +744,11 @@ function glyphClass(name: string): string {
 .rd-input.is-expanded { border-color: #4a2a7a; }
 .rd-input-head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
 .rd-input-proj { color: #9a86ba; font-size: 0.58rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.rd-input-metric {
+  flex-shrink: 0; color: #8a76aa; font-size: 0.54rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  padding: 0 5px; border-radius: 5px; background: rgba(192, 128, 255, 0.08);
+}
 .rd-input-time { color: #6f5a90; font-size: 0.56rem; flex-shrink: 0; }
 .rd-input-text {
   color: #d8c4f0; font-size: 0.7rem; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
@@ -752,21 +780,30 @@ function glyphClass(name: string): string {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5); pointer-events: none;
 }
 
-/* lightbox */
+/* lightbox — near-fullscreen overlay. The stage takes the whole viewport minus a
+   slim padding and reserves room at the bottom for the action bar; the image fits
+   ~95vw × ~88vh so detail is readable on mobile. Pinch/double-tap zoom + pan are
+   unchanged (they drive the <img> transform, which scales from whatever base size
+   `object-fit: contain` resolves to). */
 .rd-lightbox {
   position: fixed; inset: 0; z-index: 360;
-  background: rgba(6, 4, 10, 0.88);
+  background: rgba(6, 4, 10, 0.92);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; padding: 24px;
+  gap: 10px;
+  padding: max(8px, env(safe-area-inset-top, 8px)) 8px
+           calc(env(safe-area-inset-bottom, 0px) + 8px);
 }
-/* Stage clips the zoomed/panned image so it never escapes the viewport bounds. */
+/* Stage fills the viewport above the action bar and clips the zoomed/panned image
+   so it never escapes the bounds. */
 .rd-lightbox-stage {
-  max-width: min(92vw, 1100px); max-height: 80vh;
+  flex: 1; min-height: 0;
+  width: 100%;
+  max-width: min(95vw, 1400px);
   display: flex; align-items: center; justify-content: center;
   overflow: hidden; touch-action: none;
 }
 .rd-lightbox-img {
-  max-width: min(92vw, 1100px); max-height: 80vh; object-fit: contain;
+  max-width: 95vw; max-height: 88vh; object-fit: contain;
   border-radius: 8px; box-shadow: 0 12px 60px rgba(0, 0, 0, 0.7);
   transform-origin: center center;
   transition: transform 0.08s ease-out;
@@ -775,9 +812,10 @@ function glyphClass(name: string): string {
 }
 .rd-lightbox-img.is-zoomed { cursor: grab; transition: none; }
 
-/* Inline text preview */
+/* Inline text preview — sizes itself within the same flex column; capping max-height
+   keeps it from pushing the action bar off-screen. */
 .rd-textview-body {
-  max-width: min(94vw, 1000px); max-height: 78vh; overflow: auto;
+  width: 100%; max-width: min(94vw, 1000px); min-height: 0; max-height: 100%; overflow: auto;
   margin: 0; padding: 14px 16px;
   background: #120c1c; border: 1px solid #3a2860; border-radius: 10px;
   color: #d8c4f0; font-size: 0.72rem; line-height: 1.5;
@@ -785,11 +823,14 @@ function glyphClass(name: string): string {
   box-shadow: 0 12px 60px rgba(0, 0, 0, 0.7);
   -webkit-overflow-scrolling: touch;
 }
+/* Action bar (插入对话/下载/关闭) is pinned: never shrinks, always reachable below
+   the near-fullscreen image / text panel. */
 .rd-lightbox-bar {
+  flex-shrink: 0;
   display: flex; align-items: center; gap: 10px;
   background: #160f22; border: 1px solid #3a2860; border-radius: 10px;
   padding: 8px 12px; color: #d8c4f0; font-size: 0.72rem;
-  max-width: 92vw;
+  max-width: 95vw; flex-wrap: wrap; justify-content: center;
 }
 .rd-lightbox-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50vw; }
 .rd-lightbox-size { color: #6f5a90; }
