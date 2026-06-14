@@ -51,21 +51,19 @@
         :sticky-ctrl="stickyCtrl"
         :sticky-alt="stickyAlt"
         :active-panel="activePanelLabel"
-        :tmux-detected="tmuxDetected"
         :keyboard-up="activeMode === 'keyboard'"
         @send-key="onSendKey"
+        @clipboard="onClipboard"
         @toggle-numpad="onTogglePanel('numpad')"
         @toggle-compose="onTogglePanel('compose')"
         @toggle-shift="stickyShift = !stickyShift"
         @toggle-ctrl="stickyCtrl = !stickyCtrl"
         @toggle-alt="stickyAlt = !stickyAlt"
         @toggle-hud="hudVisible = !hudVisible"
-        @toggle-tmux="onTogglePanel('tmux')"
         @toggle-keyboard="onToggleKeyboard"
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
-      <TmuxPanel v-if="activeMode === 'tmux'" :session-id="sessionId" @send-key="onSendKey" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
 
@@ -156,7 +154,6 @@ import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusShe
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
-import TmuxPanel from '@terminal/components/terminal-session/TmuxPanel.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
@@ -234,7 +231,7 @@ const installGuideOpen = ref(false) // WS7: install + notify guide sheet
 const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
 const resourceDrawerOpen = ref(localStorage.getItem(RESOURCE_DRAWER_KEY) === '1')
 watch(resourceDrawerOpen, (v) => localStorage.setItem(RESOURCE_DRAWER_KEY, v ? '1' : '0'))
-const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'tmux' | 'compose'>('idle')
+const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'compose'>('idle')
 // Draft pushed into the ComposeBar by the drawer's 重发 action. A fresh object-less
 // value would not re-trigger ComposeBar's watcher for an identical re-send, so we
 // bump a nonce-suffixed ref only via the handler below.
@@ -247,9 +244,8 @@ const terminalRows = ref(24)
 const { keyboardInset: keyboardHeight, syncKeyboardInset } = useVisualKeyboardInset({ enabled: () => isMobile.value })
 let keyboardWanted = false
 
-const activePanelLabel = computed<'none' | 'numpad' | 'tmux' | 'compose'>(() => {
+const activePanelLabel = computed<'none' | 'numpad' | 'compose'>(() => {
   if (activeMode.value === 'numpad') return 'numpad'
-  if (activeMode.value === 'tmux') return 'tmux'
   if (activeMode.value === 'compose') return 'compose'
   return 'none'
 })
@@ -637,7 +633,7 @@ function onToggleKeyboard() {
   }
 }
 
-function onTogglePanel(panel: 'numpad' | 'tmux' | 'compose') {
+function onTogglePanel(panel: 'numpad' | 'compose') {
   if (activeMode.value === panel) {
     showKeyboard()
   } else {

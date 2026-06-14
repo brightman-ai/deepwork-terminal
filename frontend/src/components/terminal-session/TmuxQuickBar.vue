@@ -41,7 +41,9 @@
     <button class="tqb-btn" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-down" title="Arrow Down" @click="send('\x1b[B')"><span class="tqb-glyph">↓</span></button>
+    <button class="tqb-btn" data-testid="tmux-quick-enter" title="Enter" @click="send('\r')"><span class="tqb-glyph">⏎</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-space" title="Space (copy-mode select)" @click="send(' ')"><span class="tqb-cap">SpC</span></button>
+    <button class="tqb-btn" data-testid="tmux-quick-bksp" title="Backspace" @click="send('\x7f')"><span class="tqb-glyph">⌫</span></button>
     <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
 
     <span class="tqb-sep" />
