@@ -71,36 +71,29 @@
               </div>
             </template>
 
-            <!-- ── Chromium / Android: native install prompt, then notify ───── -->
+            <!-- ── Chromium (desktop + Android): notify-first, install optional ─
+                 Chrome/Edge/Firefox + Android Chrome do Web Push in a normal tab —
+                 no install required. "开启通知" is the primary CTA; the captured
+                 beforeinstallprompt is offered only as a subtle optional link. -->
             <template v-else-if="push.platform.value === 'chromium'">
-              <ol class="igs-steps">
-                <li class="igs-step" :class="{ 'is-done': push.installed.value }">
-                  <span class="igs-step-n mono">1</span>
-                  <div class="igs-step-body">
-                    <span class="igs-step-t">安装应用</span>
-                    <span class="igs-step-d">添加到主屏 / 应用列表，获得独立窗口与后台推送。</span>
+              <div class="igs-section">
+                <div class="igs-toggle-row" data-testid="install-guide-notify-toggle">
+                  <div class="igs-toggle-meta">
+                    <span class="igs-toggle-state" :class="notifyStateClass">{{ notifyStateText }}</span>
+                    <span class="igs-toggle-hint mono">{{ permissionHint }}</span>
                   </div>
                   <button
-                    v-if="push.canPromptInstall.value && !push.installed.value"
-                    class="igs-btn igs-btn--accent"
-                    data-testid="install-guide-install"
-                    @click="onInstall"
-                  >安装应用</button>
-                  <span v-else-if="push.installed.value" class="igs-step-ok mono">已安装</span>
-                  <span v-else class="igs-step-na mono">已安装或不可用</span>
-                </li>
-                <li class="igs-step">
-                  <span class="igs-step-n mono">2</span>
-                  <div class="igs-step-body">
-                    <span class="igs-step-t">开启通知</span>
-                    <span class="igs-step-d">agent 等待输入时推送提醒，无需盯着屏幕。</span>
-                  </div>
+                    v-if="!push.supported.value"
+                    class="igs-btn igs-btn--ghost"
+                    disabled
+                  >不支持</button>
                   <button
-                    v-if="push.subscribed.value"
+                    v-else-if="push.subscribed.value"
                     class="igs-btn igs-btn--ghost"
                     :disabled="busy"
+                    data-testid="install-guide-notify-off"
                     @click="onUnsubscribe"
-                  >关闭</button>
+                  >关闭通知</button>
                   <button
                     v-else
                     class="igs-btn igs-btn--accent"
@@ -108,19 +101,38 @@
                     data-testid="install-guide-notify-on"
                     @click="onSubscribe"
                   >{{ push.permission.value === 'denied' ? '已被拒绝' : (busy ? '请稍候…' : '开启通知') }}</button>
-                </li>
-              </ol>
-              <p v-if="errorText" class="igs-error">{{ errorText }}</p>
-              <TestRow
-                v-if="canTest"
-                :busy="busy"
-                :result="testText"
-                @test="onSendTest"
-              />
+                </div>
+                <p class="igs-note" v-if="push.supported.value">
+                  无需安装即可直接开启通知；agent 等待输入时推送提醒，无需盯着屏幕。
+                </p>
+                <p class="igs-note" v-else>
+                  当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
+                </p>
+                <p v-if="errorText" class="igs-error">{{ errorText }}</p>
+                <TestRow
+                  v-if="canTest"
+                  :busy="busy"
+                  :result="testText"
+                  @test="onSendTest"
+                />
+                <!-- Optional secondary: only when a real install prompt is captured. -->
+                <button
+                  v-if="push.canPromptInstall.value && !push.installed.value"
+                  class="igs-optional-link mono"
+                  data-testid="install-guide-install"
+                  @click="onInstall"
+                >也可安装为应用（可选，获得独立窗口）</button>
+              </div>
             </template>
 
-            <!-- ── iOS Safari: illustrated Add-to-Home-Screen steps ─────────── -->
+            <!-- ── iOS Safari (not standalone): install is a genuine prerequisite ─
+                 Unlike desktop/Android, iOS only grants Web Push to apps launched
+                 from a home-screen icon. So here — and ONLY here — the add-to-home
+                 steps lead, framed honestly as the prerequisite for notifications. -->
             <template v-else-if="push.platform.value === 'ios-safari'">
+              <p class="igs-note igs-note--warn">
+                <b>iOS 需先添加到主屏</b>，并从图标打开，才能开启通知 —— Safari 标签页内无法直接授权推送。
+              </p>
               <ol class="igs-steps">
                 <li class="igs-step">
                   <span class="igs-step-n mono">1</span>
@@ -203,7 +215,7 @@
                   >{{ push.permission.value === 'denied' ? '已被拒绝' : (busy ? '请稍候…' : '开启通知') }}</button>
                 </div>
                 <p class="igs-note" v-if="push.supported.value">
-                  无需安装即可直接开启通知；安装为应用可获得独立窗口（可选）。
+                  无需安装即可直接开启通知；agent 等待输入时推送提醒，无需盯着屏幕。<template v-if="push.platform.value === 'desktop-safari'">也可在 Safari 菜单将本站“添加到程序坞”（可选）。</template>
                 </p>
                 <p class="igs-note" v-else>
                   当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
@@ -273,13 +285,19 @@ TestRow.emits = ['test']
 // Refresh permission + subscription state whenever the sheet opens.
 watch(() => props.open, (o) => { if (o) { errorText.value = ''; testText.value = ''; void push.refresh() } })
 
-const headline = computed(() => (push.isStandalone.value ? '通知设置' : '安装与通知'))
+// iOS-not-standalone is the only path where install leads; everywhere else the
+// headline/lede are notification-first.
+const installLeads = computed(() =>
+  !push.isStandalone.value &&
+  (push.platform.value === 'ios-safari' || push.platform.value === 'ios-other'),
+)
+const headline = computed(() => (installLeads.value ? '安装与通知' : '通知设置'))
 
 const lede = computed(() => {
   if (push.isStandalone.value) return '已作为应用运行。开启通知，让 agent 等待输入时主动提醒你。'
-  if (push.platform.value === 'chromium') return '安装为应用并开启通知 —— agent 需要确认时第一时间收到提醒。'
-  if (push.platform.value === 'ios-safari') return '把页面添加到主屏幕，即可在 iOS 上接收 agent 推送提醒。'
+  if (push.platform.value === 'ios-safari') return 'iOS 需先把页面添加到主屏并从图标打开，才能接收 agent 推送提醒。'
   if (push.platform.value === 'ios-other') return '需要在 Safari 中打开才能安装为应用并接收通知。'
+  if (push.platform.value === 'chromium') return '开启通知 —— agent 需要确认时第一时间收到提醒，无需安装。'
   return '开启通知，在 agent 等待输入时收到提醒。'
 })
 
@@ -493,6 +511,22 @@ async function onSendTest(): Promise<void> {
 .igs-btn--accent:not(:disabled):active { background: #d8772b; }
 .igs-btn--ghost { background: #232327; color: #c8c8ce; border-color: #353539; }
 .igs-btn--ghost:not(:disabled):active { background: #2c2c31; }
+
+/* Optional secondary action (e.g. "也可安装为应用") — deliberately subtle so it
+   never competes with the primary 开启通知 CTA. */
+.igs-optional-link {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: #7a7a82;
+  font-size: 0.68rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.igs-optional-link:active { color: #f08a3c; }
 
 /* Notes & errors */
 .igs-note {
