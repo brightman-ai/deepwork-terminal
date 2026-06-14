@@ -49,6 +49,8 @@ export interface TmuxState {
   installed: boolean
   serverRunning: boolean
   attached: boolean
+  /** tmux session name THIS shell's client is attached to ('' when detached). */
+  attachedSession?: string
   prefix: TmuxPrefix
   sessions: TmuxSessionState[]
 }

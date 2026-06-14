@@ -18,6 +18,10 @@
       <SetupWizardIcon :inline="true" />
     </div>
 
+    <!-- tmux pane bar: its own row directly under the title, OUTSIDE .terminal-body,
+         so taps don't hit copy-mode handlers / touchball. Self-hides unless attached. -->
+    <TmuxPaneBar :session-id="sessionId" @send-key="onSendKey" @open-notify="installGuideOpen = true" />
+
     <div v-if="wsStatus === 'preempted'" class="preempted-banner">
       <span>Session taken over by another device.</span>
       <button class="btn-reconnect" @click="wsReconnect()">Reconnect</button>
@@ -30,9 +34,6 @@
       @touchstart.passive="onTerminalTouchStart"
       @touchend.passive="onTerminalTouchEnd"
     >
-      <!-- tmux window tabs: under the title row, above xterm; self-hides without tmux.
-           Its header carries the WS7 contextual notify bell. -->
-      <TmuxPaneBar :session-id="sessionId" @send-key="onSendKey" @open-notify="installGuideOpen = true" />
       <XtermTerminal
         ref="xtermRef"
         :active="true"

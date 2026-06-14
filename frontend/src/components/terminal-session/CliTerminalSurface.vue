@@ -19,10 +19,9 @@
       @touchstart.passive="onTerminalTouchStart"
       @touchend.passive="onTerminalTouchEnd"
     >
-      <!-- tmux window tabs: directly under the workbench "终端 N" title row, above xterm.
-           Self-hides unless a tmux server is attached. The contextual notify bell
-           lives in its header (WS7 secondary entry). -->
-      <TmuxPaneBar :session-id="sessionId" @send-key="onSendKey" @open-notify="installGuideOpen = true" />
+      <!-- The tmux pane bar moved OUT of .terminal-body into the host's status row
+           (CliPortal) so its taps no longer hit copy-mode touch handlers / touchball,
+           and it replaces the per-session "终端 N idle" strip when attached. -->
       <!-- WS7 primary entry — always-visible install/notify icon, top-right of the
            terminal surface (the workbench title row lives in the parent CliTabBar). -->
       <InstallNotifyIcon class="surface-notify-icon" @open="installGuideOpen = true" />
@@ -149,7 +148,6 @@ import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.vue'
 import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.vue'
-import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
@@ -919,7 +917,11 @@ function clipboardWriteFallback(text: string): boolean {
 
 // ─── Expose for parent ────────────────────────────────────────────────────────
 
-defineExpose({ wsStatus, agentState, notifications, netStats })
+// onSendKey + openInstallGuide are exposed so the host (CliPortal) can drive the
+// relocated tmux pane bar — which now lives in the header/status row, outside this
+// surface's body. openInstallGuide backs the pane bar's contextual notify bell.
+function openInstallGuide() { installGuideOpen.value = true }
+defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide })
 </script>
 
 <style scoped>

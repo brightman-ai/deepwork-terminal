@@ -26,11 +26,14 @@ export interface TmuxStateStore {
   state: Ref<TmuxState | null>
   installed: ComputedRef<boolean>
   serverRunning: ComputedRef<boolean>
+  /** True iff THIS session's shell is inside a tmux client (per-shell, not global). */
   attached: ComputedRef<boolean>
+  /** tmux session name THIS shell is attached to ('' when detached). */
+  attachedSession: ComputedRef<string>
   /** Decoded tmux prefix control byte(s); falls back to 0x02 (C-b) until known. */
   prefixBytes: ComputedRef<Uint8Array>
   prefixDisplay: ComputedRef<string>
-  /** Windows of the attached session (else the first session, else []). */
+  /** Windows of the session THIS shell is attached to ([] when detached). */
   windows: ComputedRef<TmuxWindowState[]>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
@@ -68,14 +71,20 @@ function createStore(sessionId: () => string): TmuxStateStore {
   const installed = computed(() => state.value?.installed ?? false)
   const serverRunning = computed(() => state.value?.serverRunning ?? false)
   const attached = computed(() => state.value?.attached ?? false)
+  const attachedSession = computed(() => state.value?.attachedSession ?? '')
   const prefixBytes = computed(() => decodePrefix(state.value?.prefix?.bytes))
   const prefixDisplay = computed(() => state.value?.prefix?.display ?? 'C-b')
 
+  // Windows of the session THIS shell is attached to — scoped by attachedSession
+  // name, NOT by any session that merely has a client. Detached → [] so the bar
+  // self-hides for plain shells even while a tmux server runs for someone else.
   const windows = computed<TmuxWindowState[]>(() => {
+    if (!attached.value) return []
     const sessions = state.value?.sessions ?? []
     if (sessions.length === 0) return []
-    const s = sessions.find(x => x.attached) ?? sessions[0]
-    return s.windows ?? []
+    const name = attachedSession.value
+    const s = (name && sessions.find(x => x.name === name)) || sessions.find(x => x.attached)
+    return s?.windows ?? []
   })
 
   function prefixSeq(suffix: string): string {
@@ -98,7 +107,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
   }
 
   return {
-    state, installed, serverRunning, attached, prefixBytes, prefixDisplay,
+    state, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
     windows, prefixSeq, handleWSMessage, fetchSnapshot,
   }
 }
