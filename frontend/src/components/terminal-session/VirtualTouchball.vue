@@ -15,11 +15,19 @@
       </svg>
     </div>
 
-    <!-- Cursor indicator — white arrow pointer -->
+    <!-- Cursor indicator — white arrow pointer. `cursorPosition` is the ARROW TIP (the
+         point the user aims with). The SVG's tip sits at local (CURSOR_TIP_X, CURSOR_TIP_Y),
+         so we translate the box by that offset to put the tip exactly on cursorPosition.
+         The copy-mode anchor is mapped from the SAME cursorPosition, so the selection starts
+         precisely under the visible tip. -->
     <div
       v-if="cursorPosition"
       class="cursor-indicator"
-      :style="{ left: cursorPosition.x + 'px', top: cursorPosition.y + 'px' }"
+      :style="{
+        left: cursorPosition.x + 'px',
+        top: cursorPosition.y + 'px',
+        transform: `translate(${-CURSOR_TIP_X}px, ${-CURSOR_TIP_Y}px)`,
+      }"
     >
       <svg width="18" height="22" viewBox="0 0 18 22" fill="none">
         <path d="M2 2 L2 19 L6.5 14.5 L9.5 21 L12.5 19.5 L9.5 13 L15.5 13 Z"
@@ -36,6 +44,7 @@
  * ALWAYS visible on mobile. Supports tap, double-tap, triple-tap, long-press, drag.
  */
 import { reactive, onMounted } from 'vue'
+import { CURSOR_TIP_X, CURSOR_TIP_Y } from './touchballCursorGeometry'
 
 defineProps<{
   visible: boolean
@@ -186,7 +195,7 @@ defineExpose({ moveTo })
   position: fixed;
   pointer-events: none;
   z-index: 115;
-  transform: translate(0, 0);
+  /* transform set inline → shifts the SVG so its arrow tip lands on cursorPosition. */
   filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6));
 }
 </style>

@@ -87,6 +87,12 @@ const ballPos = ref({ x: 200, y: 300 })
 
 function onBallPositionChange(x: number, y: number) { ballPos.value = { x, y } }
 
+// Authoritative aim point = the ARROW TIP of the touchball's virtual cursor. This SAME
+// value is (a) handed to VirtualTouchball as `:cursor-position` (which renders its tip
+// exactly here) and (b) emitted as the screen point for tap / double-tap / long-press →
+// the copy-mode anchor. So the selection anchor lands precisely under the visible cursor
+// the user is aiming with — no finger-vs-cursor offset. Drag re-mapping in SelectionOverlay
+// already maps the finger directly, which is correct once the start anchor is tip-aligned.
 const cursorDisplayPos = computed(() => {
   const b = ballPos.value
   const nearTop = b.y < OFFSET_DIST + 20
