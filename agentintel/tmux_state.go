@@ -52,8 +52,12 @@ type TmuxState struct {
 	Installed     bool               `json:"installed"`
 	ServerRunning bool               `json:"serverRunning"`
 	Attached      bool               `json:"attached"`
-	Prefix        TmuxPrefix         `json:"prefix"`
-	Sessions      []TmuxSessionState `json:"sessions"`
+	// AttachedSession is the tmux session name this shellPID's client is attached
+	// to (empty when not attached). It scopes the pane bar to THIS session's
+	// windows rather than any session that merely has a client somewhere.
+	AttachedSession string             `json:"attachedSession"`
+	Prefix          TmuxPrefix         `json:"prefix"`
+	Sessions        []TmuxSessionState `json:"sessions"`
 }
 
 // defaultPrefix is C-b (tmux default) used when prefix cannot be read.
@@ -220,6 +224,11 @@ func (s *TmuxStateService) State(ctx context.Context, shellPID int) TmuxState {
 	st.ServerRunning = s.ServerRunning(ctx)
 	if shellPID > 0 {
 		st.Attached = s.Attached(ctx, shellPID)
+		if st.Attached {
+			cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+			st.AttachedSession = s.prober.FindClientSession(cctx, shellPID)
+			cancel()
+		}
 	}
 	if !st.ServerRunning {
 		return st
