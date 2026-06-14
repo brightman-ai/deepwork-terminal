@@ -49,28 +49,92 @@ type PTYFactory func(opts PTYStartOptions) (master *os.File, cmd *exec.Cmd, err 
 // DefaultPTYFactory creates a real PTY. Tries independent process group (Setpgid)
 // for DDC-01 SIGHUP isolation; falls back gracefully in restricted environments
 // (containers, seccomp) where Setpgid is denied.
+//
+// The shell string may carry args (config.go documents e.g. "/bin/bash --login",
+// and "tmux attach -t x" is a common case), so we tokenize it shell-words style
+// before exec rather than passing the whole string as a single program path.
 func DefaultPTYFactory(opts PTYStartOptions) (*os.File, *exec.Cmd, error) {
-	shell := opts.Shell
-	cmd := exec.Command(shell)
-	if opts.CWD != "" {
-		cmd.Dir = opts.CWD
+	prog, args := splitShell(opts.Shell)
+	newCmd := func() *exec.Cmd {
+		c := exec.Command(prog, args...)
+		if opts.CWD != "" {
+			c.Dir = opts.CWD
+		}
+		return c
 	}
+	cmd := newCmd()
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		// Fallback: retry without Setpgid (restricted environment).
-		cmd = exec.Command(shell)
-		if opts.CWD != "" {
-			cmd.Dir = opts.CWD
-		}
+		cmd = newCmd()
 		ptmx, err = pty.Start(cmd)
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 	return ptmx, cmd, nil
+}
+
+// splitShell tokenizes a shell command string into program + args, honouring
+// single and double quotes and backslash escapes (POSIX shell-words style). A
+// single bare token (e.g. "/bin/zsh") yields that token and no args, so existing
+// single-shell behaviour is unchanged. An empty/whitespace-only string yields an
+// empty program, which exec rejects with a clear error — the same as before.
+func splitShell(s string) (prog string, args []string) {
+	var (
+		tokens  []string
+		cur     strings.Builder
+		inToken bool
+		quote   rune // 0, '\'' or '"'
+	)
+	flush := func() {
+		if inToken {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+			inToken = false
+		}
+	}
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			} else {
+				cur.WriteRune(c)
+			}
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			} else if c == '\\' && i+1 < len(rs) && (rs[i+1] == '"' || rs[i+1] == '\\') {
+				i++
+				cur.WriteRune(rs[i])
+			} else {
+				cur.WriteRune(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			inToken = true
+		case c == '\\' && i+1 < len(rs):
+			i++
+			cur.WriteRune(rs[i])
+			inToken = true
+		case c == ' ' || c == '\t' || c == '\n':
+			flush()
+		default:
+			cur.WriteRune(c)
+			inToken = true
+		}
+	}
+	flush()
+	if len(tokens) == 0 {
+		return "", nil
+	}
+	return tokens[0], tokens[1:]
 }
 
 // activeConnEntry tracks the active WS connection for a session (BUG-3 preemption).
