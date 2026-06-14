@@ -66,7 +66,7 @@
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
       <TmuxPanel v-if="activeMode === 'tmux'" :session-id="sessionId" @send-key="onSendKey" @close="onToggleKeyboard" />
-      <ComposeBar v-if="activeMode === 'compose'" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
+      <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
 
     <!-- 浮动层: touchball, 选区覆盖, 复制按钮, HUD -->
@@ -101,11 +101,14 @@
       @close="tmuxSheetOpen = false"
     />
 
-    <!-- WS5: 收纳抽屉 — images / files / input history. Send reuses the compose path. -->
+    <!-- WS5: 收纳抽屉 — images / files / input history.
+         @inject       → re-uses the clipboard-paste inject chokepoint (file path → PTY).
+         @compose-draft → opens the ComposeBar with text inserted for editing (重发). -->
     <ResourceDrawer
       :session-id="sessionId"
       v-model:open="resourceDrawerOpen"
-      @send="onComposeSend"
+      @inject="onDrawerInject"
+      @compose-draft="onDrawerComposeDraft"
     />
 
     <!-- WS7: platform-aware install + notification guide (shared by both entries). -->
@@ -232,6 +235,10 @@ const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
 const resourceDrawerOpen = ref(localStorage.getItem(RESOURCE_DRAWER_KEY) === '1')
 watch(resourceDrawerOpen, (v) => localStorage.setItem(RESOURCE_DRAWER_KEY, v ? '1' : '0'))
 const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'tmux' | 'compose'>('idle')
+// Draft pushed into the ComposeBar by the drawer's 重发 action. A fresh object-less
+// value would not re-trigger ComposeBar's watcher for an identical re-send, so we
+// bump a nonce-suffixed ref only via the handler below.
+const composeDraft = ref<string | undefined>(undefined)
 const stickyShift = ref(false)
 const stickyCtrl = ref(false)
 const stickyAlt = ref(false)
@@ -708,7 +715,30 @@ function onComposeSend(text: string) {
   const chunks = composeSend.encode(text)
   for (const chunk of chunks) sendBinary(chunk)
   activeMode.value = 'idle'
+  composeDraft.value = undefined
   hud.record('keyboard', `compose: ${text.length} chars`)
+}
+
+// Drawer "插入对话" — re-use an already-uploaded image/file. The drawer hands us the
+// item's on-disk path; we route it through the SAME inject chokepoint the
+// clipboard-paste flow uses post-upload (shell-quoted path → PTY), so claude/codex
+// can @-reference it exactly as a fresh paste.
+function onDrawerInject(path: string) {
+  if (!path) return
+  pasteResolver.injectKnownPaths([path])
+  hud.record('state', `inject: ${path}`)
+}
+
+// Drawer 重发 — open the ComposeBar with the past prompt inserted for editing (NOT a
+// direct send). Reset the draft first so an identical re-send still re-triggers the
+// ComposeBar watcher on the next tick.
+function onDrawerComposeDraft(text: string) {
+  if (text == null) return
+  composeDraft.value = undefined
+  nextTick(() => {
+    composeDraft.value = text
+    activeMode.value = 'compose'
+  })
 }
 
 // ─── Touch interactions ───────────────────────────────────────────────────────
