@@ -1,8 +1,11 @@
 <template>
-  <!-- WS7 — platform-aware install + notification guide. Same sheet for both entry
-       icons (top title-bar app icon + tmux-bar bell). Mobile = bottom sheet,
-       desktop = anchored popover. Branches on usePushNotifications().platform /
-       isStandalone so each platform sees only the steps it can actually act on. -->
+  <!-- WS7 — foolproof, state-driven notification onboarding. One clear primary
+       action per state, derived from (platform, isStandalone, permission,
+       subscribed) via a single `uiState`. No wall of options: the user always
+       sees exactly the next thing to do. Mobile = bottom sheet, desktop =
+       anchored popover. Reactively reflects permission/subscribed/standalone
+       changes (launching from the home-screen icon or returning from Settings
+       auto-updates the shown state via the composable's visibility re-eval). -->
   <Teleport to="body">
     <Transition name="igs-fade">
       <div
@@ -26,113 +29,87 @@
           <div class="igs-body">
             <p class="igs-lede">{{ lede }}</p>
 
-            <!-- ── Already standalone: notification toggle only ─────────────── -->
-            <template v-if="push.isStandalone.value">
-              <div class="igs-section">
-                <div class="igs-section-lbl mono">通知</div>
-                <div class="igs-toggle-row" data-testid="install-guide-notify-toggle">
-                  <div class="igs-toggle-meta">
-                    <span class="igs-toggle-state" :class="notifyStateClass">{{ notifyStateText }}</span>
-                    <span class="igs-toggle-hint mono">{{ permissionHint }}</span>
-                  </div>
-                  <button
-                    v-if="!push.supported.value"
-                    class="igs-btn igs-btn--ghost"
-                    disabled
-                  >不支持</button>
-                  <button
-                    v-else-if="push.permission.value === 'denied'"
-                    class="igs-btn igs-btn--ghost"
-                    disabled
-                    data-testid="install-guide-notify-denied"
-                  >已被系统拒绝</button>
-                  <button
-                    v-else-if="push.subscribed.value"
-                    class="igs-btn igs-btn--ghost"
-                    :disabled="busy"
-                    data-testid="install-guide-notify-off"
-                    @click="onUnsubscribe"
-                  >关闭通知</button>
-                  <button
-                    v-else
-                    class="igs-btn igs-btn--accent"
-                    :disabled="busy"
-                    data-testid="install-guide-notify-on"
-                    @click="onSubscribe"
-                  >{{ busy ? '请稍候…' : '开启通知' }}</button>
+            <!-- ════════ STATE: already on ═══════════════════════════════════
+                 subscribed OR permission granted. One reassuring line + the
+                 end-to-end test. No toggle wall — turning off is a rare path,
+                 offered as a quiet secondary link. -->
+            <template v-if="uiState === 'on'">
+              <div class="igs-status igs-status--on" data-testid="install-guide-status-on">
+                <span class="igs-status-mark">✅</span>
+                <div class="igs-status-body">
+                  <span class="igs-status-t">通知已开启</span>
+                  <span class="igs-status-d">agent 等待输入时，你会第一时间收到系统提醒。</span>
                 </div>
-                <p v-if="errorText" class="igs-error">{{ errorText }}</p>
-                <TestRow
-                  v-if="canTest"
-                  :busy="busy"
-                  :result="testText"
-                  @test="onSendTest"
-                />
               </div>
+              <TestRow :busy="busy" :result="testText" @test="onSendTest" />
+              <button
+                v-if="push.subscribed.value"
+                class="igs-optional-link mono"
+                data-testid="install-guide-notify-off"
+                :disabled="busy"
+                @click="onUnsubscribe"
+              >关闭通知</button>
             </template>
 
-            <!-- ── Chromium (desktop + Android): notify-first, install optional ─
-                 Chrome/Edge/Firefox + Android Chrome do Web Push in a normal tab —
-                 no install required. "开启通知" is the primary CTA; the captured
-                 beforeinstallprompt is offered only as a subtle optional link. -->
-            <template v-else-if="push.platform.value === 'chromium'">
-              <div class="igs-section">
-                <div class="igs-toggle-row" data-testid="install-guide-notify-toggle">
-                  <div class="igs-toggle-meta">
-                    <span class="igs-toggle-state" :class="notifyStateClass">{{ notifyStateText }}</span>
-                    <span class="igs-toggle-hint mono">{{ permissionHint }}</span>
-                  </div>
-                  <button
-                    v-if="!push.supported.value"
-                    class="igs-btn igs-btn--ghost"
-                    disabled
-                  >不支持</button>
-                  <button
-                    v-else-if="push.subscribed.value"
-                    class="igs-btn igs-btn--ghost"
-                    :disabled="busy"
-                    data-testid="install-guide-notify-off"
-                    @click="onUnsubscribe"
-                  >关闭通知</button>
-                  <button
-                    v-else
-                    class="igs-btn igs-btn--accent"
-                    :disabled="busy || push.permission.value === 'denied'"
-                    data-testid="install-guide-notify-on"
-                    @click="onSubscribe"
-                  >{{ push.permission.value === 'denied' ? '已被拒绝' : (busy ? '请稍候…' : '开启通知') }}</button>
-                </div>
-                <p class="igs-note" v-if="push.supported.value">
-                  无需安装即可直接开启通知；agent 等待输入时推送提醒，无需盯着屏幕。
-                </p>
-                <p class="igs-note" v-else>
-                  当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
-                </p>
-                <p v-if="errorText" class="igs-error">{{ errorText }}</p>
-                <TestRow
-                  v-if="canTest"
-                  :busy="busy"
-                  :result="testText"
-                  @test="onSendTest"
-                />
-                <!-- Optional secondary: only when a real install prompt is captured. -->
-                <button
-                  v-if="push.canPromptInstall.value && !push.installed.value"
-                  class="igs-optional-link mono"
-                  data-testid="install-guide-install"
-                  @click="onInstall"
-                >也可安装为应用（可选，获得独立窗口）</button>
-              </div>
+            <!-- ════════ STATE: can enable now ═══════════════════════════════
+                 permission default + push supported (desktop any browser,
+                 Android Chrome, or iOS-standalone). ONE prominent CTA: tap →
+                 request permission → subscribe. -->
+            <template v-else-if="uiState === 'enable'">
+              <button
+                class="igs-cta"
+                data-testid="install-guide-notify-on"
+                :disabled="busy"
+                @click="onSubscribe"
+              >
+                <span class="igs-cta-icon">🔔</span>
+                {{ busy ? '请稍候…' : '开启通知' }}
+              </button>
+              <p class="igs-note">{{ enableHint }}</p>
+              <p v-if="errorText" class="igs-error">{{ errorText }}</p>
+              <!-- Quiet, optional install (only when a real prompt is captured). -->
+              <button
+                v-if="push.canPromptInstall.value && !push.installed.value"
+                class="igs-optional-link mono"
+                data-testid="install-guide-install"
+                @click="onInstall"
+              >也可安装为应用（可选，获得独立窗口）</button>
             </template>
 
-            <!-- ── iOS Safari (not standalone): install is a genuine prerequisite ─
-                 Unlike desktop/Android, iOS only grants Web Push to apps launched
-                 from a home-screen icon. So here — and ONLY here — the add-to-home
-                 steps lead, framed honestly as the prerequisite for notifications. -->
-            <template v-else-if="push.platform.value === 'ios-safari'">
-              <p class="igs-note igs-note--warn">
-                <b>iOS 需先添加到主屏</b>，并从图标打开，才能开启通知 —— Safari 标签页内无法直接授权推送。
-              </p>
+            <!-- ════════ STATE: denied — recovery ════════════════════════════
+                 permission === 'denied'. The browser will NOT let the web app
+                 re-prompt, so we give honest, platform-specific MANUAL steps to
+                 re-enable in settings, plus a "我已恢复，重试" re-check button. -->
+            <template v-else-if="uiState === 'denied'">
+              <div class="igs-status igs-status--off" data-testid="install-guide-status-denied">
+                <span class="igs-status-mark">🔕</span>
+                <div class="igs-status-body">
+                  <span class="igs-status-t">通知已被拒绝</span>
+                  <span class="igs-status-d">浏览器不允许网页代为开启，请按下面步骤在设置里恢复。</span>
+                </div>
+              </div>
+              <div class="igs-section">
+                <div class="igs-section-lbl mono">{{ recover.label }}</div>
+                <ol class="igs-steps">
+                  <li v-for="(s, i) in recover.steps" :key="i" class="igs-step igs-step--compact">
+                    <span class="igs-step-n mono">{{ i + 1 }}</span>
+                    <div class="igs-step-body"><span class="igs-step-t" v-html="s" /></div>
+                  </li>
+                </ol>
+              </div>
+              <button
+                class="igs-btn igs-btn--accent igs-btn--block"
+                data-testid="install-guide-retry"
+                :disabled="busy"
+                @click="onRetry"
+              >{{ busy ? '检查中…' : '我已恢复，重试' }}</button>
+              <p v-if="errorText" class="igs-error">{{ errorText }}</p>
+            </template>
+
+            <!-- ════════ STATE: iOS Safari, NOT standalone — add to home ═════
+                 The genuine prerequisite for iOS Web Push. Framed as the path
+                 to notifications. Launching from the icon flips to 'enable'. -->
+            <template v-else-if="uiState === 'ios-install'">
               <ol class="igs-steps">
                 <li class="igs-step">
                   <span class="igs-step-n mono">1</span>
@@ -144,15 +121,15 @@
                 <li class="igs-step">
                   <span class="igs-step-n mono">2</span>
                   <div class="igs-step-body">
-                    <span class="igs-step-t">添加到主屏幕</span>
-                    <span class="igs-step-d">在分享菜单中选择 <IconPlusSquare /> “添加到主屏幕”。</span>
+                    <span class="igs-step-t">选择「添加到主屏幕」</span>
+                    <span class="igs-step-d">在分享菜单中点 <IconPlusSquare /> “添加到主屏幕”。</span>
                   </div>
                 </li>
                 <li class="igs-step">
                   <span class="igs-step-n mono">3</span>
                   <div class="igs-step-body">
                     <span class="igs-step-t">从主屏图标打开本应用</span>
-                    <span class="igs-step-d">iOS 仅对已安装的应用授予推送，且只有从主屏图标启动的窗口才算“已安装”。</span>
+                    <span class="igs-step-d">iOS 仅对从主屏图标启动的应用授予推送，Safari 标签页不算。</span>
                   </div>
                 </li>
                 <li class="igs-step">
@@ -164,70 +141,27 @@
                 </li>
               </ol>
               <p class="igs-note igs-note--warn" data-testid="install-guide-ios-callout">
-                <b>已添加？</b>请从主屏的图标打开本应用，再回到这里开启通知 —— 当前的 Safari 标签页无法检测到安装。
-              </p>
-              <p class="igs-note mono">
-                iOS 16.4+ 支持 Web Push，但只在“添加到主屏幕”后生效。首次从主屏启动时存储是隔离的，可能需要重新输入一次授权码。
+                <b>已添加？</b>请从主屏的图标打开本应用，再回到这里开启通知 —— 当前 Safari 标签页无法检测到安装。
               </p>
             </template>
 
-            <!-- ── iOS non-Safari: must switch to Safari ────────────────────── -->
-            <template v-else-if="push.platform.value === 'ios-other'">
+            <!-- ════════ STATE: iOS non-Safari — must switch to Safari ═══════ -->
+            <template v-else-if="uiState === 'ios-safari'">
               <p class="igs-note igs-note--warn">
-                当前浏览器无法安装为应用。请用 <b>Safari</b> 打开本页面，再按下方步骤添加到主屏幕。
+                当前浏览器无法添加到主屏。请用 <b>Safari</b> 打开本页面，再按下方步骤操作。
               </p>
               <ol class="igs-steps igs-steps--muted">
-                <li class="igs-step"><span class="igs-step-n mono">1</span><div class="igs-step-body"><span class="igs-step-t">在 Safari 中打开此链接</span></div></li>
-                <li class="igs-step"><span class="igs-step-n mono">2</span><div class="igs-step-body"><span class="igs-step-t">分享 → 添加到主屏幕</span></div></li>
-                <li class="igs-step"><span class="igs-step-n mono">3</span><div class="igs-step-body"><span class="igs-step-t">从主屏打开后开启通知</span></div></li>
+                <li class="igs-step igs-step--compact"><span class="igs-step-n mono">1</span><div class="igs-step-body"><span class="igs-step-t">在 Safari 中打开此链接</span></div></li>
+                <li class="igs-step igs-step--compact"><span class="igs-step-n mono">2</span><div class="igs-step-body"><span class="igs-step-t">分享 → 添加到主屏幕</span></div></li>
+                <li class="igs-step igs-step--compact"><span class="igs-step-n mono">3</span><div class="igs-step-body"><span class="igs-step-t">从主屏图标打开后开启通知</span></div></li>
               </ol>
             </template>
 
-            <!-- ── Desktop Safari / Firefox / other ─────────────────────────── -->
-            <!-- Desktop = no install required: Chrome/Edge/Firefox + Safari 16+ do
-                 Web Push in a normal tab. "开启通知" is the primary, front-and-center
-                 action; install/add-to-dock is not gated in front of it. -->
+            <!-- ════════ STATE: unsupported ══════════════════════════════════ -->
             <template v-else>
-              <div class="igs-section">
-                <div class="igs-toggle-row" data-testid="install-guide-notify-toggle">
-                  <div class="igs-toggle-meta">
-                    <span class="igs-toggle-state" :class="notifyStateClass">{{ notifyStateText }}</span>
-                    <span class="igs-toggle-hint mono">{{ permissionHint }}</span>
-                  </div>
-                  <button
-                    v-if="!push.supported.value"
-                    class="igs-btn igs-btn--ghost"
-                    disabled
-                  >不支持</button>
-                  <button
-                    v-else-if="push.subscribed.value"
-                    class="igs-btn igs-btn--ghost"
-                    :disabled="busy"
-                    data-testid="install-guide-notify-off"
-                    @click="onUnsubscribe"
-                  >关闭通知</button>
-                  <button
-                    v-else
-                    class="igs-btn igs-btn--accent"
-                    :disabled="busy || push.permission.value === 'denied'"
-                    data-testid="install-guide-notify-on"
-                    @click="onSubscribe"
-                  >{{ push.permission.value === 'denied' ? '已被拒绝' : (busy ? '请稍候…' : '开启通知') }}</button>
-                </div>
-                <p class="igs-note" v-if="push.supported.value">
-                  无需安装即可直接开启通知；agent 等待输入时推送提醒，无需盯着屏幕。<template v-if="push.platform.value === 'desktop-safari'">也可在 Safari 菜单将本站“添加到程序坞”（可选）。</template>
-                </p>
-                <p class="igs-note" v-else>
-                  当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
-                </p>
-                <p v-if="errorText" class="igs-error">{{ errorText }}</p>
-                <TestRow
-                  v-if="canTest"
-                  :busy="busy"
-                  :result="testText"
-                  @test="onSendTest"
-                />
-              </div>
+              <p class="igs-note">
+                当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
+              </p>
             </template>
           </div>
         </div>
@@ -251,9 +185,27 @@ const busy = ref(false)
 const errorText = ref('')
 const testText = ref('')
 
-// The end-to-end test is offered the moment a test could actually land: either a
-// real subscription (→ backend /push/test → SW → OS) or, as a foreground-only
-// fallback, granted permission (→ local Notification). Single button, single flow.
+// ── Single source of truth: one state, one primary action. ───────────────────
+// Order matters — earlier branches win. Reactively reflects every input so the
+// sheet updates itself when the user relaunches from the icon or returns from
+// Settings (the composable re-evaluates permission/subscribed/standalone on
+// visibilitychange + focus).
+type UiState = 'on' | 'enable' | 'denied' | 'ios-install' | 'ios-safari' | 'unsupported'
+const uiState = computed<UiState>(() => {
+  // Already on — highest priority, regardless of platform.
+  if (push.subscribed.value || push.permission.value === 'granted') return 'on'
+  const p = push.platform.value
+  // iOS in a non-Safari shell can't add to home → must switch to Safari first.
+  if (p === 'ios-other' && !push.isStandalone.value) return 'ios-safari'
+  // iOS Safari tab (not standalone): install is the genuine prerequisite.
+  if (p === 'ios-safari' && !push.isStandalone.value) return 'ios-install'
+  // Denied: browser won't re-prompt → manual recovery steps.
+  if (push.permission.value === 'denied') return 'denied'
+  // Can enable now: push supported + permission still askable.
+  if (push.supported.value && push.permission.value === 'default') return 'enable'
+  return 'unsupported'
+})
+
 const canTest = computed(() =>
   push.subscribed.value ||
   (push.permission.value === 'granted' && push.supported.value),
@@ -267,57 +219,115 @@ const IconPlusSquare = () => h('svg', { width: 13, height: 13, viewBox: '0 0 24 
   h('rect', { x: 3, y: 3, width: 18, height: 18, rx: 3 }), h('path', { d: 'M12 8v8M8 12h8' }),
 ])
 
-// Shared "发送测试通知" row — appears in every branch where a test can land
-// (standalone / chromium / desktop). Emits 'test'; the parent owns the flow.
-const TestRow = (props: { busy: boolean; result: string }, { emit }: { emit: (e: 'test') => void }) =>
-  h('div', { class: 'igs-test' }, [
-    h('button', {
-      class: 'igs-btn igs-btn--ghost',
-      disabled: props.busy,
-      'data-testid': 'install-guide-test',
-      onClick: () => emit('test'),
-    }, props.busy ? '发送中…' : '发送测试通知'),
-    props.result ? h('p', { class: 'igs-test-result mono' }, props.result) : null,
-  ])
+// Shared "发送测试通知" row — only rendered in the 'on' state.
+const TestRow = (rowProps: { busy: boolean; result: string }, { emit: rowEmit }: { emit: (e: 'test') => void }) =>
+  canTest.value
+    ? h('div', { class: 'igs-test' }, [
+        h('button', {
+          class: 'igs-btn igs-btn--ghost',
+          disabled: rowProps.busy,
+          'data-testid': 'install-guide-test',
+          onClick: () => rowEmit('test'),
+        }, rowProps.busy ? '发送中…' : '发送测试通知'),
+        rowProps.result ? h('p', { class: 'igs-test-result mono' }, rowProps.result) : null,
+      ])
+    : null
 TestRow.props = ['busy', 'result']
 TestRow.emits = ['test']
 
 // Refresh permission + subscription state whenever the sheet opens.
 watch(() => props.open, (o) => { if (o) { errorText.value = ''; testText.value = ''; void push.refresh() } })
 
-// iOS-not-standalone is the only path where install leads; everywhere else the
-// headline/lede are notification-first.
-const installLeads = computed(() =>
-  !push.isStandalone.value &&
-  (push.platform.value === 'ios-safari' || push.platform.value === 'ios-other'),
-)
-const headline = computed(() => (installLeads.value ? '安装与通知' : '通知设置'))
+const headline = computed(() => {
+  switch (uiState.value) {
+    case 'on': return '通知已开启'
+    case 'denied': return '恢复通知权限'
+    case 'ios-install':
+    case 'ios-safari': return '安装与通知'
+    default: return '通知设置'
+  }
+})
 
 const lede = computed(() => {
-  if (push.isStandalone.value) return '已作为应用运行。开启通知，让 agent 等待输入时主动提醒你。'
-  if (push.platform.value === 'ios-safari') return 'iOS 需先把页面添加到主屏并从图标打开，才能接收 agent 推送提醒。'
-  if (push.platform.value === 'ios-other') return '需要在 Safari 中打开才能安装为应用并接收通知。'
-  if (push.platform.value === 'chromium') return '开启通知 —— agent 需要确认时第一时间收到提醒，无需安装。'
-  return '开启通知，在 agent 等待输入时收到提醒。'
+  switch (uiState.value) {
+    case 'on': return '一切就绪。下面可发一条测试通知确认链路。'
+    case 'denied': return ''
+    case 'ios-install': return 'iOS 需先把页面添加到主屏并从图标打开，才能接收 agent 推送提醒。'
+    case 'ios-safari': return '需要在 Safari 中打开才能添加到主屏并接收通知。'
+    case 'unsupported': return ''
+    default:
+      return push.isStandalone.value
+        ? '已作为应用运行。开启通知，让 agent 等待输入时主动提醒你。'
+        : '开启通知 —— agent 需要确认时第一时间收到提醒。'
+  }
 })
 
-const notifyStateText = computed(() => {
-  if (!push.supported.value) return '不支持'
-  if (push.subscribed.value) return '已开启'
-  if (push.permission.value === 'denied') return '已拒绝'
-  return '未开启'
+// Sub-line under the 'enable' CTA: platform-honest one-liner.
+const enableHint = computed(() => {
+  if (push.isStandalone.value) return '点上方按钮，系统会弹出授权框，点“允许”即可。'
+  if (push.platform.value === 'chromium' || push.platform.value === 'desktop-firefox') {
+    return '无需安装即可直接开启；点上方按钮后在浏览器授权框点“允许”。'
+  }
+  if (push.platform.value === 'desktop-safari') {
+    return '无需安装即可直接开启；也可在 Safari 菜单将本站“添加到程序坞”（可选）。'
+  }
+  return '点上方按钮，在系统授权框点“允许”即可。'
 })
-const notifyStateClass = computed(() => {
-  if (push.subscribed.value) return 'is-on'
-  if (push.permission.value === 'denied' || !push.supported.value) return 'is-off'
-  return 'is-idle'
-})
-const permissionHint = computed(() => {
-  switch (push.permission.value) {
-    case 'granted': return 'permission: granted'
-    case 'denied': return 'permission: denied — 需在系统设置中恢复'
-    case 'unsupported': return 'notifications unsupported'
-    default: return 'permission: default'
+
+// ── Denied recovery: real UI labels, per platform. Short, numbered, honest. ──
+const recover = computed<{ label: string; steps: string[] }>(() => {
+  const p = push.platform.value
+  if (push.isStandalone.value || p === 'ios-safari' || p === 'ios-other') {
+    // iOS standalone PWA (or any iOS path where the app icon exists).
+    return {
+      label: 'iOS · 在「设置」中恢复',
+      steps: [
+        '打开 iOS <b>设置</b>',
+        '向下找到 <b>「Deepwork」</b>',
+        '进入 <b>通知</b>',
+        '打开 <b>「允许通知」</b>，再回来点下方“重试”',
+      ],
+    }
+  }
+  if (p === 'chromium') {
+    return {
+      label: 'Chrome / Edge · 在地址栏恢复',
+      steps: [
+        '点地址栏最左的 <b>🔒 / ⓘ</b> 图标',
+        '找到 <b>通知</b> 一项',
+        '改为 <b>允许</b>（或点“重置权限”后刷新重试）',
+        '刷新页面，再回来点下方“重试”',
+      ],
+    }
+  }
+  if (p === 'desktop-firefox') {
+    return {
+      label: 'Firefox · 清除拦截',
+      steps: [
+        '点地址栏的 <b>🔒</b> 图标',
+        '清除对 <b>通知</b> 的拦截',
+        '刷新页面，再回来点下方“重试”',
+      ],
+    }
+  }
+  if (p === 'desktop-safari') {
+    return {
+      label: 'Safari · 在设置中恢复',
+      steps: [
+        '打开 <b>Safari → 设置</b>',
+        '进入 <b>网站 → 通知</b>',
+        '把本站设为 <b>「允许」</b>',
+        '刷新页面，再回来点下方“重试”',
+      ],
+    }
+  }
+  return {
+    label: '在浏览器设置中恢复',
+    steps: [
+      '打开浏览器的 <b>站点权限 / 通知</b> 设置',
+      '把本站的通知改为 <b>允许</b>',
+      '刷新页面，再回来点下方“重试”',
+    ],
   }
 })
 
@@ -326,13 +336,21 @@ async function onSubscribe(): Promise<void> {
   errorText.value = ''
   try {
     const ok = await push.subscribe(props.sessionId)
-    if (!ok) {
-      errorText.value = push.permission.value === 'denied'
-        ? '系统已拒绝通知权限，请在浏览器/系统设置中恢复后重试。'
-        : '开启通知失败，请稍后重试。'
-    }
+    if (!ok) errorText.value = subscribeErrorText()
   } finally {
     busy.value = false
+  }
+}
+
+// Map the composable's lastError into a concrete, actionable hint — never a bare "失败".
+function subscribeErrorText(): string {
+  switch (push.lastError.value) {
+    case 'denied':
+      return '系统已拒绝通知权限，请按上面的步骤在设置中恢复后重试。'
+    case 'ios-reopen':
+      return '开启未成功：请完全关闭本应用（上滑移除）后，从主屏图标重新打开，再点“开启通知”重试。'
+    default:
+      return '开启通知失败，请稍后重试。'
   }
 }
 
@@ -340,6 +358,24 @@ async function onUnsubscribe(): Promise<void> {
   busy.value = true
   errorText.value = ''
   try { await push.unsubscribe() } finally { busy.value = false }
+}
+
+// "我已恢复，重试" — re-check permission, then attempt to subscribe if now askable.
+async function onRetry(): Promise<void> {
+  busy.value = true
+  errorText.value = ''
+  try {
+    await push.refresh()
+    if (push.permission.value === 'denied') {
+      errorText.value = '仍是“已拒绝”状态。请确认已在设置里把本站/本应用的通知改为“允许”，并刷新页面后再试。'
+      return
+    }
+    // Permission now default/granted → drive straight through to a subscription.
+    const ok = await push.subscribe(props.sessionId)
+    if (!ok) errorText.value = subscribeErrorText()
+  } finally {
+    busy.value = false
+  }
 }
 
 async function onInstall(): Promise<void> {
@@ -436,6 +472,7 @@ async function onSendTest(): Promise<void> {
   scrollbar-color: #252528 transparent;
 }
 .igs-lede { color: #a8a8b0; line-height: 1.6; margin-bottom: 14px; }
+.igs-lede:empty { display: none; }
 
 /* Sections */
 .igs-section { margin-top: 4px; }
@@ -446,6 +483,47 @@ async function onSendTest(): Promise<void> {
   color: #6b6b72;
   margin-bottom: 8px;
 }
+
+/* Status banner (on / denied) */
+.igs-status {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border-radius: 10px;
+  border: 1px solid #252528;
+  background: #1c1c1f;
+}
+.igs-status--on { border-color: #2f5a3a; background: #16221a; }
+.igs-status--off { border-color: #4a2828; background: #221616; }
+.igs-status-mark { font-size: 1.3rem; line-height: 1; flex-shrink: 0; }
+.igs-status-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.igs-status-t { font-weight: 600; font-size: 0.86rem; color: #e8e8ec; }
+.igs-status--on .igs-status-t { color: #70c88c; }
+.igs-status--off .igs-status-t { color: #e08a8a; }
+.igs-status-d { color: #9a9aa2; font-size: 0.72rem; line-height: 1.45; }
+
+/* Primary CTA — the single foolproof "开启通知" action. */
+.igs-cta {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 14px;
+  border: none;
+  border-radius: 11px;
+  background: #f08a3c;
+  color: #0d0d0f;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: background 0.1s, opacity 0.1s;
+}
+.igs-cta:not(:disabled):active { background: #d8772b; }
+.igs-cta:disabled { opacity: 0.55; cursor: default; }
+.igs-cta-icon { font-size: 1.05rem; line-height: 1; }
 
 /* Steps */
 .igs-steps { list-style: none; display: flex; flex-direction: column; gap: 10px; }
@@ -459,7 +537,7 @@ async function onSendTest(): Promise<void> {
   border: 1px solid #252528;
   border-radius: 10px;
 }
-.igs-step.is-done { border-color: #2f5a3a; background: #16221a; }
+.igs-step--compact { padding: 9px 11px; }
 .igs-step-n {
   flex-shrink: 0;
   width: 22px; height: 22px;
@@ -470,30 +548,10 @@ async function onSendTest(): Promise<void> {
   font-size: 0.72rem;
   font-weight: 700;
 }
-.igs-step.is-done .igs-step-n { background: rgba(112, 200, 140, 0.16); color: #70c88c; }
 .igs-step-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .igs-step-t { color: #e8e8ec; font-weight: 600; font-size: 0.8rem; }
+.igs-step-t :deep(b) { color: #f5c79a; font-weight: 700; }
 .igs-step-d { color: #8a8a92; font-size: 0.72rem; line-height: 1.45; }
-.igs-step-ok { color: #70c88c; font-size: 0.66rem; flex-shrink: 0; }
-.igs-step-na { color: #6b6b72; font-size: 0.62rem; flex-shrink: 0; text-align: right; max-width: 72px; }
-
-/* Toggle row (standalone / desktop) */
-.igs-toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px;
-  background: #1c1c1f;
-  border: 1px solid #252528;
-  border-radius: 10px;
-}
-.igs-toggle-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.igs-toggle-state { font-weight: 600; font-size: 0.82rem; }
-.igs-toggle-state.is-on { color: #70c88c; }
-.igs-toggle-state.is-off { color: #c87070; }
-.igs-toggle-state.is-idle { color: #d8d8de; }
-.igs-toggle-hint { color: #6b6b72; font-size: 0.62rem; }
 
 /* Buttons */
 .igs-btn {
@@ -511,9 +569,10 @@ async function onSendTest(): Promise<void> {
 .igs-btn--accent:not(:disabled):active { background: #d8772b; }
 .igs-btn--ghost { background: #232327; color: #c8c8ce; border-color: #353539; }
 .igs-btn--ghost:not(:disabled):active { background: #2c2c31; }
+.igs-btn--block { width: 100%; margin-top: 14px; padding: 11px; font-size: 0.82rem; }
 
-/* Optional secondary action (e.g. "也可安装为应用") — deliberately subtle so it
-   never competes with the primary 开启通知 CTA. */
+/* Optional secondary action — deliberately subtle so it never competes with the
+   primary action. */
 .igs-optional-link {
   display: inline-block;
   margin-top: 12px;
@@ -527,6 +586,7 @@ async function onSendTest(): Promise<void> {
   cursor: pointer;
 }
 .igs-optional-link:active { color: #f08a3c; }
+.igs-optional-link:disabled { opacity: 0.5; cursor: default; }
 
 /* Notes & errors */
 .igs-note {
@@ -550,8 +610,8 @@ async function onSendTest(): Promise<void> {
 
 /* End-to-end test row */
 .igs-test {
-  margin-top: 12px;
-  padding-top: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
   border-top: 1px dashed #2c2c31;
   display: flex;
   flex-direction: column;

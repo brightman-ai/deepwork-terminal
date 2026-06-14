@@ -51,6 +51,12 @@ export interface PushNotificationsApi {
   ensureRegistration(): Promise<ServiceWorkerRegistration | null>
   /** Fire the captured native install prompt; returns the user's outcome. */
   promptInstall(): Promise<'accepted' | 'dismissed' | 'unavailable'>
+  /**
+   * Last subscribe() failure reason — drives a specific, actionable hint instead
+   * of a generic "失败". 'ios-reopen' means the SW wasn't controlling the page and
+   * the documented iOS fix (fully close + relaunch from the icon) is required.
+   */
+  lastError: Ref<'' | 'denied' | 'ios-reopen' | 'generic'>
   /** Opt-in: request permission, subscribe, POST to backend. Returns success. */
   subscribe(sessionId: string): Promise<boolean>
   /** Opt-out: unsubscribe locally + tell the backend to forget the endpoint. */
@@ -114,6 +120,7 @@ function detectStandalone(): boolean {
 // ─── module-level singleton state ────────────────────────────────────────────────
 const _permission = ref<PushPermission>('default')
 const _subscribed = ref(false)
+const _lastError = ref<'' | 'denied' | 'ios-reopen' | 'generic'>('')
 const _canPromptInstall = ref(false)
 const _installed = ref(false)
 const _standalone = ref(detectStandalone())
@@ -182,6 +189,39 @@ function createApi(): PushNotificationsApi {
     }
   }
 
+  /**
+   * Ensure the SW is BOTH ready AND controlling the page before we subscribe.
+   *
+   * Documented iOS PWA bug: pushManager.subscribe() silently fails (or hangs) when
+   * the service worker isn't yet the page's controller. On a first standalone launch
+   * the SW is installed/activated but `navigator.serviceWorker.controller` is still
+   * null until the next navigation — so we wait briefly for `controllerchange`, and
+   * if it never fires we try a one-shot re-register to claim the page. Returns true
+   * when the page is controlled; false means the caller should surface the iOS
+   * "fully close + relaunch" hint rather than a generic failure.
+   */
+  async function ensureControlling(): Promise<boolean> {
+    if (!swSupported) return false
+    try { await navigator.serviceWorker.ready } catch { /* keep going */ }
+    if (navigator.serviceWorker.controller) return true
+    // Wait one tick for an activating SW to claim the page.
+    const gotControl = await new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => resolve(Boolean(navigator.serviceWorker.controller)), 1500)
+      navigator.serviceWorker.addEventListener(
+        'controllerchange',
+        () => { clearTimeout(t); resolve(true) },
+        { once: true },
+      )
+    })
+    if (gotControl) return true
+    // Last resort: re-register so a clients.claim()-ing SW takes control.
+    try {
+      _registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      await navigator.serviceWorker.ready
+    } catch { /* ignore — fall through to the controller check */ }
+    return Boolean(navigator.serviceWorker.controller)
+  }
+
   async function syncExistingSubscription(): Promise<void> {
     if (!supported.value) { _subscribed.value = false; return }
     const reg = await ensureRegistration()
@@ -209,9 +249,10 @@ function createApi(): PushNotificationsApi {
   }
 
   async function subscribe(sessionId: string): Promise<boolean> {
-    if (!supported.value) return false
+    _lastError.value = ''
+    if (!supported.value) { _lastError.value = 'generic'; return false }
     const reg = await ensureRegistration()
-    if (!reg) return false
+    if (!reg) { _lastError.value = 'generic'; return false }
 
     // Permission must be requested from a user gesture; callers wire this to a tap.
     let perm = readPermission()
@@ -220,21 +261,33 @@ function createApi(): PushNotificationsApi {
       catch { perm = readPermission() }
     }
     _permission.value = perm
-    if (perm !== 'granted') return false
+    if (perm !== 'granted') { _lastError.value = 'denied'; return false }
+
+    // iOS PWA: subscribe() silently fails unless the SW controls the page. Gate on it.
+    const controlling = await ensureControlling()
+    if (!controlling) { _lastError.value = 'ios-reopen'; return false }
 
     try {
       // Fetch the VAPID public key, then subscribe (reuse an existing sub if present).
       const vapidResp = await cliFetch(cliApi('/push/vapid'))
-      if (!vapidResp.ok) return false
+      if (!vapidResp.ok) { _lastError.value = 'generic'; return false }
       const { publicKey } = await vapidResp.json() as { publicKey: string }
-      if (!publicKey) return false
+      if (!publicKey) { _lastError.value = 'generic'; return false }
 
       let sub = await reg.pushManager.getSubscription()
       if (!sub) {
-        sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(publicKey),
-        })
+        try {
+          sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(publicKey),
+          })
+        } catch {
+          // The classic standalone-iOS silent failure: granted, controlling, yet
+          // subscribe() still throws/rejects. The documented remedy is a full relaunch.
+          _lastError.value = _standalone.value ? 'ios-reopen' : 'generic'
+          _subscribed.value = false
+          return false
+        }
       }
 
       const body = {
@@ -251,9 +304,11 @@ function createApi(): PushNotificationsApi {
         body: JSON.stringify(body),
       })
       _subscribed.value = resp.ok
+      if (!resp.ok) _lastError.value = 'generic'
       return resp.ok
     } catch {
       _subscribed.value = false
+      _lastError.value = 'generic'
       return false
     }
   }
@@ -285,6 +340,7 @@ function createApi(): PushNotificationsApi {
   async function refresh(): Promise<void> {
     _permission.value = readPermission()
     _standalone.value = detectStandalone()
+    if (_permission.value !== 'denied') _lastError.value = ''
     await syncExistingSubscription()
   }
 
@@ -319,6 +375,7 @@ function createApi(): PushNotificationsApi {
     platform,
     canPromptInstall: _canPromptInstall,
     installed: _installed,
+    lastError: _lastError,
     ensureRegistration,
     promptInstall,
     subscribe,
