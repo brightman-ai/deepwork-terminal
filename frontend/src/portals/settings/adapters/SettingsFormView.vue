@@ -3,16 +3,30 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { FormPane } from '@ce/components/pane'
 import { usePortalEvents } from '@ce/composables/layout/usePortalEvents'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
-import { Globe, ClipboardCopy } from 'lucide-vue-next'
+import { Globe, ClipboardCopy, Info, Terminal } from 'lucide-vue-next'
 
 interface Props {
   activeCategory: string
+  /** Render the sticky in-panel category nav (mobile). On desktop the left rail handles navigation. */
+  showCategoryNav?: boolean
 }
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  showCategoryNav: false,
+})
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const bus = usePortalEvents()
 const { setAuthCode, cliFetch } = useCliAuth()
+
+// ─── Category nav (mobile sticky segmented control) ────────────────────────────
+const navCategories = [
+  { id: 'system-info', label: 'System',   icon: Info },
+  { id: 'terminal',    label: 'Terminal', icon: Terminal },
+  { id: 'network',     label: 'Network',  icon: Globe },
+]
+function selectCategory(id: string) {
+  if (id === props.activeCategory) return
+  bus?.emit('settings.category', { categoryId: id })
+}
 
 // ─── System Info ──────────────────────────────────────────────────────────────
 interface SystemInfo {
@@ -259,8 +273,25 @@ const formSections = computed(() => {
 </script>
 
 <template>
-  <FormPane :sections="formSections" class="h-full">
-    <template #actions><span /></template>
+  <div class="settings-form-shell">
+
+    <!-- ── Sticky category nav (mobile) ─────────────────────────────────────── -->
+    <nav v-if="showCategoryNav" class="cat-nav" aria-label="设置分类">
+      <button
+        v-for="cat in navCategories"
+        :key="cat.id"
+        class="cat-chip"
+        :class="{ 'cat-chip--active': activeCategory === cat.id }"
+        :aria-current="activeCategory === cat.id ? 'true' : undefined"
+        @click="selectCategory(cat.id)"
+      >
+        <component :is="cat.icon" :size="14" class="cat-chip__icon" />
+        <span>{{ cat.label }}</span>
+      </button>
+    </nav>
+
+    <FormPane :sections="formSections" class="settings-form-pane">
+      <template #actions><span /></template>
 
     <template #field="{ field }">
 
@@ -391,10 +422,67 @@ const formSections = computed(() => {
       </template>
 
     </template>
-  </FormPane>
+    </FormPane>
+  </div>
 </template>
 
 <style scoped>
+/* ── Shell + sticky category nav (mobile) ─────────────────────────────────── */
+.settings-form-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: hsl(var(--background));
+}
+
+.settings-form-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+.cat-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 10px 12px;
+  background: hsl(var(--background));
+  border-bottom: 1px solid hsl(var(--border));
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.cat-nav::-webkit-scrollbar { display: none; }
+
+.cat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s, border-color 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.cat-chip:active { transform: scale(0.97); }
+
+.cat-chip--active {
+  background: hsl(var(--primary) / 0.12);
+  border-color: hsl(var(--primary) / 0.45);
+  color: hsl(var(--primary));
+}
+
+.cat-chip__icon { flex-shrink: 0; }
+
 .section-header {
   font-size: 13px;
   font-weight: 600;
