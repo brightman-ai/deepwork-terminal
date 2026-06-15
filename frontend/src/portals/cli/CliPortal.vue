@@ -36,21 +36,9 @@
             :notifications="activeAgentNotifications"
             data-testid="cli-portal-agent-status"
           />
-          <!-- Settings (gear) — the canonical standalone entry to the settings portal,
-               where the built-in Cloudflare-tunnel / HTTPS control lives. Lives in the top
-               tab-bar status slot (always visible, right-aligned, above the bottom
-               tmux/compose toolbars so it is never occluded). Restores the entry the
-               deleted TerminalWorkbenchPage used to carry. -->
-          <button
-            class="cli-portal__settings-btn"
-            type="button"
-            title="设置 (Cloudflare 隧道 / HTTPS)"
-            aria-label="设置"
-            data-testid="cli-portal-settings-btn"
-            @click="openSettings"
-          >
-            <Settings :size="18" />
-          </button>
+          <!-- Settings now lives in the portal NAV sidebar (@ce NavigationSidebar),
+               a single SSOT entry reachable via the draggable left-edge nav trigger —
+               no top-right gear here (it was easy to miss / could be occluded). -->
         </div>
       </template>
     </CliTabBar>
@@ -73,8 +61,6 @@
 </template>
 
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
-import { Settings } from 'lucide-vue-next'
 import { usePortalRuntime } from '@ce/composables/layout/usePortalRuntime'
 import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
@@ -82,13 +68,6 @@ import { useCliState } from './useCliState'
 import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import { CliTabBar, CliTerminalView } from './adapters'
-
-// Cross-portal navigation is plain router push — the settings portal route
-// (/portal/settings) is registered via the portal registry (see router/index.ts).
-const router = useRouter()
-function openSettings() {
-  router.push('/portal/settings')
-}
 
 const runtime = usePortalRuntime({
   portalId: 'cli',
@@ -127,28 +106,6 @@ const {
   padding: 0 8px;
   flex-shrink: 0;
 }
-/* Settings gear — always-visible, tappable hit-target in the top tab bar. Kept
-   outside the .is-mobile :deep() hides below so it never collapses on mobile. */
-.cli-portal__settings-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--workbench-text-muted, hsl(var(--muted-foreground, 240 4% 60%)));
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-}
-.cli-portal__settings-btn:hover {
-  background: hsl(var(--accent, 240 4% 22%));
-  color: var(--workbench-text, hsl(var(--foreground, 0 0% 90%)));
-}
-.cli-portal__settings-btn:active { background: hsl(var(--accent, 240 4% 22%)); }
 .cli-portal__tab-status.is-mobile {
   position: sticky;
   right: 0;
