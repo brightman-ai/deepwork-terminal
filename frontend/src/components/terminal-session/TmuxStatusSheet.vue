@@ -75,17 +75,19 @@
                   <span class="tss-sess-meta mono">{{ s.windows.length }}w · {{ paneCount(s) }}p</span>
                 </div>
                 <div class="tss-wins">
-                  <span
+                  <button
                     v-for="w in s.windows"
                     :key="w.index"
+                    type="button"
                     class="tss-win"
                     :class="{ 'is-active': w.active }"
-                    :title="`${w.name} — ${w.panes.length} pane(s)`"
+                    :title="`Switch to ${w.name} — ${w.panes.length} pane(s)`"
+                    @click="selectWindow(w)"
                   >
                     <span class="tss-win-idx mono">{{ w.index }}</span>
                     <span class="tss-win-name">{{ w.name }}</span>
                     <span v-if="winDot(w)" class="tss-win-dot" :class="winDot(w)" />
-                  </span>
+                  </button>
                 </div>
               </div>
             </div>
@@ -103,12 +105,19 @@ import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 
 const props = defineProps<{ sessionId: string; open: boolean }>()
-defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'sendKey', key: string): void }>()
 
 const { isMobile } = useDeviceDetection()
 const tmux = useTmuxState(() => props.sessionId)
 
 const prefixDisplay = tmux.prefixDisplay
+
+/** Tap a window chip → switch to it via the dynamic-prefix select-window (prefix + index),
+ *  the same mechanism TmuxPaneBar/TmuxQuickBar use. Close the sheet for one-handed flow. */
+function selectWindow(w: TmuxWindowState): void {
+  emit('sendKey', tmux.prefixSeq(String(w.index)))
+  emit('close')
+}
 const sessions = computed<TmuxSessionState[]>(() => tmux.state.value?.sessions ?? [])
 
 function paneCount(s: TmuxSessionState): number {
@@ -301,13 +310,19 @@ function winDot(w: TmuxWindowState): string {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
+  padding: 4px 9px;
   background: #221636;
   border: 1px solid #3a2860;
+  border-bottom: 2px solid #1f1040;
   border-radius: 5px;
   font-size: 0.68rem;
+  font-family: inherit;
   color: #b08fd0;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.08s, transform 0.08s;
 }
+.tss-win:active { background: #30205a; transform: translateY(1px) scale(0.97); border-bottom-width: 1px; }
 .tss-win.is-active { background: #4a2a7a; border-color: #7a4ab0; color: #f0e0ff; }
 .tss-win-idx { font-weight: 700; font-size: 0.62rem; }
 .tss-win-name { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

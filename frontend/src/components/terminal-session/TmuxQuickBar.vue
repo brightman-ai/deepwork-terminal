@@ -14,7 +14,6 @@
       @click="$emit('openSheet')"
     >
       <span class="tqb-tag-text">tmux:</span>
-      <span class="tqb-tag-prefix">{{ pfxLabel }}</span>
     </button>
 
     <!-- attach FIRST when detached (prominent), LAST when attached — driven purely off `attached` -->
@@ -39,12 +38,12 @@
     </button>
     <button class="tqb-btn" data-testid="tmux-quick-pgup" title="Page Up" @click="send('\x1b[5~')"><span class="tqb-cap">PgUp</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
+    <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-down" title="Arrow Down" @click="send('\x1b[B')"><span class="tqb-glyph">↓</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-enter" title="Enter" @click="send('\r')"><span class="tqb-glyph">⏎</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-space" title="Space (copy-mode select)" @click="send(' ')"><span class="tqb-cap">SpC</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-bksp" title="Backspace" @click="send('\x7f')"><span class="tqb-glyph">⌫</span></button>
-    <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
 
     <span class="tqb-sep" />
 
@@ -181,8 +180,6 @@ function send(key: string): void {
 .tqb-tag:active { background: #30205a; transform: translateY(1px) scale(0.97); border-bottom-width: 1px; }
 .tqb-tag.is-attached { border-color: #7a4ab0; background: #2c1c48; color: #f0e0ff; }
 .tqb-tag-text { letter-spacing: 0.3px; }
-.tqb-tag-prefix { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.64rem; color: #8e6fc0; }
-.tqb-tag.is-attached .tqb-tag-prefix { color: #c8a0e8; }
 
 /* Action buttons — compact icon + micro-caption hybrid. */
 .tqb-btn {
