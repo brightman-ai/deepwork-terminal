@@ -216,7 +216,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
-import { useEdgeDrag } from '@terminal/composables/cli/useEdgeDrag'
+import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 
 // sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
