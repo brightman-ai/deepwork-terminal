@@ -86,6 +86,7 @@
         :sticky-alt="stickyAlt"
         :active-panel="activePanelLabel"
         :keyboard-up="activeMode === 'keyboard'"
+        :keycast-on="keystrokeHudVisible"
         @send-key="onSendKey"
         @clipboard="onClipboard"
         @toggle-numpad="onTogglePanel('numpad')"
@@ -94,6 +95,7 @@
         @toggle-ctrl="stickyCtrl = !stickyCtrl"
         @toggle-alt="stickyAlt = !stickyAlt"
         @toggle-hud="hudVisible = !hudVisible"
+        @toggle-keycast="keystrokeHudVisible = !keystrokeHudVisible"
         @toggle-keyboard="onToggleKeyboard"
         @attach="onAttachClick"
       />
@@ -165,6 +167,15 @@
       style="display: none"
       @change="onAttachFileSelected"
     />
+
+    <!-- KeyCastr keystroke display (mobile only). Toggled from the main Toolbar's
+         keycast button; defaults ON. No left-edge HUD tab — the toolbar is the SSOT toggle. -->
+    <KeyCastrOverlay
+      v-if="isMobile && keystrokeHudVisible"
+      :entries="keycastEntries"
+      :bottom-offset="keycastBottomOffset"
+      data-testid="keystroke-hud"
+    />
   </div>
 </template>
 
@@ -189,6 +200,7 @@ import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
+import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -202,6 +214,7 @@ import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
+import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
@@ -247,6 +260,12 @@ const tmux = useTmuxState(() => props.sessionId)
 const tmuxAttached = computed(() => tmux.attached.value)
 // WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
 useForegroundAgentNotify(() => props.sessionId)
+const keyCastr = useKeyCastrHud()
+const keycastEntries = keyCastr.entries
+
+// KeyCastr keystroke-display visibility. Defaults ON; toggled by the main Toolbar's
+// keycast button (no left-edge HUD tab — the toolbar is the SSOT toggle).
+const keystrokeHudVisible = ref(true)
 
 // ─── Template refs ────────────────────────────────────────────────────────────
 
@@ -283,6 +302,10 @@ const activePanelLabel = computed<'none' | 'numpad' | 'compose'>(() => {
   if (activeMode.value === 'compose') return 'compose'
   return 'none'
 })
+
+const keycastBottomOffset = computed(() =>
+  80 + (activeMode.value === 'keyboard' ? keyboardHeight.value : 0)
+)
 
 const encoder = new TextEncoder()
 
@@ -482,6 +505,7 @@ const isWKWebView = navigator.userAgent.includes('AppleWebKit') &&
 
 function onKeydownDirect(e: KeyboardEvent) {
   if (!props.active) return
+  keyCastr.feed(e)
   reportCliInputDiagnostic('document.keydown', {
     surface: 'workbench',
     key: summarizeText(e.key),
