@@ -58,8 +58,10 @@ func NewServer(opts ...Option) (*Server, error) {
 	if s.hooks.AgentStatePush == nil {
 		s.hooks.AgentStatePush = nativeAgentStatePush(s.newAgentIntelMonitor())
 	}
-	// Web Push: load (or generate) persisted VAPID keys + subscriptions.
-	s.push = newPushStore(s.config.DataDir)
+	// Web Push: load (or generate) persisted VAPID keys + subscriptions. The
+	// resolved subscriber ("sub" claim) must be a valid mailto:/https: URL or Apple
+	// APNs rejects the token — see resolveVapidSubscriber.
+	s.push = newPushStore(s.config.DataDir, resolveVapidSubscriber(s.config))
 	s.push.server = s
 	// If subscriptions survived a restart, resume the background notifier so
 	// push keeps working with no browser tab and no fresh subscribe call.

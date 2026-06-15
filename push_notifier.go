@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
@@ -38,8 +40,8 @@ const (
 	notifyStateTimeout = 3 * time.Second
 	// pushSendTimeout bounds a single web push HTTP request.
 	pushSendTimeout = 10 * time.Second
-	// vapidSubscriber is the VAPID "sub" claim (mailto/URL identifying the app server).
-	vapidSubscriber = "mailto:dw-terminal@localhost"
+	// pushBodyLogLimit caps how much of a push service's error body we log/return.
+	pushBodyLogLimit = 256
 )
 
 // pushNotifier is the running poller. Owned by pushStore; one at a time.
@@ -193,28 +195,73 @@ func (n *pushNotifier) notify(ev notifyEvent) {
 	})
 
 	// Single source of truth for fan-out delivery + prune (shared with /push/test).
-	pruned := store.broadcast(payload, subs)
-	logger.Info("push sent", "pane", ev.paneID, "subs", len(subs), "pruned", pruned)
+	res := store.broadcast(payload, subs)
+	logger.Info("push sent", "pane", ev.paneID, "subs", len(subs),
+		"delivered", res.delivered, "rejected", len(res.rejected), "pruned", res.pruned)
 }
 
-// sendPush delivers one notification. Returns true iff the endpoint is gone
-// (404/410) and should be pruned.
-func sendPush(payload []byte, sub pushSubscription, pub, priv string) bool {
+// pushOutcomeKind classifies the result of a single send attempt.
+type pushOutcomeKind int
+
+const (
+	// pushDelivered: the push service accepted the message (2xx).
+	pushDelivered pushOutcomeKind = iota
+	// pushGone: the subscription is dead (404/410) → prune it.
+	pushGone
+	// pushRejected: the service returned a non-2xx, non-gone status (e.g. Apple
+	// 403 BadJwtToken). The message was NOT delivered; surfaced, never pruned.
+	pushRejected
+	// pushError: transport/library error before any HTTP status (no response).
+	pushError
+)
+
+// pushOutcome is the typed result of one sendPush. status is the HTTP status
+// (0 when kind==pushError); reason carries the service's error body / error text
+// so callers can show WHY a push failed (Apple returns e.g. "BadJwtToken").
+type pushOutcome struct {
+	kind   pushOutcomeKind
+	status int
+	reason string
+}
+
+// sendPush delivers one notification and returns a typed outcome. It LOGS every
+// non-2xx result (status + service error body + endpoint tail) so silent failures
+// — the bug where Apple rejected a token but the UI said "sent" — are now visible.
+func sendPush(payload []byte, sub pushSubscription, pub, priv, subscriber string) pushOutcome {
 	ctx, cancel := context.WithTimeout(context.Background(), pushSendTimeout)
 	defer cancel()
 	resp, err := webpush.SendNotificationWithContext(ctx, payload, sub.toWebpush(), &webpush.Options{
-		Subscriber:      vapidSubscriber,
+		Subscriber:      subscriber,
 		VAPIDPublicKey:  pub,
 		VAPIDPrivateKey: priv,
 		TTL:             60,
 	})
 	if err != nil {
-		logger.Debug("push send error", "endpoint_tail", endpointTail(sub.Endpoint), "error", err)
-		return false
+		logger.Warn("push send error", "endpoint_tail", endpointTail(sub.Endpoint), "error", err)
+		return pushOutcome{kind: pushError, reason: err.Error()}
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return true
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return pushOutcome{kind: pushDelivered, status: resp.StatusCode}
 	}
-	return false
+
+	// Non-2xx: read the (short) descriptive body the push service returns, e.g.
+	// Apple's "BadJwtToken". This is what makes a rejected push diagnosable.
+	body := readBodySnippet(resp.Body)
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		logger.Info("push gone", "endpoint_tail", endpointTail(sub.Endpoint),
+			"status", resp.StatusCode, "body", body)
+		return pushOutcome{kind: pushGone, status: resp.StatusCode, reason: body}
+	}
+	logger.Warn("push rejected", "endpoint_tail", endpointTail(sub.Endpoint),
+		"status", resp.StatusCode, "body", body)
+	return pushOutcome{kind: pushRejected, status: resp.StatusCode, reason: body}
+}
+
+// readBodySnippet reads at most pushBodyLogLimit bytes of a response body and
+// trims it to a single tidy line for logs / API responses.
+func readBodySnippet(r io.Reader) string {
+	buf, _ := io.ReadAll(io.LimitReader(r, pushBodyLogLimit))
+	return strings.TrimSpace(string(buf))
 }
