@@ -59,6 +59,12 @@ type pushStore struct {
 	// reach the tmux provider and the subscription set. Read-only after wiring.
 	server *Server
 
+	// subscriber is the VAPID "sub" claim used to sign every push token. Resolved
+	// once at construction (Config → DW_VAPID_SUBSCRIBER → valid placeholder) and
+	// read-only thereafter. MUST be a valid mailto:/https: URL or Apple rejects the
+	// token with 403 BadJwtToken (see resolveVapidSubscriber).
+	subscriber string
+
 	mu     sync.Mutex
 	vapid  vapidKeys
 	subs   map[string]pushSubscription // dedupe by endpoint
@@ -71,11 +77,13 @@ type pushStore struct {
 // newPushStore loads (or initializes) VAPID keys and subscriptions from disk.
 // VAPID keys are generated and persisted on first run; subscriptions are loaded
 // if present. Never returns nil — a load failure degrades to an empty store
-// with freshly generated keys.
-func newPushStore(dataDir string) *pushStore {
+// with freshly generated keys. subscriber is the VAPID "sub" claim (see
+// resolveVapidSubscriber), wired in so every send signs with a valid contact URL.
+func newPushStore(dataDir, subscriber string) *pushStore {
 	ps := &pushStore{
-		dir:  dataDir,
-		subs: map[string]pushSubscription{},
+		dir:        dataDir,
+		subscriber: subscriber,
+		subs:       map[string]pushSubscription{},
 	}
 	ps.loadVapid()
 	ps.loadSubs()
@@ -255,36 +263,75 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 		"tag":   "dw-test",
 		"data":  map[string]any{"url": "/"},
 	})
-	pruned := s.push.broadcast(payload, subs)
-	logger.Info("push test", "subs", len(subs), "pruned", pruned)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sent": len(subs) - pruned, "pruned": pruned})
+	res := s.push.broadcast(payload, subs)
+	logger.Info("push test", "subs", len(subs),
+		"delivered", res.delivered, "rejected", len(res.rejected), "pruned", res.pruned)
+	// Diagnostic shape: `sent` = delivered (2xx) count; `rejected` lists each
+	// non-delivered attempt with its status+reason so a 403 BadJwtToken is visible
+	// in the response (not a silent "sent"). `ok` stays true (the request itself
+	// succeeded); the frontend inspects sent/rejected to give honest feedback.
+	if res.rejected == nil {
+		res.rejected = []rejectedSend{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"sent":     res.delivered,
+		"rejected": res.rejected,
+		"pruned":   res.pruned,
+	})
 }
 
-// broadcast sends payload to every subscription concurrently and prunes any that
-// report gone (404/410). Returns the number pruned. The single source of truth
-// for fan-out delivery — both the test endpoint and the background notifier route
-// here via sendPush. Caller passes a snapshot so we never hold the lock across I/O.
-func (s *pushStore) broadcast(payload []byte, subs []pushSubscription) int {
+// rejectedSend is one non-delivered, non-gone attempt, surfaced to the caller so
+// the failure is visible (status + reason from the push service, e.g. 403 BadJwtToken).
+type rejectedSend struct {
+	Status int    `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// broadcastResult is the SSOT outcome of a single fan-out: how many were delivered
+// (2xx), which were rejected (with status+reason), and how many gone subs were pruned.
+type broadcastResult struct {
+	delivered int
+	rejected  []rejectedSend
+	pruned    int
+}
+
+// broadcast sends payload to every subscription concurrently, prunes any that
+// report gone (404/410), and returns a typed result counting delivered vs rejected.
+// The single source of truth for fan-out delivery — both the test endpoint and the
+// background notifier route here via sendPush. Caller passes a snapshot so we never
+// hold the lock across I/O.
+func (s *pushStore) broadcast(payload []byte, subs []pushSubscription) broadcastResult {
 	if len(subs) == 0 {
-		return 0
+		return broadcastResult{}
 	}
 	pub := s.PublicKey()
 	priv := s.privateKey()
 	if pub == "" || priv == "" {
-		return 0
+		return broadcastResult{}
 	}
-	var prune []string
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	var (
+		prune     []string
+		rejected  []rejectedSend
+		delivered int
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+	)
 	for _, sub := range subs {
 		wg.Add(1)
 		go func(sub pushSubscription) {
 			defer wg.Done()
-			if sendPush(payload, sub, pub, priv) {
-				mu.Lock()
+			out := sendPush(payload, sub, pub, priv, s.subscriber)
+			mu.Lock()
+			switch out.kind {
+			case pushDelivered:
+				delivered++
+			case pushGone:
 				prune = append(prune, sub.Endpoint)
-				mu.Unlock()
+			case pushRejected, pushError:
+				rejected = append(rejected, rejectedSend{Status: out.status, Reason: out.reason})
 			}
+			mu.Unlock()
 		}(sub)
 	}
 	wg.Wait()
@@ -295,7 +342,7 @@ func (s *pushStore) broadcast(payload []byte, subs []pushSubscription) int {
 	if s.count() == 0 {
 		go s.stopNotifier()
 	}
-	return len(prune)
+	return broadcastResult{delivered: delivered, rejected: rejected, pruned: len(prune)}
 }
 
 // handlePushUnsubscribe handles POST /push/unsubscribe. Body = { endpoint }.
