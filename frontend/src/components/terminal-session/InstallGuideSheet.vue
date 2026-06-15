@@ -433,11 +433,19 @@ async function onSendTest(): Promise<void> {
   testText.value = ''
   try {
     const r = await push.sendTest()
-    testText.value = r === 'sent'
-      ? '已发送测试推送，请留意系统通知。'
-      : r === 'local'
-        ? '已触发本地测试通知（此设备为前台通知，未走后台推送）。'
-        : '测试发送失败，请确认已开启通知后重试。'
+    // Honest, per-outcome feedback — no false "已发送" when the push service refused.
+    if (r.kind === 'delivered') {
+      testText.value = `✅ 已送达 ${r.sent ?? 1} 台设备，请留意系统通知。`
+    } else if (r.kind === 'rejected') {
+      const status = r.rejected?.[0]?.status ?? 0
+      testText.value = status === 403
+        ? '⚠️ 推送被 Apple 拒绝 (403)，请检查 VAPID 配置（sub 必须是有效的 mailto:/https: 地址）。'
+        : `⚠️ 推送被拒绝${status ? ` (${status})` : ''}，未送达。请检查推送配置后重试。`
+    } else if (r.kind === 'local') {
+      testText.value = '已触发本地测试通知（此设备为前台通知，未走后台推送）。'
+    } else {
+      testText.value = '测试发送失败，请确认已开启通知后重试。'
+    }
   } finally {
     busy.value = false
   }

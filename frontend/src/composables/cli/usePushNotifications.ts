@@ -73,11 +73,26 @@ export interface PushNotificationsApi {
   refresh(): Promise<void>
   /**
    * Fire an end-to-end test notification so the user can verify the full chain.
-   *   'sent'   — POSTed /push/test (subscribed): real SW-delivered OS notification.
-   *   'local'  — not subscribed but permission granted: a local new Notification().
-   *   'failed' — neither path available (no permission / request failed).
+   * Returns the REAL outcome — never a false "sent". See PushTestResult.
    */
-  sendTest(): Promise<'sent' | 'local' | 'failed'>
+  sendTest(): Promise<PushTestResult>
+}
+
+/**
+ * Honest result of sendTest(). The backend's /push/test reports per-attempt
+ * delivery, so we no longer claim "已发送" when Apple rejected the token.
+ *   'delivered' — backend confirmed ≥1 device got the push (2xx). `sent` = count.
+ *   'rejected'  — backend tried but every attempt was refused (e.g. Apple 403
+ *                 BadJwtToken). `rejected[0].status` is the HTTP status to show.
+ *   'local'     — no backend subscription, but a local Notification() fired.
+ *   'failed'    — nothing could be sent (no permission / request failed).
+ */
+export interface PushTestResult {
+  kind: 'delivered' | 'rejected' | 'local' | 'failed'
+  /** Devices the backend confirmed delivered to (kind === 'delivered'). */
+  sent?: number
+  /** Per-attempt refusals from the push service (kind === 'rejected'). */
+  rejected?: Array<{ status: number; reason?: string }>
 }
 
 // ─── base64url → Uint8Array (applicationServerKey expects a raw byte array) ──────
@@ -356,13 +371,24 @@ function createApi(): PushNotificationsApi {
     await syncExistingSubscription()
   }
 
-  async function sendTest(): Promise<'sent' | 'local' | 'failed'> {
+  async function sendTest(): Promise<PushTestResult> {
     // Preferred path: a real subscription exists → ask the backend to push, which
     // exercises the entire SW + OS chain exactly as an agent-waiting event would.
+    // The backend reports per-attempt delivery so we surface the HONEST outcome:
+    // a delivered count, or the rejection status (e.g. Apple 403 BadJwtToken).
     if (_subscribed.value) {
       try {
         const resp = await cliFetch(cliApi('/push/test'), { method: 'POST' })
-        if (resp.ok) return 'sent'
+        if (resp.ok) {
+          const r = await resp.json().catch(() => null) as
+            | { sent?: number; rejected?: Array<{ status: number; reason?: string }> }
+            | null
+          const sent = r?.sent ?? 0
+          const rejected = r?.rejected ?? []
+          if (sent > 0) return { kind: 'delivered', sent }
+          if (rejected.length > 0) return { kind: 'rejected', rejected }
+          // ok but nothing delivered and nothing rejected → fall through to local self-test.
+        }
       } catch { /* fall through to local self-test */ }
     }
     // Fallback (e.g. desktop foreground-only, or backend test failed): if permission
@@ -370,10 +396,10 @@ function createApi(): PushNotificationsApi {
     if (readPermission() === 'granted' && notificationSupported) {
       try {
         new Notification('✅ 测试通知', { body: 'Deepwork 推送已就绪（本地自检）', tag: 'dw-test', icon: '/pwa-192.png' })
-        return 'local'
+        return { kind: 'local' }
       } catch { /* quota / revoked mid-call — fall through */ }
     }
-    return 'failed'
+    return { kind: 'failed' }
   }
 
   // Kick off background registration + subscription sync (non-blocking).
