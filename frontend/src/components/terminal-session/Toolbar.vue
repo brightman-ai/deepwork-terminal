@@ -136,6 +136,20 @@
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[B')" title="Arrow Down">↓</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x03')" title="Ctrl+C">^C</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', ' ')" title="Space (tmux select)">Spc</button>
+    <!-- KeyCastr keystroke-display toggle (2nd-to-last). Reflects current on/off state;
+         emits toggle-keycast so the surface flips its keystrokeHudVisible (default ON). -->
+    <button
+      class="tb-btn tb-btn--extra tb-btn--keycast"
+      :class="{ 'tb-btn--keycast-on': keycastOn }"
+      @click="$emit('toggleKeycast')"
+      :title="keycastOn ? 'KeyCastr: on' : 'KeyCastr: off'"
+    >
+      <svg width="16" height="13" viewBox="0 0 24 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <rect x="1" y="1" width="22" height="16" rx="3"/>
+        <line x1="5" y1="6" x2="6" y2="6"/><line x1="11" y1="6" x2="13" y2="6"/><line x1="18" y1="6" x2="19" y2="6"/>
+        <line x1="6" y1="13" x2="18" y2="13"/>
+      </svg>
+    </button>
     <button
       class="tb-btn tb-btn--extra tb-btn--debug"
       @click="$emit('toggleHud')"
@@ -157,6 +171,7 @@ defineProps<{
   keyboardUp: boolean
   stickyAlt: boolean
   activePanel: 'none' | 'numpad' | 'compose'
+  keycastOn: boolean
 }>()
 
 defineEmits<{
@@ -168,6 +183,7 @@ defineEmits<{
   (e: 'toggleCtrl'): void
   (e: 'toggleAlt'): void
   (e: 'toggleHud'): void
+  (e: 'toggleKeycast'): void
   (e: 'toggleKeyboard'): void
   (e: 'attach'): void
 }>()
@@ -262,6 +278,20 @@ defineEmits<{
 }
 .tb-btn--panel-compose:active {
   background: #162a40;
+}
+
+/* -- KeyCastr toggle: subdued when off, green when keystroke display is on ------ */
+.tb-btn--keycast {
+  color: #707078;
+  border-color: #2a2a4a;
+  border-bottom-color: #111;
+  background: #1a1a2e;
+}
+.tb-btn--keycast:active { background: #222240; }
+.tb-btn--keycast-on {
+  color: #4ade80;
+  border-color: #2a5a3a;
+  background: #0e1e12;
 }
 
 /* -- Debug button (subdued) ---------------------------------------- */
