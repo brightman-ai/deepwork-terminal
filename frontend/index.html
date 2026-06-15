@@ -19,6 +19,21 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Deepwork">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+    <!-- App shell base color (terminal-scoped). The shared @ce stylesheet currently
+         renders with the LIGHT :root tokens (.dark is not applied app-wide), so the
+         body background is a light gray. In an iOS standalone PWA the visible viewport
+         (visualViewport.height → --dw-app-viewport-height) excludes the bottom
+         home-indicator inset, so #app ends ABOVE the physical screen bottom and the
+         body background shows in that inset band — a gray strip below the dark bottom
+         toolbar. Painting the shell root in the canonical dark app color (#0d0d0f =
+         the .dark --background token and the manifest theme-color above) makes that
+         band seamless dark. No-op in a Safari tab: there the viewport spans to the bar
+         and the body is fully covered, so the body color is never visible. This is the
+         terminal's own index.html — it does NOT touch the shared @ce stylesheet. -->
+    <style>
+      html, body { background-color: #0d0d0f; }
+    </style>
   </head>
   <body>
     <div id="app"></div>
