@@ -165,30 +165,6 @@
       style="display: none"
       @change="onAttachFileSelected"
     />
-
-    <KeyCastrOverlay
-      v-if="isMobile && keystrokeHudVisible"
-      :entries="keycastEntries"
-      :bottom-offset="keycastBottomOffset"
-      data-testid="keystroke-hud"
-    />
-
-    <!-- Left-edge HUD tab ("菜单按钮"): the keystroke-HUD toggle as a fixed left-edge
-         affordance. Vertically draggable (useEdgeDrag, same composable + storage key as
-         TerminalPage's tab) so it can be slid off covered text; a short tap still toggles
-         the HUD, a drag repositions + persists. Shared kernel → fixes 8087 + 8088. -->
-    <Teleport to="body">
-      <button
-        ref="hudTabEl"
-        class="hud-edge-tab"
-        :class="{ 'hud-edge-tab--on': keystrokeHudVisible, 'is-mobile': isMobile }"
-        :style="hudTabStyle"
-        type="button"
-        title="按键 HUD（可上下拖动）"
-        data-testid="hud-edge-tab"
-        @click="keystrokeHudVisible = !keystrokeHudVisible"
-      >HUD</button>
-    </Teleport>
   </div>
 </template>
 
@@ -213,10 +189,8 @@ import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
-import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
-import { useEdgeDrag } from '@terminal/composables/cli/useEdgeDrag'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { useFocusStateMachine } from '@terminal/composables/cli/useFocusStateMachine'
 import { useAnchorStateMachine } from '@terminal/composables/cli/useAnchorStateMachine'
@@ -228,7 +202,6 @@ import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
-import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
@@ -274,17 +247,6 @@ const tmux = useTmuxState(() => props.sessionId)
 const tmuxAttached = computed(() => tmux.attached.value)
 // WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
 useForegroundAgentNotify(() => props.sessionId)
-const keyCastr = useKeyCastrHud()
-const keycastEntries = keyCastr.entries
-
-// Keystroke-HUD visibility, toggled by the draggable left-edge tab below. Starts
-// hidden so the surface stays clean until the user summons the diagnostic overlay.
-const keystrokeHudVisible = ref(false)
-// Left-edge HUD tab: vertically draggable along the left edge (shared useEdgeDrag,
-// same storage key as TerminalPage so the offset is one persisted position). The
-// composable's internal capture-phase click guard suppresses the bubble-phase
-// @click toggle when the gesture was a drag, so no extra guard is needed here.
-const { el: hudTabEl, style: hudTabStyle } = useEdgeDrag({ storageKey: 'dw.hudTab.top' })
 
 // ─── Template refs ────────────────────────────────────────────────────────────
 
@@ -321,10 +283,6 @@ const activePanelLabel = computed<'none' | 'numpad' | 'compose'>(() => {
   if (activeMode.value === 'compose') return 'compose'
   return 'none'
 })
-
-const keycastBottomOffset = computed(() =>
-  80 + (activeMode.value === 'keyboard' ? keyboardHeight.value : 0)
-)
 
 const encoder = new TextEncoder()
 
@@ -524,7 +482,6 @@ const isWKWebView = navigator.userAgent.includes('AppleWebKit') &&
 
 function onKeydownDirect(e: KeyboardEvent) {
   if (!props.active) return
-  keyCastr.feed(e)
   reportCliInputDiagnostic('document.keydown', {
     surface: 'workbench',
     key: summarizeText(e.key),
@@ -1140,38 +1097,4 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   pointer-events: none !important;
   opacity: 0 !important;
 }
-
-/* Left-edge HUD tab — slim vertical affordance clinging to the LEFT viewport edge,
-   mirror of TerminalPage's .hud-edge-tab and ResourceDrawer's .rd-handle. Draggable
-   via useEdgeDrag (touch-action:none so the gesture isn't stolen by page scroll).
-   top:50%/translateY centers it until a persisted drag offset overrides `top`
-   (the composable sets transform:none then). Teleported to body but keeps this
-   component's scope id, so scoped CSS still applies. */
-.hud-edge-tab {
-  position: fixed;
-  top: 50%;
-  left: 0;
-  transform: translateY(-50%);
-  z-index: 290;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 54px;
-  padding: 0;
-  font-size: 10px;
-  letter-spacing: 0.5px;
-  background: #160f22;
-  border: 1px solid #3a2860;
-  border-left: none;
-  border-radius: 0 9px 9px 0;
-  color: #666;
-  cursor: pointer;
-  box-shadow: 4px 0 18px rgba(0, 0, 0, 0.45);
-  touch-action: none;
-}
-.hud-edge-tab.is-mobile { width: 30px; height: 62px; }
-.hud-edge-tab:active { background: #1f1533; }
-.hud-edge-tab--on { color: #4ade80; border-color: #4ade80; }
-
 </style>
