@@ -133,6 +133,7 @@
       :session-id="sessionId"
       :open="tmuxSheetOpen"
       @close="tmuxSheetOpen = false"
+      @send-key="onSendKey"
     />
 
     <!-- WS5: 收纳抽屉 — images / files / input history.
