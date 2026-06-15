@@ -69,19 +69,16 @@ const {
       </template>
 
       <template v-else>
-        <div v-if="mobileActiveTab === 'categories'" class="h-full flex flex-col">
-          <SettingsCategoryRail :active-category="activeCategory" />
+        <div v-show="mobileActiveTab === 'settings'" class="h-full flex flex-col bg-background">
+          <SettingsFormView :active-category="activeCategory" show-category-nav />
         </div>
-        <div v-else-if="mobileActiveTab === 'settings'" class="h-full flex flex-col bg-background">
-          <SettingsFormView :active-category="activeCategory" />
-        </div>
-        <div v-else-if="mobileActiveTab === 'browser' && hasSecondary" class="settings-portal__mobile-browser">
+        <div v-if="mobileActiveTab === 'browser' && hasSecondary" class="settings-portal__mobile-browser">
           <SettingsProviderAuth :provider-account-id="providerAccountId" />
         </div>
       </template>
     </div>
 
-    <nav v-if="breakpoint.isMobile.value" class="settings-portal__mobile-tabs">
+    <nav v-if="breakpoint.isMobile.value && mobileTabs.length > 1" class="settings-portal__mobile-tabs">
       <button
         v-for="tab in mobileTabs"
         :key="tab.id"

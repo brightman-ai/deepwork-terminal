@@ -1,11 +1,11 @@
 import { ref, computed, watch, onUnmounted } from 'vue'
-import { Settings, Globe, List } from 'lucide-vue-next'
+import { Settings, Globe } from 'lucide-vue-next'
 import { useSlotGrid, useSlotGridHandlers, resolveLayout, saveSlotGridLayout, fetchServerLayout } from '@ce/composables/layout/slotGrid'
 import type { PortalRuntimeResult } from '@ce/composables/layout/usePortalRuntime'
 
 const PORTAL_ID = 'settings'
 
-export type MobileTabId = 'categories' | 'settings' | 'browser'
+export type MobileTabId = 'settings' | 'browser'
 
 interface MobileTab {
   id: MobileTabId
@@ -68,11 +68,9 @@ export function useSettingsState(runtime: PortalRuntimeResult) {
     const p = payload as { categoryId?: string } | undefined
     if (p?.categoryId) {
       activeCategory.value = p.categoryId
-      // Mobile: auto-switch to settings content after selecting a category.
-      // One tap = see that category's content, not a separate manual step.
-      if (breakpoint.isMobile.value) {
-        mobileActiveTab.value = 'settings'
-      }
+      // Mobile: the category nav is a sticky segmented control inside the settings
+      // panel, so the content panel is already visible — no tab switch needed.
+      // One tap on a chip = that category's settings render in place.
     }
   })
 
@@ -110,7 +108,6 @@ export function useSettingsState(runtime: PortalRuntimeResult) {
 
   const mobileTabs = computed<MobileTab[]>(() => {
     const tabs: MobileTab[] = [
-      { id: 'categories', label: '分类', icon: List },
       { id: 'settings', label: '设置', icon: Settings },
     ]
     if (hasSecondary.value) {
