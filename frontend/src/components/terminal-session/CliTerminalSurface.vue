@@ -1106,8 +1106,26 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
 .is-mobile .bottom-bar {
   flex-shrink: 0;
   background: #1a1a2e;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
   z-index: 102;
+}
+
+/* Bottom safe-area padding — standalone PWA ONLY.
+   --dw-app-viewport-height is window.visualViewport.height (main.ts), the runtime
+   VISIBLE area. In a browser tab (mobile Safari) the visual viewport already ends
+   ABOVE the browser's bottom chrome / home-indicator zone, so adding
+   env(safe-area-inset-bottom) on top of it DOUBLE-reserves that strip → the toolbar
+   content floats ~34px up, leaving wasted empty space below it.
+   In standalone the app paints edge-to-edge UNDER the home indicator, so the visual
+   viewport spans the full screen and the inset padding is genuinely needed to lift
+   the toolbar above the home indicator. Gating on (display-mode: standalone) applies
+   the inset exactly where it is real and zeroes it in a tab → flush in both. */
+.is-mobile .bottom-bar {
+  padding-bottom: 0;
+}
+@media (display-mode: standalone) {
+  .is-mobile .bottom-bar {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
 }
 
 /* Mobile: 隐藏 xterm 系统键盘 (只通过工具栏按钮触发) */

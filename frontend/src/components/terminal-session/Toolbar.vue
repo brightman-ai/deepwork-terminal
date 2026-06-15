@@ -79,9 +79,11 @@
     </button>
 
     <!-- 8. Paste — pastes the OS clipboard into the terminal via the robust
-         paste path (handles iOS / HTTP fallback + HUD errors in the host). -->
+         paste path (handles iOS / HTTP fallback + HUD errors in the host).
+         Icon + caption "粘贴" so it is unambiguous by glance (the clipboard glyph
+         alone reads as copy/clipboard, not specifically paste-into-terminal). -->
     <button
-      class="tb-btn tb-btn--paste"
+      class="tb-btn tb-btn--paste tb-btn--labeled"
       @click="$emit('clipboard', 'paste')"
       title="Paste from clipboard"
     >
@@ -89,6 +91,7 @@
         <rect x="8" y="2" width="8" height="4" rx="1" />
         <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
       </svg>
+      <span class="tb-cap">粘贴</span>
     </button>
 
     <!-- 9. Toggle system keyboard -->
@@ -137,18 +140,24 @@
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x03')" title="Ctrl+C">^C</button>
     <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', ' ')" title="Space (tmux select)">Spc</button>
     <!-- KeyCastr keystroke-display toggle (2nd-to-last). Reflects current on/off state;
-         emits toggle-keycast so the surface flips its keystrokeHudVisible (default ON). -->
+         emits toggle-keycast so the surface flips its keystrokeHudVisible (default ON).
+         Icon (a single keycap with a radiating "cast" arc) + caption "击键" so it is
+         not confused with the system-keyboard toggle (which is a full keyboard grid). -->
     <button
-      class="tb-btn tb-btn--extra tb-btn--keycast"
+      class="tb-btn tb-btn--extra tb-btn--keycast tb-btn--labeled"
       :class="{ 'tb-btn--keycast-on': keycastOn }"
       @click="$emit('toggleKeycast')"
-      :title="keycastOn ? 'KeyCastr: on' : 'KeyCastr: off'"
+      :title="keycastOn ? 'KeyCastr 击键显示: 开' : 'KeyCastr 击键显示: 关'"
     >
-      <svg width="16" height="13" viewBox="0 0 24 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-        <rect x="1" y="1" width="22" height="16" rx="3"/>
-        <line x1="5" y1="6" x2="6" y2="6"/><line x1="11" y1="6" x2="13" y2="6"/><line x1="18" y1="6" x2="19" y2="6"/>
-        <line x1="6" y1="13" x2="18" y2="13"/>
+      <svg width="15" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <!-- a keycap -->
+        <rect x="3" y="9" width="11" height="11" rx="2"/>
+        <line x1="6.5" y1="14.5" x2="10.5" y2="14.5"/>
+        <!-- radiating "cast" arcs (keystroke broadcast) -->
+        <path d="M16 8a5 5 0 014 4"/>
+        <path d="M16 4a9 9 0 018 8"/>
       </svg>
+      <span class="tb-cap">击键</span>
     </button>
     <button
       class="tb-btn tb-btn--extra tb-btn--debug"
@@ -245,6 +254,22 @@ defineEmits<{
 }
 .tb-btn span {
   font-size: 0.7rem;
+}
+
+/* Labeled buttons (icon + tiny caption) — caption disambiguates icon-only glyphs
+   that real-device testers found unclear (Paste, KeyCastr). The strip scrolls
+   horizontally so the extra few px are absorbed; the caption stays small so the
+   button height/shape matches its icon-only neighbours. */
+.tb-btn--labeled {
+  gap: 4px;
+  padding: 0 9px;
+}
+.tb-btn--labeled .tb-cap {
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 /* -- Sticky modifier active (orange) ------------------------------- */
