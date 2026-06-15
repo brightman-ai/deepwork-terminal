@@ -163,7 +163,7 @@
     <input
       ref="attachInputRef"
       type="file"
-      accept="image/*,.pdf,.txt,.md,.json,.csv,.log,.py,.go,.js,.ts,.sh,.yaml,.yml,.toml"
+      accept="image/*,.pdf,.txt,.md,.json,.csv,.log,.py,.go,.js,.ts,.sh,.yaml,.yml,.toml,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.zip"
       multiple
       style="display: none"
       @change="onAttachFileSelected"

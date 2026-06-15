@@ -253,10 +253,21 @@ func isAllowedClipboardMIME(mime string) bool {
 	for _, allowed := range []string{
 		"application/octet-stream", "application/zip", "application/gzip",
 		"application/x-yaml", "application/toml", "application/xml",
+		// Office documents — the deepwork side does ZERO text extraction; these
+		// land in the session sandbox (tmp/files/) and the agent reads them via
+		// the injected path. Allowing the MIME is purely "let the file reach disk".
+		"application/msword",
+		"application/vnd.ms-excel",
+		"application/vnd.ms-powerpoint",
 	} {
 		if lower == allowed {
 			return true
 		}
+	}
+	// Modern OOXML office formats (wordprocessingml / spreadsheetml /
+	// presentationml) all share the openxmlformats-officedocument namespace.
+	if strings.HasPrefix(lower, "application/vnd.openxmlformats-officedocument.") {
+		return true
 	}
 	return false
 }
@@ -275,6 +286,20 @@ func extFromMIME(mime string) string {
 		return ".svg"
 	case "application/pdf":
 		return ".pdf"
+	case "application/msword":
+		return ".doc"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return ".docx"
+	case "application/vnd.ms-excel":
+		return ".xls"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return ".xlsx"
+	case "application/vnd.ms-powerpoint":
+		return ".ppt"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return ".pptx"
+	case "application/zip":
+		return ".zip"
 	default:
 		return ".bin"
 	}

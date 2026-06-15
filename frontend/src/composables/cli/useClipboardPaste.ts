@@ -93,6 +93,20 @@ export function useClipboardPaste(sessionId: () => string) {
       }
     }
 
+    // Priority 4: Any remaining file blob (docx/xlsx/pptx/zip/…). The earlier
+    // image branch only catches image/* MIMEs, so an office/archive file pasted
+    // as a blob would otherwise fall through to {type:'none'} and vanish. Upload
+    // it via the same REST path images use — deepwork stores the file and the
+    // agent reads it from the injected path (zero text extraction here).
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const blob = item.getAsFile()
+        if (!blob) continue
+        const mime = blob.type || 'application/octet-stream'
+        return await uploadFile(blob, mime, { source: 'paste-event-file' })
+      }
+    }
+
     return { type: 'none', textForPTY: '', isLocal }
   }
 
@@ -218,6 +232,13 @@ function extFromMime(mime: string): string {
     'image/webp': 'webp',
     'image/svg+xml': 'svg',
     'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'application/zip': 'zip',
   }
   return map[mime.toLowerCase()] || 'bin'
 }
