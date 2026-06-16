@@ -122,7 +122,10 @@ func (tp *TmuxProber) ListPanes(ctx context.Context) ([]TmuxPane, error) {
 	return parseTmuxPanes(string(out))
 }
 
-// CapturePane reads the last n visible lines of a tmux pane (zero-invasion, read-only).
+// CapturePane reads the last n visible lines of a tmux pane (zero-invasion, read-only). The agent's
+// permission / selection / input PROMPT lives in the terminal, not its JSONL transcript, so this is
+// the ground-truth source for "blocked waiting for the user" — gated on transcript inactivity so it
+// is read only for panes that have stopped producing output (see PaneAgentMonitor).
 func (tp *TmuxProber) CapturePane(ctx context.Context, sessionWindow string, paneIdx, lines int) ([]string, error) {
 	target := fmt.Sprintf("%s.%d", sessionWindow, paneIdx)
 	out, err := tmuxCommandContext(ctx,
