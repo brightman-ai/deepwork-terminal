@@ -16,41 +16,38 @@
          REPLACES the single-session "终端 N idle" strip (one row, never stacked); otherwise
          the strip + connection/agent badges show. This is the exact dedup the hosts used
          to do — now owned by the surface so every host gets it for free. -->
-    <div class="surface-status-row" data-testid="surface-status-row">
-      <TmuxPaneBar
-        v-if="tmuxAttached"
-        :session-id="sessionId"
-        :ws-status="wsStatus"
+    <!-- Per-surface status row (SSOT for BOTH hosts). One thin line, never stacked:
+         · LEFT (ssr-main): scrollable — tmux window tabs when attached, else the agent badge.
+           Only this zone scrolls.
+         · RIGHT (ssr-health): the connection heartbeat, PINNED — it never scrolls and is never
+           pushed off by a long tmux window list, so it stays fully visible regardless of pane
+           count. This is the ONLY connection-health widget (the host tab bar no longer renders a
+           duplicate) → no double 'ms', single source for terminal + pro. -->
+    <div class="surface-status-row" :class="{ 'is-tmux': tmuxAttached }" data-testid="surface-status-row">
+      <div class="ssr-main">
+        <TmuxPaneBar
+          v-if="tmuxReady && tmuxAttached"
+          :session-id="sessionId"
+          @send-key="onSendKey"
+          @open-notify="openInstallGuide"
+        />
+        <AgentStatusBadge
+          v-else-if="tmuxReady && (agentState || notifications.length > 0)"
+          class="ssr-agent"
+          :state="agentState"
+          :notifications="notifications"
+          data-testid="surface-agent-status"
+        />
+      </div>
+      <ConnectionStatus
+        class="ssr-health"
+        :status="wsStatus"
         :rtt="netStats.rtt ?? 0"
         :tx-total="netStats.txTotal ?? 0"
         :rx-total="netStats.rxTotal ?? 0"
         :uptime-sec="netStats.uptimeSec ?? 0"
-        @send-key="onSendKey"
-        @open-notify="openInstallGuide"
+        data-testid="surface-connection-status"
       />
-      <div v-else class="surface-status-single">
-        <CliAgentStatusStrip
-          :tabs="surfaceStripTabs"
-          :rtt="netStats.rtt ?? 0"
-          data-testid="surface-status-strip"
-        />
-        <div class="surface-status-badges">
-          <ConnectionStatus
-            :status="wsStatus"
-            :rtt="netStats.rtt ?? 0"
-            :tx-total="netStats.txTotal ?? 0"
-            :rx-total="netStats.rxTotal ?? 0"
-            :uptime-sec="netStats.uptimeSec ?? 0"
-            data-testid="surface-connection-status"
-          />
-          <AgentStatusBadge
-            v-if="agentState || notifications.length > 0"
-            :state="agentState"
-            :notifications="notifications"
-            data-testid="surface-agent-status"
-          />
-        </div>
-      </div>
     </div>
 
     <!-- 终端区域 -->
@@ -199,10 +196,6 @@ import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusShe
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
-// Single-session status strip ("终端 N <status>"). This pure presentational component
-// (tabs[] + rtt → row) lives under the cli portal's adapters but has no portal coupling;
-// the surface feeds it a ONE-entry tabs[] built from its own props so the SSOT owns the row.
-import CliAgentStatusStrip from '@terminal/portals/cli/adapters/CliAgentStatusStrip.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
@@ -265,6 +258,10 @@ const tmux = useTmuxState(() => props.sessionId)
 // client, else the single-session "终端 N <status>" strip — the exact mutual exclusion the
 // hosts used to wire up, now owned by the surface (SSOT).
 const tmuxAttached = computed(() => tmux.attached.value)
+// Three-state gate: until the first tmux snapshot arrives the topology is UNKNOWN, so we
+// render NEITHER the pane bar NOR the agent badge (both would be a guessed state). The row
+// keeps its height from the always-present ConnectionStatus on the right → no layout jump.
+const tmuxReady = computed(() => tmux.ready.value)
 // WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
 useForegroundAgentNotify(() => props.sessionId)
 const keyCastr = useKeyCastrHud()
@@ -333,17 +330,6 @@ const inputTelemetry = useCliTerminalInputTelemetry({
   surface: 'workbench',
   sessionId: () => props.sessionId,
 })
-
-// Single-entry feed for the per-surface "终端 N <status>" strip. The strip is a generic
-// multi-tab component, but a surface owns exactly ONE session, so we hand it a one-element
-// tabs[] built from this surface's own props/state. The strip self-hides when there is
-// nothing to show (no agent state + not connected), keeping the row clean while idle.
-const surfaceStripTabs = computed(() => [{
-  tabId: props.sessionId,
-  tabName: props.sessionName,
-  agentState: agentState.value,
-  wsStatus: wsStatus.value,
-}])
 
 function sendBinary(data: Uint8Array, route = 'direct'): void {
   inputTelemetry.recordSend(data, route)
@@ -1050,36 +1036,40 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   min-height: 0;
 }
 
-/* Per-surface status row (SSOT). Sibling above .terminal-body — single-occupancy: either
-   the TmuxPaneBar (full-width, brings its own border/bg) OR the single-session row (strip +
-   trailing badges). flex-shrink:0 so it never eats terminal height. */
+/* Per-surface status row (SSOT for both hosts). A single horizontal bar above .terminal-body.
+   ssr-main grows + scrolls (tmux windows / agent badge); ssr-health is PINNED to the trailing
+   edge and never scrolls, so the heartbeat stays fully visible no matter how many tmux windows
+   exist. flex-shrink:0 so the row never eats terminal height. */
 .surface-status-row {
   display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-.surface-status-row :deep(.tmux-pane-bar) { flex: 1; min-width: 0; }
-
-/* Single-session branch: the "终端 N <status>" strip grows; connection/agent badges cling
-   to the trailing edge. The row carries the strip's chrome so it stays a clean full-width
-   bar even when the strip itself self-hides (idle + disconnected). */
-.surface-status-single {
-  display: flex;
   align-items: stretch;
+  flex-shrink: 0;
   background: hsl(var(--muted, 240 4% 16%));
   border-bottom: 1px solid hsl(var(--border, 240 4% 24%));
 }
-.surface-status-single :deep(.cli-agent-status-strip) {
+/* tmux mode: match the pane bar's own palette so the pinned health zone is seamless with it. */
+.surface-status-row.is-tmux {
+  background: #16121f;
+  border-bottom-color: #2a1f3a;
+}
+.ssr-main {
   flex: 1;
   min-width: 0;
-  border-bottom: none;
-}
-.surface-status-badges {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.ssr-main::-webkit-scrollbar { display: none; }
+.ssr-main :deep(.tmux-pane-bar) { flex: 1; min-width: 0; }
+.ssr-agent { padding: 0 8px; }
+/* Pinned heartbeat — never scrolls, never pushed off by a long window list. */
+.ssr-health {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
 }
 
 /* WS7 primary entry — floats top-right above xterm; small and unobtrusive so it
