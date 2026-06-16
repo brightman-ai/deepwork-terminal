@@ -5,7 +5,7 @@
        key sequence over the existing @send-key → PTY path; topology is PUSHED (WS tmux_state)
        so there is no per-tap server roundtrip. The leading `tmux:` label is itself a tap
        target that opens the WS8 status sheet. -->
-  <div v-if="installed" class="tmux-quick-bar" data-testid="tmux-quick-bar" @mousedown.prevent>
+  <div v-if="ready && installed" class="tmux-quick-bar" data-testid="tmux-quick-bar" @mousedown.prevent>
     <button
       class="tqb-tag"
       data-testid="tmux-quick-tag"
@@ -39,8 +39,17 @@
     <button class="tqb-btn" data-testid="tmux-quick-pgup" title="Page Up" @click="send('\x1b[5~')"><span class="tqb-cap">PgUp</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
     <!-- Half-page up — copy-mode scroll for the cross-screen copy flow (overlap halves, easier to
-         stitch). vi copy-mode binds C-u → halfpage-up (user runs mode-keys vi). -->
-    <button class="tqb-btn" data-testid="tmux-quick-halfpgup" title="Half Page Up (copy-mode)" @click="send('\x15')"><span class="tqb-cap">½↑</span></button>
+         stitch). Only present while attached (no tmux client → no copy-mode → nothing to scroll,
+         and the prefix below would otherwise leak to the shell). The keystroke is resolved from
+         the server's live mode-keys (vi C-u / emacs M-Up) and prefixed with copy-mode entry, so
+         it is standardized across users and never triggers a shell side-effect. -->
+    <button
+      v-if="attached"
+      class="tqb-btn"
+      data-testid="tmux-quick-halfpgup"
+      title="Half Page Up (copy-mode)"
+      @click="send(tmux.copyMotionSeq('halfpage-up'))"
+    ><span class="tqb-cap">½↑</span></button>
     <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-down" title="Arrow Down" @click="send('\x1b[B')"><span class="tqb-glyph">↓</span></button>
@@ -111,6 +120,7 @@ const emit = defineEmits<{
 }>()
 
 const tmux = useTmuxState(() => props.sessionId)
+const ready = tmux.ready
 const installed = tmux.installed
 const attached = tmux.attached
 

@@ -22,8 +22,25 @@ import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 const DEFAULT_PREFIX = new Uint8Array([0x02]) // C-b
 
+/** Semantic copy-mode motions the UI can request without knowing keystrokes. */
+export type CopyMotion = 'halfpage-up' | 'halfpage-down'
+
+// SSOT for "motion → keystroke per mode-keys". A raw key is inherently mode-dependent
+// (tmux copy-mode-vi vs copy-mode-emacs bind different keys), so the ONLY way to express a
+// motion correctly for every user is to pick the keystroke from the server's live mode-keys.
+// vi: C-u/C-d = halfpage up/down · emacs: M-Up/M-Down = halfpage up/down (tmux defaults).
+const COPY_MOTION_KEYS: Record<CopyMotion, { vi: string; emacs: string }> = {
+  'halfpage-up':   { vi: '\x15', emacs: '\x1b\x1b[A' },
+  'halfpage-down': { vi: '\x04', emacs: '\x1b\x1b[B' },
+}
+
 export interface TmuxStateStore {
   state: Ref<TmuxState | null>
+  /** True once the first snapshot/push has arrived (state !== null). Until then the
+   *  topology is UNKNOWN, distinct from "known to be empty/detached" — consumers must
+   *  gate any tmux chrome on `ready` so an unknown first frame renders nothing (no
+   *  attached/detached state guess) instead of flashing the detached layout. */
+  ready: ComputedRef<boolean>
   installed: ComputedRef<boolean>
   serverRunning: ComputedRef<boolean>
   /** True iff THIS session's shell is inside a tmux client (per-shell, not global). */
@@ -33,10 +50,17 @@ export interface TmuxStateStore {
   /** Decoded tmux prefix control byte(s); falls back to 0x02 (C-b) until known. */
   prefixBytes: ComputedRef<Uint8Array>
   prefixDisplay: ComputedRef<string>
+  /** Resolved global mode-keys ('vi' | 'emacs'); 'emacs' until known (tmux default). */
+  modeKeys: ComputedRef<'vi' | 'emacs'>
   /** Windows of the session THIS shell is attached to ([] when detached). */
   windows: ComputedRef<TmuxWindowState[]>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
+  /** Keystrokes for a semantic copy-mode motion, resolved for the live mode-keys.
+   *  Enters copy-mode first (idempotent) so the motion key is ALWAYS read in copy-mode
+   *  context — it can never leak to the shell (e.g. vi C-u = kill-line). Caller must only
+   *  invoke while `attached` (no tmux client → nothing to intercept the prefix). */
+  copyMotionSeq: (motion: CopyMotion) => string
   /** Apply a pushed { type: "tmux_state" } WS frame payload. */
   handleWSMessage: (payload: unknown) => void
   /** One-shot GET snapshot — called on init. */
@@ -68,12 +92,17 @@ function createStore(sessionId: () => string): TmuxStateStore {
   const { cliFetch } = useCliAuth()
   const state = ref<TmuxState | null>(null)
 
+  // null = topology UNKNOWN (snapshot not yet arrived); non-null = known. This闸
+  // separates "未知" from "已知未 attach" so the bar never renders a guessed state on
+  // the first frame (root cause of the 1.1~11.1 flash: ?? false collapsed both into false).
+  const ready = computed(() => state.value !== null)
   const installed = computed(() => state.value?.installed ?? false)
   const serverRunning = computed(() => state.value?.serverRunning ?? false)
   const attached = computed(() => state.value?.attached ?? false)
   const attachedSession = computed(() => state.value?.attachedSession ?? '')
   const prefixBytes = computed(() => decodePrefix(state.value?.prefix?.bytes))
   const prefixDisplay = computed(() => state.value?.prefix?.display ?? 'C-b')
+  const modeKeys = computed<'vi' | 'emacs'>(() => (state.value?.modeKeys === 'vi' ? 'vi' : 'emacs'))
 
   // Windows of the session THIS shell is attached to — scoped by attachedSession
   // name, NOT by any session that merely has a client. Detached → [] so the bar
@@ -89,6 +118,13 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   function prefixSeq(suffix: string): string {
     return bytesToString(prefixBytes.value) + suffix
+  }
+
+  function copyMotionSeq(motion: CopyMotion): string {
+    const keys = COPY_MOTION_KEYS[motion]
+    // prefix+[ enters copy-mode (no-op if already in it, position preserved), so the motion
+    // key below is guaranteed to be interpreted by copy-mode, never by the shell.
+    return prefixSeq('[') + (modeKeys.value === 'vi' ? keys.vi : keys.emacs)
   }
 
   function handleWSMessage(payload: unknown): void {
@@ -107,8 +143,8 @@ function createStore(sessionId: () => string): TmuxStateStore {
   }
 
   return {
-    state, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    windows, prefixSeq, handleWSMessage, fetchSnapshot,
+    state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
+    modeKeys, windows, prefixSeq, copyMotionSeq, handleWSMessage, fetchSnapshot,
   }
 }
 

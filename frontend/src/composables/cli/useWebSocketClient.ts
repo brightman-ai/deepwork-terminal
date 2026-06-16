@@ -32,7 +32,11 @@ export interface NetStats {
 }
 
 export function useWebSocketClient(sessionId: () => string, opts: WebSocketClientOptions = {}) {
-  const status = ref<WSConnectionStatus>('disconnected')
+  // Initial status is the neutral 'connecting' (amber pulse), NOT 'disconnected' (red).
+  // The first frame is "connection not yet established", not "connection lost" — starting
+  // at 'disconnected' flashed a red "Disconnected" chip before connect() runs. We only fall
+  // to 'disconnected' on an actual close/error (lines below).
+  const status = ref<WSConnectionStatus>('connecting')
   const maxAttempts = opts.maxReconnectAttempts ?? 10
   // [TH-0501-m9j 铁律 v2.0] WKWebView drops keystrokes during JS busy loops.
   // 1s heartbeat was competing with keyboard events. 30s is sufficient for
