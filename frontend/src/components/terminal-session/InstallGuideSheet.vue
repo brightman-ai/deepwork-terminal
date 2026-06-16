@@ -27,6 +27,13 @@
           </div>
 
           <div class="igs-body">
+            <!-- Tabs: 通知/安装 (the live action) ↔ 帮助 (feature cheat-sheet). -->
+            <div class="igs-tabs" role="tablist">
+              <button class="igs-tab" :class="{ 'is-active': tab === 'notify' }" data-testid="igs-tab-notify" @click="tab = 'notify'">通知</button>
+              <button class="igs-tab" :class="{ 'is-active': tab === 'help' }" data-testid="igs-tab-help" @click="tab = 'help'">帮助</button>
+            </div>
+
+            <div v-show="tab === 'notify'" data-testid="igs-tab-panel-notify">
             <p class="igs-lede">{{ lede }}</p>
 
             <!-- ════════ STATE: already on ═══════════════════════════════════
@@ -196,6 +203,29 @@
                 当前浏览器不支持 Web Push。可在 Chrome / Edge / Firefox，或已“添加到主屏幕”的 iOS Safari 中开启。
               </p>
             </template>
+            </div>
+
+            <!-- ════════ TAB: 帮助 — feature cheat-sheet (高频 → 中频, 低频不教) ═════ -->
+            <div v-show="tab === 'help'" class="igs-help" data-testid="igs-tab-panel-help">
+              <p class="igs-help-lede">把终端用顺手的几招，由常用到偶尔用。</p>
+
+              <div class="igs-help-grp">高频</div>
+              <ul class="igs-help-list">
+                <li class="igs-help-item"><span class="igs-help-ic">📎</span><div><b>上传附件</b><span>底栏「附件」键：手机直接传照片 / 文件进终端；远程也能推文件。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">⌨️</span><div><b>PC 粘贴</b><span>电脑浏览器里 <code>Ctrl/⌘+V</code>：本机文件和剪贴板图片直接粘进 tmux / 终端。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">🎯</span><div><b>悬浮球选区复制</b><span>拖悬浮球定位、双击复制一个词、拖两端锚点框选，点 Copy 取走。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">⬛</span><div><b>tmux 工具条</b><span><code>cp</code> 进 copy mode、PgUp/PgDn 翻页、<code>½↑</code> 上滚半屏、窗格 / 窗口一键切。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">📋</span><div><b>粘贴键</b><span>把剪贴板送进终端；HTTP 下读不了剪贴板时会自动转下方输入框粘贴 + 发送。</span></div></li>
+              </ul>
+
+              <div class="igs-help-grp">中频</div>
+              <ul class="igs-help-list">
+                <li class="igs-help-item"><span class="igs-help-ic">🔔</span><div><b>等待通知</b><span>HTTPS 下开通知：tmux 各窗格里 claude / codex 等你输入时，手机收推送。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">🗄️</span><div><b>收纳抽屉</b><span>右缘抽屉聚合跨会话的图片 / 文件 / 输入历史，点一下回插当前终端。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">🌐</span><div><b>公网访问</b><span>设置 → Network 一键 Cloudflare 隧道，给一个 <code>https</code> 链接把终端暴露到公网。</span></div></li>
+                <li class="igs-help-item"><span class="igs-help-ic">⚙️</span><div><b>设置入口</b><span>左缘把手拉出导航 → 设置：认证码、外观、网络都在这。</span></div></li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
@@ -214,6 +244,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const { isMobile } = useDeviceDetection()
 const push = usePushNotifications()
 
+const tab = ref<'notify' | 'help'>('notify')
 const busy = ref(false)
 const errorText = ref('')
 const testText = ref('')
@@ -677,4 +708,61 @@ async function onSendTest(): Promise<void> {
 .igs-fade-enter-active .igs-panel, .igs-fade-leave-active .igs-panel { transition: transform 0.2s ease; }
 .is-mobile .igs-fade-enter-from .igs-panel, .is-mobile .igs-fade-leave-to .igs-panel { transform: translateY(18px); }
 .is-desktop .igs-fade-enter-from .igs-panel, .is-desktop .igs-fade-leave-to .igs-panel { transform: translateY(-12px); }
+
+/* ── Tabs (通知 ↔ 帮助) ─────────────────────────────────────────────── */
+.igs-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 3px;
+  background: #1c1c1f;
+  border: 1px solid #252528;
+  border-radius: 9px;
+}
+.igs-tab {
+  flex: 1;
+  padding: 7px 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9a9aa2;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.igs-tab.is-active { background: #2a2118; color: #f5c79a; }
+
+/* ── 帮助 cheat-sheet ──────────────────────────────────────────────── */
+.igs-help-lede { color: #a8a8b0; font-size: 0.82rem; line-height: 1.55; margin: 0 0 12px; }
+.igs-help-grp {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #f08a3c;
+  text-transform: uppercase;
+  margin: 4px 0 7px;
+}
+.igs-help-list { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.igs-help-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  background: #1a1a1d;
+  border: 1px solid #232326;
+  border-radius: 8px;
+}
+.igs-help-ic { font-size: 1.05rem; line-height: 1.3; flex-shrink: 0; width: 22px; text-align: center; }
+.igs-help-item > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.igs-help-item b { color: #e8e8ec; font-size: 0.82rem; font-weight: 600; }
+.igs-help-item span { color: #98989f; font-size: 0.76rem; line-height: 1.5; }
+.igs-help-item code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.72rem;
+  background: #26262a;
+  color: #d8b48a;
+  padding: 0 4px;
+  border-radius: 4px;
+}
 </style>

@@ -53,7 +53,11 @@
     <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-down" title="Arrow Down" @click="send('\x1b[B')"><span class="tqb-glyph">↓</span></button>
-    <button class="tqb-btn" data-testid="tmux-quick-enter" title="Enter" @click="send('\r')"><span class="tqb-glyph">⏎</span></button>
+    <button class="tqb-btn tqb-btn--enter" data-testid="tmux-quick-enter" title="Enter" @click="send('\r')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="9,10 4,15 9,20"/><path d="M20 4v7a4 4 0 01-4 4H4"/>
+      </svg>
+    </button>
     <button class="tqb-btn" data-testid="tmux-quick-space" title="Space (copy-mode select)" @click="send(' ')"><span class="tqb-cap">SpC</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-bksp" title="Backspace" @click="send('\x7f')"><span class="tqb-glyph">⌫</span></button>
 
@@ -228,6 +232,16 @@ function send(key: string): void {
   background: #2a1020;
 }
 .tqb-btn--danger:active { background: #3a1828; }
+
+/* Enter — same green accent as the main Toolbar's Enter (.tb-btn--enter), so the two bars'
+   Enter keys read as one consistent affordance. */
+.tqb-btn--enter {
+  color: #80c880;
+  border-color: #2a4a2a;
+  border-bottom-color: #142a14;
+  background: #0e1e0e;
+}
+.tqb-btn--enter:active { background: #16321a; }
 
 /* attach prominent (green) when detached. */
 .tqb-btn--attach {

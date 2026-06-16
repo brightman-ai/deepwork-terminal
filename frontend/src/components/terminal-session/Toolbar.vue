@@ -78,22 +78,6 @@
       Alt
     </button>
 
-    <!-- 8. Paste — pastes the OS clipboard into the terminal via the robust
-         paste path (handles iOS / HTTP fallback + HUD errors in the host).
-         Icon + caption "粘贴" so it is unambiguous by glance (the clipboard glyph
-         alone reads as copy/clipboard, not specifically paste-into-terminal). -->
-    <button
-      class="tb-btn tb-btn--paste tb-btn--labeled"
-      @click="$emit('clipboard', 'paste')"
-      title="Paste from clipboard"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="8" y="2" width="8" height="4" rx="1" />
-        <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
-      </svg>
-      <span class="tb-cap">粘贴</span>
-    </button>
-
     <!-- 9. Toggle system keyboard -->
     <button
       class="tb-btn"
@@ -125,6 +109,21 @@
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="9,10 4,15 9,20"/><path d="M20 4v7a4 4 0 01-4 4H4"/>
       </svg>
+    </button>
+
+    <!-- 11. Paste — low-frequency, so it trails Enter (was up front). Pastes the OS clipboard
+         into the terminal via the robust paste path (handles iOS / HTTP-insecure fallback in the
+         host). Icon + caption "粘贴" so it reads as paste-into-terminal, not generic clipboard. -->
+    <button
+      class="tb-btn tb-btn--paste tb-btn--labeled"
+      @click="$emit('clipboard', 'paste')"
+      title="Paste from clipboard"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="8" y="2" width="8" height="4" rx="1" />
+        <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
+      </svg>
+      <span class="tb-cap">粘贴</span>
     </button>
 
     <!-- Page 2: quick-access keys (scroll right to see) -->
