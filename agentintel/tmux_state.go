@@ -81,8 +81,9 @@ const (
 // TmuxStateService aggregates tmux topology + agent detection with light caching.
 // It is safe for concurrent use. A nil receiver is never valid — use NewTmuxStateService.
 type TmuxStateService struct {
-	prober    *TmuxProber
-	inspector *ProcessInspector
+	prober      *TmuxProber
+	inspector   *ProcessInspector
+	paneMonitor *PaneAgentMonitor
 
 	mu             sync.Mutex
 	installed      bool
@@ -100,8 +101,9 @@ type TmuxStateService struct {
 func NewTmuxStateService() *TmuxStateService {
 	insp := SharedProcessInspector
 	return &TmuxStateService{
-		prober:    NewTmuxProber(insp),
-		inspector: insp,
+		prober:      NewTmuxProber(insp),
+		inspector:   insp,
+		paneMonitor: NewPaneAgentMonitor(nil),
 	}
 }
 
@@ -333,6 +335,9 @@ func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool
 func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, attached map[string]bool) []TmuxSessionState {
 	// agents: PID → tool, computed once over the shared ps snapshot.
 	agents := s.prober.DetectAgentsInPanes(ctx, panes)
+	// agentKeys: the JSONL-monitor keys for panes still hosting an agent this pass — used to prune
+	// watchers for panes that went away.
+	agentKeys := make(map[string]bool)
 
 	type winKey struct {
 		session string
@@ -369,7 +374,8 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		}
 		if tool, ok := agents[p.PanePID]; ok {
 			ps.AgentTool = tool
-			ps.AgentStatus = s.paneStatus(ctx, p)
+			ps.AgentStatus = s.paneStatus(ctx, p, tool)
+			agentKeys[paneKey(p)] = true
 		}
 		winPanes[wk] = append(winPanes[wk], ps)
 	}
@@ -392,27 +398,40 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			Windows:  windows,
 		})
 	}
+	// Drop JSONL watchers for panes that no longer host an agent (closed / agent exited).
+	s.paneMonitor.Prune(agentKeys)
 	return sessions
 }
 
-// paneStatus derives a coarse AgentStatus for a pane that hosts an agent by
-// capturing its visible buffer and analyzing prompt structure. Read-only and
-// time-boxed; failures degrade to StatusRunning (an agent process is present).
-func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane) AgentStatus {
+// paneKey is the stable per-pane id the transcript-freshness cache is keyed on (the pane's shell PID).
+func paneKey(p TmuxPane) string {
+	return strconv.Itoa(p.PanePID)
+}
+
+// paneStatus derives a pane's agent status with a JSONL-gated terminal read:
+//   - transcript being written (PaneAgentMonitor.Active) → working → Running, WITHOUT touching the pane.
+//   - transcript stopped → read the visible pane: a permission/selection/input PROMPT lives there
+//     (never in the transcript), so AnalyzeOutput on it is the ground truth — needs-permission →
+//     Waiting (the push trigger), a spinner → still Running, otherwise the turn is done → Idle.
+//
+// This keeps the (slightly brittle, version-coupled) prompt scrape OFF the hot path: it runs only
+// for stopped panes, not every agent pane every poll — accurate where it matters, cheap otherwise.
+func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, tool AgentTool) AgentStatus {
+	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool) {
+		return StatusRunning
+	}
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
-	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 40)
+	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
 	if err != nil {
 		return StatusRunning
 	}
 	switch AnalyzeOutput(lines) {
 	case PromptNeedsPermission:
 		return StatusWaiting
-	case PromptIdle, PromptLikelyIdle:
-		return StatusIdle
 	case PromptRunning:
 		return StatusRunning
 	default:
-		return StatusRunning
+		return StatusIdle
 	}
 }
