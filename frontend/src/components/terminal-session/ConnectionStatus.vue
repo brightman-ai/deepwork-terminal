@@ -1,7 +1,9 @@
 <template>
   <div class="connection-status" :class="statusClass" data-testid="cli-connection-status">
     <span class="status-indicator" />
-    <span class="status-text">{{ statusText }}</span>
+    <!-- When connected the green dot already says "OK"; the word is redundant, so show the text
+         label only for the states that actually need explaining (connecting / disconnected / …). -->
+    <span v-if="status !== 'connected'" class="status-text">{{ statusText }}</span>
     <template v-if="status === 'connected'">
       <span v-if="safeRtt > 0" class="net-stat net-rtt" :class="rttClass">{{ safeRtt }}ms</span>
       <span class="net-stat net-bw" v-if="safeRxTotal > 0 || safeTxTotal > 0">

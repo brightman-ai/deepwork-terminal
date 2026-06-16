@@ -52,6 +52,9 @@ export interface TmuxState {
   /** tmux session name THIS shell's client is attached to ('' when detached). */
   attachedSession?: string
   prefix: TmuxPrefix
+  /** Resolved global `mode-keys` ("vi" | "emacs") — selects the active copy-mode key
+   *  table so semantic copy-mode motions map to the right keystroke. Absent on older hosts. */
+  modeKeys?: string
   sessions: TmuxSessionState[]
 }
 
