@@ -68,10 +68,13 @@ const BALL_HALF = 36
 const position = reactive({ x: 200, y: 300 })
 
 onMounted(() => {
+  // MOB-007: park at the bottom-right corner (just above the 58px quick bar) instead
+  // of mid-terminal-body — the old x=82%·y=55% resting spot floated the 72px ring over
+  // the terminal text (file-path lines were covered). Still fully draggable from here.
   const quickBarH = 58
-  const termH = window.innerHeight - quickBarH
-  position.x = Math.round(window.innerWidth * 0.82)
-  position.y = Math.round(termH * 0.55)
+  position.x = Math.round(window.innerWidth - BALL_HALF - 8)
+  position.y = Math.round(window.innerHeight - quickBarH - BALL_HALF - 8)
+  clampPosition()
   emit('positionChange', position.x, position.y)
 })
 
@@ -184,7 +187,17 @@ defineExpose({ moveTo })
     inset 0 1px 0 rgba(255,255,255,0.18),
     inset 0 -1px 0 rgba(0,0,0,0.25);
 }
-.virtual-touchball:active { cursor: grabbing; }
+.virtual-touchball:active { cursor: grabbing; opacity: 1; }
+
+/* MOB-007: smaller + semi-transparent at rest on phones so the corner ring never
+   competes with terminal text; full opacity on touch (see :active above). */
+@media (max-width: 768px) {
+  .virtual-touchball {
+    width: 56px;
+    height: 56px;
+    opacity: 0.62;
+  }
+}
 
 .touchball-ring {
   pointer-events: none;
