@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 )
@@ -41,6 +42,38 @@ func (s *Server) handleTmuxPrefix(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
+}
+
+// TmuxCopyMotioner is an OPTIONAL provider capability: drive a copy-mode scroll
+// motion directly against the tmux server (bypassing the PTY keystroke stream,
+// which silently no-ops for these motions). The default provider implements it; a
+// host-injected provider may omit it, in which case the endpoint 501s gracefully.
+type TmuxCopyMotioner interface {
+	CopyMotion(ctx context.Context, session, motion string) error
+}
+
+// handleTmuxCopyMotion handles POST /tmux/copy-motion.
+// Body: { "session": "<name>", "motion": "halfpage-up" }. The session scopes the
+// target to its active pane; motion is validated against an allowlist provider-side.
+func (s *Server) handleTmuxCopyMotion(w http.ResponseWriter, r *http.Request) {
+	mover, ok := s.tmuxProvider.(TmuxCopyMotioner)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "copy motion unsupported"})
+		return
+	}
+	var body struct {
+		Session string `json:"session"`
+		Motion  string `json:"motion"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := mover.CopyMotion(r.Context(), body.Session, body.Motion); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // shellPIDForQuery resolves a session ID to its shell PID, or 0 if absent/unknown.

@@ -47,11 +47,11 @@ export interface TmuxStateStore {
   windows: ComputedRef<TmuxWindowState[]>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
-  /** Keystrokes for a semantic copy-mode motion, resolved for the live mode-keys.
-   *  Enters copy-mode first (idempotent) so the motion key is ALWAYS read in copy-mode
-   *  context — it can never leak to the shell (e.g. vi C-u = kill-line). Caller must only
-   *  invoke while `attached` (no tmux client → nothing to intercept the prefix). */
-  copyMotionSeq: (motion: CopyMotion) => string
+  /** Run a semantic copy-mode scroll motion via POST /tmux/copy-motion — the server
+   *  drives it as a direct `send-keys -X <motion>` against the tmux socket. We do NOT
+   *  inject keystrokes: the prefix `[` + command-prompt route silently no-ops for these
+   *  motions, and a raw key depends on mode-keys. Best-effort; resolves once dispatched. */
+  runCopyMotion: (motion: CopyMotion) => Promise<void>
   /** Apply a pushed { type: "tmux_state" } WS frame payload. */
   handleWSMessage: (payload: unknown) => void
   /** One-shot GET snapshot — called on init. */
@@ -111,14 +111,19 @@ function createStore(sessionId: () => string): TmuxStateStore {
     return bytesToString(prefixBytes.value) + suffix
   }
 
-  function copyMotionSeq(motion: CopyMotion): string {
-    // Invoke the SEMANTIC tmux copy-mode command, not a raw key. A raw key (vi C-u / emacs
-    // M-Up) depends on mode-keys AND the user not having rebound it — the source of "½↑ does
-    // nothing" reports even when mode-keys was detected correctly. `send-keys -X <motion>` runs
-    // the command directly, identical for every config. prefix+[ first makes copy-mode active
-    // (no-op if already in it) so the command always has a mode to act on; prefix+: runs it via
-    // tmux's command prompt (dispatched in the same input burst, so it does not linger).
-    return prefixSeq('[') + prefixSeq(':') + `send-keys -X ${motion}\r`
+  async function runCopyMotion(motion: CopyMotion): Promise<void> {
+    // Drive the scroll on the SERVER via `send-keys -X <motion>` against the tmux socket.
+    // The keystroke route (prefix `[`, then the command prompt) was proven to silently no-op
+    // for these motions while in copy-mode, and a raw key depends on mode-keys. The server
+    // enters copy-mode first only when the pane is not already in one (so a held scroll
+    // position is preserved). attachedSession scopes the target to the right session's pane.
+    try {
+      await cliFetch(cliApi('/tmux/copy-motion'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: attachedSession.value, motion }),
+      })
+    } catch { /* best-effort scroll — a transient failure just means no scroll this tap */ }
   }
 
   function handleWSMessage(payload: unknown): void {
@@ -138,7 +143,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, prefixSeq, copyMotionSeq, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, prefixSeq, runCopyMotion, handleWSMessage, fetchSnapshot,
   }
 }
 
