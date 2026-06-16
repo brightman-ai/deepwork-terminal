@@ -38,6 +38,9 @@
     </button>
     <button class="tqb-btn" data-testid="tmux-quick-pgup" title="Page Up" @click="send('\x1b[5~')"><span class="tqb-cap">PgUp</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
+    <!-- Half-page up — copy-mode scroll for the cross-screen copy flow (overlap halves, easier to
+         stitch). vi copy-mode binds C-u → halfpage-up (user runs mode-keys vi). -->
+    <button class="tqb-btn" data-testid="tmux-quick-halfpgup" title="Half Page Up (copy-mode)" @click="send('\x15')"><span class="tqb-cap">½↑</span></button>
     <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-down" title="Arrow Down" @click="send('\x1b[B')"><span class="tqb-glyph">↓</span></button>
