@@ -20,6 +20,11 @@
       <TmuxPaneBar
         v-if="tmuxAttached"
         :session-id="sessionId"
+        :ws-status="wsStatus"
+        :rtt="netStats.rtt ?? 0"
+        :tx-total="netStats.txTotal ?? 0"
+        :rx-total="netStats.rxTotal ?? 0"
+        :uptime-sec="netStats.uptimeSec ?? 0"
         @send-key="onSendKey"
         @open-notify="openInstallGuide"
       />
@@ -33,8 +38,9 @@
           <ConnectionStatus
             :status="wsStatus"
             :rtt="netStats.rtt ?? 0"
-            :upload-bps="netStats.uploadBps ?? 0"
-            :download-bps="netStats.downloadBps ?? 0"
+            :tx-total="netStats.txTotal ?? 0"
+            :rx-total="netStats.rxTotal ?? 0"
+            :uptime-sec="netStats.uptimeSec ?? 0"
             data-testid="surface-connection-status"
           />
           <AgentStatusBadge
@@ -580,6 +586,17 @@ function onTerminalReady(terminal: Terminal) {
 
   terminal.onScroll(() => {
     viewportY.value = terminal.buffer.active.viewportY
+  })
+  // Keep the reactive `viewportY` AUTHORITATIVE for the overlay's anchor RENDER math.
+  // onScroll alone is insufficient: in tmux copy-mode (alt-screen) PgUp/PgDn redraw the grid
+  // IN PLACE without an xterm scroll event, and a main↔alt buffer switch fires no scroll either
+  // — so the ref keeps a STALE value while the selection path reads the live one. That split is
+  // exactly the "选区定位不准 after PgUp; fixed after switching panes" bug (pane switch forces a
+  // redraw that happens to resync). onRender fires on every repaint; the guarded write no-ops
+  // when unchanged (alt-screen viewportY is structurally 0), so this stays cheap.
+  terminal.onRender(() => {
+    const vY = terminal.buffer.active.viewportY
+    if (viewportY.value !== vY) viewportY.value = vY
   })
   terminalRows.value = terminal.rows
 

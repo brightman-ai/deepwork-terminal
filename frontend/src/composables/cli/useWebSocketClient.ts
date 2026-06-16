@@ -19,10 +19,16 @@ export interface WebSocketClientOptions {
 export interface NetStats {
   /** Round-trip time in ms (from last heartbeat) */
   rtt: number
-  /** Upload bytes in the last second */
+  /** Upload bytes in the last sampling window */
   uploadBps: number
-  /** Download bytes in the last second */
+  /** Download bytes in the last sampling window */
   downloadBps: number
+  /** Cumulative bytes sent on the CURRENT connection (reset on (re)open) */
+  txTotal: number
+  /** Cumulative bytes received on the CURRENT connection (reset on (re)open) */
+  rxTotal: number
+  /** Seconds elapsed since the current connection opened (10s granularity) */
+  uptimeSec: number
 }
 
 export function useWebSocketClient(sessionId: () => string, opts: WebSocketClientOptions = {}) {
@@ -34,7 +40,8 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   const heartbeatMs = opts.heartbeatInterval ?? 30_000
 
   // Network stats (reactive for UI binding)
-  const netStats = reactive<NetStats>({ rtt: 0, uploadBps: 0, downloadBps: 0 })
+  const netStats = reactive<NetStats>({ rtt: 0, uploadBps: 0, downloadBps: 0, txTotal: 0, rxTotal: 0, uptimeSec: 0 })
+  let connectedAt = 0
 
   let ws: WebSocket | null = null
   let reconnectAttempts = 0
@@ -71,6 +78,11 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     ws.onopen = () => {
       status.value = 'connected'
       reconnectAttempts = 0
+      // Fresh connection → reset cumulative traffic + uptime baseline.
+      netStats.txTotal = 0
+      netStats.rxTotal = 0
+      netStats.uptimeSec = 0
+      connectedAt = Date.now()
       startHeartbeat()
       startBandwidthTracker()
       flushQueuedBinary()
@@ -211,6 +223,11 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     bandwidthTimer = setInterval(() => {
       netStats.uploadBps = bytesSentInWindow
       netStats.downloadBps = bytesReceivedInWindow
+      // Fold the window into the running totals (10s cadence, same as the bandwidth sample —
+      // no extra 1s timer, so WKWebView keystroke loss stays avoided per [TH-0501-m9j]).
+      netStats.txTotal += bytesSentInWindow
+      netStats.rxTotal += bytesReceivedInWindow
+      if (connectedAt > 0) netStats.uptimeSec = Math.floor((Date.now() - connectedAt) / 1000)
       bytesSentInWindow = 0
       bytesReceivedInWindow = 0
     }, 10_000)

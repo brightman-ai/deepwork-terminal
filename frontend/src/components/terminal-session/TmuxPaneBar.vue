@@ -29,10 +29,24 @@
       @touchend.stop
     >+</button>
 
-    <!-- WS7 secondary entry — contextual notify bell. Pushed to the right; badged
-         when notifications are off, and a one-time inline hint pops near it the first
-         time any pane enters `waiting` while unsubscribed. Opens the shared guide. -->
+    <!-- Network health heartbeat — same widget the single-session row shows. Lives here so it
+         stays visible while attached to tmux (this bar REPLACES the single-session row, so
+         dropping it here is exactly why the heartbeat "disappeared" in tmux mode). Connection
+         quality is orthogonal to tmux pane identity, so it belongs on every status row. -->
     <div class="tpb-spacer" />
+    <ConnectionStatus
+      class="tpb-heartbeat"
+      :status="wsStatus ?? 'disconnected'"
+      :rtt="rtt"
+      :tx-total="txTotal"
+      :rx-total="rxTotal"
+      :uptime-sec="uptimeSec"
+      data-testid="tmux-pane-heartbeat"
+    />
+
+    <!-- WS7 secondary entry — contextual notify bell. Badged when notifications are off, and a
+         one-time inline hint pops near it the first time any pane enters `waiting` while
+         unsubscribed. Opens the shared guide. -->
     <div class="tpb-bell-wrap">
       <Transition name="tpb-hint">
         <span v-if="showWaitingHint" class="tpb-hint" data-testid="tmux-notify-hint">
@@ -61,11 +75,20 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { TmuxWindowState } from '@terminal/types/terminal'
+import type { TmuxWindowState, WSConnectionStatus } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
+import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 
-const props = defineProps<{ sessionId: string }>()
+const props = defineProps<{
+  sessionId: string
+  // Network heartbeat — fed from the surface's live netStats so it mirrors the single-session row.
+  wsStatus?: WSConnectionStatus
+  rtt?: number
+  txTotal?: number
+  rxTotal?: number
+  uptimeSec?: number
+}>()
 
 const emit = defineEmits<{
   (e: 'sendKey', key: string): void
@@ -202,6 +225,9 @@ function newWindow(): void {
 
 /* WS7 — contextual notify bell, pushed to the trailing edge. */
 .tpb-spacer { flex: 1; min-width: 6px; }
+
+/* Heartbeat sits just left of the bell in the trailing cluster. */
+.tpb-heartbeat { flex-shrink: 0; margin-right: 2px; }
 .tpb-bell-wrap { position: relative; display: flex; align-items: center; flex-shrink: 0; }
 
 .tpb-bell {
