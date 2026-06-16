@@ -36,6 +36,12 @@ func (p *defaultTmuxProvider) TmuxState(ctx context.Context, shellPID int) (json
 	return json.Marshal(st)
 }
 
+// CopyMotion satisfies TmuxCopyMotioner — the default provider can drive copy-mode
+// scrolls because it owns an in-process tmux service on the same socket.
+func (p *defaultTmuxProvider) CopyMotion(ctx context.Context, session, motion string) error {
+	return p.svc.CopyMotion(ctx, session, motion)
+}
+
 // WithTmuxProvider overrides the default in-process tmux provider.
 // Hosts use this to supply a richer snapshot; standalone needs nothing.
 func WithTmuxProvider(p TmuxStateProvider) Option {

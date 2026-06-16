@@ -38,18 +38,25 @@
     </button>
     <button class="tqb-btn" data-testid="tmux-quick-pgup" title="Page Up" @click="send('\x1b[5~')"><span class="tqb-cap">PgUp</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
-    <!-- Half-page up — copy-mode scroll for the cross-screen copy flow (overlap halves, easier to
-         stitch). Only present while attached (no tmux client → no copy-mode → nothing to scroll,
-         and the prefix below would otherwise leak to the shell). The keystroke is resolved from
-         the server's live mode-keys (vi C-u / emacs M-Up) and prefixed with copy-mode entry, so
-         it is standardized across users and never triggers a shell side-effect. -->
+    <!-- Half-page up/down — copy-mode scroll for the cross-screen copy flow (overlap halves,
+         easier to stitch). Only present while attached (no tmux client → no copy-mode → nothing
+         to scroll). The motion runs SERVER-SIDE (POST /tmux/copy-motion → send-keys -X) rather
+         than via keystrokes: the prefix `[` + command-prompt route silently no-ops for these
+         motions, and a raw key depends on mode-keys. Config-independent, never leaks to the shell. -->
     <button
       v-if="attached"
       class="tqb-btn"
       data-testid="tmux-quick-halfpgup"
       title="Half Page Up (copy-mode)"
-      @click="send(tmux.copyMotionSeq('halfpage-up'))"
+      @click="tmux.runCopyMotion('halfpage-up')"
     ><span class="tqb-cap">½↑</span></button>
+    <button
+      v-if="attached"
+      class="tqb-btn"
+      data-testid="tmux-quick-halfpgdn"
+      title="Half Page Down (copy-mode)"
+      @click="tmux.runCopyMotion('halfpage-down')"
+    ><span class="tqb-cap">½↓</span></button>
     <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-down" title="Arrow Down" @click="send('\x1b[B')"><span class="tqb-glyph">↓</span></button>

@@ -174,6 +174,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /store", wrap(s.handleSaveStore))
 	s.mux.HandleFunc("GET /tmux/state", wrap(s.handleTmuxState))
 	s.mux.HandleFunc("GET /tmux/prefix", wrap(s.handleTmuxPrefix))
+	s.mux.HandleFunc("POST /tmux/copy-motion", wrap(s.handleTmuxCopyMotion))
 	s.mux.HandleFunc("GET /push/vapid", wrap(s.handlePushVAPID))
 	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
 	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
