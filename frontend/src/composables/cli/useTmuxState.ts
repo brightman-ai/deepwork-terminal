@@ -25,15 +25,6 @@ const DEFAULT_PREFIX = new Uint8Array([0x02]) // C-b
 /** Semantic copy-mode motions the UI can request without knowing keystrokes. */
 export type CopyMotion = 'halfpage-up' | 'halfpage-down'
 
-// SSOT for "motion → keystroke per mode-keys". A raw key is inherently mode-dependent
-// (tmux copy-mode-vi vs copy-mode-emacs bind different keys), so the ONLY way to express a
-// motion correctly for every user is to pick the keystroke from the server's live mode-keys.
-// vi: C-u/C-d = halfpage up/down · emacs: M-Up/M-Down = halfpage up/down (tmux defaults).
-const COPY_MOTION_KEYS: Record<CopyMotion, { vi: string; emacs: string }> = {
-  'halfpage-up':   { vi: '\x15', emacs: '\x1b\x1b[A' },
-  'halfpage-down': { vi: '\x04', emacs: '\x1b\x1b[B' },
-}
-
 export interface TmuxStateStore {
   state: Ref<TmuxState | null>
   /** True once the first snapshot/push has arrived (state !== null). Until then the
@@ -121,10 +112,13 @@ function createStore(sessionId: () => string): TmuxStateStore {
   }
 
   function copyMotionSeq(motion: CopyMotion): string {
-    const keys = COPY_MOTION_KEYS[motion]
-    // prefix+[ enters copy-mode (no-op if already in it, position preserved), so the motion
-    // key below is guaranteed to be interpreted by copy-mode, never by the shell.
-    return prefixSeq('[') + (modeKeys.value === 'vi' ? keys.vi : keys.emacs)
+    // Invoke the SEMANTIC tmux copy-mode command, not a raw key. A raw key (vi C-u / emacs
+    // M-Up) depends on mode-keys AND the user not having rebound it — the source of "½↑ does
+    // nothing" reports even when mode-keys was detected correctly. `send-keys -X <motion>` runs
+    // the command directly, identical for every config. prefix+[ first makes copy-mode active
+    // (no-op if already in it) so the command always has a mode to act on; prefix+: runs it via
+    // tmux's command prompt (dispatched in the same input burst, so it does not linger).
+    return prefixSeq('[') + prefixSeq(':') + `send-keys -X ${motion}\r`
   }
 
   function handleWSMessage(payload: unknown): void {
