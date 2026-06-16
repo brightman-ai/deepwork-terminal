@@ -57,11 +57,20 @@ type TmuxState struct {
 	// windows rather than any session that merely has a client somewhere.
 	AttachedSession string             `json:"attachedSession"`
 	Prefix          TmuxPrefix         `json:"prefix"`
-	Sessions        []TmuxSessionState `json:"sessions"`
+	// ModeKeys is the resolved global `mode-keys` option ("vi" | "emacs"). It tells the
+	// client which copy-mode key table is active, so a semantic copy-mode motion (e.g.
+	// halfpage-up) can be mapped to the correct keystroke for THIS server — the SSOT for
+	// "how to express copy-mode motions" shared by every connected client.
+	ModeKeys string             `json:"modeKeys"`
+	Sessions []TmuxSessionState `json:"sessions"`
 }
 
 // defaultPrefix is C-b (tmux default) used when prefix cannot be read.
 var defaultPrefix = TmuxPrefix{Display: "C-b", Bytes: []byte{0x02}}
+
+// defaultModeKeys is tmux's compiled default; tmux auto-switches to "vi" when
+// $EDITOR/$VISUAL contains "vi" at server start. show-options reports the effective value.
+const defaultModeKeys = "emacs"
 
 const (
 	tmuxInstalledTTL = 60 * time.Second
@@ -81,6 +90,9 @@ type TmuxStateService struct {
 	prefix         TmuxPrefix
 	prefixAt       time.Time
 	prefixResolved bool
+	modeKeys         string
+	modeKeysAt       time.Time
+	modeKeysResolved bool
 }
 
 // NewTmuxStateService builds a service over the shared process inspector so it
@@ -153,6 +165,48 @@ func (s *TmuxStateService) resolvePrefix(ctx context.Context) TmuxPrefix {
 	return parsePrefix(fields[1])
 }
 
+// ModeKeys returns the resolved global mode-keys ("vi" | "emacs"), cached with the
+// same short TTL as the prefix. Falls back to "emacs" when tmux is absent or unreadable.
+func (s *TmuxStateService) ModeKeys(ctx context.Context) string {
+	s.mu.Lock()
+	if s.modeKeysResolved && time.Since(s.modeKeysAt) < tmuxPrefixTTL {
+		v := s.modeKeys
+		s.mu.Unlock()
+		return v
+	}
+	s.mu.Unlock()
+
+	v := s.resolveModeKeys(ctx)
+
+	s.mu.Lock()
+	s.modeKeys = v
+	s.modeKeysAt = time.Now()
+	s.modeKeysResolved = true
+	s.mu.Unlock()
+	return v
+}
+
+func (s *TmuxStateService) resolveModeKeys(ctx context.Context) string {
+	if !s.TmuxInstalled() {
+		return defaultModeKeys
+	}
+	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	defer cancel()
+	out, err := tmuxCommandContext(cctx, "show-options", "-g", "mode-keys").Output()
+	if err != nil {
+		return defaultModeKeys
+	}
+	// Output form: "mode-keys vi" (or "mode-keys emacs").
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 2 {
+		return defaultModeKeys
+	}
+	if fields[1] == "vi" {
+		return "vi"
+	}
+	return "emacs"
+}
+
 // parsePrefix converts a tmux key spec ("C-b", "C-a", "M-x", "F1") into a
 // display label + the control byte(s) to emulate it. Only C-<letter> maps to a
 // single control byte; anything else keeps its display but carries no bytes
@@ -216,6 +270,7 @@ func (s *TmuxStateService) State(ctx context.Context, shellPID int) TmuxState {
 	st := TmuxState{
 		Installed: s.TmuxInstalled(),
 		Prefix:    s.Prefix(ctx),
+		ModeKeys:  s.ModeKeys(ctx),
 	}
 	if !st.Installed {
 		return st

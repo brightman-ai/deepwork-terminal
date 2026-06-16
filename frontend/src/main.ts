@@ -10,7 +10,9 @@ import '@ce/assets/main.css'
 
 // ── Portal registrations (side-effect imports — must run before app mount) ────
 import '@terminal/portals/cli'
-import '@terminal/portals/settings'
+// Shared @ce settings portal (SSOT shell + descriptor) + terminal's contributed sections.
+import '@ce/portals/settings'
+import '@terminal/portals/settings/sections'
 
 configureRemoteSink()
 const log = createLogger('main')

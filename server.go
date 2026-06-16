@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
+	tunnelkit "github.com/brightman-ai/kit/tunnel"
 )
 
 // Server is a complete terminal session HTTP service.
@@ -21,7 +22,7 @@ type Server struct {
 	hooks        Hooks
 	config       Config
 	listener     net.Listener
-	tunnel       *Tunnel
+	tunnel       *tunnelkit.Tunnel
 	tmuxProvider TmuxStateProvider
 	push         *pushStore
 	uploads      *uploadIndex
@@ -44,7 +45,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	if s.config.AuthCode == "" {
 		s.config.AuthCode = generateAuthCode()
 	}
-	s.tunnel = NewTunnel(s.config.DataDir)
+	s.tunnel = tunnelkit.New(s.config.DataDir)
 	s.uploads = newUploadIndex(s.config.DataDir)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Default in-process tmux provider so standalone gets tmux state without a host.

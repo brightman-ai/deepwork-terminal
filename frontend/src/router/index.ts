@@ -2,7 +2,11 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router"
 
 // ── Portal 注册 (静态 import 保证在 portalRegistry.getAll() 前执行) ─────────────
 import "@terminal/portals/cli";
-import "@terminal/portals/settings";
+// Settings portal is now the SHARED @ce one (the SSOT shell + descriptor); the terminal only
+// CONTRIBUTES its sections (System/Terminal/Auth) + the host-injected authed fetch. The shared
+// @ce sections (Internet Access / Cloudflare tunnel) come in via @ce/portals/settings itself.
+import "@ce/portals/settings";
+import "@terminal/portals/settings/sections";
 
 import { portalRegistry, isPortalEnabled } from "@ce/framework/portal";
 
