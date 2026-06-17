@@ -275,7 +275,7 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := r.URL.Query().Get("path")
-	target, err := safeResolve(cwd, rel)
+	target, err := resolvePreviewPath(cwd, rel)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
 		return
@@ -327,6 +327,37 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(head)
 	_, _ = io.Copy(w, f) // stream the remainder past the sniffed head
+}
+
+// resolvePreviewPath resolves a /files/raw preview path. In-cwd paths (tree navigation,
+// search results, recent files under cwd) use the traversal-safe safeResolve. An ABSOLUTE
+// path OUTSIDE cwd is allowed ONLY when it is a file the agent actually touched — i.e. a
+// member of the transcript-derived recent-edited set. Recent files legitimately live
+// outside the workbench root (/tmp scratch, sibling repos), and without this an absolute
+// outside-cwd path is collapsed INTO cwd by safeResolve → a 404. Arbitrary path traversal
+// stays blocked: only the bounded, agent-touched allowlist escapes the root.
+func resolvePreviewPath(cwd, rel string) (string, error) {
+	if filepath.IsAbs(rel) && !pathUnder(cwd, rel) {
+		if isRecentFile(cwd, rel) {
+			return filepath.Clean(rel), nil
+		}
+		return "", errors.New("path not allowed")
+	}
+	return safeResolve(cwd, rel)
+}
+
+// isRecentFile reports whether abs is in the session cwd's recent-edited file set (the
+// transcript tool_use signal that feeds /files/recent) — the allowlist that lets a file
+// outside cwd be previewed.
+func isRecentFile(cwd, abs string) bool {
+	abs = filepath.Clean(abs)
+	pl := agentintel.NewProjectLocator()
+	for _, f := range agentintel.RecentEditedFiles(pl, cwd) {
+		if filepath.Clean(f.Path) == abs {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionCWD resolves a session id to its working directory. ok=false when the id

@@ -272,3 +272,20 @@ func sessionByName(t *testing.T, sm *SessionManager, name string) *Session {
 	t.Fatalf("session %q not found", name)
 	return nil
 }
+
+func TestResolvePreviewPath_SecurityBranches(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// In-cwd path resolves via safeResolve.
+	if _, err := resolvePreviewPath(cwd, "a.txt"); err != nil {
+		t.Fatalf("in-cwd path should resolve, got %v", err)
+	}
+	// Absolute path OUTSIDE cwd that is NOT in any recent-edited set → blocked.
+	if _, err := resolvePreviewPath(cwd, "/etc/passwd"); err == nil {
+		t.Fatal("outside-cwd non-recent path must be blocked")
+	}
+	// (The recent-edited allowlist ESCAPE is covered end-to-end by the API harness:
+	// a transcript-referenced file outside cwd previews 200.)
+}
