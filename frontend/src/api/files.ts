@@ -45,6 +45,20 @@ export interface TreeResponse {
 }
 
 /**
+ * One hit of GET /files/search — a TreeEntry plus `rel`, the path RELATIVE to the
+ * search root (forward slashes). Files and directories both appear; `isDir` tells
+ * the UI whether to preview (file) or navigate (dir).
+ */
+export interface SearchEntry {
+  name: string
+  /** Path relative to the search cwd, forward slashes (e.g. 'src/deep/widget.go'). */
+  rel: string
+  isDir: boolean
+  size: number
+  mtimeMs: number
+}
+
+/**
  * Result of GET /files/raw. The server returns one of three body shapes; we
  * normalize them into a tagged union so the caller renders the right affordance:
  *   - { kind:'text', text }      — previewable text bytes
@@ -94,6 +108,26 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
     return (await resp.json()) as TreeResponse
   } catch {
     return null
+  }
+}
+
+/**
+ * GET /files/search — recursively find files/dirs under cwd whose NAME contains q
+ * (case-insensitive), VS-Code quick-open style. Returns [] on an empty query or any
+ * error so the caller can render an empty list without special-casing.
+ */
+export async function filesSearch(sessionId: string, cwd: string | undefined, q: string): Promise<SearchEntry[]> {
+  if (!sessionId || !q.trim()) return []
+  const { cliFetch } = useCliAuth()
+  try {
+    let path = withScope('/files/search', sessionId, cwd)
+    path += `&q=${encodeURIComponent(q)}`
+    const resp = await cliFetch(cliApi(path))
+    if (!resp.ok) return []
+    const data = (await resp.json()) as { entries?: SearchEntry[] }
+    return data.entries ?? []
+  } catch {
+    return []
   }
 }
 

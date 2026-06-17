@@ -195,6 +195,61 @@ func TestFilesRecent_Shape(t *testing.T) {
 	assert.Equal(t, http.StatusOK, r2.StatusCode)
 }
 
+// TC-FS-06: GET /files/search recursively finds matching files/dirs by name, returns the
+// cwd-relative path, and SKIPS noise dirs (node_modules) entirely.
+func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	// A nested matching file under real source.
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "src", "deep"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "src", "deep", "widget.go"), []byte("x"), 0o644))
+	// A matching DIRECTORY too (name contains the query).
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "src", "widgets"), 0o755))
+	// A noise dir holding a file that ALSO matches — it must NOT be returned.
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "node_modules", "pkg"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "node_modules", "pkg", "widget.js"), []byte("x"), 0o644))
+
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "search", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "search")
+
+	resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, "widget"), "")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out searchResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+
+	rels := map[string]bool{}
+	for _, e := range out.Entries {
+		rels[e.Rel] = e.IsDir
+	}
+	// The nested match is found with its forward-slash rel path.
+	isDir, found := rels["src/deep/widget.go"]
+	assert.True(t, found, "nested match should be found")
+	assert.False(t, isDir, "widget.go is a file")
+	// The matching directory is found and flagged isDir.
+	dirIsDir, dirFound := rels["src/widgets"]
+	assert.True(t, dirFound, "matching directory should be found")
+	assert.True(t, dirIsDir, "src/widgets is a directory")
+	// The noise-dir file must NOT appear.
+	_, noiseFound := rels["node_modules/pkg/widget.js"]
+	assert.False(t, noiseFound, "node_modules match must be skipped")
+	// Dirs sort before files.
+	require.NotEmpty(t, out.Entries)
+	assert.True(t, out.Entries[0].IsDir, "directories sort first")
+
+	// Empty query → empty list, 200.
+	r2, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, ""), "")
+	require.NoError(t, err)
+	defer r2.Body.Close()
+	assert.Equal(t, http.StatusOK, r2.StatusCode)
+	var out2 searchResponse
+	require.NoError(t, json.NewDecoder(r2.Body).Decode(&out2))
+	assert.Empty(t, out2.Entries)
+}
+
 func TestIsBinaryContent(t *testing.T) {
 	assert.True(t, isBinaryContent([]byte{0x00, 'a'}), "NUL byte → binary")
 	assert.False(t, isBinaryContent([]byte("hello")), "ascii → text")

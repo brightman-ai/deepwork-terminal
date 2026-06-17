@@ -16,13 +16,15 @@
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
 import { ref, computed, watch, onMounted } from 'vue'
-import { Copy, Check, Folder, FileText, ChevronLeft, Download } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X } from 'lucide-vue-next'
 import {
   filesRecent,
   filesTree,
+  filesSearch,
   filesRaw,
   type RecentFileItem,
   type TreeEntry,
+  type SearchEntry,
   type RawResult,
 } from '@terminal/api/files'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
@@ -84,9 +86,16 @@ const recentCats = computed(() => {
   for (const k of order) if (counts[k]) cats.push({ key: k, label: CAT_LABEL[k], count: counts[k] })
   return cats
 })
-const filteredRecent = computed(() =>
-  activeCat.value === 'all' ? recent.value : recent.value.filter(f => catOf(f.name) === activeCat.value),
-)
+// Client-side quick filter — composes with the category chip filter (both must pass).
+const recentQuery = ref('')
+const filteredRecent = computed(() => {
+  const q = recentQuery.value.trim().toLowerCase()
+  return recent.value.filter((f) => {
+    if (activeCat.value !== 'all' && catOf(f.name) !== activeCat.value) return false
+    if (q && !f.name.toLowerCase().includes(q)) return false
+    return true
+  })
+})
 // Reset the active chip if the data changes such that it no longer exists.
 watch(recentCats, (cats) => {
   if (!cats.some(c => c.key === activeCat.value)) activeCat.value = 'all'
@@ -142,6 +151,59 @@ function entryAbsPath(entry: TreeEntry): string {
 }
 function entryRelPath(entry: TreeEntry): string {
   return treeRel.value ? `${treeRel.value}/${entry.name}` : entry.name
+}
+
+// ── 目录树 recursive search (VS-Code quick-open) ──
+// A non-empty treeQuery replaces the single-level browse with a FLAT, recursive results
+// list from GET /files/search; clearing it returns to breadcrumb browse at the current dir.
+const treeQuery = ref('')
+const searchResults = ref<SearchEntry[]>([])
+const searching = ref(false)
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+let searchSeq = 0 // guards against out-of-order responses clobbering a newer query
+
+async function runSearch(q: string): Promise<void> {
+  const seq = ++searchSeq
+  searching.value = true
+  try {
+    const res = await filesSearch(props.sessionId, tmux.activeCwd.value, q)
+    if (seq === searchSeq) searchResults.value = res
+  } finally {
+    if (seq === searchSeq) searching.value = false
+  }
+}
+
+// Debounce ~250ms; an empty query instantly drops back to browse mode.
+watch(treeQuery, (q) => {
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+  const trimmed = q.trim()
+  if (!trimmed) {
+    searchSeq++ // cancel any in-flight result
+    searching.value = false
+    searchResults.value = []
+    return
+  }
+  searchTimer = setTimeout(() => { void runSearch(trimmed) }, 250)
+})
+
+// The parent rel dir of a search hit (dimmed in the row, VS-Code style); '' for a top-level hit.
+function parentRel(rel: string): string {
+  const i = rel.lastIndexOf('/')
+  return i >= 0 ? rel.slice(0, i) : ''
+}
+// Absolute path of a search hit (treeCwd may be unset before first browse → fall back to live cwd).
+function searchAbsPath(entry: SearchEntry): string {
+  const base = (treeCwd.value || tmux.activeCwd.value || '').replace(/\/+$/, '')
+  return base ? `${base}/${entry.rel}` : entry.rel
+}
+// Click a FILE hit → preview by its rel path. Click a DIR hit → browse into it + clear search.
+function onSearchHit(entry: SearchEntry): void {
+  if (entry.isDir) {
+    treeQuery.value = ''
+    void loadTree(entry.rel)
+  } else {
+    void previewRel(entry.name, searchAbsPath(entry), entry.rel)
+  }
 }
 
 // ── Preview (shared by both sub-tabs) ──
@@ -251,6 +313,10 @@ function reanchor(): void {
   recent.value = []
   treeEntries.value = []
   treeRel.value = ''
+  recentQuery.value = ''
+  treeQuery.value = ''
+  searchResults.value = []
+  searching.value = false
   closePreview()
   if (subTab.value === 'recent') void loadRecent()
   else void loadTree('')
@@ -285,6 +351,25 @@ defineExpose({ loadRecent, loadTree })
 
     <!-- ── 最近文件 ── -->
     <div v-show="subTab === 'recent'" class="flex-1 flex flex-col overflow-hidden">
+      <!-- Quick filter (client-side, instant) — composes with the category chips below. -->
+      <div v-if="recent.length" class="shrink-0 flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
+        <Search class="size-3.5 shrink-0 text-muted-foreground/70" />
+        <input
+          v-model="recentQuery"
+          type="text"
+          inputmode="search"
+          placeholder="筛选最近文件…"
+          class="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
+          data-testid="fp-recent-search"
+        />
+        <button
+          v-if="recentQuery"
+          class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+          type="button" title="清除"
+          data-testid="fp-recent-search-clear"
+          @click="recentQuery = ''"
+        ><X class="size-3.5" /></button>
+      </div>
       <!-- Format filter chips — only when the recent set actually spans >1 category. -->
       <div v-if="recent.length && recentCats.length > 2" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
         <button
@@ -300,6 +385,7 @@ defineExpose({ loadRecent, loadTree })
       <div class="flex-1 overflow-y-auto p-2">
       <div v-if="recentLoading && !recent.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">加载中…</div>
       <div v-else-if="!recent.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">暂无最近文件</div>
+      <div v-else-if="!filteredRecent.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
       <ul v-else class="flex flex-col gap-1.5">
         <li
           v-for="f in filteredRecent"
@@ -340,8 +426,28 @@ defineExpose({ loadRecent, loadTree })
 
     <!-- ── 目录树 ── -->
     <div v-show="subTab === 'tree'" class="flex flex-col flex-1 overflow-hidden">
-      <!-- breadcrumb + copy current path -->
-      <div class="shrink-0 flex items-center gap-1 border-b border-border px-2 py-1.5 text-[0.62rem] text-muted-foreground overflow-x-auto">
+      <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
+      <div class="shrink-0 flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
+        <Search class="size-3.5 shrink-0 text-muted-foreground/70" />
+        <input
+          v-model="treeQuery"
+          type="text"
+          inputmode="search"
+          placeholder="搜索文件 / 目录（递归）…"
+          class="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
+          data-testid="fp-tree-search"
+        />
+        <button
+          v-if="treeQuery"
+          class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+          type="button" title="清除"
+          data-testid="fp-tree-search-clear"
+          @click="treeQuery = ''"
+        ><X class="size-3.5" /></button>
+      </div>
+
+      <!-- breadcrumb + copy current path (browse mode only) -->
+      <div v-show="!treeQuery.trim()" class="shrink-0 flex items-center gap-1 border-b border-border px-2 py-1.5 text-[0.62rem] text-muted-foreground overflow-x-auto">
         <button
           v-if="treeRel"
           class="p-0.5 rounded hover:bg-muted/50 shrink-0"
@@ -369,7 +475,43 @@ defineExpose({ loadRecent, loadTree })
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto p-2">
+      <!-- ── search results (recursive, flat) — VS-Code quick-open style ── -->
+      <div v-if="treeQuery.trim()" class="flex-1 overflow-y-auto p-2" data-testid="fp-search-results">
+        <div v-if="searching && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">搜索中…</div>
+        <div v-else-if="!searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
+        <ul v-else class="flex flex-col gap-0.5">
+          <li
+            v-for="e in searchResults"
+            :key="e.rel"
+            class="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40 transition-colors"
+            :data-testid="`fp-search-${e.rel}`"
+          >
+            <Folder v-if="e.isDir" class="size-4 shrink-0 text-primary/80" />
+            <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
+            <button
+              class="min-w-0 flex-1 text-left"
+              type="button"
+              :title="e.rel"
+              @click="onSearchHit(e)"
+            >
+              <span class="block text-xs truncate" :class="e.isDir ? 'text-foreground font-medium' : 'text-foreground'">{{ e.name }}<span v-if="e.isDir" class="text-muted-foreground/60">/</span></span>
+              <span v-if="parentRel(e.rel)" class="block text-[0.58rem] text-muted-foreground/60 truncate">{{ parentRel(e.rel) }}</span>
+            </button>
+            <span v-if="!e.isDir" class="text-[0.58rem] text-muted-foreground/70 tabular-nums shrink-0">{{ fmtSize(e.size) }}</span>
+            <button
+              class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
+              type="button" title="复制路径"
+              @click="copyPath(searchAbsPath(e), 's:' + e.rel)"
+            >
+              <Check v-if="copiedKey === 's:' + e.rel" class="size-3 text-green-500" />
+              <Copy v-else class="size-3" />
+            </button>
+          </li>
+        </ul>
+      </div>
+
+      <!-- ── browse (single level) ── -->
+      <div v-else class="flex-1 overflow-y-auto p-2">
         <div v-if="treeLoading && !treeEntries.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">加载中…</div>
         <div v-else-if="!treeEntries.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">空目录</div>
         <ul v-else class="flex flex-col gap-0.5">

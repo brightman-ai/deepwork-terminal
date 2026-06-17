@@ -759,9 +759,12 @@ function glyphClass(name: string): string {
 .rd-resize {
   position: absolute;
   top: 0; left: 0; bottom: 0;
-  width: 7px;
+  width: 9px;
   cursor: ew-resize;
-  z-index: 5;
+  /* Must sit ABOVE every tab/overlay inside the panel (file preview z-10, toast z-20,
+     etc.) — they share this panel's stacking context, so a higher z-index keeps the
+     left-edge resize strip grabbable in ANY drawer state (list, preview, overview). */
+  z-index: 40;
   touch-action: none;
   background: transparent;
 }

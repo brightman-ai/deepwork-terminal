@@ -52,6 +52,47 @@ type treeResponse struct {
 	Entries []treeEntry `json:"entries"`
 }
 
+// searchEntry is one hit in GET /files/search — a treeEntry plus the path RELATIVE
+// to the search root (forward slashes), so the client can preview/navigate it without
+// re-deriving the location.
+type searchEntry struct {
+	Name    string `json:"name"`
+	Rel     string `json:"rel"`
+	IsDir   bool   `json:"isDir"`
+	Size    int64  `json:"size"`
+	MtimeMs int64  `json:"mtimeMs"`
+}
+
+type searchResponse struct {
+	Entries []searchEntry `json:"entries"`
+}
+
+// searchMaxResults caps how many hits /files/search returns — a quick-open list, not a
+// full index dump. searchMaxScan caps how many tree entries we walk before stopping, so
+// a giant subtree can't hang the request.
+const (
+	searchMaxResults = 200
+	searchMaxScan    = 20000
+)
+
+// searchSkipDirs are directory names we never descend into — build artifacts, vendored
+// deps, caches and VCS internals that bury real source under tens of thousands of files.
+// `.git` is always skipped; other dot-dirs (.github, .vscode, …) are still walked.
+var searchSkipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	"dist":         true,
+	"build":        true,
+	"__pycache__":  true,
+	".venv":        true,
+	"venv":         true,
+	"vendor":       true,
+	"target":       true,
+	".next":        true,
+	".cache":       true,
+	".idea":        true,
+}
+
 // handleFilesRecent handles GET /files/recent?session=<id>.
 //
 // It resolves the session's cwd, asks agentintel for the files agents recently
@@ -140,6 +181,84 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 		Rel:     cleanRel(rel),
 		Entries: out,
 	})
+}
+
+// handleFilesSearch handles GET /files/search?session=<id>&cwd=<dir>&q=<query>.
+//
+// It recursively walks the resolved cwd subtree and returns files AND directories whose
+// NAME contains q (case-insensitive) — VS-Code quick-open style. Noise directories
+// (build artifacts / vendored deps / caches, see searchSkipDirs) are skipped entirely so
+// a real project's source isn't buried. Results cap at searchMaxResults; the walk caps at
+// searchMaxScan entries so a giant tree can't hang the request. An empty/unknown cwd or an
+// empty query → 200 with an empty list (soft-fail, like the other /files/* handlers).
+func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
+	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	if !ok || cwd == "" {
+		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if q == "" {
+		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
+		return
+	}
+
+	out := make([]searchEntry, 0, 64)
+	scanned := 0
+	// WalkDir does NOT follow symlinks, so traversal stays within the real subtree.
+	_ = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Unreadable dir/file: skip it (or its subtree) but keep walking the rest.
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if path == cwd {
+			return nil // never match/emit the root itself
+		}
+		if d.IsDir() && searchSkipDirs[d.Name()] {
+			return filepath.SkipDir
+		}
+		scanned++
+		if scanned > searchMaxScan || len(out) >= searchMaxResults {
+			return filepath.SkipDir // stop descending; WalkDir keeps the walk bounded
+		}
+		if !strings.Contains(strings.ToLower(d.Name()), q) {
+			return nil
+		}
+		rel, rerr := filepath.Rel(cwd, path)
+		if rerr != nil {
+			return nil
+		}
+		entry := searchEntry{
+			Name:  d.Name(),
+			Rel:   filepath.ToSlash(rel),
+			IsDir: d.IsDir(),
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			entry.MtimeMs = info.ModTime().UnixMilli()
+			if !d.IsDir() {
+				entry.Size = info.Size()
+			}
+		}
+		out = append(out, entry)
+		return nil
+	})
+
+	// Cap (the SkipDir guard stops descent, but a wide single level can still overshoot).
+	if len(out) > searchMaxResults {
+		out = out[:searchMaxResults]
+	}
+	// Directories first, then by rel path — a stable, scannable quick-open order.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		return out[i].Rel < out[j].Rel
+	})
+
+	writeJSON(w, http.StatusOK, searchResponse{Entries: out})
 }
 
 // handleFilesRaw handles GET /files/raw?session=<id>&path=<rel>.

@@ -180,6 +180,7 @@ func (s *Server) registerRoutes() {
 	// recent = transcript tool_use signal; tree = single dir level; raw = bounded preview.
 	s.mux.HandleFunc("GET /files/recent", wrap(s.handleFilesRecent))
 	s.mux.HandleFunc("GET /files/tree", wrap(s.handleFilesTree))
+	s.mux.HandleFunc("GET /files/search", wrap(s.handleFilesSearch))
 	s.mux.HandleFunc("GET /files/raw", wrap(s.handleFilesRaw))
 	// Session overview metrics (CHG-017): turn/summary breakdown of the CURRENT claude
 	// transcript for the session cwd. Feeds the shared @ce OverviewPanel.
