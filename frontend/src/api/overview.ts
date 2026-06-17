@@ -22,7 +22,7 @@ export type { SessionMetricsBag } from '@ce/types/sessionMetrics'
  * empty/loading affordance instead of crashing the drawer.
  */
 export async function sessionOverview(sessionId: string, cwd?: string): Promise<SessionMetricsBag> {
-  const empty: SessionMetricsBag = { detail: null, summary: null, turns: [] }
+  const empty: SessionMetricsBag = { detail: null, summary: null, turns: [], price: null }
   if (!sessionId) return empty
   const { cliFetch } = useCliAuth()
   try {
@@ -37,6 +37,7 @@ export async function sessionOverview(sessionId: string, cwd?: string): Promise<
       detail: data.detail ?? null,
       summary: data.summary ?? null,
       turns: data.turns ?? [],
+      price: data.price ?? null,
     }
   } catch {
     return empty

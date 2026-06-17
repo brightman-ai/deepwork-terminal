@@ -16,7 +16,7 @@ import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import SessionOverviewPane from '@ce/components/overview/SessionOverviewPane.vue'
 import { sessionOverview } from '@terminal/api/overview'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-import type { SessionDetail, TurnsSummary, Turn } from '@ce/types/sessionMetrics'
+import type { SessionDetail, TurnsSummary, Turn, UnitPrice } from '@ce/types/sessionMetrics'
 
 const props = defineProps<{ sessionId: string }>()
 
@@ -27,6 +27,7 @@ const tmux = useTmuxState(() => props.sessionId)
 const detail = ref<SessionDetail | null>(null)
 const summary = ref<TurnsSummary | null>(null)
 const turns = ref<Turn[]>([])
+const price = ref<UnitPrice | null>(null)
 // loading is true only until the FIRST response of the current session lands —
 // the 3s poll refreshes silently so the pane never flashes its loading state.
 const loading = ref(true)
@@ -39,6 +40,7 @@ async function refresh(): Promise<void> {
     detail.value = null
     summary.value = null
     turns.value = []
+    price.value = null
     loading.value = false
     return
   }
@@ -46,6 +48,7 @@ async function refresh(): Promise<void> {
   detail.value = bag.detail
   summary.value = bag.summary
   turns.value = bag.turns ?? []
+  price.value = bag.price ?? null
   loading.value = false
 }
 
@@ -82,6 +85,7 @@ onBeforeUnmount(() => {
     :detail="detail"
     :summary="summary"
     :turns="turns"
+    :price="price"
     :loading="loading"
   />
 </template>

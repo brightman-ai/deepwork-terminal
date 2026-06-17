@@ -155,10 +155,25 @@ func TestSessionMetrics_TwoTurns(t *testing.T) {
 		t.Errorf("summary started_at empty")
 	}
 
-	// --- Group B must all be nil ---
+	// --- Group B (non-derivable) must all be nil ---
 	if sum.ModelCalls != nil || sum.AgentCalls != nil || sum.PermissionRequests != nil ||
-		sum.ToolCallsByCategory != nil || sum.TotalCost != nil || sum.Currency != nil {
-		t.Errorf("Group-B fields must be nil: %+v", sum)
+		sum.ToolCallsByCategory != nil {
+		t.Errorf("non-derivable Group-B fields must be nil: %+v", sum)
+	}
+
+	// --- cost IS derived (claude-sonnet-4 is a known model) ---
+	if sum.TotalCost == nil || *sum.TotalCost <= 0 {
+		t.Errorf("summary total_cost = %v, want a positive derived cost for known model", sum.TotalCost)
+	}
+	if sum.Currency != "USD" {
+		t.Errorf("summary currency = %q, want USD", sum.Currency)
+	}
+	// --- top-level price = the model's reference unit price (per-MTok) ---
+	if m.Price == nil {
+		t.Fatalf("m.Price must be non-nil for known model claude-sonnet-4")
+	}
+	if m.Price.Input <= 0 || m.Price.Output <= 0 || m.Price.Currency != "USD" {
+		t.Errorf("price unit prices invalid: %+v", m.Price)
 	}
 }
 

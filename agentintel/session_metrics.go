@@ -3,17 +3,37 @@ package agentintel
 import (
 	"strings"
 	"time"
+
+	"github.com/brightman-ai/kit/pricing"
 )
 
 // SessionMetrics is the full overview payload for ONE agent session: a per-turn
 // breakdown, an aggregate summary, and session-level detail. It feeds the shared
-// @ce OverviewPanel. Group-B metrics (cost, agent/model calls, permission requests,
+// @ce OverviewPanel. Group-B metrics (agent/model calls, permission requests,
 // tool-call categories) are NOT derivable from a Claude transcript and are left nil
-// → serialized as JSON null → the UI renders "—".
+// → serialized as JSON null → the UI renders "—". Cost is the exception: it IS
+// derivable (summed tokens × kit/pricing) so summary.total_cost is computed here.
+//
+// Price is the current model's reference UNIT price (per-MTok), looked up once from
+// the kit/pricing SSOT. It is nil (omitted) when the model is unknown to the table —
+// never a fabricated 0.
 type SessionMetrics struct {
 	Detail  SessionDetail  `json:"detail"`
 	Summary SessionSummary `json:"summary"`
 	Turns   []TurnMetrics  `json:"turns"`
+	Price   *PriceJSON     `json:"price,omitempty"`
+}
+
+// PriceJSON is the current model's reference unit price, in currency per MILLION
+// tokens, mirrored from pricing.ModelPrice. cache_create is 0 for providers without
+// a cache-write tier (OpenAI, Gemini). It is only emitted when the model resolves in
+// the kit/pricing table.
+type PriceJSON struct {
+	Input       float64 `json:"input"`
+	Output      float64 `json:"output"`
+	CacheCreate float64 `json:"cache_create"`
+	CacheRead   float64 `json:"cache_read"`
+	Currency    string  `json:"currency"`
 }
 
 // SessionDetail is the session-level header. ended_at is always null (a live session
@@ -50,8 +70,12 @@ type SessionSummary struct {
 	AgentCalls          *int    `json:"agent_calls"`
 	PermissionRequests  *int    `json:"permission_requests"`
 	ToolCallsByCategory *string `json:"tool_calls_by_category"`
-	TotalCost           *string `json:"total_cost"`
-	Currency            *string `json:"currency"`
+
+	// Cost IS derivable: summed tokens × kit/pricing for the session model. nil when
+	// the model is unknown to the price table (never a fabricated 0). currency is
+	// omitted when there is no cost.
+	TotalCost *float64 `json:"total_cost"`
+	Currency  string   `json:"currency,omitempty"`
 }
 
 // TurnMetrics is one user→assistant cycle. A turn opens on a user text message and
@@ -233,7 +257,10 @@ func parseTranscript(path, sessionID, title string, active bool) SessionMetrics 
 		EndedAt:   nil,
 	}
 	summary := aggregate(turns, earliestTs, sawToolResult, toolErrors)
-	return SessionMetrics{Detail: detail, Summary: summary, Turns: turns}
+	// Derive cost (summed tokens × kit/pricing) + the model's reference unit price.
+	// Unknown model → total_cost nil + price nil (honest, never a fabricated 0).
+	price := enrichPricing(modelID, &summary)
+	return SessionMetrics{Detail: detail, Summary: summary, Turns: turns, Price: price}
 }
 
 // accumulateAssistant folds one assistant message into the open turn: usage tokens
@@ -397,8 +424,37 @@ func emptySummary() SessionSummary {
 		PermissionRequests:  nil,
 		ToolCallsByCategory: nil,
 		TotalCost:           nil,
-		Currency:            nil,
+		Currency:            "",
 	}
+}
+
+// enrichPricing computes the session cost (summed tokens × kit/pricing) and looks up
+// the model's reference unit price. model is the latest assistant model id from the
+// transcript; an empty model (or one unknown to the price table) leaves total_cost
+// nil and returns a nil price — the honest "no price data" shape, never a fake 0.
+func enrichPricing(model string, s *SessionSummary) *PriceJSON {
+	if model == "" {
+		return nil
+	}
+	if cost, currency, ok := pricing.Cost(model, pricing.Usage{
+		Input:       s.InputTokens,
+		Output:      s.OutputTokens,
+		CacheCreate: s.CacheCreateTokens,
+		CacheRead:   s.CacheReadTokens,
+	}); ok {
+		s.TotalCost = &cost
+		s.Currency = currency
+	}
+	if p, ok := pricing.Lookup(model); ok {
+		return &PriceJSON{
+			Input:       p.InputPerM,
+			Output:      p.OutputPerM,
+			CacheCreate: p.CacheCreatePerM,
+			CacheRead:   p.CacheReadPerM,
+			Currency:    p.Currency,
+		}
+	}
+	return nil
 }
 
 // truncate clips s to max runes, appending an ellipsis when cut. Operates on runes so
