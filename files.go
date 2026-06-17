@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -192,16 +191,17 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	head = head[:n]
 
-	ct := mime.TypeByExtension(filepath.Ext(target))
-	if isBinaryContent(head, ct) {
+	if isBinaryContent(head) {
 		writeJSON(w, http.StatusOK, map[string]any{"binary": true, "size": info.Size()})
 		return
 	}
 
-	if ct == "" {
-		ct = "text/plain; charset=utf-8"
-	}
-	w.Header().Set("Content-Type", ct)
+	// Serve every previewable file as plain text: the drawer renders it read-only with
+	// extension-based highlighting (FilePreview), so the precise mime is irrelevant — and
+	// forcing text/plain both avoids the browser executing/interpreting a .html and keeps a
+	// real .json from colliding with the application/json {binary}/{tooLarge} sentinels the
+	// client distinguishes by content-type.
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// File is mutable (an agent may rewrite it) — never cache the preview.
 	w.Header().Set("Cache-Control", "no-cache")
@@ -329,26 +329,27 @@ func cleanRel(rel string) string {
 // isBinaryContent reports whether the sniffed head looks binary: a NUL byte in the
 // first bytes, or a content-type that is neither text/* nor a known text-ish type.
 // An empty/unknown content-type is treated as text (we already checked for NULs).
-func isBinaryContent(head []byte, contentType string) bool {
+// isBinaryContent decides text-vs-binary from the CONTENT, not the extension/mime — a
+// .sh is plain text even though its mime is application/x-sh, and an extension whitelist
+// forever misses variants (.zsh/.conf/.env/Dockerfile/…). A NUL byte is the definitive
+// binary signal; otherwise a high ratio of non-whitespace CONTROL bytes means binary.
+// Printable ASCII and any byte ≥0x80 (UTF-8 lead/continuation) read as text, so source,
+// scripts, configs and UTF-8 docs all preview.
+func isBinaryContent(head []byte) bool {
+	if len(head) == 0 {
+		return false // empty file → previewable (blank), not binary
+	}
 	if bytes.IndexByte(head, 0) >= 0 {
 		return true
 	}
-	if contentType == "" {
-		return false
+	ctrl := 0
+	for _, b := range head {
+		switch {
+		case b >= 0x20: // printable ASCII or UTF-8 (≥0x80)
+		case b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v' || b == '\b' || b == 0x1b:
+		default:
+			ctrl++
+		}
 	}
-	base := contentType
-	if i := strings.IndexByte(base, ';'); i >= 0 {
-		base = base[:i]
-	}
-	base = strings.TrimSpace(strings.ToLower(base))
-	if strings.HasPrefix(base, "text/") {
-		return false
-	}
-	// A handful of structured-text types that mime reports as application/*.
-	switch base {
-	case "application/json", "application/xml", "application/javascript",
-		"application/x-yaml", "application/x-sh", "application/toml":
-		return false
-	}
-	return true
+	return float64(ctrl)/float64(len(head)) > 0.3
 }

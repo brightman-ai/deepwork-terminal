@@ -128,76 +128,84 @@ watch(
 </template>
 
 <style scoped>
-.filepreview { background: transparent; }
+/* High-contrast, self-contained theme (GitHub-Dark-grade) so the preview reads cleanly
+   regardless of the host's tokens. Solid surface + near-white text on a deep base. */
+.filepreview {
+  background: #0e0b16;
+  color: #e6e1f0;
+}
 
 .fp-wrap-toggle {
   position: absolute; top: 6px; right: 8px; z-index: 2;
   display: inline-flex; align-items: center; justify-content: center;
   padding: 3px; border-radius: 6px;
-  color: #6f5a90; background: rgba(22, 15, 34, 0.85);
-  border: 1px solid #2e2050;
+  color: #9d97b5; background: rgba(14, 11, 22, 0.9);
+  border: 1px solid #2b2640;
 }
-.fp-wrap-toggle.is-on { color: #c080ff; border-color: #3a2860; }
+.fp-wrap-toggle.is-on { color: #c8a8ff; border-color: #4a3f70; }
 
 /* ── code ── */
 .fp-code {
   margin: 0; padding: 12px 12px 28px;
   font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', ui-monospace, monospace;
-  font-size: 0.7rem; line-height: 1.55;
-  color: #d8c4f0; background: transparent;
+  font-size: 0.72rem; line-height: 1.6;
+  color: #e6e1f0; background: transparent;
   tab-size: 4;
 }
 .fp-wrap { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .fp-nowrap { white-space: pre; overflow-x: auto; }
 
-/* highlight.js token palette — dark purple, aligned with the drawer's v6 surface. */
-.fp-code :deep(.hljs-comment), .fp-code :deep(.hljs-quote) { color: #6f5a90; font-style: italic; }
-.fp-code :deep(.hljs-keyword), .fp-code :deep(.hljs-selector-tag), .fp-code :deep(.hljs-literal),
-.fp-code :deep(.hljs-section), .fp-code :deep(.hljs-doctag) { color: #c080ff; }
-.fp-code :deep(.hljs-string), .fp-code :deep(.hljs-regexp), .fp-code :deep(.hljs-addition) { color: #7fd8a0; }
-.fp-code :deep(.hljs-number), .fp-code :deep(.hljs-symbol), .fp-code :deep(.hljs-bullet) { color: #f0a560; }
-.fp-code :deep(.hljs-title), .fp-code :deep(.hljs-title.function_), .fp-code :deep(.hljs-name) { color: #80c0ff; }
-.fp-code :deep(.hljs-built_in), .fp-code :deep(.hljs-type), .fp-code :deep(.hljs-class .hljs-title) { color: #f0c860; }
+/* highlight.js — GitHub-Dark-grade palette, tuned bright for the deep surface. */
+.fp-code :deep(.hljs-comment), .fp-code :deep(.hljs-quote) { color: #8b93a7; font-style: italic; }
+.fp-code :deep(.hljs-keyword), .fp-code :deep(.hljs-selector-tag), .fp-code :deep(.hljs-doctag) { color: #ff7b9c; }
+.fp-code :deep(.hljs-literal), .fp-code :deep(.hljs-number), .fp-code :deep(.hljs-symbol),
+.fp-code :deep(.hljs-bullet) { color: #ffab70; }
+.fp-code :deep(.hljs-string), .fp-code :deep(.hljs-regexp), .fp-code :deep(.hljs-addition) { color: #9ae6b4; }
+.fp-code :deep(.hljs-title), .fp-code :deep(.hljs-title.function_), .fp-code :deep(.hljs-section) { color: #c8a8ff; }
+.fp-code :deep(.hljs-built_in), .fp-code :deep(.hljs-type), .fp-code :deep(.hljs-class .hljs-title) { color: #ffd866; }
+.fp-code :deep(.hljs-name), .fp-code :deep(.hljs-tag) { color: #7ee787; }
 .fp-code :deep(.hljs-attr), .fp-code :deep(.hljs-attribute), .fp-code :deep(.hljs-variable),
-.fp-code :deep(.hljs-template-variable) { color: #c8a0ff; }
-.fp-code :deep(.hljs-meta), .fp-code :deep(.hljs-comment .hljs-doctag) { color: #8a76aa; }
-.fp-code :deep(.hljs-deletion) { color: #f08080; }
+.fp-code :deep(.hljs-template-variable) { color: #79c0ff; }
+.fp-code :deep(.hljs-meta) { color: #a9a3c2; }
+.fp-code :deep(.hljs-deletion) { color: #ff9c9c; }
 .fp-code :deep(.hljs-emphasis) { font-style: italic; }
 .fp-code :deep(.hljs-strong) { font-weight: 700; }
 
 /* ── markdown prose ── */
 .fp-md {
-  padding: 12px 14px 28px;
-  font-size: 0.74rem; line-height: 1.6; color: #d8c4f0;
+  padding: 14px 16px 28px;
+  font-size: 0.78rem; line-height: 1.65; color: #d9d4e6;
   word-break: break-word; overflow-wrap: anywhere;
 }
-.fp-md :deep(h1), .fp-md :deep(h2), .fp-md :deep(h3) { color: #f0e0ff; font-weight: 700; line-height: 1.3; margin: 0.9em 0 0.4em; }
-.fp-md :deep(h1) { font-size: 1.15rem; border-bottom: 1px solid #2e2050; padding-bottom: 0.2em; }
-.fp-md :deep(h2) { font-size: 1.05rem; }
-.fp-md :deep(h3) { font-size: 0.95rem; }
-.fp-md :deep(h4), .fp-md :deep(h5), .fp-md :deep(h6) { color: #c8b4e0; font-weight: 600; margin: 0.8em 0 0.3em; }
-.fp-md :deep(p) { margin: 0.5em 0; }
-.fp-md :deep(a) { color: #80c0ff; text-decoration: underline; }
-.fp-md :deep(ul), .fp-md :deep(ol) { margin: 0.5em 0; padding-left: 1.4em; }
-.fp-md :deep(li) { margin: 0.2em 0; }
-.fp-md :deep(strong) { color: #f0e0ff; font-weight: 700; }
+.fp-md :deep(h1), .fp-md :deep(h2), .fp-md :deep(h3) { color: #ffffff; font-weight: 700; line-height: 1.3; margin: 1em 0 0.45em; }
+.fp-md :deep(h1) { font-size: 1.2rem; border-bottom: 1px solid #2b2640; padding-bottom: 0.25em; }
+.fp-md :deep(h2) { font-size: 1.08rem; border-bottom: 1px solid #221d33; padding-bottom: 0.2em; }
+.fp-md :deep(h3) { font-size: 0.98rem; }
+.fp-md :deep(h4), .fp-md :deep(h5), .fp-md :deep(h6) { color: #d8d2ea; font-weight: 600; margin: 0.85em 0 0.3em; }
+.fp-md :deep(p) { margin: 0.55em 0; }
+.fp-md :deep(a) { color: #79b8ff; text-decoration: none; }
+.fp-md :deep(a:hover) { text-decoration: underline; }
+.fp-md :deep(ul), .fp-md :deep(ol) { margin: 0.55em 0; padding-left: 1.5em; }
+.fp-md :deep(li) { margin: 0.25em 0; }
+.fp-md :deep(li::marker) { color: #8b7fb0; }
+.fp-md :deep(strong) { color: #ffffff; font-weight: 700; }
 .fp-md :deep(em) { font-style: italic; }
 .fp-md :deep(code) {
   font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', ui-monospace, monospace;
-  font-size: 0.92em; background: rgba(192, 128, 255, 0.12); color: #e0c8ff;
-  padding: 0.08em 0.35em; border-radius: 4px;
+  font-size: 0.9em; background: rgba(140, 130, 180, 0.18); color: #f0d8ff;
+  padding: 0.1em 0.4em; border-radius: 5px;
 }
 .fp-md :deep(pre) {
-  background: rgba(0, 0, 0, 0.3); border: 1px solid #241934; border-radius: 8px;
-  padding: 10px 12px; overflow-x: auto; margin: 0.6em 0;
+  background: #07060c; border: 1px solid #221d33; border-radius: 8px;
+  padding: 11px 13px; overflow-x: auto; margin: 0.7em 0;
 }
-.fp-md :deep(pre code) { background: none; padding: 0; color: #d8c4f0; font-size: 0.7rem; line-height: 1.5; }
+.fp-md :deep(pre code) { background: none; padding: 0; color: #e6e1f0; font-size: 0.72rem; line-height: 1.55; }
 .fp-md :deep(blockquote) {
-  border-left: 3px solid #4a2a7a; margin: 0.6em 0; padding: 0.1em 0 0.1em 0.8em; color: #b0a0c8;
+  border-left: 3px solid #6a5aa0; margin: 0.7em 0; padding: 0.15em 0 0.15em 0.9em; color: #b8b2cc;
 }
-.fp-md :deep(table) { border-collapse: collapse; margin: 0.6em 0; font-size: 0.92em; display: block; overflow-x: auto; }
-.fp-md :deep(th), .fp-md :deep(td) { border: 1px solid #2e2050; padding: 4px 8px; text-align: left; }
-.fp-md :deep(th) { background: rgba(192, 128, 255, 0.08); color: #e0d4f0; }
-.fp-md :deep(hr) { border: none; border-top: 1px solid #2e2050; margin: 1em 0; }
+.fp-md :deep(table) { border-collapse: collapse; margin: 0.7em 0; font-size: 0.9em; display: block; overflow-x: auto; }
+.fp-md :deep(th), .fp-md :deep(td) { border: 1px solid #2b2640; padding: 5px 9px; text-align: left; }
+.fp-md :deep(th) { background: rgba(140, 130, 180, 0.12); color: #ffffff; font-weight: 600; }
+.fp-md :deep(hr) { border: none; border-top: 1px solid #2b2640; margin: 1.1em 0; }
 .fp-md :deep(img) { max-width: 100%; border-radius: 6px; }
 </style>
