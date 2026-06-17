@@ -38,6 +38,7 @@
           <!-- Left-edge resize handle (desktop primarily): drag left to widen the
                panel; width persists to localStorage. Mobile keeps the max-width guard. -->
           <div
+            v-if="!isFull"
             class="rd-resize"
             data-testid="resource-drawer-resize"
             title="拖拽调整宽度"
@@ -64,6 +65,19 @@
                 @click="topTab = t.key"
               >{{ t.label }}</button>
             </div>
+            <button
+              class="rd-full"
+              :title="isFull ? '退出全屏' : '全屏'"
+              data-testid="resource-drawer-fullscreen"
+              @click="toggleFull"
+            >
+              <svg v-if="!isFull" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" /><line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+            </button>
             <button class="rd-close" title="收起" data-testid="resource-drawer-close" @click="$emit('update:open', false)">&times;</button>
           </div>
 
@@ -321,7 +335,11 @@ function loadWidth(): number {
   return Number.isFinite(v) && v > 0 ? clampW(v) : 320
 }
 const panelWidth = ref<number>(loadWidth())
-const panelStyle = computed(() => ({ width: `${panelWidth.value}px` }))
+// Fullscreen toggle: expand the panel to the whole viewport (for reading long files /
+// the overview), independent of the persisted drag-width which it restores on exit.
+const isFull = ref(false)
+const panelStyle = computed(() => ({ width: isFull.value ? '100vw' : `${panelWidth.value}px` }))
+function toggleFull(): void { isFull.value = !isFull.value }
 
 let resizing = false
 let resizeStartX = 0
@@ -724,6 +742,9 @@ function glyphClass(name: string): string {
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+  /* Keep the header clear of the status bar / notch (Safari + standalone PWA): without
+     this the 工作台 title + tabs sit UNDER the Dynamic Island and are unreadable. */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 /* Width comes from the inline :style (panelStyle, persisted + drag-resized). The
    desktop/mobile rules below only set height + the mobile viewport guard. */
@@ -796,6 +817,12 @@ function glyphClass(name: string): string {
   font-variant-numeric: tabular-nums; font-size: 0.6rem;
   background: rgba(0, 0, 0, 0.25); border-radius: 5px; padding: 0 4px;
 }
+.rd-full {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; color: #6f5a90; cursor: pointer;
+  padding: 0 4px; flex-shrink: 0;
+}
+.rd-full:active { color: #c080ff; }
 .rd-close {
   background: none; border: none; color: #6f5a90; cursor: pointer;
   font-size: 1.3rem; line-height: 1; padding: 0 2px; flex-shrink: 0;

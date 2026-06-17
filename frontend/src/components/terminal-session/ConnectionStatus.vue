@@ -1,30 +1,43 @@
 <template>
-  <div class="connection-status" :class="statusClass" data-testid="cli-connection-status">
+  <!-- Compact inline: just the dot + RTT + live ↓↑ rate. Everything else (uptime,
+       cumulative traffic) moves into a tap-to-open popover so the bar stays small. -->
+  <div
+    class="connection-status" :class="[statusClass, { 'is-clickable': status === 'connected' }]"
+    data-testid="cli-connection-status"
+    @click="status === 'connected' && (popOpen = !popOpen)"
+  >
     <span class="status-indicator" />
-    <!-- When connected the green dot already says "OK"; the word is redundant, so show the text
-         label only for the states that actually need explaining (connecting / disconnected / …). -->
     <span v-if="status !== 'connected'" class="status-text">{{ statusText }}</span>
     <template v-if="status === 'connected'">
       <span v-if="safeRtt > 0" class="net-stat net-rtt" :class="rttClass">{{ safeRtt }}ms</span>
-      <!-- Live throughput (bytes/s) — only while data is actually moving, so an idle bar stays quiet. -->
       <span class="net-stat net-speed" v-if="safeDownBps > 0 || safeUpBps > 0">
         <span class="bw-down">{{ formatRate(safeDownBps) }}</span>
         <span class="bw-up">{{ formatRate(safeUpBps) }}</span>
       </span>
-      <!-- Cumulative traffic this connection (Σ marker distinguishes it from the live rate). -->
-      <span class="net-stat net-bw" v-if="safeRxTotal > 0 || safeTxTotal > 0">
-        <span class="bw-sum">Σ</span>
-        <span class="bw-down">{{ formatBytes(safeRxTotal) }}</span>
-        <span class="bw-up">{{ formatBytes(safeTxTotal) }}</span>
-      </span>
-      <span class="net-stat net-uptime" v-if="safeUptime > 0">{{ formatDuration(safeUptime) }}</span>
     </template>
+
+    <!-- Detail popover (tap the chip). Backdrop closes on outside tap. -->
+    <Teleport to="body">
+      <div v-if="popOpen" class="net-pop-backdrop" @click="popOpen = false" />
+    </Teleport>
+    <div v-if="popOpen" class="net-pop" data-testid="cli-connection-pop" @click.stop>
+      <div class="net-pop-row"><span>状态</span><span class="np-ok">已连接</span></div>
+      <div class="net-pop-row"><span>延迟 RTT</span><span :class="rttClass">{{ safeRtt > 0 ? safeRtt + ' ms' : '—' }}</span></div>
+      <div class="net-pop-row"><span>连接时长</span><span>{{ safeUptime > 0 ? formatDuration(safeUptime) : '—' }}</span></div>
+      <div class="net-pop-sep" />
+      <div class="net-pop-row"><span>实时 ↓ / ↑</span><span>{{ formatRate(safeDownBps) }} / {{ formatRate(safeUpBps) }}</span></div>
+      <div class="net-pop-row"><span>累计 ↓ 下行</span><span>{{ formatBytes(safeRxTotal) }}</span></div>
+      <div class="net-pop-row"><span>累计 ↑ 上行</span><span>{{ formatBytes(safeTxTotal) }}</span></div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { WSConnectionStatus } from '@terminal/types/terminal'
+
+// Tap-to-open detail popover (uptime + cumulative traffic). Kept out of the inline bar.
+const popOpen = ref(false)
 
 const props = defineProps<{
   status: WSConnectionStatus
@@ -45,6 +58,8 @@ const safeUpBps = computed(() => props.uploadBps ?? 0)
 const safeTxTotal = computed(() => props.txTotal ?? 0)
 const safeRxTotal = computed(() => props.rxTotal ?? 0)
 const safeUptime = computed(() => props.uptimeSec ?? 0)
+// Don't leave the popover hanging if the connection drops while it's open.
+watch(() => props.status, (s) => { if (s !== 'connected') popOpen.value = false })
 const statusText = computed(() => {
   switch (props.status) {
     case 'connecting': return 'Connecting...'
@@ -87,6 +102,7 @@ function formatDuration(sec: number): string {
 
 <style scoped>
 .connection-status {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -98,6 +114,7 @@ function formatDuration(sec: number): string {
   white-space: nowrap;
   flex-shrink: 0;
 }
+.connection-status.is-clickable { cursor: pointer; }
 .status-indicator {
   width: 7px;
   height: 7px;
@@ -126,22 +143,39 @@ function formatDuration(sec: number): string {
 .rtt-ok { color: #ffc107; }
 .rtt-bad { color: #f44336; }
 
-.net-bw,
 .net-speed {
   display: inline-flex;
   gap: 3px;
+  opacity: 0.9;
 }
-/* Live rate reads slightly brighter than the cumulative totals (which are dimmed by the Σ marker). */
-.net-speed { opacity: 0.9; }
-.bw-sum { opacity: 0.55; font-weight: 600; }
 .bw-down::before { content: "\2193"; font-size: 0.58rem; }
 .bw-up::before { content: "\2191"; font-size: 0.58rem; }
 
-.net-uptime {
-  opacity: 0.7;
-  font-weight: 600;
+/* Detail popover — small card anchored under the chip (right-aligned to stay on screen). */
+.net-pop-backdrop {
+  position: fixed; inset: 0; z-index: 60;
 }
-.net-uptime::before { content: "\25F7\2009"; font-size: 0.62rem; opacity: 0.85; }
+.net-pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 61;
+  min-width: 168px;
+  padding: 8px 10px;
+  background: #1a1230;
+  border: 1px solid #3a2860;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  color: #d8c4f0;
+  cursor: default;
+  white-space: nowrap;
+}
+.net-pop-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 2px 0;
+  font-size: 0.66rem;
+}
+.net-pop-row > span:first-child { color: #8a76aa; }
+.net-pop-row > span:last-child { font-weight: 600; font-variant-numeric: tabular-nums; }
+.net-pop-row .np-ok { color: #4caf50; }
+.net-pop-sep { height: 1px; background: #2e2050; margin: 5px 0; }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
