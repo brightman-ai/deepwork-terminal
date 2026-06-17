@@ -42,8 +42,7 @@
             class="rd-resize"
             data-testid="resource-drawer-resize"
             title="拖拽调整宽度"
-            @mousedown="onResizeStart"
-            @touchstart="onResizeStart"
+            @pointerdown="onResizeStart"
           ></div>
 
           <div class="rd-header">
@@ -344,33 +343,38 @@ function toggleFull(): void { isFull.value = !isFull.value }
 let resizing = false
 let resizeStartX = 0
 let resizeStartW = 0
-function pointerX(e: MouseEvent | TouchEvent): number {
-  return 'touches' in e ? (e.touches[0]?.clientX ?? 0) : e.clientX
-}
-function onResizeStart(e: MouseEvent | TouchEvent): void {
+// Pointer Events unify mouse + touch + pen, and setPointerCapture routes every
+// pointermove/up to the handle even as the pointer crosses the terminal / the
+// pointer-events:none desktop scrim — the old split mouse/touch + window listeners
+// dropped on iOS WKWebView, which read as "can't drag". Capture is the robust path.
+function onResizeStart(e: PointerEvent): void {
   resizing = true
-  resizeStartX = pointerX(e)
+  resizeStartX = e.clientX
   resizeStartW = panelWidth.value
-  window.addEventListener('mousemove', onResizeMove)
-  window.addEventListener('mouseup', onResizeEnd)
-  window.addEventListener('touchmove', onResizeMove, { passive: false })
-  window.addEventListener('touchend', onResizeEnd)
+  // Best-effort capture keeps a TOUCH drag from being stolen by a scroll/gesture; the
+  // move/up listeners live on WINDOW so they fire regardless of capture support or where
+  // the pointer travels (over the terminal / the pointer-events:none desktop scrim).
+  try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch { /* best effort */ }
+  window.addEventListener('pointermove', onResizeMove)
+  window.addEventListener('pointerup', onResizeEnd)
+  window.addEventListener('pointercancel', onResizeEnd)
+  e.preventDefault()
+  e.stopPropagation()
 }
-function onResizeMove(e: MouseEvent | TouchEvent): void {
+function onResizeMove(e: PointerEvent): void {
   if (!resizing) return
-  if ('touches' in e) e.preventDefault()
+  e.preventDefault()
   // The panel is anchored to the RIGHT edge; dragging the handle left (smaller clientX)
   // must GROW the width — hence (start − current).
-  panelWidth.value = clampW(resizeStartW + (resizeStartX - pointerX(e)))
+  panelWidth.value = clampW(resizeStartW + (resizeStartX - e.clientX))
 }
 function onResizeEnd(): void {
   if (!resizing) return
   resizing = false
   localStorage.setItem(WIDTH_KEY, String(panelWidth.value))
-  window.removeEventListener('mousemove', onResizeMove)
-  window.removeEventListener('mouseup', onResizeEnd)
-  window.removeEventListener('touchmove', onResizeMove)
-  window.removeEventListener('touchend', onResizeEnd)
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', onResizeEnd)
+  window.removeEventListener('pointercancel', onResizeEnd)
 }
 
 // Bubble FilesPanel's inject / compose-draft to the host (same chokepoints as the
@@ -759,17 +763,33 @@ function glyphClass(name: string): string {
 .rd-resize {
   position: absolute;
   top: 0; left: 0; bottom: 0;
-  width: 9px;
+  width: 14px; /* generous hit area — a 9px strip was too thin to grab on touch */
   cursor: ew-resize;
   /* Must sit ABOVE every tab/overlay inside the panel (file preview z-10, toast z-20,
      etc.) — they share this panel's stacking context, so a higher z-index keeps the
      left-edge resize strip grabbable in ANY drawer state (list, preview, overview). */
   z-index: 40;
   touch-action: none;
+  display: flex;
+  align-items: center;
   background: transparent;
 }
-.rd-resize:hover { background: rgba(192, 128, 255, 0.18); }
-.rd-resize:active { background: rgba(192, 128, 255, 0.3); }
+/* Always-visible grip pill so the handle is DISCOVERABLE on touch (no :hover there);
+   it brightens + grows while dragging. */
+.rd-resize::before {
+  content: '';
+  width: 3px;
+  height: 38px;
+  margin-left: 1px;
+  border-radius: 3px;
+  background: rgba(192, 128, 255, 0.32);
+  transition: background 0.15s ease, height 0.15s ease;
+}
+.rd-resize:hover::before,
+.rd-resize:active::before {
+  background: rgba(192, 128, 255, 0.8);
+  height: 60px;
+}
 
 /* 历史输入 sub-tab bar (图片/文件/输入) — mirrors the original tab pills. */
 .rd-subtabs {
