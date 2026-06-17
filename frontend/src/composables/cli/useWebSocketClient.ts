@@ -12,16 +12,18 @@ import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 export interface WebSocketClientOptions {
   authToken?: string
   maxReconnectAttempts?: number
-  /** Heartbeat interval in ms (default 1000 for per-second RTT updates) */
+  /** Telemetry tick in ms — RTT ping + bandwidth/traffic sampling cadence (default 2000). */
+  telemetryInterval?: number
+  /** @deprecated kept for back-compat; superseded by telemetryInterval. */
   heartbeatInterval?: number
 }
 
 export interface NetStats {
   /** Round-trip time in ms (from last heartbeat) */
   rtt: number
-  /** Upload bytes in the last sampling window */
+  /** Upload throughput, true bytes/second (sampled each telemetry tick) */
   uploadBps: number
-  /** Download bytes in the last sampling window */
+  /** Download throughput, true bytes/second (sampled each telemetry tick) */
   downloadBps: number
   /** Cumulative bytes sent on the CURRENT connection (reset on (re)open) */
   txTotal: number
@@ -38,10 +40,16 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   // to 'disconnected' on an actual close/error (lines below).
   const status = ref<WSConnectionStatus>('connecting')
   const maxAttempts = opts.maxReconnectAttempts ?? 10
-  // [TH-0501-m9j 铁律 v2.0] WKWebView drops keystrokes during JS busy loops.
-  // 1s heartbeat was competing with keyboard events. 30s is sufficient for
-  // keep-alive (TCP idle timeout is typically 60-120s).
-  const heartbeatMs = opts.heartbeatInterval ?? 30_000
+  // Unified telemetry tick. The bandwidth/traffic/uptime sampling is a LOCAL computation
+  // (no network send), so running it at 2s never competes with keystrokes — it just reads
+  // byte counters already accumulated from frames that flow anyway. The RTT ping is the ONLY
+  // network send here, and it is GUARDED below (skipped within rttGuardMs of a keystroke), so
+  // the [TH-0501-m9j] WKWebView keystroke safety holds while latency still refreshes ~2s when
+  // idle (the ping also doubles as keep-alive). Zero added bytes on PTY data.
+  const telemetryMs = opts.telemetryInterval ?? opts.heartbeatInterval ?? 2_000
+  const rttGuardMs = 400
+  let lastInputAt = 0
+  let lastSampleAt = 0
 
   // Network stats (reactive for UI binding)
   const netStats = reactive<NetStats>({ rtt: 0, uploadBps: 0, downloadBps: 0, txTotal: 0, rxTotal: 0, uptimeSec: 0 })
@@ -50,7 +58,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   let ws: WebSocket | null = null
   let reconnectAttempts = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  let telemetryTimer: ReturnType<typeof setInterval> | null = null
   let wasPreempted = false
   let queuedBinaryBytes = 0
   const maxQueuedBinaryBytes = 64 * 1024
@@ -59,7 +67,6 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   // Bandwidth tracking
   let bytesSentInWindow = 0
   let bytesReceivedInWindow = 0
-  let bandwidthTimer: ReturnType<typeof setInterval> | null = null
 
   // Callbacks
   let onBinaryMessage: ((data: ArrayBuffer) => void) | null = null
@@ -87,8 +94,8 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
       netStats.rxTotal = 0
       netStats.uptimeSec = 0
       connectedAt = Date.now()
-      startHeartbeat()
-      startBandwidthTracker()
+      lastInputAt = 0
+      startTelemetry()
       flushQueuedBinary()
     }
 
@@ -117,8 +124,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     }
 
     ws.onclose = () => {
-      stopHeartbeat()
-      stopBandwidthTracker()
+      stopTelemetry()
       if (wasPreempted) {
         status.value = 'preempted'
         wasPreempted = false
@@ -144,8 +150,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   function disconnect() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     reconnectAttempts = maxAttempts
-    stopHeartbeat()
-    stopBandwidthTracker()
+    stopTelemetry()
     if (ws) { ws.close(1000, 'client disconnect'); ws = null }
     clearQueuedBinary()
     status.value = 'disconnected'
@@ -154,6 +159,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   // [TH-0501-m9j] Direct synchronous binary WS send. No intermediate layers.
   function sendBinary(data: Uint8Array) {
     if (ws && ws.readyState === WebSocket.OPEN) {
+      lastInputAt = Date.now()
       bytesSentInWindow += data.byteLength
       ws.send(data)
     } else if (ws && ws.readyState === WebSocket.CONNECTING) {
@@ -208,37 +214,41 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     reconnectTimer = setTimeout(connect, delay)
   }
 
-  // Heartbeat with timestamp for RTT
-  function startHeartbeat() {
-    stopHeartbeat()
-    heartbeatTimer = setInterval(() => {
-      sendControl({ type: 'heartbeat', payload: { sentAt: Date.now() } })
-    }, heartbeatMs)
-  }
-
-  function stopHeartbeat() {
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
-  }
-
-  // Bandwidth: sample every 10s (was 1s — WKWebView keystroke loss).
-  // [TH-0501-m9j 铁律 v2.0 Rule 5]
-  function startBandwidthTracker() {
-    stopBandwidthTracker()
-    bandwidthTimer = setInterval(() => {
-      netStats.uploadBps = bytesSentInWindow
-      netStats.downloadBps = bytesReceivedInWindow
-      // Fold the window into the running totals (10s cadence, same as the bandwidth sample —
-      // no extra 1s timer, so WKWebView keystroke loss stays avoided per [TH-0501-m9j]).
+  // Unified telemetry tick (~2s): samples bandwidth/traffic/uptime from byte counters that
+  // already flow (zero added bytes), then sends ONE guarded RTT ping. The ping is skipped
+  // within rttGuardMs of a keystroke so it never competes with input on WKWebView; when idle
+  // it also serves as keep-alive. RTT lands in netStats.rtt via the heartbeat_ack handler.
+  function startTelemetry() {
+    stopTelemetry()
+    lastSampleAt = Date.now()
+    pingRtt(Date.now()) // instant first RTT (user is not typing at connect)
+    telemetryTimer = setInterval(() => {
+      const now = Date.now()
+      const elapsedMs = now - lastSampleAt
+      lastSampleAt = now
+      // True throughput in bytes/second (pure local compute, no network).
+      if (elapsedMs > 0) {
+        netStats.uploadBps = Math.round((bytesSentInWindow / elapsedMs) * 1000)
+        netStats.downloadBps = Math.round((bytesReceivedInWindow / elapsedMs) * 1000)
+      }
       netStats.txTotal += bytesSentInWindow
       netStats.rxTotal += bytesReceivedInWindow
-      if (connectedAt > 0) netStats.uptimeSec = Math.floor((Date.now() - connectedAt) / 1000)
+      if (connectedAt > 0) netStats.uptimeSec = Math.floor((now - connectedAt) / 1000)
       bytesSentInWindow = 0
       bytesReceivedInWindow = 0
-    }, 10_000)
+      // Guarded RTT ping — never within rttGuardMs of a keystroke (keystroke safety).
+      if (now - lastInputAt > rttGuardMs) pingRtt(now)
+    }, telemetryMs)
   }
 
-  function stopBandwidthTracker() {
-    if (bandwidthTimer) { clearInterval(bandwidthTimer); bandwidthTimer = null }
+  function pingRtt(now: number) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      sendControl({ type: 'heartbeat', payload: { sentAt: now } })
+    }
+  }
+
+  function stopTelemetry() {
+    if (telemetryTimer) { clearInterval(telemetryTimer); telemetryTimer = null }
   }
 
   function onMessage(binaryHandler: (data: ArrayBuffer) => void, controlHandler?: (msg: WSControlMessage) => void) {

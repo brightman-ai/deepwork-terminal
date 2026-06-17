@@ -6,7 +6,14 @@
     <span v-if="status !== 'connected'" class="status-text">{{ statusText }}</span>
     <template v-if="status === 'connected'">
       <span v-if="safeRtt > 0" class="net-stat net-rtt" :class="rttClass">{{ safeRtt }}ms</span>
+      <!-- Live throughput (bytes/s) — only while data is actually moving, so an idle bar stays quiet. -->
+      <span class="net-stat net-speed" v-if="safeDownBps > 0 || safeUpBps > 0">
+        <span class="bw-down">{{ formatRate(safeDownBps) }}</span>
+        <span class="bw-up">{{ formatRate(safeUpBps) }}</span>
+      </span>
+      <!-- Cumulative traffic this connection (Σ marker distinguishes it from the live rate). -->
       <span class="net-stat net-bw" v-if="safeRxTotal > 0 || safeTxTotal > 0">
+        <span class="bw-sum">Σ</span>
         <span class="bw-down">{{ formatBytes(safeRxTotal) }}</span>
         <span class="bw-up">{{ formatBytes(safeTxTotal) }}</span>
       </span>
@@ -33,6 +40,8 @@ const props = defineProps<{
 
 const statusClass = computed(() => `status-${props.status}`)
 const safeRtt = computed(() => props.rtt ?? 0)
+const safeDownBps = computed(() => props.downloadBps ?? 0)
+const safeUpBps = computed(() => props.uploadBps ?? 0)
 const safeTxTotal = computed(() => props.txTotal ?? 0)
 const safeRxTotal = computed(() => props.rxTotal ?? 0)
 const safeUptime = computed(() => props.uptimeSec ?? 0)
@@ -59,6 +68,11 @@ function formatBytes(bytes: number): string {
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)}K`
   if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)}M`
   return `${(bytes / 1073741824).toFixed(2)}G`
+}
+
+/** Live throughput as a compact per-second rate, e.g. 1.2K/s. */
+function formatRate(bps: number): string {
+  return `${formatBytes(bps)}/s`
 }
 
 /** Compact elapsed: 45s · 5m · 1h20m. */
@@ -112,10 +126,14 @@ function formatDuration(sec: number): string {
 .rtt-ok { color: #ffc107; }
 .rtt-bad { color: #f44336; }
 
-.net-bw {
+.net-bw,
+.net-speed {
   display: inline-flex;
   gap: 3px;
 }
+/* Live rate reads slightly brighter than the cumulative totals (which are dimmed by the Σ marker). */
+.net-speed { opacity: 0.9; }
+.bw-sum { opacity: 0.55; font-weight: 600; }
 .bw-down::before { content: "\2193"; font-size: 0.58rem; }
 .bw-up::before { content: "\2191"; font-size: 0.58rem; }
 
