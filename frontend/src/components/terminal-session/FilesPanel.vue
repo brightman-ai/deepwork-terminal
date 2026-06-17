@@ -26,6 +26,7 @@ import {
   type RawResult,
 } from '@terminal/api/files'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 
 const props = defineProps<{ sessionId: string }>()
 
@@ -52,6 +53,44 @@ async function loadRecent(): Promise<void> {
     recentLoading.value = false
   }
 }
+
+// ── 格式分类筛选 (recent) ──
+// Group recent files by a small set of human categories so a long mixed list can be
+// filtered to "just the markdown" / "just the code" with one tap (mobile chip row).
+const CAT_EXT: Record<string, string[]> = {
+  doc: ['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'org'],
+  code: ['go', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'vue', 'py', 'rs', 'rb', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'cc', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'sql', 'proto'],
+  config: ['json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'env', 'xml', 'lock', 'dockerfile'],
+  style: ['css', 'scss', 'less', 'html', 'svg'],
+}
+const CAT_LABEL: Record<string, string> = { all: '全部', doc: '文档', code: '代码', config: '配置', style: '样式', other: '其他' }
+function fileExt(name: string): string {
+  if (name.toLowerCase() === 'dockerfile') return 'dockerfile'
+  const parts = name.split('.')
+  return parts.length > 1 ? (parts.pop() || '').toLowerCase() : ''
+}
+function catOf(name: string): string {
+  const e = fileExt(name)
+  for (const [cat, exts] of Object.entries(CAT_EXT)) if (exts.includes(e)) return cat
+  return 'other'
+}
+const activeCat = ref('all')
+// Only surface categories that actually have files, in a stable order, each with a count.
+const recentCats = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const f of recent.value) counts[catOf(f.name)] = (counts[catOf(f.name)] || 0) + 1
+  const order = ['doc', 'code', 'config', 'style', 'other']
+  const cats = [{ key: 'all', label: CAT_LABEL.all, count: recent.value.length }]
+  for (const k of order) if (counts[k]) cats.push({ key: k, label: CAT_LABEL[k], count: counts[k] })
+  return cats
+})
+const filteredRecent = computed(() =>
+  activeCat.value === 'all' ? recent.value : recent.value.filter(f => catOf(f.name) === activeCat.value),
+)
+// Reset the active chip if the data changes such that it no longer exists.
+watch(recentCats, (cats) => {
+  if (!cats.some(c => c.key === activeCat.value)) activeCat.value = 'all'
+})
 
 // ── 目录树 ──
 const treeRel = ref('') // '' = cwd root
@@ -245,12 +284,25 @@ defineExpose({ loadRecent, loadTree })
     </div>
 
     <!-- ── 最近文件 ── -->
-    <div v-show="subTab === 'recent'" class="flex-1 overflow-y-auto p-2">
+    <div v-show="subTab === 'recent'" class="flex-1 flex flex-col overflow-hidden">
+      <!-- Format filter chips — only when the recent set actually spans >1 category. -->
+      <div v-if="recent.length && recentCats.length > 2" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
+        <button
+          v-for="c in recentCats"
+          :key="c.key"
+          type="button"
+          class="shrink-0 rounded-full border px-2.5 py-0.5 text-[0.62rem] font-medium transition-colors"
+          :class="activeCat === c.key ? 'bg-primary/15 border-primary/60 text-foreground' : 'bg-card border-border text-muted-foreground hover:text-foreground'"
+          :data-testid="`fp-cat-${c.key}`"
+          @click="activeCat = c.key"
+        >{{ c.label }}<span class="ml-1 opacity-60 tabular-nums">{{ c.count }}</span></button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-2">
       <div v-if="recentLoading && !recent.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">加载中…</div>
       <div v-else-if="!recent.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">暂无最近文件</div>
       <ul v-else class="flex flex-col gap-1.5">
         <li
-          v-for="f in recent"
+          v-for="f in filteredRecent"
           :key="f.path"
           class="group flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2"
           :class="{ 'opacity-50': !f.exists }"
@@ -283,6 +335,7 @@ defineExpose({ loadRecent, loadTree })
           </div>
         </li>
       </ul>
+      </div>
     </div>
 
     <!-- ── 目录树 ── -->
@@ -371,7 +424,7 @@ defineExpose({ loadRecent, loadTree })
         </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <pre v-else-if="preview.result.kind === 'text'" class="fp-pre m-0 p-3 text-[0.7rem] leading-relaxed text-foreground whitespace-pre-wrap break-words">{{ preview.result.text }}</pre>
+          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" />
           <div v-else-if="preview.result.kind === 'binary'" class="flex flex-col items-center justify-center gap-2 h-full px-4 text-center">
             <Download class="size-7 text-muted-foreground/60" />
             <p class="text-xs text-muted-foreground">二进制文件，无法预览</p>
@@ -395,7 +448,9 @@ defineExpose({ loadRecent, loadTree })
 
 <style scoped>
 .fp { position: relative; }
-.fp-pre { font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', monospace; }
+/* Horizontal chip row: scrollable but without a visible scrollbar (mobile). */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
 .fp-fade-enter-active, .fp-fade-leave-active { transition: opacity 0.15s ease, transform 0.15s ease; }
 .fp-fade-enter-from, .fp-fade-leave-to { opacity: 0; transform: translateX(12px); }
 .fp-toast {
