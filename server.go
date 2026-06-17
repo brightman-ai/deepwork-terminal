@@ -180,6 +180,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /files/recent", wrap(s.handleFilesRecent))
 	s.mux.HandleFunc("GET /files/tree", wrap(s.handleFilesTree))
 	s.mux.HandleFunc("GET /files/raw", wrap(s.handleFilesRaw))
+	// Session overview metrics (CHG-017): turn/summary breakdown of the CURRENT claude
+	// transcript for the session cwd. Feeds the shared @ce OverviewPanel.
+	s.mux.HandleFunc("GET /sessions/{id}/overview", wrap(s.handleSessionOverview))
 	s.mux.HandleFunc("GET /push/vapid", wrap(s.handlePushVAPID))
 	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
 	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
