@@ -16,7 +16,7 @@
  * hardcode \x02.
  */
 import { ref, computed, type Ref, type ComputedRef } from 'vue'
-import type { TmuxState, TmuxWindowState } from '@terminal/types/terminal'
+import type { TmuxState, TmuxWindowState, AgentTool } from '@terminal/types/terminal'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
@@ -49,6 +49,10 @@ export interface TmuxStateStore {
    *  session — '' when unknown/detached. Drives the workbench (files + overview) so it
    *  follows pane/window switches instead of being pinned to the session's creation cwd. */
   activeCwd: ComputedRef<string>
+  /** Live agentTool of the ACTIVE pane (active window → active pane → agentTool) of the
+   *  attached session — '' when unknown/detached/no agent. Lets the overview route to the
+   *  codex vs claude metrics extractor for the pane the user is actually looking at. */
+  activeTool: ComputedRef<AgentTool>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
   /** Run a semantic copy-mode scroll motion via POST /tmux/copy-motion — the server
@@ -126,6 +130,19 @@ function createStore(sessionId: () => string): TmuxStateStore {
     return pane?.cwd ?? ''
   })
 
+  // Live agentTool of the active pane (same active window → active pane resolution as
+  // activeCwd). '' when no agent is detected on that pane. Drives the overview's codex-vs-
+  // claude routing so it follows pane/window switches alongside activeCwd.
+  const activeTool = computed<AgentTool>(() => {
+    const ws = windows.value
+    if (ws.length === 0) return ''
+    const win = ws.find(w => w.active) ?? ws[0]
+    const panes = win?.panes ?? []
+    if (panes.length === 0) return ''
+    const pane = panes.find(p => p.active) ?? panes[0]
+    return pane?.agentTool ?? ''
+  })
+
   function prefixSeq(suffix: string): string {
     return bytesToString(prefixBytes.value) + suffix
   }
@@ -170,7 +187,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, activeCwd, prefixSeq, runCopyMotion, newSession, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, activeCwd, activeTool, prefixSeq, runCopyMotion, newSession, handleWSMessage, fetchSnapshot,
   }
 }
 
