@@ -76,6 +76,31 @@ func (s *Server) handleTmuxCopyMotion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// TmuxSessionMaker is an OPTIONAL provider capability: create a new tmux session and
+// switch the requesting client onto it (server-side, since keystroke-driven new-session
+// is unreliable and refuses to nest inside a client). Default provider implements it.
+type TmuxSessionMaker interface {
+	NewSession(ctx context.Context, shellPID int) (string, error)
+}
+
+// handleTmuxNewSession handles POST /tmux/new-session?session=<id>.
+// Creates a fresh tmux session and switches the caller's client onto it, so the user
+// lands in the new session. Returns { name } of the created session.
+func (s *Server) handleTmuxNewSession(w http.ResponseWriter, r *http.Request) {
+	maker, ok := s.tmuxProvider.(TmuxSessionMaker)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "new session unsupported"})
+		return
+	}
+	shellPID := s.shellPIDForQuery(r.URL.Query().Get("session"))
+	name, err := maker.NewSession(r.Context(), shellPID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": name})
+}
+
 // shellPIDForQuery resolves a session ID to its shell PID, or 0 if absent/unknown.
 func (s *Server) shellPIDForQuery(sessionID string) int {
 	if sessionID == "" {

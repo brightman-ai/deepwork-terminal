@@ -41,6 +41,31 @@ func (s *TmuxStateService) CopyMotion(ctx context.Context, session, motion strin
 	return tmuxCommandContext(ctx, withTarget(target, "send-keys", "-X", motion)...).Run()
 }
 
+// NewSession creates a fresh DETACHED tmux session and switches the client that shellPID
+// is attached through onto it, so the user lands directly in the new session.
+//
+// Why server-side: driving `new-session` through the client's keystroke stream fails —
+// the command prompt opens on `prefix :` but the rest of the burst arrives before the
+// prompt is ready (same fragility as copy-motion), and `new-session` run inside a client
+// where $TMUX is set refuses to nest. Running it here (tmuxCommandContext sanitizes $TMUX)
+// avoids both: `-d` creates without attaching (no nesting), then switch-client moves the
+// client. Returns the new session name. When the client can't be resolved (shell not
+// attached) the session is still created and the ~1s topology poll surfaces it.
+func (s *TmuxStateService) NewSession(ctx context.Context, shellPID int) (string, error) {
+	out, err := tmuxCommandContext(ctx, "new-session", "-d", "-P", "-F", "#{session_name}").Output()
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return "", fmt.Errorf("new-session produced no name")
+	}
+	if client := s.prober.FindClientName(ctx, shellPID); client != "" {
+		_ = tmuxCommandContext(ctx, "switch-client", "-c", client, "-t", name).Run()
+	}
+	return name, nil
+}
+
 // paneInMode reports whether the target pane is currently in a mode (copy-mode etc.).
 // A query failure reads as "not in mode" so the caller enters copy-mode defensively.
 func (s *TmuxStateService) paneInMode(ctx context.Context, target string) bool {
