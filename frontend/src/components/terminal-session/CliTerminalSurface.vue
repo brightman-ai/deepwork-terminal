@@ -43,6 +43,8 @@
         class="ssr-health"
         :status="wsStatus"
         :rtt="netStats.rtt ?? 0"
+        :download-bps="netStats.downloadBps ?? 0"
+        :upload-bps="netStats.uploadBps ?? 0"
         :tx-total="netStats.txTotal ?? 0"
         :rx-total="netStats.rxTotal ?? 0"
         :uptime-sec="netStats.uptimeSec ?? 0"
