@@ -197,9 +197,9 @@
             />
           </div>
 
-          <!-- ════ TOP TAB 3 · 会话总览 (@ce shared SSOT) ════ -->
+          <!-- ════ TOP TAB 3 · 会话总览 (@ce shared SSOT pane, terminal fetch wrapper) ════ -->
           <div v-show="topTab === 'overview'" class="rd-toppane">
-            <SessionOverview :session-id="sessionId" />
+            <SessionOverviewTab :session-id="sessionId" />
           </div>
 
           <div v-if="toast" class="rd-toast">{{ toast }}</div>
@@ -260,7 +260,7 @@ import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 import FilesPanel from '@terminal/components/terminal-session/FilesPanel.vue'
-import SessionOverview from '@ce/components/session-overview/SessionOverview.vue'
+import SessionOverviewTab from '@terminal/components/terminal-session/SessionOverviewTab.vue'
 
 // sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
 // no longer used to fetch resources, which are now global/cross-session.
