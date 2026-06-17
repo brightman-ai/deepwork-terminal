@@ -25,15 +25,18 @@ type SessionMetrics struct {
 }
 
 // PriceJSON is the current model's reference unit price, in currency per MILLION
-// tokens, mirrored from pricing.ModelPrice. cache_create is 0 for providers without
-// a cache-write tier (OpenAI, Gemini). It is only emitted when the model resolves in
-// the kit/pricing table.
+// tokens, mirrored from pricing.ModelPrice's BASE Tier. cache_write_5m / cache_write_1h
+// are 0 for providers without a cache-write tier (OpenAI, Gemini). context_threshold is
+// the long-context premium boundary in tokens (0 = no tier). It is only emitted when the
+// model resolves in the kit/pricing table.
 type PriceJSON struct {
-	Input       float64 `json:"input"`
-	Output      float64 `json:"output"`
-	CacheCreate float64 `json:"cache_create"`
-	CacheRead   float64 `json:"cache_read"`
-	Currency    string  `json:"currency"`
+	Input            float64 `json:"input"`
+	Output           float64 `json:"output"`
+	CacheRead        float64 `json:"cache_read"`
+	CacheWrite5m     float64 `json:"cache_write_5m"`
+	CacheWrite1h     float64 `json:"cache_write_1h"`
+	Currency         string  `json:"currency"`
+	ContextThreshold int     `json:"context_threshold,omitempty"`
 }
 
 // SessionDetail is the session-level header. ended_at is always null (a live session
@@ -135,6 +138,19 @@ func newestClaudeTranscript(pl *ProjectLocator, cwd string) string {
 	return files[0]
 }
 
+// costState accumulates the session cost PER ASSISTANT MESSAGE. Cost MUST be summed
+// per-request (not from session-aggregate tokens) because the context-tier decision is
+// per-request and cache-write splits into 5m/1h TTLs at different prices. seenMsgIDs is
+// session-scoped so a streamed message counted twice (or echoed across turns) is never
+// double-charged. any is set once at least one priced (model-known) message was seen —
+// only then does enrichPricing emit total_cost (honest, never a fabricated 0).
+type costState struct {
+	total      float64
+	currency   string
+	any        bool
+	seenMsgIDs map[string]bool
+}
+
 // turnAccum accumulates one turn while we stream rows. We hold timestamps as time.Time
 // to compute durations precisely, then convert to ms at flush.
 type turnAccum struct {
@@ -167,6 +183,7 @@ func parseTranscript(path, sessionID, title string, active bool) SessionMetrics 
 	var modelID string
 	toolErrors := 0
 	sawToolResult := false
+	cost := &costState{seenMsgIDs: map[string]bool{}}
 
 	flush := func() {
 		if cur == nil {
@@ -236,7 +253,7 @@ func parseTranscript(path, sessionID, title string, active bool) SessionMetrics 
 			if m, ok := msg["model"].(string); ok && m != "" {
 				modelID = m
 			}
-			accumulateAssistant(cur, msg)
+			accumulateAssistant(cur, msg, cost)
 		}
 		return true
 	})
@@ -257,15 +274,17 @@ func parseTranscript(path, sessionID, title string, active bool) SessionMetrics 
 		EndedAt:   nil,
 	}
 	summary := aggregate(turns, earliestTs, sawToolResult, toolErrors)
-	// Derive cost (summed tokens × kit/pricing) + the model's reference unit price.
-	// Unknown model → total_cost nil + price nil (honest, never a fabricated 0).
-	price := enrichPricing(modelID, &summary)
+	// Set cost (Σ per-message tiered, accumulated during the walk) + the model's
+	// reference unit price. Unknown model → no priced message → total_cost nil + price
+	// nil (honest, never a fabricated 0).
+	price := enrichPricing(modelID, cost, &summary)
 	return SessionMetrics{Detail: detail, Summary: summary, Turns: turns, Price: price}
 }
 
 // accumulateAssistant folds one assistant message into the open turn: usage tokens
-// (deduped per message id, mirroring claude_driver) and tool_use block counts.
-func accumulateAssistant(cur *turnAccum, msg map[string]any) {
+// (deduped per message id, mirroring claude_driver), per-message tiered cost (cost),
+// and tool_use block counts.
+func accumulateAssistant(cur *turnAccum, msg map[string]any, cost *costState) {
 	// Usage — dedup by message id so a streamed message counted twice isn't doubled.
 	msgID, _ := msg["id"].(string)
 	if usageRaw, ok := msg["usage"].(map[string]any); ok {
@@ -277,6 +296,16 @@ func accumulateAssistant(cur *turnAccum, msg map[string]any) {
 			cur.outputTokens += intFromAny(usageRaw["output_tokens"])
 			cur.cacheReadTokens += intFromAny(usageRaw["cache_read_input_tokens"])
 			cur.cacheCreate += intFromAny(usageRaw["cache_creation_input_tokens"])
+		}
+		// Cost is computed PER MESSAGE (the context-tier decision is per-request) and
+		// summed. Deduped by the same message id (session-scoped) so a streamed message
+		// isn't double-charged. model is THIS message's model (cost mixes models honestly).
+		if msgID == "" || !cost.seenMsgIDs[msgID] {
+			if msgID != "" {
+				cost.seenMsgIDs[msgID] = true
+			}
+			model, _ := msg["model"].(string)
+			accumulateCost(cost, model, usageRaw)
 		}
 	}
 	// Tool-use blocks.
@@ -290,6 +319,34 @@ func accumulateAssistant(cur *turnAccum, msg map[string]any) {
 				cur.toolCalls++
 			}
 		}
+	}
+}
+
+// accumulateCost prices ONE assistant message and folds it into cost. It builds a
+// per-message pricing.Usage and calls pricing.Cost (which picks the context tier per
+// request). The cache-write split:
+//   - usage.cache_creation (object) present → CacheWrite5m = ephemeral_5m_input_tokens,
+//     CacheWrite1h = ephemeral_1h_input_tokens (the precise per-TTL breakdown);
+//   - else → fall back to usage.cache_creation_input_tokens as all-5m (legacy shape).
+//
+// An unknown model → pricing.Cost ok=false → the message contributes nothing and
+// cost.any stays as-is (honest: total_cost is only emitted once a priced message lands).
+func accumulateCost(cost *costState, model string, usageRaw map[string]any) {
+	u := pricing.Usage{
+		Input:     intFromAny(usageRaw["input_tokens"]),
+		Output:    intFromAny(usageRaw["output_tokens"]),
+		CacheRead: intFromAny(usageRaw["cache_read_input_tokens"]),
+	}
+	if cc, ok := usageRaw["cache_creation"].(map[string]any); ok {
+		u.CacheWrite5m = intFromAny(cc["ephemeral_5m_input_tokens"])
+		u.CacheWrite1h = intFromAny(cc["ephemeral_1h_input_tokens"])
+	} else {
+		u.CacheWrite5m = intFromAny(usageRaw["cache_creation_input_tokens"])
+	}
+	if c, currency, ok := pricing.Cost(model, u); ok {
+		cost.total += c
+		cost.currency = currency
+		cost.any = true
 	}
 }
 
@@ -428,30 +485,31 @@ func emptySummary() SessionSummary {
 	}
 }
 
-// enrichPricing computes the session cost (summed tokens × kit/pricing) and looks up
-// the model's reference unit price. model is the latest assistant model id from the
-// transcript; an empty model (or one unknown to the price table) leaves total_cost
-// nil and returns a nil price — the honest "no price data" shape, never a fake 0.
-func enrichPricing(model string, s *SessionSummary) *PriceJSON {
+// enrichPricing sets the session cost (Σ per-message tiered, accumulated during the
+// walk into cost) and looks up the model's reference unit price. model is the latest
+// assistant model id from the transcript (used only for the reference price row).
+//
+// total_cost is emitted only when at least one priced (model-known) message was seen —
+// the honest "no price data" shape, never a fabricated 0. An empty model (or one unknown
+// to the price table) returns a nil price.
+func enrichPricing(model string, cost *costState, s *SessionSummary) *PriceJSON {
+	if cost != nil && cost.any {
+		total := cost.total
+		s.TotalCost = &total
+		s.Currency = cost.currency
+	}
 	if model == "" {
 		return nil
 	}
-	if cost, currency, ok := pricing.Cost(model, pricing.Usage{
-		Input:       s.InputTokens,
-		Output:      s.OutputTokens,
-		CacheCreate: s.CacheCreateTokens,
-		CacheRead:   s.CacheReadTokens,
-	}); ok {
-		s.TotalCost = &cost
-		s.Currency = currency
-	}
 	if p, ok := pricing.Lookup(model); ok {
 		return &PriceJSON{
-			Input:       p.InputPerM,
-			Output:      p.OutputPerM,
-			CacheCreate: p.CacheCreatePerM,
-			CacheRead:   p.CacheReadPerM,
-			Currency:    p.Currency,
+			Input:            p.InputPerM,
+			Output:           p.OutputPerM,
+			CacheRead:        p.CacheReadPerM,
+			CacheWrite5m:     p.CacheWrite5mPerM,
+			CacheWrite1h:     p.CacheWrite1hPerM,
+			Currency:         p.Currency,
+			ContextThreshold: p.ContextThreshold,
 		}
 	}
 	return nil
