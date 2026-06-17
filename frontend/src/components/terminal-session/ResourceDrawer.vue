@@ -34,28 +34,54 @@
         data-testid="resource-drawer"
         @click.self="$emit('update:open', false)"
       >
-        <div class="rd-panel" @mousedown.prevent>
+        <div class="rd-panel" :style="panelStyle" @mousedown.prevent>
+          <!-- Left-edge resize handle (desktop primarily): drag left to widen the
+               panel; width persists to localStorage. Mobile keeps the max-width guard. -->
+          <div
+            class="rd-resize"
+            data-testid="resource-drawer-resize"
+            title="拖拽调整宽度"
+            @mousedown="onResizeStart"
+            @touchstart="onResizeStart"
+          ></div>
+
           <div class="rd-header">
             <span class="rd-title">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#c080ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" />
               </svg>
-              收纳
+              工作台
             </span>
+            <!-- TOP-LEVEL tabs: 历史输入 / 文件 / 会话总览 (CHG-016). -->
             <div class="rd-tabs">
               <button
-                v-for="t in tabs"
+                v-for="t in topTabs"
                 :key="t.key"
                 class="rd-tab"
-                :class="{ 'is-active': activeTab === t.key }"
+                :class="{ 'is-active': topTab === t.key }"
                 type="button"
-                :data-testid="`rd-tab-${t.key}`"
-                @click="activeTab = t.key"
-              >
-                {{ t.label }}<span v-if="t.count" class="rd-tab-count">{{ t.count }}</span>
-              </button>
+                :data-testid="`rd-toptab-${t.key}`"
+                @click="topTab = t.key"
+              >{{ t.label }}</button>
             </div>
             <button class="rd-close" title="收起" data-testid="resource-drawer-close" @click="$emit('update:open', false)">&times;</button>
+          </div>
+
+          <!-- ════ TOP TAB 1 · 历史输入 (the original three views, now sub-tabs) ════ -->
+          <template v-if="topTab === 'history'">
+          <!-- Sub-tabs: 图片 / 文件 / 输入 -->
+          <div class="rd-subtabs">
+            <button
+              v-for="t in tabs"
+              :key="t.key"
+              class="rd-tab"
+              :class="{ 'is-active': activeTab === t.key }"
+              type="button"
+              :data-testid="`rd-tab-${t.key}`"
+              @click="activeTab = t.key"
+            >
+              {{ t.label }}<span v-if="t.count" class="rd-tab-count">{{ t.count }}</span>
+            </button>
           </div>
 
           <!-- Filter bar (v6 paradigm): session scope · sort · search. -->
@@ -160,6 +186,21 @@
               </ul>
             </div>
           </div>
+          </template>
+
+          <!-- ════ TOP TAB 2 · 文件 (session working tree) ════ -->
+          <div v-show="topTab === 'files'" class="rd-toppane">
+            <FilesPanel
+              :session-id="sessionId"
+              @inject="onChildInject"
+              @compose-draft="onChildComposeDraft"
+            />
+          </div>
+
+          <!-- ════ TOP TAB 3 · 会话总览 (@ce shared SSOT) ════ -->
+          <div v-show="topTab === 'overview'" class="rd-toppane">
+            <SessionOverview :session-id="sessionId" />
+          </div>
 
           <div v-if="toast" class="rd-toast">{{ toast }}</div>
         </div>
@@ -218,6 +259,8 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
+import FilesPanel from '@terminal/components/terminal-session/FilesPanel.vue'
+import SessionOverview from '@ce/components/session-overview/SessionOverview.vue'
 
 // sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
 // no longer used to fetch resources, which are now global/cross-session.
@@ -237,8 +280,90 @@ const { isMobile } = useDeviceDetection()
 // off whatever terminal text it overlaps; offset persists per-handle.
 const { el: handleEl, style: handleStyle } = useEdgeDrag({ storageKey: 'dw.rdHandle.top' })
 
+// ── TOP-LEVEL tabs (CHG-016): 历史输入 / 文件 / 会话总览. The selected top tab and the
+// 历史输入 sub-tab both persist to localStorage so the drawer reopens where it was left.
+type TopKey = 'history' | 'files' | 'overview'
+const TOP_TAB_KEY = 'dw.rd.tab'
+const SUB_TAB_KEY = 'dw.rd.subtab'
+function loadTop(): TopKey {
+  const v = localStorage.getItem(TOP_TAB_KEY)
+  return v === 'files' || v === 'overview' || v === 'history' ? v : 'history'
+}
+const topTab = ref<TopKey>(loadTop())
+const topTabs: { key: TopKey; label: string }[] = [
+  { key: 'history', label: '历史输入' },
+  { key: 'files', label: '文件' },
+  { key: 'overview', label: '会话总览' },
+]
+watch(topTab, (v) => { localStorage.setItem(TOP_TAB_KEY, v) })
+
 type TabKey = 'images' | 'files' | 'inputs'
-const activeTab = ref<TabKey>('images')
+function loadSub(): TabKey {
+  const v = localStorage.getItem(SUB_TAB_KEY)
+  return v === 'images' || v === 'files' || v === 'inputs' ? v : 'images'
+}
+const activeTab = ref<TabKey>(loadSub())
+watch(activeTab, (v) => { localStorage.setItem(SUB_TAB_KEY, v) })
+
+// ── Horizontal drag-to-resize. Dragging the left-edge handle LEFT widens the panel.
+// Clamped to [300, min(720, 92vw)]; width persists. Mobile keeps the max-width guard
+// in CSS, so this just changes the base width while staying within the viewport.
+const WIDTH_KEY = 'dw.rd.width'
+const MIN_W = 300
+function maxW(): number {
+  return Math.min(720, Math.round(window.innerWidth * 0.92))
+}
+function clampW(w: number): number {
+  return Math.max(MIN_W, Math.min(maxW(), w))
+}
+function loadWidth(): number {
+  const v = parseInt(localStorage.getItem(WIDTH_KEY) || '', 10)
+  return Number.isFinite(v) && v > 0 ? clampW(v) : 320
+}
+const panelWidth = ref<number>(loadWidth())
+const panelStyle = computed(() => ({ width: `${panelWidth.value}px` }))
+
+let resizing = false
+let resizeStartX = 0
+let resizeStartW = 0
+function pointerX(e: MouseEvent | TouchEvent): number {
+  return 'touches' in e ? (e.touches[0]?.clientX ?? 0) : e.clientX
+}
+function onResizeStart(e: MouseEvent | TouchEvent): void {
+  resizing = true
+  resizeStartX = pointerX(e)
+  resizeStartW = panelWidth.value
+  window.addEventListener('mousemove', onResizeMove)
+  window.addEventListener('mouseup', onResizeEnd)
+  window.addEventListener('touchmove', onResizeMove, { passive: false })
+  window.addEventListener('touchend', onResizeEnd)
+}
+function onResizeMove(e: MouseEvent | TouchEvent): void {
+  if (!resizing) return
+  if ('touches' in e) e.preventDefault()
+  // The panel is anchored to the RIGHT edge; dragging the handle left (smaller clientX)
+  // must GROW the width — hence (start − current).
+  panelWidth.value = clampW(resizeStartW + (resizeStartX - pointerX(e)))
+}
+function onResizeEnd(): void {
+  if (!resizing) return
+  resizing = false
+  localStorage.setItem(WIDTH_KEY, String(panelWidth.value))
+  window.removeEventListener('mousemove', onResizeMove)
+  window.removeEventListener('mouseup', onResizeEnd)
+  window.removeEventListener('touchmove', onResizeMove)
+  window.removeEventListener('touchend', onResizeEnd)
+}
+
+// Bubble FilesPanel's inject / compose-draft to the host (same chokepoints as the
+// existing 历史输入 actions); a compose-draft also closes the drawer like 重发.
+function onChildInject(path: string): void {
+  emit('inject', path)
+}
+function onChildComposeDraft(text: string): void {
+  emit('compose-draft', text)
+  emit('update:open', false)
+}
 
 const uploads = ref<UploadItem[]>([])
 const allInputs = ref<InputItem[]>([])
@@ -424,6 +549,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('dw:upload-success', onUploadSuccess)
   if (toastTimer) clearTimeout(toastTimer)
+  onResizeEnd() // detach any in-flight resize listeners
 })
 
 function openLightbox(img: UploadItem): void { lightbox.value = img; resetZoom() }
@@ -587,6 +713,7 @@ function glyphClass(name: string): string {
 .rd-scrim.is-desktop .rd-panel { pointer-events: auto; }
 
 .rd-panel {
+  position: relative; /* anchors the left-edge resize handle */
   display: flex;
   flex-direction: column;
   background: #160f22;
@@ -598,15 +725,44 @@ function glyphClass(name: string): string {
   user-select: none;
   -webkit-user-select: none;
 }
-.is-desktop .rd-panel {
-  width: 320px;
-  height: 100%;
-}
+/* Width comes from the inline :style (panelStyle, persisted + drag-resized). The
+   desktop/mobile rules below only set height + the mobile viewport guard. */
+.is-desktop .rd-panel { height: 100%; }
 .is-mobile .rd-panel {
-  width: 330px;
   max-width: calc(100vw - 24px);
   height: 100%;
   padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Left-edge horizontal resize handle — a slim grab strip; widens on hover. */
+.rd-resize {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  z-index: 5;
+  touch-action: none;
+  background: transparent;
+}
+.rd-resize:hover { background: rgba(192, 128, 255, 0.18); }
+.rd-resize:active { background: rgba(192, 128, 255, 0.3); }
+
+/* 历史输入 sub-tab bar (图片/文件/输入) — mirrors the original tab pills. */
+.rd-subtabs {
+  display: flex; gap: 3px; justify-content: center;
+  padding: 7px 10px;
+  background: rgba(192, 128, 255, 0.03);
+  border-bottom: 1px solid #241934;
+  flex-shrink: 0;
+}
+
+/* New top-level panes (文件 / 会话总览) fill the body and host the @ce/Files panels. */
+.rd-toppane {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Header + tabs */
