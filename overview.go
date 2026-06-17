@@ -24,13 +24,20 @@ func (s *Server) handleSessionOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess.mu.Lock()
-	cwd := sess.CWD
+	baseCWD := sess.CWD
 	title := sessionTitle(sess)
 	// active = the PTY session is still alive (not exited). The transcript-level "agent
 	// running right now" nuance lives in agentintel; at the session layer this is the
 	// honest, cheap signal.
 	active := sess.Status != StatusExited
 	sess.mu.Unlock()
+
+	// Prefer the LIVE active tmux pane cwd (frontend-supplied) so the overview follows
+	// pane/window switches; fall back to the session's creation cwd.
+	cwd := baseCWD
+	if lc, ok := s.workbenchCWD(id, r.URL.Query().Get("cwd")); ok && lc != "" {
+		cwd = lc
+	}
 
 	pl := agentintel.NewProjectLocator()
 	metrics := agentintel.SessionMetricsForCWD(pl, cwd, id, title, active)

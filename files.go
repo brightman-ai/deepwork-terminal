@@ -61,7 +61,7 @@ type treeResponse struct {
 // been deleted and the历史信号 is still useful. A bad/absent session → 200 with an
 // empty list (the drawer just shows nothing), matching the soft-fail style of /inputs.
 func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.sessionCWD(r.URL.Query().Get("session"))
+	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusOK, recentFilesResponse{Items: []recentFileItem{}})
 		return
@@ -94,7 +94,7 @@ func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
 // cleaned, joined onto cwd, then symlink-resolved and verified to stay within the
 // cwd subtree — `..` escape / absolute / symlink-out all yield 403.
 func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.sessionCWD(r.URL.Query().Get("session"))
+	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -151,7 +151,7 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 // streamed with a Content-Type derived from the extension and a no-cache header (the
 // file on disk is mutable — agents may rewrite it between previews).
 func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.sessionCWD(r.URL.Query().Get("session"))
+	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -223,6 +223,22 @@ func (s *Server) sessionCWD(sessionID string) (cwd string, ok bool) {
 	return sess.CWD, true
 }
 
+// workbenchCWD resolves the working directory for a workbench request (files + overview).
+// It PREFERS an explicit `cwd` — the frontend supplies the LIVE active tmux pane's cwd so
+// the workbench follows pane/window switches — when that cwd is an absolute, existing
+// directory; otherwise it falls back to the session's creation cwd. Trust model is local
+// single-user: the caller already holds the auth code and full shell access, so honouring
+// a real existing directory is no escalation, and tree/raw still confine traversal within
+// the resolved root.
+func (s *Server) workbenchCWD(sessionID, cwdParam string) (string, bool) {
+	if cwdParam != "" && filepath.IsAbs(cwdParam) {
+		if info, err := os.Stat(cwdParam); err == nil && info.IsDir() {
+			return cwdParam, true
+		}
+	}
+	return s.sessionCWD(sessionID)
+}
+
 // safeResolve joins a client-supplied relative path onto the session cwd and proves
 // the result stays within the cwd subtree. It defends against `..` escape, absolute
 // paths, and symlinks that point outside the root:
@@ -243,9 +259,16 @@ func safeResolve(cwd, rel string) (string, error) {
 		}
 	}
 
-	// Anchor: treat rel as rooted so an absolute `/etc/...` collapses into the cwd.
-	cleaned := filepath.Clean("/" + rel)
-	target := filepath.Join(cwd, cleaned)
+	// A full absolute path that ALREADY sits inside cwd (the 最近文件 list carries
+	// agent-attributed absolute paths) is taken as-is. Everything else — a relative 目录树
+	// path, or an absolute path outside cwd like "/sub/f.txt" — is anchored under cwd so it
+	// can only ever address something within the tree. `..` was already rejected above.
+	var target string
+	if filepath.IsAbs(rel) && pathUnder(cwd, rel) {
+		target = filepath.Clean(rel)
+	} else {
+		target = filepath.Join(cwd, filepath.Clean("/"+rel))
+	}
 
 	// Resolve symlinks on the real cwd and on whatever part of target exists, so a
 	// symlink pointing outside the tree is caught. Non-existent leaves are fine —
@@ -263,6 +286,15 @@ func safeResolve(cwd, rel string) (string, error) {
 		return "", errors.New("path escapes session root")
 	}
 	return realTarget, nil
+}
+
+// pathUnder reports whether the cleaned absolute path p is cwd itself or a descendant of
+// cwd — a lexical pre-check that lets a genuine in-tree absolute path skip cwd-anchoring
+// (the EvalSymlinks confinement check in safeResolve remains the real security gate).
+func pathUnder(cwd, p string) bool {
+	c := filepath.Clean(cwd)
+	cp := filepath.Clean(p)
+	return cp == c || strings.HasPrefix(cp, c+string(os.PathSeparator))
 }
 
 // evalExistingPrefix EvalSymlinks the longest existing prefix of p, then rejoins the

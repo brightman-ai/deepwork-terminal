@@ -15,9 +15,14 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import SessionOverviewPane from '@ce/components/overview/SessionOverviewPane.vue'
 import { sessionOverview } from '@terminal/api/overview'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import type { SessionDetail, TurnsSummary, Turn } from '@ce/types/sessionMetrics'
 
 const props = defineProps<{ sessionId: string }>()
+
+// Live active-pane cwd so the overview follows tmux pane/window switches (server falls
+// back to the session's creation cwd when this is empty).
+const tmux = useTmuxState(() => props.sessionId)
 
 const detail = ref<SessionDetail | null>(null)
 const summary = ref<TurnsSummary | null>(null)
@@ -37,7 +42,7 @@ async function refresh(): Promise<void> {
     loading.value = false
     return
   }
-  const bag = await sessionOverview(props.sessionId)
+  const bag = await sessionOverview(props.sessionId, tmux.activeCwd.value)
   detail.value = bag.detail
   summary.value = bag.summary
   turns.value = bag.turns ?? []
@@ -58,6 +63,10 @@ watch(() => props.sessionId, () => {
   void refresh()
   startPoll()
 })
+
+// Active-pane cwd change (user switched tmux pane/window) → re-fetch immediately so the
+// overview tracks what the user is now looking at, without waiting for the 3s poll.
+watch(() => tmux.activeCwd.value, () => { void refresh() })
 
 onMounted(() => {
   void refresh()

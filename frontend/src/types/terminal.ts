@@ -31,6 +31,8 @@ export interface TmuxPaneState {
   index: number
   active: boolean
   title?: string
+  /** pane_current_path — the live working directory of this pane. */
+  cwd?: string
   agentTool?: AgentTool
   agentStatus?: AgentStatusType
 }

@@ -25,8 +25,13 @@ import {
   type TreeEntry,
   type RawResult,
 } from '@terminal/api/files'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 
 const props = defineProps<{ sessionId: string }>()
+
+// Live active-pane cwd → files (recent + tree) follow tmux pane/window switches; server
+// falls back to the session's creation cwd when this is empty.
+const tmux = useTmuxState(() => props.sessionId)
 const emit = defineEmits<{
   (e: 'inject', path: string): void
   (e: 'compose-draft', text: string): void
@@ -42,7 +47,7 @@ const recentLoading = ref(false)
 async function loadRecent(): Promise<void> {
   recentLoading.value = true
   try {
-    recent.value = await filesRecent(props.sessionId)
+    recent.value = await filesRecent(props.sessionId, tmux.activeCwd.value)
   } finally {
     recentLoading.value = false
   }
@@ -57,7 +62,7 @@ const treeLoading = ref(false)
 async function loadTree(rel: string): Promise<void> {
   treeLoading.value = true
   try {
-    const resp = await filesTree(props.sessionId, rel)
+    const resp = await filesTree(props.sessionId, rel, tmux.activeCwd.value)
     if (resp) {
       treeCwd.value = resp.cwd
       treeRel.value = resp.rel === '.' ? '' : resp.rel
@@ -113,7 +118,7 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   previewLoading.value = true
   preview.value = { name, absPath, result: { kind: 'text', text: '' } }
   try {
-    const result = await filesRaw(props.sessionId, rel)
+    const result = await filesRaw(props.sessionId, rel, tmux.activeCwd.value)
     preview.value = { name, absPath, result }
   } finally {
     previewLoading.value = false
@@ -201,15 +206,18 @@ watch(subTab, (t) => {
   if (t === 'recent' && !recent.value.length) void loadRecent()
   if (t === 'tree' && !treeEntries.value.length) void loadTree(treeRel.value)
 })
-// Re-anchor when the target session changes.
-watch(() => props.sessionId, () => {
+// Re-anchor when the target session OR the live active-pane cwd changes (the user switched
+// tmux pane/window) — reset the tree to the new root and reload the visible sub-tab.
+function reanchor(): void {
   recent.value = []
   treeEntries.value = []
   treeRel.value = ''
   closePreview()
   if (subTab.value === 'recent') void loadRecent()
   else void loadTree('')
-})
+}
+watch(() => props.sessionId, reanchor)
+watch(() => tmux.activeCwd.value, reanchor)
 
 onMounted(() => { void loadRecent() })
 

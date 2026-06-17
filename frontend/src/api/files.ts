@@ -58,17 +58,22 @@ export type RawResult =
   | { kind: 'tooLarge'; size: number }
   | { kind: 'error' }
 
-function withSession(path: string, sessionId: string): string {
+// withScope builds the session + (optional) live-cwd query prefix. `cwd` is the active
+// tmux pane's working directory; supplying it makes the server anchor to that pane so the
+// panel follows pane/window switches instead of the session's creation cwd.
+function withScope(path: string, sessionId: string, cwd?: string): string {
   const sep = path.includes('?') ? '&' : '?'
-  return `${path}${sep}session=${encodeURIComponent(sessionId)}`
+  let q = `${path}${sep}session=${encodeURIComponent(sessionId)}`
+  if (cwd) q += `&cwd=${encodeURIComponent(cwd)}`
+  return q
 }
 
 /** GET /files/recent — files agents recently wrote/edited, newest first (≤30). */
-export async function filesRecent(sessionId: string): Promise<RecentFileItem[]> {
+export async function filesRecent(sessionId: string, cwd?: string): Promise<RecentFileItem[]> {
   if (!sessionId) return []
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(cliApi(withSession('/files/recent', sessionId)))
+    const resp = await cliFetch(cliApi(withScope('/files/recent', sessionId, cwd)))
     if (!resp.ok) return []
     const data = (await resp.json()) as { items?: RecentFileItem[] }
     return data.items ?? []
@@ -78,11 +83,11 @@ export async function filesRecent(sessionId: string): Promise<RecentFileItem[]> 
 }
 
 /** GET /files/tree — one directory level under the session cwd (dirs first). */
-export async function filesTree(sessionId: string, relPath: string): Promise<TreeResponse | null> {
+export async function filesTree(sessionId: string, relPath: string, cwd?: string): Promise<TreeResponse | null> {
   if (!sessionId) return null
   const { cliFetch } = useCliAuth()
   try {
-    let path = withSession('/files/tree', sessionId)
+    let path = withScope('/files/tree', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
     const resp = await cliFetch(cliApi(path))
     if (!resp.ok) return null
@@ -98,11 +103,11 @@ export async function filesTree(sessionId: string, relPath: string): Promise<Tre
  * text/* with the file's content-type, but returns application/json for the
  * {binary}/{tooLarge} metadata sentinels.
  */
-export async function filesRaw(sessionId: string, relPath: string): Promise<RawResult> {
+export async function filesRaw(sessionId: string, relPath: string, cwd?: string): Promise<RawResult> {
   if (!sessionId) return { kind: 'error' }
   const { cliFetch } = useCliAuth()
   try {
-    let path = withSession('/files/raw', sessionId)
+    let path = withScope('/files/raw', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
     const resp = await cliFetch(cliApi(path))
     if (!resp.ok) return { kind: 'error' }
