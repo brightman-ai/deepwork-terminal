@@ -1,9 +1,7 @@
 github.com/SherClockHolmes/webpush-go v1.4.0 h1:ocnzNKWN23T9nvHi6IfyrQjkIc0oJWv1B1pULsf9i3s=
 github.com/SherClockHolmes/webpush-go v1.4.0/go.mod h1:XSq8pKX11vNV8MJEMwjrlTkxhAj1zKfxmyhdV7Pd6UA=
-github.com/brightman-ai/kit v0.1.0 h1:f/TgaWZh47jQVus6kIHmCNwMpliv5GPne09DzQo4Zdk=
-github.com/brightman-ai/kit v0.1.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
-github.com/brightman-ai/kit v0.2.0 h1:F2iv03iZWk5mhUGcyjh15p2KvGhtF7irrORa1+a72as=
-github.com/brightman-ai/kit v0.2.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
+github.com/brightman-ai/kit v0.3.0 h1:FzvxGIv390H/7Uv5Cp4RKP9lBC3ACntVsxhyY+JFGqQ=
+github.com/brightman-ai/kit v0.3.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
