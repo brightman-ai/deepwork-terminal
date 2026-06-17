@@ -175,6 +175,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /tmux/state", wrap(s.handleTmuxState))
 	s.mux.HandleFunc("GET /tmux/prefix", wrap(s.handleTmuxPrefix))
 	s.mux.HandleFunc("POST /tmux/copy-motion", wrap(s.handleTmuxCopyMotion))
+	// Session workbench file service (CHG-016): anchored to session.CWD, traversal-safe.
+	// recent = transcript tool_use signal; tree = single dir level; raw = bounded preview.
+	s.mux.HandleFunc("GET /files/recent", wrap(s.handleFilesRecent))
+	s.mux.HandleFunc("GET /files/tree", wrap(s.handleFilesTree))
+	s.mux.HandleFunc("GET /files/raw", wrap(s.handleFilesRaw))
 	s.mux.HandleFunc("GET /push/vapid", wrap(s.handlePushVAPID))
 	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
 	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
