@@ -44,7 +44,9 @@ async function refresh(): Promise<void> {
     loading.value = false
     return
   }
-  const bag = await sessionOverview(props.sessionId, tmux.activeCwd.value)
+  // Pass the active pane's cwd AND agentTool so the server routes to the codex-vs-claude
+  // metrics extractor for the pane the user is actually looking at (null-safe: '' → claude).
+  const bag = await sessionOverview(props.sessionId, tmux.activeCwd.value, tmux.activeTool.value)
   detail.value = bag.detail
   summary.value = bag.summary
   turns.value = bag.turns ?? []
@@ -67,9 +69,9 @@ watch(() => props.sessionId, () => {
   startPoll()
 })
 
-// Active-pane cwd change (user switched tmux pane/window) → re-fetch immediately so the
-// overview tracks what the user is now looking at, without waiting for the 3s poll.
-watch(() => tmux.activeCwd.value, () => { void refresh() })
+// Active-pane cwd OR tool change (user switched tmux pane/window) → re-fetch immediately so
+// the overview tracks what the user is now looking at, without waiting for the 3s poll.
+watch(() => [tmux.activeCwd.value, tmux.activeTool.value], () => { void refresh() })
 
 onMounted(() => {
   void refresh()

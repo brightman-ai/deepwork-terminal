@@ -8,13 +8,20 @@ import (
 
 // handleSessionOverview handles GET /sessions/{id}/overview.
 //
-// It resolves the session's cwd, locates the CURRENT Claude transcript (newest-mtime
-// .jsonl for that cwd), and parses it into per-turn metrics + an aggregate summary +
-// session detail — the payload behind the shared @ce OverviewPanel.
+// It resolves the session's cwd, then routes to the CLAUDE or CODEX metrics extractor and
+// parses the active agent's transcript/rollout into per-turn metrics + an aggregate
+// summary + session detail — the payload behind the shared @ce OverviewPanel.
 //
-// Unknown session → 404 (mirrors handleGetSession). A live session whose tool is codex
-// (or that has no transcript yet) → 200 with a valid-but-empty shape (turn_count 0),
-// never an error — the panel just shows zeros and "—" for the non-derivable metrics.
+// Tool routing (claude default):
+//   - ?tool=codex → codex extractor directly (the frontend passes the active pane's
+//     agentTool from /tmux/state).
+//   - else claude. As a param-free fallback, if the claude extractor yields zero turns AND
+//     a codex rollout exists for the cwd, route to codex — so a Codex pane still works even
+//     when the param is missing.
+//
+// Unknown session → 404 (mirrors handleGetSession). A pane with no transcript/rollout yet
+// → 200 with a valid-but-empty shape (turn_count 0), never an error — the panel just shows
+// zeros and "—" for the non-derivable metrics.
 func (s *Server) handleSessionOverview(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, err := s.mgr.Get(id)
@@ -40,6 +47,21 @@ func (s *Server) handleSessionOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pl := agentintel.NewProjectLocator()
-	metrics := agentintel.SessionMetricsForCWD(pl, cwd, id, title, active)
+	metrics := overviewMetrics(pl, cwd, id, title, active, r.URL.Query().Get("tool"))
 	writeJSON(w, http.StatusOK, metrics)
+}
+
+// overviewMetrics picks the claude or codex extractor for the active pane. tool is the
+// frontend-supplied active-pane agentTool (may be empty). When tool=="codex" it goes
+// straight to codex. Otherwise it parses the claude transcript; if that yields zero turns
+// and a codex rollout exists for cwd, it falls back to codex (param-free Codex support).
+func overviewMetrics(pl *agentintel.ProjectLocator, cwd, id, title string, active bool, tool string) agentintel.SessionMetrics {
+	if tool == "codex" {
+		return agentintel.CodexSessionMetricsForCWD(pl, cwd, id, title, active)
+	}
+	claude := agentintel.SessionMetricsForCWD(pl, cwd, id, title, active)
+	if claude.Detail.TurnCount == 0 && agentintel.CodexRolloutExistsForCWD(pl, cwd) {
+		return agentintel.CodexSessionMetricsForCWD(pl, cwd, id, title, active)
+	}
+	return claude
 }

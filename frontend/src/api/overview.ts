@@ -21,15 +21,26 @@ export type { SessionMetricsBag } from '@ce/types/sessionMetrics'
  * Returns nulls (not a throw) on any failure so the caller renders the pane's
  * empty/loading affordance instead of crashing the drawer.
  */
-export async function sessionOverview(sessionId: string, cwd?: string): Promise<SessionMetricsBag> {
+export async function sessionOverview(
+  sessionId: string,
+  cwd?: string,
+  tool?: string,
+): Promise<SessionMetricsBag> {
   const empty: SessionMetricsBag = { detail: null, summary: null, turns: [], price: null }
   if (!sessionId) return empty
   const { cliFetch } = useCliAuth()
   try {
-    // cwd = live active tmux pane dir → overview follows pane switches (server falls back
-    // to the session's creation cwd when absent/invalid).
+    // cwd  = live active tmux pane dir → overview follows pane switches (server falls back
+    //        to the session's creation cwd when absent/invalid).
+    // tool = active pane's agentTool ('codex' | 'claude' | …) → server routes to the codex
+    //        vs claude metrics extractor. Omitted/empty → server defaults to claude (with a
+    //        param-free codex fallback when the claude transcript is empty).
+    const params = new URLSearchParams()
+    if (cwd) params.set('cwd', cwd)
+    if (tool) params.set('tool', tool)
     let url = `/sessions/${encodeURIComponent(sessionId)}/overview`
-    if (cwd) url += `?cwd=${encodeURIComponent(cwd)}`
+    const qs = params.toString()
+    if (qs) url += `?${qs}`
     const resp = await cliFetch(cliApi(url))
     if (!resp.ok) return empty
     const data = (await resp.json()) as Partial<SessionMetricsBag>
