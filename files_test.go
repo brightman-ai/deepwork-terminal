@@ -196,11 +196,14 @@ func TestFilesRecent_Shape(t *testing.T) {
 }
 
 func TestIsBinaryContent(t *testing.T) {
-	assert.True(t, isBinaryContent([]byte{0x00, 'a'}, ""), "NUL byte → binary")
-	assert.False(t, isBinaryContent([]byte("hello"), "text/plain; charset=utf-8"))
-	assert.False(t, isBinaryContent([]byte("{}"), "application/json"))
-	assert.True(t, isBinaryContent([]byte{1, 2, 3}, "image/png"))
-	assert.False(t, isBinaryContent([]byte("plain"), ""), "no NUL, unknown type → text")
+	assert.True(t, isBinaryContent([]byte{0x00, 'a'}), "NUL byte → binary")
+	assert.False(t, isBinaryContent([]byte("hello")), "ascii → text")
+	assert.False(t, isBinaryContent([]byte("{}")), "json → text")
+	// The bug: a shell script is plain text (its mime is application/x-sh).
+	assert.False(t, isBinaryContent([]byte("#!/bin/bash\nset -e\necho \"hi\"\n")), ".sh → text")
+	assert.False(t, isBinaryContent([]byte("你好，世界\n# 注释")), "utf-8 doc → text")
+	assert.False(t, isBinaryContent([]byte{}), "empty → text")
+	assert.True(t, isBinaryContent([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}), "control bytes → binary")
 }
 
 // sessionByName returns the live session whose Name matches.
