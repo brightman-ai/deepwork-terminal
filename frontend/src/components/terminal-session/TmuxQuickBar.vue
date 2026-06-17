@@ -90,6 +90,22 @@
       </svg>
       <span class="tqb-cap">zoom</span>
     </button>
+    <!-- New tmux session — create + switch the client onto it (server-side; keystroke
+         new-session is unreliable and refuses to nest). Placed before the session switcher
+         so "新会话 → sess" reads as create-then-pick. Only while attached: a new session is
+         meaningful once you're in tmux (use attach otherwise). -->
+    <button
+      v-if="attached"
+      class="tqb-btn tqb-btn--new"
+      data-testid="tmux-quick-newsession"
+      title="新建 tmux 会话并切换"
+      @click="tmux.newSession()"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="4" rx="1" /><rect x="3" y="10" width="11" height="4" rx="1" /><rect x="3" y="16" width="11" height="4" rx="1" /><line x1="19" y1="14" x2="19" y2="22" /><line x1="15" y1="18" x2="23" y2="18" />
+      </svg>
+      <span class="tqb-cap">新会话</span>
+    </button>
     <button class="tqb-btn" data-testid="tmux-quick-sessions" :title="`${pfxLabel} s sessions`" @click="send(tmux.prefixSeq('s'))">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="4" width="18" height="4" rx="1" /><rect x="3" y="10" width="18" height="4" rx="1" /><rect x="3" y="16" width="18" height="4" rx="1" />
@@ -258,6 +274,15 @@ function send(key: string): void {
   background: #0a2418;
 }
 .tqb-btn--attach:active { background: #0e2e20; }
+
+/* New-session: a calm purple accent (a create action, distinct from attach-green). */
+.tqb-btn--new {
+  color: #c080ff;
+  border-color: #3a2860;
+  border-bottom-color: #241640;
+  background: #1a1030;
+}
+.tqb-btn--new:active { background: #241640; }
 
 .tqb-sep {
   flex-shrink: 0;

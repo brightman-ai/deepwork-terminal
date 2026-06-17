@@ -42,6 +42,12 @@ func (p *defaultTmuxProvider) CopyMotion(ctx context.Context, session, motion st
 	return p.svc.CopyMotion(ctx, session, motion)
 }
 
+// NewSession satisfies TmuxSessionMaker — creates a detached session and switches the
+// shellPID's client onto it. Returns the new session name.
+func (p *defaultTmuxProvider) NewSession(ctx context.Context, shellPID int) (string, error) {
+	return p.svc.NewSession(ctx, shellPID)
+}
+
 // WithTmuxProvider overrides the default in-process tmux provider.
 // Hosts use this to supply a richer snapshot; standalone needs nothing.
 func WithTmuxProvider(p TmuxStateProvider) Option {

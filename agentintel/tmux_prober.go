@@ -45,22 +45,35 @@ func (tp *TmuxProber) DetectTmux(ctx context.Context, shellPID int) bool {
 }
 
 // FindClientSession finds which tmux session the CLI session's tmux client is attached to.
-// Looks for the tmux client PID in the child tree, then matches against tmux list-clients.
 func (tp *TmuxProber) FindClientSession(ctx context.Context, shellPID int) string {
-	procs := tp.inspector.processSnapshot(ctx)
+	return tp.clientField(ctx, shellPID, "#{session_name}")
+}
 
-	var tmuxPID int
+// FindClientName returns the tmux client name (its tty, the handle `switch-client -c` wants)
+// for the client in shellPID's child tree, "" when that shell is not attached to tmux.
+func (tp *TmuxProber) FindClientName(ctx context.Context, shellPID int) string {
+	return tp.clientField(ctx, shellPID, "#{client_name}")
+}
+
+// clientPIDForShell finds the tmux client process PID inside shellPID's child tree (0 if none).
+func (tp *TmuxProber) clientPIDForShell(ctx context.Context, shellPID int) int {
+	procs := tp.inspector.processSnapshot(ctx)
 	for _, p := range processTreeIncludingRoot(procs, shellPID) {
 		if isTmuxClient(p.Command) {
-			tmuxPID = p.PID
-			break
+			return p.PID
 		}
 	}
+	return 0
+}
+
+// clientField resolves one tmux client format field for the client shellPID is attached
+// through, by matching the in-tree client PID against tmux list-clients.
+func (tp *TmuxProber) clientField(ctx context.Context, shellPID int, field string) string {
+	tmuxPID := tp.clientPIDForShell(ctx, shellPID)
 	if tmuxPID == 0 {
 		return ""
 	}
-
-	out, err := tmuxCommandContext(ctx, "list-clients", "-F", "#{client_pid}"+tmuxFieldSep+"#{session_name}").Output()
+	out, err := tmuxCommandContext(ctx, "list-clients", "-F", "#{client_pid}"+tmuxFieldSep+field).Output()
 	if err != nil {
 		return ""
 	}

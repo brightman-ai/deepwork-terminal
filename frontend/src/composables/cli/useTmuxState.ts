@@ -56,6 +56,9 @@ export interface TmuxStateStore {
    *  inject keystrokes: the prefix `[` + command-prompt route silently no-ops for these
    *  motions, and a raw key depends on mode-keys. Best-effort; resolves once dispatched. */
   runCopyMotion: (motion: CopyMotion) => Promise<void>
+  /** Create a new tmux session and switch this client onto it via POST /tmux/new-session.
+   *  Server-side (keystroke `new-session` is unreliable + refuses to nest in a client). */
+  newSession: () => Promise<void>
   /** Apply a pushed { type: "tmux_state" } WS frame payload. */
   handleWSMessage: (payload: unknown) => void
   /** One-shot GET snapshot — called on init. */
@@ -142,6 +145,14 @@ function createStore(sessionId: () => string): TmuxStateStore {
     } catch { /* best-effort scroll — a transient failure just means no scroll this tap */ }
   }
 
+  async function newSession(): Promise<void> {
+    const id = sessionId()
+    if (!id) return
+    try {
+      await cliFetch(cliApi(`/tmux/new-session?session=${encodeURIComponent(id)}`), { method: 'POST' })
+    } catch { /* best-effort — the ~1s topology poll still surfaces a created session */ }
+  }
+
   function handleWSMessage(payload: unknown): void {
     if (payload && typeof payload === 'object') {
       state.value = payload as TmuxState
@@ -159,7 +170,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, activeCwd, prefixSeq, runCopyMotion, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, activeCwd, prefixSeq, runCopyMotion, newSession, handleWSMessage, fetchSnapshot,
   }
 }
 
