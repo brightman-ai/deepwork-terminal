@@ -21,12 +21,16 @@ export type { SessionMetricsBag } from '@ce/types/sessionMetrics'
  * Returns nulls (not a throw) on any failure so the caller renders the pane's
  * empty/loading affordance instead of crashing the drawer.
  */
-export async function sessionOverview(sessionId: string): Promise<SessionMetricsBag> {
+export async function sessionOverview(sessionId: string, cwd?: string): Promise<SessionMetricsBag> {
   const empty: SessionMetricsBag = { detail: null, summary: null, turns: [] }
   if (!sessionId) return empty
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(cliApi(`/sessions/${encodeURIComponent(sessionId)}/overview`))
+    // cwd = live active tmux pane dir → overview follows pane switches (server falls back
+    // to the session's creation cwd when absent/invalid).
+    let url = `/sessions/${encodeURIComponent(sessionId)}/overview`
+    if (cwd) url += `?cwd=${encodeURIComponent(cwd)}`
+    const resp = await cliFetch(cliApi(url))
     if (!resp.ok) return empty
     const data = (await resp.json()) as Partial<SessionMetricsBag>
     return {

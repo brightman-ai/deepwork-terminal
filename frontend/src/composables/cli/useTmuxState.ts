@@ -45,6 +45,10 @@ export interface TmuxStateStore {
   modeKeys: ComputedRef<'vi' | 'emacs'>
   /** Windows of the session THIS shell is attached to ([] when detached). */
   windows: ComputedRef<TmuxWindowState[]>
+  /** Live cwd of the ACTIVE pane (active window → active pane → cwd) of the attached
+   *  session — '' when unknown/detached. Drives the workbench (files + overview) so it
+   *  follows pane/window switches instead of being pinned to the session's creation cwd. */
+  activeCwd: ComputedRef<string>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
   /** Run a semantic copy-mode scroll motion via POST /tmux/copy-motion — the server
@@ -107,6 +111,18 @@ function createStore(sessionId: () => string): TmuxStateStore {
     return s?.windows ?? []
   })
 
+  // Live cwd of the active pane within the attached session's active window. Falls back
+  // through active→first window and active→first pane so a single-pane shell still resolves.
+  const activeCwd = computed<string>(() => {
+    const ws = windows.value
+    if (ws.length === 0) return ''
+    const win = ws.find(w => w.active) ?? ws[0]
+    const panes = win?.panes ?? []
+    if (panes.length === 0) return ''
+    const pane = panes.find(p => p.active) ?? panes[0]
+    return pane?.cwd ?? ''
+  })
+
   function prefixSeq(suffix: string): string {
     return bytesToString(prefixBytes.value) + suffix
   }
@@ -143,7 +159,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, prefixSeq, runCopyMotion, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, activeCwd, prefixSeq, runCopyMotion, handleWSMessage, fetchSnapshot,
   }
 }
 
