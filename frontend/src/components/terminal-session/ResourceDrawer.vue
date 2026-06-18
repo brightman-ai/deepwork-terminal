@@ -355,6 +355,11 @@ function onResizeStart(e: PointerEvent): void {
   // move/up listeners live on WINDOW so they fire regardless of capture support or where
   // the pointer travels (over the terminal / the pointer-events:none desktop scrim).
   try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch { /* best effort */ }
+  // Suppress text selection (+ pin the resize cursor) for the WHOLE drag: it travels over
+  // xterm, which enables its own user-select:text, so a body-level rule can't reach it —
+  // the global html.dw-resizing * { user-select:none!important } rule does. Without this
+  // the drag highlights terminal text instead of resizing cleanly.
+  document.documentElement.classList.add('dw-resizing')
   window.addEventListener('pointermove', onResizeMove)
   window.addEventListener('pointerup', onResizeEnd)
   window.addEventListener('pointercancel', onResizeEnd)
@@ -371,6 +376,7 @@ function onResizeMove(e: PointerEvent): void {
 function onResizeEnd(): void {
   if (!resizing) return
   resizing = false
+  document.documentElement.classList.remove('dw-resizing')
   localStorage.setItem(WIDTH_KEY, String(panelWidth.value))
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeEnd)
@@ -1046,4 +1052,16 @@ function glyphClass(name: string): string {
 .rd-fade-enter-from, .rd-fade-leave-to { opacity: 0; }
 .rd-fade-enter-active .rd-panel, .rd-fade-leave-active .rd-panel { transition: transform 0.2s ease; }
 .rd-fade-enter-from .rd-panel, .rd-fade-leave-to .rd-panel { transform: translateX(24px); }
+</style>
+
+<!-- GLOBAL (un-scoped): toggled by the resize handlers for the duration of a drag. It has
+     to reach EVERY element — the drag pointer travels over xterm, which opts itself into
+     user-select:text, so only a universal !important rule keeps the drag from highlighting
+     terminal text and flickering the I-beam cursor. -->
+<style>
+html.dw-resizing, html.dw-resizing * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: ew-resize !important;
+}
 </style>
