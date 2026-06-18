@@ -54,7 +54,14 @@ function syncAppVisualViewport(reason = 'event'): void {
   const vv = window.visualViewport
   const height = Math.max(1, Math.round(vv?.height ?? window.innerHeight))
   const offsetTop = Math.max(0, Math.round(vv?.offsetTop ?? 0))
-  document.documentElement.style.setProperty('--dw-app-viewport-height', `${height}px`)
+  // The shell sits at the layout-viewport top — it CANNOT be position:fixed/transformed,
+  // that would reparent xterm.js's fixed descendants. When iOS offsets the visual viewport
+  // to reveal a focused input (offsetTop > 0, e.g. the first keyboard open), a height of
+  // just visualViewport.height ends ABOVE the keyboard, leaving the tall gap below the
+  // compose bar. Extending the height by offsetTop makes the shell reach from layout-top
+  // down to the keyboard top: its top offsetTop px scroll off-screen (expected keyboard
+  // behaviour) and the visible region fills exactly — no gap, xterm untouched.
+  document.documentElement.style.setProperty('--dw-app-viewport-height', `${height + offsetTop}px`)
   document.documentElement.style.setProperty('--dw-app-viewport-offset-top', `${offsetTop}px`)
   reportCliInputDiagnostic('app.viewport.sync', { reason, height, offsetTop })
 }
