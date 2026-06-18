@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8">
     <link rel="icon" type="image/png" href="/favicon-32.png">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <!-- interactive-widget=resizes-content: when the soft keyboard opens, resize the LAYOUT
+         viewport (not just the visual one) so the app shell shrinks to the area above the
+         keyboard instead of iOS scroll-shifting the fixed shell and exposing a gap. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="color-scheme" content="dark">
     <meta name="description" content="Deepwork Terminal — remote terminal portal with agent-aware push notifications.">
     <title>Deepwork Terminal</title>
 
