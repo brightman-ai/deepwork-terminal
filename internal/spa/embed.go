@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+
+	"github.com/brightman-ai/kit/webserve"
 )
 
 //go:embed all:dist
@@ -23,24 +25,18 @@ func Handler() http.Handler {
 	dist, _ := fs.Sub(distFS, "dist")
 	fileServer := http.FileServer(http.FS(dist))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Strip leading slash to get relative path
-		relPath := strings.TrimPrefix(r.URL.Path, "/")
-		// Try to serve the exact file
-		f, err := dist.Open(relPath)
-		if err == nil {
+		// Try to serve the exact file; the Vite cache split (content-hashed assets/*
+		// immutable, shell no-cache) is the shared webserve SSOT so terminal + pro agree.
+		relPath := r.URL.Path
+		if f, err := dist.Open(strings.TrimPrefix(relPath, "/")); err == nil {
 			f.Close()
-			if strings.HasPrefix(relPath, "assets/") {
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			} else {
-				// index.html, sw.js, manifest, icons — must revalidate each load.
-				w.Header().Set("Cache-Control", "no-cache")
-			}
+			w.Header().Set("Cache-Control", webserve.AssetCacheControl(relPath))
 			fileServer.ServeHTTP(w, r)
 			return
 		}
 		// SPA fallback: serve index.html for client-side routing. NEVER cache it — a stale
 		// index.html pins the previous build's asset hashes and silently blocks updates.
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", webserve.AssetCacheControl("/"))
 		r.URL.Path = "/"
 		fileServer.ServeHTTP(w, r)
 	})
