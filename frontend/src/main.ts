@@ -8,6 +8,16 @@ import { reportCliInputDiagnostic } from '@terminal/composables/cli/useCliInputD
 // Import Tailwind CSS
 import '@ce/assets/main.css'
 
+// Terminal is a dark-only app: apply the @ce dark token set up-front so bg-background and
+// friends resolve DARK (matching the explicit dark chrome). Without it the @ce :root
+// (light) tokens render bg-background as a light gray that shows through on the iOS
+// keyboard gap and the home-indicator band — the body #0d0d0f override only masked it on
+// html/body, not on inner @ce surfaces. Pro applies .dark via its theme switcher; the
+// terminal standalone has no light mode, so set it unconditionally (CSP forbids an inline
+// <script>, hence here rather than index.html).
+document.documentElement.classList.add('dark')
+document.documentElement.setAttribute('data-theme', 'dark')
+
 // ── Portal registrations (side-effect imports — must run before app mount) ────
 import '@terminal/portals/cli'
 // Shared @ce settings portal (SSOT shell + descriptor) + terminal's contributed sections.
