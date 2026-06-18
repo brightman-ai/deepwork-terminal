@@ -16,7 +16,7 @@
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
 import { ref, computed, watch, onMounted } from 'vue'
-import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X, Link2 } from 'lucide-vue-next'
 import {
   filesRecent,
   filesTree,
@@ -251,13 +251,17 @@ function injectPath(path: string): void {
 // ── copy affordance ──
 const copiedKey = ref('')
 let copiedTimer: ReturnType<typeof setTimeout> | null = null
-async function copyPath(path: string, key: string): Promise<void> {
+// copyText copies any string to the clipboard — same affordance for a file's PATH and its
+// CONTENT. navigator.clipboard needs a secure context (HTTPS/localhost); over plain LAN
+// HTTP it's undefined, so we fall back to the execCommand+textarea path. key drives the
+// transient ✓ on whichever button fired.
+async function copyText(text: string, key: string): Promise<void> {
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(path)
+      await navigator.clipboard.writeText(text)
     } else {
       const ta = document.createElement('textarea')
-      ta.value = path
+      ta.value = text
       ta.style.position = 'fixed'
       ta.style.opacity = '0'
       document.body.appendChild(ta)
@@ -271,6 +275,13 @@ async function copyPath(path: string, key: string): Promise<void> {
   } catch {
     toast('复制失败')
   }
+}
+
+// copyContent copies the previewed file's TEXT — the primary action in a content preview
+// (mainstream: a viewer's copy means "copy what I'm reading", not the path). Only text
+// previews carry content; binary/too-large states expose path actions instead.
+function copyContent(): void {
+  if (preview.value?.result.kind === 'text') void copyText(preview.value.result.text, 'content')
 }
 
 // ── toast ──
@@ -408,7 +419,7 @@ defineExpose({ loadRecent, loadTree })
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
               type="button" title="复制路径"
               :data-testid="`fp-copy-${f.name}`"
-              @click="copyPath(f.path, 'r:' + f.path)"
+              @click="copyText(f.path, 'r:' + f.path)"
             >
               <Check v-if="copiedKey === 'r:' + f.path" class="size-3.5 text-green-500" />
               <Copy v-else class="size-3.5" />
@@ -468,7 +479,7 @@ defineExpose({ loadRecent, loadTree })
           class="ml-auto p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
           type="button" title="复制当前目录路径"
           data-testid="fp-tree-copy-cwd"
-          @click="copyPath((treeCwd.replace(/\/+$/, '')) + (treeRel ? '/' + treeRel : ''), 'cwd')"
+          @click="copyText((treeCwd.replace(/\/+$/, '')) + (treeRel ? '/' + treeRel : ''), 'cwd')"
         >
           <Check v-if="copiedKey === 'cwd'" class="size-3 text-green-500" />
           <Copy v-else class="size-3" />
@@ -501,7 +512,7 @@ defineExpose({ loadRecent, loadTree })
             <button
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
               type="button" title="复制路径"
-              @click="copyPath(searchAbsPath(e), 's:' + e.rel)"
+              @click="copyText(searchAbsPath(e), 's:' + e.rel)"
             >
               <Check v-if="copiedKey === 's:' + e.rel" class="size-3 text-green-500" />
               <Copy v-else class="size-3" />
@@ -533,7 +544,7 @@ defineExpose({ loadRecent, loadTree })
             <button
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
               type="button" title="复制路径"
-              @click="copyPath(entryAbsPath(e), 't:' + e.name)"
+              @click="copyText(entryAbsPath(e), 't:' + e.name)"
             >
               <Check v-if="copiedKey === 't:' + e.name" class="size-3 text-green-500" />
               <Copy v-else class="size-3" />
@@ -549,13 +560,26 @@ defineExpose({ loadRecent, loadTree })
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
           <FileText class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium truncate text-foreground" :title="preview.absPath">{{ preview.name }}</span>
+          <!-- 复制内容 (primary — a content preview's copy means "copy what I'm reading") -->
+          <button
+            v-if="preview.result.kind === 'text'"
+            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            type="button" title="复制内容"
+            data-testid="fp-preview-copy-content"
+            @click="copyContent"
+          >
+            <Check v-if="copiedKey === 'content'" class="size-3.5 text-green-500" />
+            <Copy v-else class="size-3.5" />
+          </button>
+          <!-- 复制路径 (secondary — distinct Link2 glyph so it isn't mistaken for content) -->
           <button
             class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
             type="button" title="复制路径"
-            @click="copyPath(preview.absPath, 'p')"
+            data-testid="fp-preview-copy-path"
+            @click="copyText(preview.absPath, 'p')"
           >
             <Check v-if="copiedKey === 'p'" class="size-3.5 text-green-500" />
-            <Copy v-else class="size-3.5" />
+            <Link2 v-else class="size-3.5" />
           </button>
           <button
             class="px-1.5 py-1 rounded text-[0.6rem] text-green-500 border border-border hover:bg-muted/50"
