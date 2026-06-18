@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
 	tunnelkit "github.com/brightman-ai/kit/tunnel"
@@ -104,6 +106,15 @@ func (s *Server) Service() TerminalSessionService {
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	root := http.NewServeMux()
 	root.Handle("/api/", http.StripPrefix("/api", s.mux))
+	// /fresh — a bookmarkable cache-buster: redirect to "/" with a unique query so the
+	// browser can't reuse a stale cached index.html and loads the current build. A manual
+	// escape hatch alongside the no-cache index.html + the in-app auto-reloader; the user's
+	// existing query (e.g. ?auth=) is preserved.
+	root.HandleFunc("/fresh", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		q.Set("t", strconv.FormatInt(time.Now().UnixNano(), 10))
+		http.Redirect(w, r, "/?"+q.Encode(), http.StatusFound)
+	})
 	root.Handle("/", spa.Handler())
 
 	// Production security headers on every standalone response (API + SPA). The terminal
