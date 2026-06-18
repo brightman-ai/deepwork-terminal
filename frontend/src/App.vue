@@ -12,8 +12,12 @@
 // Root application component — renders the active route view.
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { useBuildVersion } from '@terminal/composables/cli/useBuildVersion'
 
 const { showAuthDialog, dismissAuthDialog } = useCliAuth()
+
+// Auto-pick-up a new build when the tab regains focus — no manual refresh, session-safe.
+useBuildVersion()
 
 function onAuthenticated() {
   dismissAuthDialog()
