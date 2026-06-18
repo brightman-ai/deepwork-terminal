@@ -11,6 +11,7 @@ import (
 
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
 	tunnelkit "github.com/brightman-ai/kit/tunnel"
+	"github.com/brightman-ai/kit/webserve"
 )
 
 // Server is a complete terminal session HTTP service.
@@ -105,6 +106,19 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	root.Handle("/api/", http.StripPrefix("/api", s.mux))
 	root.Handle("/", spa.Handler())
 
+	// Production security headers on every standalone response (API + SPA). The terminal
+	// frames nothing, so frame-src 'none'. HSTS stays OFF: this listener is reached over
+	// plain HTTP on the LAN (e.g. http://stwork:8087), and HSTS would pin that host to
+	// HTTPS and brick HTTP access; the cloudflare tunnel owns HSTS for the public HTTPS
+	// domain. The CSP carries no upgrade-insecure-requests, so HTTP origins load fine and
+	// clipboard keeps its execCommand fallback. When EMBEDDED (Handler()) the host (pro)
+	// owns the headers — this wraps only the standalone listener. SSOT: kit/webserve.
+	secured := webserve.Config{
+		CSP:          webserve.SPACSP("'none'"),
+		FrameOptions: "SAMEORIGIN",
+		HSTS:         false,
+	}.Middleware(root)
+
 	ln, err := net.Listen("tcp", s.config.Addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.config.Addr, err)
@@ -119,7 +133,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	hostname, _ := os.Hostname()
 	fmt.Fprintf(os.Stderr, "  LAN:       http://%s:%d\n\n", hostname, port)
 
-	srv := &http.Server{Handler: root}
+	srv := &http.Server{Handler: secured}
 	go func() {
 		<-ctx.Done()
 		srv.Close()
