@@ -292,6 +292,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronsRight, Lock, LockOpen } from 'lucide-vue-next'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
@@ -688,18 +689,8 @@ function resend(text: string): void {
 
 async function copyText(text: string): Promise<void> {
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-    } else {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-    }
+    // SSOT helper: iOS-aware fallback (the old bare ta.select() silently no-ops on iOS Safari).
+    if (!(await copyTextToClipboard(text))) throw new Error('copy failed')
     showToast('已复制')
   } catch {
     showToast('复制失败')

@@ -210,6 +210,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { Terminal } from 'xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.vue'
 import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
@@ -1041,39 +1042,11 @@ function applyXtermSelection() {
 
 // ─── Clipboard helpers ────────────────────────────────────────────────────────
 
+// Clipboard write delegates to the shared SSOT helper (@ce/utils/clipboard): secure-context
+// writeText with an iOS-aware execCommand fallback. (This component is where that logic
+// originated; it now lives in @ce so every copy button shares one correct implementation.)
 function clipboardWrite(text: string): Promise<boolean> {
-  // Secure-context API (HTTPS / localhost). On iOS Safari over plain HTTP (e.g. a Tailscale
-  // http://host:PORT link) navigator.clipboard is UNDEFINED, so we fall through to execCommand,
-  // which must run synchronously inside the tap gesture.
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text).then(() => true).catch(() => clipboardWriteFallback(text))
-  }
-  return Promise.resolve(clipboardWriteFallback(text))
-}
-
-function clipboardWriteFallback(text: string): boolean {
-  // iOS Safari requires a focused, contentEditable, selected element with an explicit range —
-  // a bare offscreen `ta.select()` silently no-ops. Keep it in-viewport but invisible.
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.readOnly = false
-  ta.contentEditable = 'true'
-  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px'
-  document.body.appendChild(ta)
-  ta.focus()
-  const range = document.createRange()
-  range.selectNodeContents(ta)
-  const winSel = window.getSelection()
-  winSel?.removeAllRanges()
-  winSel?.addRange(range)
-  ta.setSelectionRange(0, text.length)
-  let threw = false
-  try { document.execCommand('copy') } catch { threw = true }
-  winSel?.removeAllRanges()
-  document.body.removeChild(ta)
-  // iOS Safari's execCommand('copy') often returns false even when the copy succeeded, so its
-  // boolean is unreliable — treat "did not throw" as success. (HTTPS uses navigator.clipboard.)
-  return !threw
+  return copyTextToClipboard(text)
 }
 
 // ─── Expose for parent ────────────────────────────────────────────────────────

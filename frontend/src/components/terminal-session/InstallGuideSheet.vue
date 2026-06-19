@@ -228,7 +228,13 @@
 
               <!-- READY: show the url + copy so PC users can paste / open in another tab. -->
               <div v-if="tunnel.publicURL.value" class="igs-tunnel-url" data-testid="igs-tunnel-url">
-                <code class="igs-tunnel-url-text">{{ tunnel.publicURL.value }}</code>
+                <a
+                  class="igs-tunnel-url-text"
+                  :href="tunnel.publicURL.value"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  data-testid="igs-tunnel-url-link"
+                >{{ tunnel.publicURL.value }}</a>
                 <button class="igs-btn igs-btn--ghost igs-tunnel-copy" data-testid="igs-tunnel-copy" @click="onTunnelCopy">
                   {{ tunnelCopied ? '已复制' : '复制' }}
                 </button>
@@ -301,6 +307,7 @@ import { usePushNotifications } from '@terminal/composables/cli/usePushNotificat
 // settingsApiFetch, which the terminal wires with cli-auth at startup (portals/settings/
 // sections/index.ts) — so start()/status are authenticated here exactly as in pro's settings.
 import { useTunnel } from '@ce/composables/useTunnel'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const props = defineProps<{ sessionId: string; open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -343,11 +350,12 @@ function onTunnelOpen(): void {
   if (tunnel.publicURL.value) window.location.assign(tunnel.publicURL.value)
 }
 async function onTunnelCopy(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(tunnel.publicURL.value)
+  // Shared SSOT helper: secure-context writeText, else execCommand fallback. Direct
+  // navigator.clipboard.writeText is undefined on iOS/HTTP, where copy silently failed.
+  if (await copyTextToClipboard(tunnel.publicURL.value)) {
     tunnelCopied.value = true
     setTimeout(() => { tunnelCopied.value = false }, 2000)
-  } catch { /* ignore — clipboard may be unavailable over http */ }
+  }
 }
 
 // ── Single source of truth: one state, one primary action. ───────────────────
@@ -797,7 +805,12 @@ async function onSendTest(): Promise<void> {
   font-size: 0.7rem;
   color: #8fdba6;
   word-break: break-all;
+  /* Tappable link (#5): open the HTTPS origin directly, not only copy. */
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
+.igs-tunnel-url-text:hover { color: #b6f0c5; }
 .igs-tunnel-copy { flex-shrink: 0; padding: 5px 11px; }
 
 /* Steps */
