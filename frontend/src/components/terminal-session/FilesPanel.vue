@@ -16,6 +16,7 @@
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
 import { ref, computed, watch, onMounted } from 'vue'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X, Link2 } from 'lucide-vue-next'
 import {
   filesRecent,
@@ -258,18 +259,8 @@ let copiedTimer: ReturnType<typeof setTimeout> | null = null
 // transient ✓ on whichever button fired.
 async function copyText(text: string, key: string): Promise<void> {
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-    } else {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-    }
+    // SSOT helper: iOS-aware fallback (the old bare ta.select() silently no-ops on iOS Safari).
+    if (!(await copyTextToClipboard(text))) throw new Error('copy failed')
     copiedKey.value = key
     if (copiedTimer) clearTimeout(copiedTimer)
     copiedTimer = setTimeout(() => { copiedKey.value = '' }, 1400)

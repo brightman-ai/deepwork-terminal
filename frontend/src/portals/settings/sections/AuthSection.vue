@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { ClipboardCopy } from 'lucide-vue-next'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const { cliFetch, setAuthCode } = useCliAuth()
 const authCode = ref('')
@@ -18,7 +19,11 @@ onMounted(async () => {
   } catch { /* ignore */ }
 })
 async function copy() {
-  try { await navigator.clipboard.writeText(authCode.value); copied.value = true; setTimeout(() => { copied.value = false }, 2000) } catch { /* ignore */ }
+  // SSOT helper: works on iOS/HTTP (navigator.clipboard is undefined there).
+  if (await copyTextToClipboard(authCode.value)) {
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  }
 }
 </script>
 
