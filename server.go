@@ -67,6 +67,11 @@ func NewServer(opts ...Option) (*Server, error) {
 	// APNs rejects the token — see resolveVapidSubscriber.
 	s.push = newPushStore(s.config.DataDir, resolveVapidSubscriber(s.config))
 	s.push.server = s
+	// Unregister subscriptions bound to a stale tunnel origin (dead/changed domain →
+	// un-tappable notifications). No-op when no tunnel is running yet (origin unknown);
+	// the tunnel adopt in tunnelkit.New means a surviving tunnel's URL is already known
+	// here, so a stable-URL restart keeps subs while a changed URL clears the old ones.
+	s.push.reconcileOrigin(s.tunnel.PublicURL())
 	// If subscriptions survived a restart, resume the background notifier so
 	// push keeps working with no browser tab and no fresh subscribe call.
 	if s.push.count() > 0 {

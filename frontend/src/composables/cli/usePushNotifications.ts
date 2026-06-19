@@ -324,6 +324,10 @@ function createApi(): PushNotificationsApi {
           auth: arrayBufferToBase64Url(sub.getKey('auth')),
         },
         sessionId,
+        // Bind this subscription to the page origin (the tunnel HTTPS domain). The server
+        // unregisters subscriptions whose origin no longer matches the live tunnel, so a
+        // notification never deep-links to a dead/changed tunnel domain.
+        origin: window.location.origin,
       }
       const resp = await cliFetch(cliApi('/push/subscribe'), {
         method: 'POST',
