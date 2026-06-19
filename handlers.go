@@ -298,8 +298,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	dataCh, unsub := s.mgr.Subscribe(sess, subID)
 	defer unsub()
 
-	// Send replay buffer first.
-	replay := sess.Buffer.Read()
+	// Send replay buffer first. Strip terminal report-queries (DA/DSR/color/…): replaying them
+	// would make the browser terminal re-answer, and on a reconnect into tmux copy-mode those
+	// stray answers are read as keys (the mysterious "(search up)"). See stripDeviceQueries.
+	replay := stripDeviceQueries(sess.Buffer.Read())
 	terminalWSConnectionsTotal.Inc()
 	terminalLogger.Info(attachLogCtx, "cli ws connected",
 		"session_id", id,
