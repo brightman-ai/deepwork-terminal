@@ -4,6 +4,8 @@ github.com/brightman-ai/kit v0.4.0 h1:9sFwlZaTivkUt9Lb1SwtTj/iV+iY7mEoZWutCEzaJu
 github.com/brightman-ai/kit v0.4.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
 github.com/brightman-ai/kit v0.5.0 h1:AJDTsMeiYLUpTEubGve677QoZERSQys8Q29rjdYoPXA=
 github.com/brightman-ai/kit v0.5.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
+github.com/brightman-ai/kit v0.6.0 h1:A7tRzs/RjGtRHgJzk6Lb+BpCLaT1WGKn5JKsYsDa+IQ=
+github.com/brightman-ai/kit v0.6.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
