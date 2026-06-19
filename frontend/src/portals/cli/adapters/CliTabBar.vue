@@ -67,11 +67,23 @@
 
     <!-- Spacer + right-side status (settings icon) -->
     <div class="cli-tab-bar__spacer" />
+    <!-- PWA-only refresh: a standalone PWA has no address bar / F5, so a wedged state can't be
+         reloaded. Force-fresh via /fresh (bypasses any stale cached index.html). -->
+    <button
+      v-if="isPWA"
+      class="cli-tab-bar__refresh"
+      type="button"
+      data-testid="cli-portal-refresh"
+      title="刷新（PWA 无 F5）"
+      @click="onRefresh"
+    ><RefreshCw :size="14" /></button>
     <slot name="status" />
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { RefreshCw } from 'lucide-vue-next'
 import type { WorkbenchGroup } from '@terminal/types/workbench'
 
 interface TabRuntime {
@@ -99,6 +111,19 @@ const emit = defineEmits<{
   (e: 'toggle-group', groupId: string): void
 }>()
 
+// A standalone PWA has no browser chrome (no address bar, no F5), so show an in-app refresh.
+const isPWA = computed(
+  () =>
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(display-mode: standalone)').matches === true ||
+      (window.navigator as { standalone?: boolean }).standalone === true),
+)
+function onRefresh(): void {
+  // /fresh force-busts any stale cached index.html and preserves the current query (auth),
+  // so a wedged PWA always reloads to the latest build.
+  window.location.href = '/fresh' + window.location.search
+}
+
 function tabDotClass(tabId: string): string {
   const rt = props.tabRuntimes[tabId]
   if (!rt) return 'dot-idle'
@@ -116,6 +141,21 @@ function tabNeedsInput(tabId: string): boolean {
 </script>
 
 <style scoped>
+/* PWA-only refresh button — sits on the right, mirrors the add-tab affordance. */
+.cli-tab-bar__refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+}
+.cli-tab-bar__refresh:hover { color: hsl(var(--foreground)); }
+.cli-tab-bar__refresh:active { transform: scale(0.92); }
+
 .cli-tab-bar {
   display: flex;
   align-items: stretch;
