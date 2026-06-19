@@ -61,8 +61,7 @@
         ref="textareaRef"
         v-model="text"
         class="compose-input"
-        :class="{ 'is-paste-hint': props.pasteHint }"
-        :placeholder="props.pasteHint ? '长按这里粘贴 → 自动发送到终端（HTTP 无法一键读剪贴板）' : 'Enter = newline, tap send to submit'"
+        placeholder="Enter = newline, tap send to submit"
         @input="onInput"
         @focus="onTextareaFocus"
       />
@@ -100,10 +99,7 @@ const serverStore = useServerStore()
  * on mount and whenever it changes to a fresh value, REPLACING the current text so
  * the user lands in an editable compose with the inserted text ready to refine.
  */
-// `pasteHint` is set by the host when the compose box was opened by the toolbar 粘贴 button on
-// HTTP purely to capture one native paste (which then auto-sends) — it only swaps the
-// placeholder so the user knows to long-press-paste here; the capture/auto-send lives in the host.
-const props = defineProps<{ draft?: string; pasteHint?: boolean }>()
+const props = defineProps<{ draft?: string }>()
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
@@ -592,11 +588,6 @@ onUnmounted(() => {
   transition: border-color 0.15s;
 }
 .compose-input::placeholder { color: var(--cb-placeholder); }
-/* Armed HTTP paste-capture: accent the box so it reads as "paste here". */
-.compose-input.is-paste-hint {
-  border-color: #60d890;
-  box-shadow: 0 0 0 2px rgba(96, 216, 144, 0.18);
-}
 .compose-input:focus {
   border-color: #4a80d8;
   box-shadow: 0 0 0 2px rgba(74,128,216,0.2);

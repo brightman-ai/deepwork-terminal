@@ -105,8 +105,29 @@
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
-      <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" :paste-hint="pasteArmed" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
+      <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
+
+    <!-- Dedicated paste-capture sheet (HTTP-only fallback). Its OWN focusable textarea — NOT
+         the compose box — so the compose draft is never touched. inputmode="none" keeps the
+         soft keyboard down while still allowing an OS long-press → 粘贴, which auto-sends to the
+         terminal (onClipboardPaste) and dismisses. -->
+    <Teleport to="body">
+      <div v-if="pasteArmed" class="pc-scrim" data-testid="paste-capture" @click.self="disarmPaste">
+        <div class="pc-card">
+          <div class="pc-title">长按下方区域 → 粘贴 → 自动发送到终端</div>
+          <textarea
+            ref="pasteCaptureEl"
+            class="pc-input"
+            inputmode="none"
+            placeholder="长按这里粘贴…"
+            aria-label="粘贴捕获"
+            @keydown.esc="disarmPaste"
+          ></textarea>
+          <button class="pc-cancel" type="button" @click="disarmPaste">取消</button>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- 浮动层: touchball, 选区覆盖, 复制按钮, HUD -->
     <MobileOverlay
@@ -296,10 +317,11 @@ const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'compose'>('idle')
 // bump a nonce-suffixed ref only via the handler below.
 const composeDraft = ref<string | undefined>(undefined)
 // HTTP paste flow: when the toolbar 粘贴 button can't read the clipboard programmatically
-// (plain HTTP), it opens the compose box ARMED — the next native paste captured there is sent
-// straight to the terminal instead of being dropped in for a manual Send. Disarmed once used,
-// or when the compose box closes.
+// (plain HTTP), it shows a DEDICATED paste-capture sheet ARMED — the next native paste caught
+// there is sent straight to the terminal. It is its OWN textarea (never the compose box), so
+// the compose draft is never disturbed. Disarmed once used or when the sheet is dismissed.
 const pasteArmed = ref(false)
+const pasteCaptureEl = ref<HTMLTextAreaElement | null>(null)
 const stickyShift = ref(false)
 const stickyCtrl = ref(false)
 const stickyAlt = ref(false)
@@ -528,11 +550,11 @@ function onKeydownDirect(e: KeyboardEvent) {
 }
 
 async function onClipboardPaste(e: ClipboardEvent) {
-  // Armed HTTP paste: the compose box was opened by the 粘贴 button only to capture ONE paste.
-  // A paste EVENT exposes clipboardData even on insecure HTTP (it's a user gesture, unlike
+  // Armed HTTP paste: the dedicated paste-capture sheet is open only to catch ONE paste. A
+  // paste EVENT exposes clipboardData even on insecure HTTP (it's a user gesture, unlike
   // navigator.clipboard.readText), so read the text, send it straight to the terminal (same
-  // encoder as compose Send), and close — never dropping it into the textarea. preventDefault
-  // keeps any existing draft untouched. Non-text pastes (images/files) fall through as usual.
+  // encoder as compose Send), and dismiss the sheet. preventDefault keeps it out of any field.
+  // Non-text pastes (images/files) fall through to the normal resolver.
   if (pasteArmed.value) {
     const text = e.clipboardData?.getData('text/plain') ?? ''
     if (text) {
@@ -540,16 +562,22 @@ async function onClipboardPaste(e: ClipboardEvent) {
       e.stopImmediatePropagation()
       pasteArmed.value = false
       for (const chunk of composeSend.encode(text)) sendBinary(chunk)
-      activeMode.value = 'idle'
-      composeDraft.value = undefined
       return
     }
   }
   await pasteResolver.handlePasteEvent(e)
 }
 
-// Leaving compose (Send / close / panel switch) disarms the one-shot HTTP paste capture.
-watch(activeMode, (m) => { if (m !== 'compose') pasteArmed.value = false })
+// Show + focus the dedicated paste-capture sheet (own textarea, NOT the compose box). The
+// inputmode="none" textarea is focusable for an OS long-press paste without popping the
+// keyboard, so it can sit anywhere and never touches the compose draft.
+function armPasteCapture(): void {
+  pasteArmed.value = true
+  void nextTick(() => pasteCaptureEl.value?.focus())
+}
+function disarmPaste(): void {
+  pasteArmed.value = false
+}
 
 // While a selection is active, swallow finger-drag scrolling on the terminal body so the
 // gesture adjusts anchors instead of scrolling the xterm viewport / page out from under the
@@ -796,12 +824,10 @@ function onClipboard(op: string) {
       // then fall back to opening the compose bar for a manual long-press paste + Send — and we
       // PRESERVE any existing draft (the old code wrongly cleared it, and never injected).
       void clipboardText.pasteFromClipboard('paste-button').then((ok) => {
-        if (!ok && activeMode.value !== 'compose') {
-          // HTTP read failed: open the compose box as a focusable paste target and ARM it so
-          // the next native paste there auto-sends to the terminal (see onClipboardPaste).
-          pasteArmed.value = true
-          activeMode.value = 'compose'
-        }
+        // HTTP read failed: show the DEDICATED paste-capture sheet (never the compose box, so
+        // the compose draft is left completely untouched) and arm it — the next native paste
+        // there auto-sends to the terminal (see onClipboardPaste).
+        if (!ok) armPasteCapture()
       })
       break
     case 'undo':
@@ -1188,4 +1214,59 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   pointer-events: none !important;
   opacity: 0 !important;
 }
+
+/* Dedicated paste-capture sheet (HTTP fallback). Teleported to body; scoped styles still apply
+   via the data-v scope id carried on the elements. A centered modal with its OWN textarea. */
+.pc-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+}
+.pc-card {
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #161320;
+  border: 1px solid #2e2750;
+  border-radius: 14px;
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.6);
+}
+.pc-title {
+  color: #c8b8e8;
+  font-size: 0.82rem;
+  text-align: center;
+}
+.pc-input {
+  min-height: 96px;
+  resize: none;
+  padding: 12px;
+  border-radius: 10px;
+  background: #0e0b16;
+  color: #e6e1f0;
+  border: 1px solid #60d890;
+  box-shadow: 0 0 0 2px rgba(96, 216, 144, 0.16);
+  font-family: inherit;
+  font-size: 0.95rem;
+  outline: none;
+}
+.pc-input::placeholder { color: #6a5a88; }
+.pc-cancel {
+  align-self: center;
+  padding: 7px 22px;
+  border-radius: 8px;
+  background: #221a36;
+  color: #b8a8d8;
+  border: 1px solid #3a2e5e;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.pc-cancel:active { background: #2c2246; }
 </style>
