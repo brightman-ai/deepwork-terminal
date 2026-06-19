@@ -111,7 +111,6 @@ watch(
 <template>
   <div class="filepreview relative h-full overflow-auto" data-testid="file-preview">
     <button
-      v-if="kind !== 'markdown'"
       class="fp-wrap-toggle"
       :class="{ 'is-on': wrap }"
       type="button"
@@ -122,7 +121,7 @@ watch(
       <WrapText class="size-3.5" />
     </button>
 
-    <div v-if="kind === 'markdown'" class="fp-md" v-html="mdHtml" />
+    <div v-if="kind === 'markdown'" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" v-html="mdHtml" />
     <pre v-else class="fp-code hljs" :class="wrap ? 'fp-wrap' : 'fp-nowrap'"><code v-html="codeHtml" /></pre>
   </div>
 </template>
@@ -211,6 +210,11 @@ watch(
   padding: 11px 13px; overflow-x: auto; margin: 0.7em 0;
 }
 .fp-md :deep(pre code) { background: none; padding: 0; color: #e6e1f0; font-size: 0.72rem; line-height: 1.55; }
+/* markdown fenced code obeys the same 换行 toggle as raw code. These rules follow the base
+   `.fp-md :deep(pre)` (equal specificity) so source order makes the active one win.
+   wrap = mobile default: soft-wrap long lines, no horizontal scroll. nowrap = restore h-scroll. */
+.fp-md-wrap :deep(pre) { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; overflow-x: visible; }
+.fp-md-nowrap :deep(pre) { white-space: pre; overflow-x: auto; }
 .fp-md :deep(blockquote) {
   border-left: 3px solid #6a5aa0; margin: 0.7em 0; padding: 0.15em 0 0.15em 0.9em; color: #b8b2cc;
 }
