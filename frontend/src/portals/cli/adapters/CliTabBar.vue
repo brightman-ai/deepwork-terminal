@@ -118,10 +118,28 @@ const isPWA = computed(
     (window.matchMedia?.('(display-mode: standalone)').matches === true ||
       (window.navigator as { standalone?: boolean }).standalone === true),
 )
-function onRefresh(): void {
-  // /fresh force-busts any stale cached index.html and preserves the current query (auth),
-  // so a wedged PWA always reloads to the latest build.
-  window.location.href = '/fresh' + window.location.search
+async function onRefresh(): Promise<void> {
+  // Belt-and-suspenders force-fresh for a wedged PWA:
+  //   1. Drop any Cache Storage — a LEGACY caching service worker (an older build) may have
+  //      precached the app shell and would otherwise keep shadowing the new build.
+  //   2. Push every registered SW to update (update(), not unregister — keeps the push
+  //      subscription alive).
+  //   3. Navigate to /fresh, which the server 302-redirects to /?t=<unixnano> — a unique URL
+  //      no cache can satisfy, so the no-cache index.html (+ its new hashed assets) is always
+  //      fetched live. The current query (auth) is preserved.
+  try {
+    if (window.caches) {
+      const keys = await caches.keys()
+      await Promise.all(keys.map((k) => caches.delete(k)))
+    }
+    if (navigator.serviceWorker?.getRegistrations) {
+      const regs = await navigator.serviceWorker.getRegistrations()
+      for (const r of regs) { void r.update() }
+    }
+  } catch {
+    /* best-effort — never block the reload on a cache-clear failure */
+  }
+  window.location.replace('/fresh' + window.location.search)
 }
 
 function tabDotClass(tabId: string): string {
