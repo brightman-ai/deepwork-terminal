@@ -93,6 +93,19 @@ var searchSkipDirs = map[string]bool{
 	".idea":        true,
 }
 
+// matchesFuzzy reports whether name contains EVERY (already-lowercased) term as a substring,
+// order-independent — the gap-tolerant rule shared with the client fuzzyMatch SSOT so
+// "test iso" matches "tmux-test-isolation". terms must be pre-lowercased + non-empty.
+func matchesFuzzy(terms []string, name string) bool {
+	ln := strings.ToLower(name)
+	for _, t := range terms {
+		if !strings.Contains(ln, t) {
+			return false
+		}
+	}
+	return true
+}
+
 // handleFilesRecent handles GET /files/recent?session=<id>.
 //
 // It resolves the session's cwd, asks agentintel for the files agents recently
@@ -197,8 +210,11 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	if q == "" {
+	// Gap-tolerant match: split the query into whitespace-separated terms; an entry name must
+	// contain EVERY term (case-insensitive, order-independent), so "test iso" finds
+	// "tmux-test-isolation". Mirrors the client fuzzyMatch SSOT.
+	terms := strings.Fields(strings.ToLower(r.URL.Query().Get("q")))
+	if len(terms) == 0 {
 		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
 		return
 	}
@@ -224,7 +240,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		if scanned > searchMaxScan || len(out) >= searchMaxResults {
 			return filepath.SkipDir // stop descending; WalkDir keeps the walk bounded
 		}
-		if !strings.Contains(strings.ToLower(d.Name()), q) {
+		if !matchesFuzzy(terms, d.Name()) {
 			return nil
 		}
 		rel, rerr := filepath.Rel(cwd, path)
