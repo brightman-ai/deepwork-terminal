@@ -27,15 +27,16 @@ import {
   type SearchEntry,
   type RawResult,
 } from '@terminal/api/files'
-import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 
-const props = defineProps<{ sessionId: string }>()
+// cwd is the ANCHORED pane's working directory, OWNED by ResourceDrawer and passed down
+// as a STABLE prop (CHG: drawer-workbench). FilesPanel no longer reads the live tmux
+// active-pane cwd, so a tmux pane/window switch does NOT yank the file tree / preview the
+// user is mid-read on; the tree only re-anchors when the user explicitly switches panes via
+// the header pill (which changes this prop). '' → server falls back to the session cwd.
+const props = defineProps<{ sessionId: string; cwd: string }>()
 
-// Live active-pane cwd → files (recent + tree) follow tmux pane/window switches; server
-// falls back to the session's creation cwd when this is empty.
-const tmux = useTmuxState(() => props.sessionId)
 const emit = defineEmits<{
   (e: 'inject', path: string): void
   (e: 'compose-draft', text: string): void
@@ -51,7 +52,7 @@ const recentLoading = ref(false)
 async function loadRecent(): Promise<void> {
   recentLoading.value = true
   try {
-    recent.value = await filesRecent(props.sessionId, tmux.activeCwd.value)
+    recent.value = await filesRecent(props.sessionId, props.cwd)
   } finally {
     recentLoading.value = false
   }
@@ -110,7 +111,7 @@ const treeLoading = ref(false)
 async function loadTree(rel: string): Promise<void> {
   treeLoading.value = true
   try {
-    const resp = await filesTree(props.sessionId, rel, tmux.activeCwd.value)
+    const resp = await filesTree(props.sessionId, rel, props.cwd)
     if (resp) {
       treeCwd.value = resp.cwd
       treeRel.value = resp.rel === '.' ? '' : resp.rel
@@ -166,7 +167,7 @@ async function runSearch(q: string): Promise<void> {
   const seq = ++searchSeq
   searching.value = true
   try {
-    const res = await filesSearch(props.sessionId, tmux.activeCwd.value, q)
+    const res = await filesSearch(props.sessionId, props.cwd, q)
     if (seq === searchSeq) searchResults.value = res
   } finally {
     if (seq === searchSeq) searching.value = false
@@ -193,7 +194,7 @@ function parentRel(rel: string): string {
 }
 // Absolute path of a search hit (treeCwd may be unset before first browse → fall back to live cwd).
 function searchAbsPath(entry: SearchEntry): string {
-  const base = (treeCwd.value || tmux.activeCwd.value || '').replace(/\/+$/, '')
+  const base = (treeCwd.value || props.cwd || '').replace(/\/+$/, '')
   return base ? `${base}/${entry.rel}` : entry.rel
 }
 // Click a FILE hit → preview by its rel path. Click a DIR hit → browse into it + clear search.
@@ -219,7 +220,7 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   previewLoading.value = true
   preview.value = { name, absPath, result: { kind: 'text', text: '' } }
   try {
-    const result = await filesRaw(props.sessionId, rel, tmux.activeCwd.value)
+    const result = await filesRaw(props.sessionId, rel, props.cwd)
     preview.value = { name, absPath, result }
   } finally {
     previewLoading.value = false
@@ -318,8 +319,10 @@ watch(subTab, (t) => {
   if (t === 'recent' && !recent.value.length) void loadRecent()
   if (t === 'tree' && !treeEntries.value.length) void loadTree(treeRel.value)
 })
-// Re-anchor when the target session OR the live active-pane cwd changes (the user switched
-// tmux pane/window) — reset the tree to the new root and reload the visible sub-tab.
+// Re-anchor when the target session OR the ANCHORED cwd prop changes — i.e. ONLY when the
+// user explicitly re-anchors via the drawer's pane pill (or a session switch). A plain tmux
+// pane/window switch no longer touches props.cwd, so the file tree / preview the user is
+// mid-read on stays put. On re-anchor: reset the tree to the new root + reload the sub-tab.
 function reanchor(): void {
   recent.value = []
   treeEntries.value = []
@@ -333,7 +336,7 @@ function reanchor(): void {
   else void loadTree('')
 }
 watch(() => props.sessionId, reanchor)
-watch(() => tmux.activeCwd.value, reanchor)
+watch(() => props.cwd, reanchor)
 
 onMounted(() => { void loadRecent() })
 
