@@ -174,25 +174,85 @@
                 <div class="igs-status-body">
                   <span class="igs-status-t">通知需要 HTTPS</span>
                   <span class="igs-status-d">
-                    当前通过不安全的 HTTP 访问（{{ host }}），Service Worker 与推送无法启用。请改用 HTTPS 访问：
+                    当前通过不安全的 HTTP 访问（{{ host }}），Service Worker 与推送无法启用。一键开启应用内置的 HTTPS 隧道即可：
                   </span>
                 </div>
               </div>
-              <ol class="igs-steps">
+
+              <!-- ── ONE-TAP CTA: the recommended action, a guidance color block. ──
+                   default → progress → error/retry → ready(navigate). A pulsing hint
+                   dot draws the eye to it. -->
+              <!-- READY: tunnel up → tap navigates to the HTTPS origin (a secure
+                   context), after which the normal 开启通知 flow becomes available. -->
+              <button
+                v-if="tunnel.publicURL.value"
+                class="igs-tunnel-cta igs-tunnel-cta--ready"
+                data-testid="igs-tunnel-cta"
+                @click="onTunnelOpen"
+              >
+                <span class="igs-tunnel-cta-main">
+                  <span class="igs-tunnel-cta-icon">✅</span>
+                  <span class="igs-tunnel-cta-label">隧道已就绪 — 用 HTTPS 打开</span>
+                </span>
+                <span class="igs-tunnel-cta-sub">点此跳转到安全地址，再回来即可开启通知</span>
+              </button>
+
+              <!-- WORKING: download / start progress, inline. -->
+              <button
+                v-else-if="tunnel.starting.value"
+                class="igs-tunnel-cta igs-tunnel-cta--working"
+                data-testid="igs-tunnel-cta"
+                disabled
+              >
+                <span class="igs-tunnel-cta-main">
+                  <span class="igs-tunnel-spinner" />
+                  <span class="igs-tunnel-cta-label">{{ tunnelProgressText }}</span>
+                </span>
+                <span v-if="tunnel.downloading.value" class="igs-tunnel-cta-sub">{{ tunnelDownloadText }}</span>
+              </button>
+
+              <!-- DEFAULT: the prominent one-tap entry point. -->
+              <button
+                v-else
+                class="igs-tunnel-cta igs-tunnel-cta--idle"
+                data-testid="igs-tunnel-cta"
+                @click="onTunnelStart"
+              >
+                <span class="igs-tunnel-hint-dot" aria-hidden="true" />
+                <span class="igs-tunnel-cta-main">
+                  <span class="igs-tunnel-cta-icon">🚀</span>
+                  <span class="igs-tunnel-cta-label">一键开启 HTTPS 通知 · Cloudflare 隧道</span>
+                </span>
+                <span class="igs-tunnel-cta-sub">应用内置，无需配置；PC 与手机同此一步</span>
+              </button>
+
+              <!-- READY: show the url + copy so PC users can paste / open in another tab. -->
+              <div v-if="tunnel.publicURL.value" class="igs-tunnel-url" data-testid="igs-tunnel-url">
+                <code class="igs-tunnel-url-text">{{ tunnel.publicURL.value }}</code>
+                <button class="igs-btn igs-btn--ghost igs-tunnel-copy" data-testid="igs-tunnel-copy" @click="onTunnelCopy">
+                  {{ tunnelCopied ? '已复制' : '复制' }}
+                </button>
+              </div>
+
+              <p v-if="tunnel.error.value" class="igs-error" data-testid="igs-tunnel-error">{{ tunnel.error.value }}</p>
+              <button
+                v-if="tunnel.error.value"
+                class="igs-btn igs-btn--accent igs-btn--block"
+                data-testid="igs-tunnel-retry"
+                @click="onTunnelStart"
+              >重试</button>
+
+              <!-- Secondary, smaller fallbacks. -->
+              <p class="igs-note" data-testid="igs-insecure-localhost">
+                <b>在电脑上？</b>直接用 <span class="mono">http://localhost:{{ port }}</span> 打开本应用，无需隧道即可开启通知。
+              </p>
+              <ol class="igs-steps igs-steps--muted" style="margin-top: 10px;">
                 <li class="igs-step igs-step--compact">
-                  <span class="igs-step-n mono">1</span>
-                  <div class="igs-step-body"><span class="igs-step-t">Cloudflare 隧道（应用内置）</span></div>
-                </li>
-                <li class="igs-step igs-step--compact">
-                  <span class="igs-step-n mono">2</span>
+                  <span class="igs-step-n mono">A</span>
                   <div class="igs-step-body">
                     <span class="igs-step-t">Tailscale Serve</span>
-                    <span class="igs-step-d mono">tailscale serve --bg --https=443 http://127.0.0.1:PORT</span>
+                    <span class="igs-step-d mono">tailscale serve --bg --https=443 http://127.0.0.1:{{ port || 'PORT' }}</span>
                   </div>
-                </li>
-                <li class="igs-step igs-step--compact">
-                  <span class="igs-step-n mono">3</span>
-                  <div class="igs-step-body"><span class="igs-step-t">本机 localhost</span></div>
                 </li>
               </ol>
             </template>
@@ -234,15 +294,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, watch } from 'vue'
+import { ref, computed, h, watch, onUnmounted } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
+// Shared @ce SSOT for the Cloudflare-tunnel lifecycle. It calls /api/tunnel/* through
+// settingsApiFetch, which the terminal wires with cli-auth at startup (portals/settings/
+// sections/index.ts) — so start()/status are authenticated here exactly as in pro's settings.
+import { useTunnel } from '@ce/composables/useTunnel'
 
 const props = defineProps<{ sessionId: string; open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const { isMobile } = useDeviceDetection()
 const push = usePushNotifications()
+
+// One-tap HTTPS: starting the built-in tunnel yields the secure context Web Push needs. Used
+// only by the 'insecure' state, but mounted once so it can reflect an already-running tunnel.
+const tunnel = useTunnel()
+const tunnelCopied = ref(false)
+onUnmounted(() => tunnel.dispose())
 
 const tab = ref<'notify' | 'help'>('notify')
 const busy = ref(false)
@@ -252,6 +322,33 @@ const testText = ref('')
 // Current host:port — shown verbatim in the insecure-context guidance so the user
 // recognises exactly which (HTTP) address they're on.
 const host = computed(() => (typeof location !== 'undefined' ? location.host : ''))
+// The port the terminal is served on — used for the localhost / Tailscale fallback hints.
+const port = computed(() => (typeof location !== 'undefined' ? location.port : ''))
+
+// Inline progress copy for the working CTA (下载组件中… / 启动隧道中…).
+const tunnelProgressText = computed(() =>
+  tunnel.downloading.value ? '下载组件中…' : '启动隧道中…',
+)
+const tunnelDownloadText = computed(() => {
+  const dl = tunnel.downloadedBytes.value
+  const total = tunnel.totalBytes.value
+  const fmt = (b: number) => (b >= 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.round(b / (1 << 10))} KB`)
+  return total > 0 ? `${fmt(dl)} / ${fmt(total)}` : fmt(dl)
+})
+
+function onTunnelStart(): void { void tunnel.start() }
+// Navigating to the https origin makes the page a secure context; the sheet's normal
+// enable-notifications flow then becomes available on the new origin.
+function onTunnelOpen(): void {
+  if (tunnel.publicURL.value) window.location.assign(tunnel.publicURL.value)
+}
+async function onTunnelCopy(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(tunnel.publicURL.value)
+    tunnelCopied.value = true
+    setTimeout(() => { tunnelCopied.value = false }, 2000)
+  } catch { /* ignore — clipboard may be unavailable over http */ }
+}
 
 // ── Single source of truth: one state, one primary action. ───────────────────
 // Order matters — earlier branches win. Reactively reflects every input so the
@@ -307,8 +404,15 @@ const TestRow = (rowProps: { busy: boolean; result: string }, { emit: rowEmit }:
 TestRow.props = ['busy', 'result']
 TestRow.emits = ['test']
 
-// Refresh permission + subscription state whenever the sheet opens.
-watch(() => props.open, (o) => { if (o) { errorText.value = ''; testText.value = ''; void push.refresh() } })
+// Refresh permission + subscription state whenever the sheet opens. Also reflect any
+// already-running tunnel so the insecure-state CTA can jump straight to its ready state.
+watch(() => props.open, (o) => {
+  if (o) {
+    errorText.value = ''; testText.value = ''
+    void push.refresh()
+    if (!push.secureContext) void tunnel.refreshStatus()
+  }
+})
 
 const headline = computed(() => {
   switch (uiState.value) {
@@ -606,6 +710,95 @@ async function onSendTest(): Promise<void> {
 .igs-cta:not(:disabled):active { background: #d8772b; }
 .igs-cta:disabled { opacity: 0.55; cursor: default; }
 .igs-cta-icon { font-size: 1.05rem; line-height: 1; }
+
+/* ── One-tap tunnel CTA (insecure state) — THE guidance color block. ──────────
+   A primary-tinted card that visually stands out as the recommended action,
+   with a pulsing hint dot. idle → working → ready (success) variants. */
+.igs-tunnel-cta {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 14px 15px;
+  border-radius: 12px;
+  border: 1px solid rgba(240, 138, 60, 0.5);
+  background: linear-gradient(135deg, rgba(240, 138, 60, 0.16), rgba(240, 138, 60, 0.07));
+  color: #f5c79a;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+  box-shadow: 0 0 0 1px rgba(240, 138, 60, 0.08), 0 6px 18px rgba(240, 138, 60, 0.06);
+}
+.igs-tunnel-cta--idle:active { background: linear-gradient(135deg, rgba(240, 138, 60, 0.24), rgba(240, 138, 60, 0.12)); }
+.igs-tunnel-cta--working { cursor: default; opacity: 0.92; }
+.igs-tunnel-cta--ready {
+  border-color: rgba(78, 196, 122, 0.55);
+  background: linear-gradient(135deg, rgba(78, 196, 122, 0.18), rgba(78, 196, 122, 0.07));
+  color: #8fdba6;
+  box-shadow: 0 0 0 1px rgba(78, 196, 122, 0.08), 0 6px 18px rgba(78, 196, 122, 0.06);
+}
+.igs-tunnel-cta--ready:active { background: linear-gradient(135deg, rgba(78, 196, 122, 0.26), rgba(78, 196, 122, 0.12)); }
+.igs-tunnel-cta-main { display: flex; align-items: center; gap: 9px; }
+.igs-tunnel-cta-icon { font-size: 1.1rem; line-height: 1; flex-shrink: 0; }
+.igs-tunnel-cta-label { font-weight: 700; font-size: 0.9rem; letter-spacing: 0.2px; }
+.igs-tunnel-cta-sub { color: #b89a72; font-size: 0.68rem; line-height: 1.4; padding-left: 28px; }
+.igs-tunnel-cta--ready .igs-tunnel-cta-sub { color: #6fae84; }
+
+/* Pulsing hint dot — breathes to draw the eye to the recommended action. */
+.igs-tunnel-hint-dot {
+  position: absolute;
+  top: 11px;
+  right: 12px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f08a3c;
+  box-shadow: 0 0 0 0 rgba(240, 138, 60, 0.6);
+  animation: igs-dot-pulse 1.6s ease-out infinite;
+}
+@keyframes igs-dot-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(240, 138, 60, 0.55); opacity: 1; }
+  70% { box-shadow: 0 0 0 9px rgba(240, 138, 60, 0); opacity: 0.85; }
+  100% { box-shadow: 0 0 0 0 rgba(240, 138, 60, 0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .igs-tunnel-hint-dot { animation: none; }
+}
+
+/* Inline spinner for the working state. */
+.igs-tunnel-spinner {
+  width: 15px; height: 15px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(240, 138, 60, 0.3);
+  border-top-color: #f08a3c;
+  animation: igs-spin 0.8s linear infinite;
+}
+@keyframes igs-spin { to { transform: rotate(360deg); } }
+
+/* Ready-state URL row + copy. */
+.igs-tunnel-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding: 8px 10px;
+  background: #16221a;
+  border: 1px solid #2f5a3a;
+  border-radius: 9px;
+}
+.igs-tunnel-url-text {
+  flex: 1;
+  min-width: 0;
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-size: 0.7rem;
+  color: #8fdba6;
+  word-break: break-all;
+}
+.igs-tunnel-copy { flex-shrink: 0; padding: 5px 11px; }
 
 /* Steps */
 .igs-steps { list-style: none; display: flex; flex-direction: column; gap: 10px; }
