@@ -15,14 +15,15 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import SessionOverviewPane from '@ce/components/overview/SessionOverviewPane.vue'
 import { sessionOverview } from '@terminal/api/overview'
-import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import type { SessionDetail, TurnsSummary, Turn, UnitPrice } from '@ce/types/sessionMetrics'
+import type { AgentTool } from '@terminal/types/terminal'
 
-const props = defineProps<{ sessionId: string }>()
-
-// Live active-pane cwd so the overview follows tmux pane/window switches (server falls
-// back to the session's creation cwd when this is empty).
-const tmux = useTmuxState(() => props.sessionId)
+// cwd + tool are the ANCHORED pane's working dir + agent, OWNED by ResourceDrawer and passed
+// down as STABLE props — the overview no longer reads live tmux, so a tmux pane switch does
+// not yank the metrics the user is reading. They change ONLY when the user re-anchors via
+// the header pill. active mirrors the drawer's `open`: the 3s poll runs only while the drawer
+// is open (no wasted fetches behind a minimized drawer), but the already-fetched data is kept.
+const props = defineProps<{ sessionId: string; cwd: string; tool: AgentTool; active: boolean }>()
 
 const detail = ref<SessionDetail | null>(null)
 const summary = ref<TurnsSummary | null>(null)
@@ -66,9 +67,9 @@ async function refresh(): Promise<void> {
     return
   }
   const mine = ++seq
-  // Pass the active pane's cwd AND agentTool so the server routes to the codex-vs-claude
-  // metrics extractor for the pane the user is actually looking at (null-safe: '' → claude).
-  const bag = await sessionOverview(props.sessionId, tmux.activeCwd.value, tmux.activeTool.value)
+  // Pass the ANCHORED pane's cwd AND agentTool so the server routes to the codex-vs-claude
+  // metrics extractor for the pane the drawer is anchored to (null-safe: '' → claude).
+  const bag = await sessionOverview(props.sessionId, props.cwd, props.tool)
   if (mine !== seq) return // superseded by a newer refresh
   // Don't replace a data-rich overview with a transient empty one: while the tmux state
   // settles on mobile the active pane can momentarily resolve to a barely-used transcript
@@ -85,8 +86,12 @@ async function refresh(): Promise<void> {
   loading.value = false
 }
 
+// startPoll only arms the 3s timer when the drawer is ACTIVE (open). A minimized drawer
+// keeps its last-fetched data but spends no network — re-opening re-arms the poll + does
+// one immediate catch-up refresh.
 function startPoll(): void {
   stopPoll()
+  if (!props.active) return
   timer = setInterval(() => { void refresh() }, POLL_MS)
 }
 function stopPoll(): void {
@@ -99,16 +104,24 @@ watch(() => props.sessionId, () => {
   seq++
   clearData()
   loading.value = true
-  void refresh()
+  if (props.active) void refresh()
   startPoll()
 })
 
-// Active-pane cwd OR tool change (user switched tmux pane/window) → re-fetch immediately so
-// the overview tracks what the user is now looking at, without waiting for the 3s poll.
-watch(() => [tmux.activeCwd.value, tmux.activeTool.value], () => { void refresh() })
+// Anchored cwd OR tool change (user re-anchored via the pill) → re-fetch immediately so the
+// overview tracks the newly-chosen pane, without waiting for the 3s poll. Only when active.
+watch(() => [props.cwd, props.tool], () => { if (props.active) void refresh() })
+
+// Drawer minimize/restore → pause/resume the poll. On restore do one immediate catch-up so
+// the user doesn't stare at stale numbers for up to 3s; on minimize just stop the timer
+// (data stays). A toggle never clears the data, so re-opening shows the prior overview at once.
+watch(() => props.active, (isActive) => {
+  if (isActive) { void refresh(); startPoll() }
+  else stopPoll()
+})
 
 onMounted(() => {
-  void refresh()
+  if (props.active) void refresh()
   startPoll()
 })
 onBeforeUnmount(() => {
