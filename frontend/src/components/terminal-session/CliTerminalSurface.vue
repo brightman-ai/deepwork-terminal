@@ -105,7 +105,7 @@
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
-      <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
+      <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" :paste-hint="pasteArmed" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
 
     <!-- 浮动层: touchball, 选区覆盖, 复制按钮, HUD -->
@@ -295,6 +295,11 @@ const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'compose'>('idle')
 // value would not re-trigger ComposeBar's watcher for an identical re-send, so we
 // bump a nonce-suffixed ref only via the handler below.
 const composeDraft = ref<string | undefined>(undefined)
+// HTTP paste flow: when the toolbar 粘贴 button can't read the clipboard programmatically
+// (plain HTTP), it opens the compose box ARMED — the next native paste captured there is sent
+// straight to the terminal instead of being dropped in for a manual Send. Disarmed once used,
+// or when the compose box closes.
+const pasteArmed = ref(false)
 const stickyShift = ref(false)
 const stickyCtrl = ref(false)
 const stickyAlt = ref(false)
@@ -523,8 +528,28 @@ function onKeydownDirect(e: KeyboardEvent) {
 }
 
 async function onClipboardPaste(e: ClipboardEvent) {
+  // Armed HTTP paste: the compose box was opened by the 粘贴 button only to capture ONE paste.
+  // A paste EVENT exposes clipboardData even on insecure HTTP (it's a user gesture, unlike
+  // navigator.clipboard.readText), so read the text, send it straight to the terminal (same
+  // encoder as compose Send), and close — never dropping it into the textarea. preventDefault
+  // keeps any existing draft untouched. Non-text pastes (images/files) fall through as usual.
+  if (pasteArmed.value) {
+    const text = e.clipboardData?.getData('text/plain') ?? ''
+    if (text) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      pasteArmed.value = false
+      for (const chunk of composeSend.encode(text)) sendBinary(chunk)
+      activeMode.value = 'idle'
+      composeDraft.value = undefined
+      return
+    }
+  }
   await pasteResolver.handlePasteEvent(e)
 }
+
+// Leaving compose (Send / close / panel switch) disarms the one-shot HTTP paste capture.
+watch(activeMode, (m) => { if (m !== 'compose') pasteArmed.value = false })
 
 // While a selection is active, swallow finger-drag scrolling on the terminal body so the
 // gesture adjusts anchors instead of scrolling the xterm viewport / page out from under the
@@ -771,7 +796,12 @@ function onClipboard(op: string) {
       // then fall back to opening the compose bar for a manual long-press paste + Send — and we
       // PRESERVE any existing draft (the old code wrongly cleared it, and never injected).
       void clipboardText.pasteFromClipboard('paste-button').then((ok) => {
-        if (!ok && activeMode.value !== 'compose') activeMode.value = 'compose'
+        if (!ok && activeMode.value !== 'compose') {
+          // HTTP read failed: open the compose box as a focusable paste target and ARM it so
+          // the next native paste there auto-sends to the terminal (see onClipboardPaste).
+          pasteArmed.value = true
+          activeMode.value = 'compose'
+        }
       })
       break
     case 'undo':
