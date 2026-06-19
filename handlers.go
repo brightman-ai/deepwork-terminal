@@ -308,10 +308,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"sub_id", subID,
 		"remote_addr", r.RemoteAddr,
 		"replay_bytes", len(replay))
-	defer terminalLogger.Info(attachLogCtx, "cli ws disconnected",
-		"session_id", id,
-		"sub_id", subID,
-		"duration_ms", time.Since(connectedAt).Milliseconds())
+	// Wrap in a closure so time.Since is evaluated at disconnect (when the deferred
+	// func runs), not at defer registration — otherwise duration_ms is always ~0.
+	defer func() {
+		terminalLogger.Info(attachLogCtx, "cli ws disconnected",
+			"session_id", id,
+			"sub_id", subID,
+			"duration_ms", time.Since(connectedAt).Milliseconds())
+	}()
 	if len(replay) > 0 {
 		terminalWSReplayBytesTotal.Add(uint64(len(replay)))
 		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
