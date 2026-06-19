@@ -16,6 +16,8 @@ credentials.*
 # runtime data dir (normally ~/.dw-terminal; can appear at repo root if HOME unset).
 # Holds the VAPID private key, push subscriptions, upload index — never commit.
 /.dw-terminal/
+# workflow_tg run scratch (ephemeral per-thread work; SSOT lives in docs/ -> pro)
+/.tg/
 screenshot.png
 docs/
 .DS_Store
