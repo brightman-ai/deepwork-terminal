@@ -67,6 +67,18 @@
                 @click="topTab = t.key"
               >{{ t.label }}</button>
             </div>
+            <!-- Pane lock: FOLLOW (default) ↔ LOCK onto the current pane so a main-area pane
+                 switch no longer disturbs the drawer (read/copy across panes). -->
+            <button
+              class="rd-lock"
+              :class="{ 'is-locked': locked }"
+              :title="locked ? `已锁定 ${baseName(lockedCwd)} · 点击恢复跟随主区域` : '锁定到当前 pane（之后切换主区域不跟随）'"
+              data-testid="resource-drawer-lock"
+              @click="toggleLock"
+            >
+              <Lock v-if="locked" class="rd-lock-ico" />
+              <LockOpen v-else class="rd-lock-ico" />
+            </button>
             <button
               class="rd-full"
               :title="isFull ? '退出全屏' : '全屏'"
@@ -86,44 +98,6 @@
             </button>
           </div>
 
-          <!-- ════ Anchored-pane pill (its OWN thin row, below the tab row — must NOT eat the
-               reading area). Shows the pane the workbench is anchored to; tap → switcher. ════ -->
-          <div class="rd-pane-row" ref="paneWrapEl">
-            <button
-              class="rd-pane-pill"
-              type="button"
-              data-testid="rd-pane-pill"
-              :title="anchorCwd || '未锚定面板'"
-              @click="togglePanePopover"
-            >
-              <span class="rd-pane-dot">◉</span>
-              <span class="rd-pane-cwd mono">{{ baseName(anchorCwd) }}</span>
-              <span class="rd-pane-sep">·</span>
-              <span class="rd-pane-tool">{{ anchorTool || '—' }}</span>
-              <svg class="rd-pane-caret" :class="{ 'is-open': panePopover }" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
-            </button>
-
-            <!-- Switcher popover: every LIVE pane from tmux state. Tap a row → re-anchor. The
-                 anchored pane is marked (◉ + highlight); the live-active pane is tagged 当前. -->
-            <div v-if="panePopover" class="rd-pane-popover" data-testid="rd-pane-popover">
-              <div v-if="!paneRows.length" class="rd-pane-empty">无可用面板</div>
-              <button
-                v-for="(r, i) in paneRows"
-                :key="r.winIndex + ':' + r.paneIndex + ':' + i"
-                class="rd-pane-opt"
-                :class="{ 'is-anchored': isAnchoredRow(r) }"
-                type="button"
-                :data-testid="`rd-pane-opt-${r.winIndex}-${r.paneIndex}`"
-                @click="chooseAnchor(r)"
-              >
-                <span class="rd-pane-opt-mark">{{ isAnchoredRow(r) ? '◉' : '○' }}</span>
-                <span class="rd-pane-opt-win mono">窗口{{ r.winIndex }}·{{ r.paneIndex }}</span>
-                <span class="rd-pane-opt-cwd mono">{{ baseName(r.cwd) }}</span>
-                <span class="rd-pane-opt-tool">{{ r.tool || '—' }}</span>
-                <span v-if="r.isLiveActive" class="rd-pane-opt-live">当前</span>
-              </button>
-            </div>
-          </div>
 
           <!-- ════ TOP TAB 1 · 历史输入 (the original three views, now sub-tabs) ════ -->
           <template v-if="topTab === 'history'">
@@ -250,7 +224,7 @@
           <div v-show="topTab === 'files'" class="rd-toppane">
             <FilesPanel
               :session-id="sessionId"
-              :cwd="anchorCwd"
+              :cwd="effectiveCwd"
               @inject="onChildInject"
               @compose-draft="onChildComposeDraft"
             />
@@ -258,7 +232,7 @@
 
           <!-- ════ TOP TAB 3 · 会话总览 (@ce shared SSOT pane, terminal fetch wrapper) ════ -->
           <div v-show="topTab === 'overview'" class="rd-toppane">
-            <SessionOverviewTab :session-id="sessionId" :cwd="anchorCwd" :tool="anchorTool" :active="open" />
+            <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open" />
           </div>
 
           <div v-if="toast" class="rd-toast">{{ toast }}</div>
@@ -315,13 +289,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { ChevronsRight } from 'lucide-vue-next'
+import { ChevronsRight, Lock, LockOpen } from 'lucide-vue-next'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
-import type { AgentTool, TmuxPaneState } from '@terminal/types/terminal'
+import type { AgentTool } from '@terminal/types/terminal'
 import FilesPanel from '@terminal/components/terminal-session/FilesPanel.vue'
 import SessionOverviewTab from '@terminal/components/terminal-session/SessionOverviewTab.vue'
 
@@ -343,79 +317,35 @@ const { isMobile } = useDeviceDetection()
 // off whatever terminal text it overlaps; offset persists per-handle.
 const { el: handleEl, style: handleStyle } = useEdgeDrag({ storageKey: 'dw.rdHandle.top' })
 
-// ── Anchored pane (CHG: drawer-workbench) ───────────────────────────────────────────
-// The drawer is a STABLE workbench: it shows ONE chosen pane's cwd/tool, NOT whatever pane
-// tmux happens to have active. We read the live tmux topology only to (a) snapshot the
-// active pane ONCE when the drawer first opens, and (b) list panes in the switcher popover.
-// After that the anchor is owned here and changes ONLY when the user taps a row in the pill
-// popover — so switching the tmux pane (to read/copy elsewhere) never disturbs the drawer.
+// ── Pane lock / follow (CHG: drawer-workbench) ──────────────────────────────────────
+// Default = FOLLOW: the drawer's effective cwd/tool track the LIVE active tmux pane, so
+// switching the main xterm pane updates the drawer (the original behaviour). The lock toggle
+// FREEZES it onto the current pane — while locked, switching the main pane no longer disturbs
+// the drawer, so you can read + copy from the locked pane's files / overview / claude session
+// while working elsewhere. FilesPanel + SessionOverviewTab consume effectiveCwd/effectiveTool
+// as props; their watchers re-fetch only when the effective value actually changes (a
+// follow-mode pane switch, or lock/unlock).
 const tmux = useTmuxState(() => props.sessionId)
-const anchorCwd = ref('')
-const anchorTool = ref<AgentTool>('')
-
-// One-time snapshot: the FIRST time the drawer is open AND the live active cwd is known,
-// adopt it as the anchor. Guarded by anchorCwd being empty so a re-open after minimize (or
-// a later pane switch) never re-snapshots — the chosen anchor is sticky for the session.
-watch(
-  () => [props.open, tmux.activeCwd.value] as const,
-  ([isOpen, liveCwd]) => {
-    if (isOpen && !anchorCwd.value && liveCwd) {
-      anchorCwd.value = liveCwd
-      anchorTool.value = tmux.activeTool.value
-    }
-  },
-  { immediate: true },
-)
-
-// Flat list of all live panes (across every window of the attached session) for the popover.
-// Each carries its window index + pane index for a stable "窗口N·pane" label, plus a flag for
-// the currently live-ACTIVE pane (tagged 当前) — distinct from the drawer's anchored pane.
-interface PaneRow { winIndex: number; paneIndex: number; cwd: string; tool: AgentTool; isLiveActive: boolean }
-const paneRows = computed<PaneRow[]>(() => {
-  const rows: PaneRow[] = []
-  for (const w of tmux.windows.value) {
-    for (const p of (w.panes ?? []) as TmuxPaneState[]) {
-      rows.push({
-        winIndex: w.index,
-        paneIndex: p.index,
-        cwd: p.cwd ?? '',
-        tool: p.agentTool ?? '',
-        isLiveActive: !!(w.active && p.active),
-      })
-    }
+const locked = ref(false)
+const lockedCwd = ref('')
+const lockedTool = ref<AgentTool>('')
+const effectiveCwd = computed(() => (locked.value ? lockedCwd.value : tmux.activeCwd.value))
+const effectiveTool = computed<AgentTool>(() => (locked.value ? lockedTool.value : tmux.activeTool.value))
+function toggleLock(): void {
+  if (!locked.value) {
+    // Freeze onto whatever the drawer is currently showing (the live active pane).
+    lockedCwd.value = tmux.activeCwd.value
+    lockedTool.value = tmux.activeTool.value
   }
-  return rows
-})
+  locked.value = !locked.value
+}
 
-// basename of a cwd for the compact pill / popover labels ('' → '—').
+// basename of the locked cwd, for the lock button's title ('' → '—').
 function baseName(path: string): string {
   if (!path) return '—'
   const trimmed = path.replace(/\/+$/, '')
   const i = trimmed.lastIndexOf('/')
-  const b = i >= 0 ? trimmed.slice(i + 1) : trimmed
-  return b || '/'
-}
-
-const panePopover = ref(false)
-const paneWrapEl = ref<HTMLElement | null>(null)
-function togglePanePopover(): void { panePopover.value = !panePopover.value }
-// Close the popover on any tap outside the pill+popover wrapper. Registered only while the
-// popover is open (added/removed by the watcher below) so it doesn't intercept other taps.
-function onPaneOutside(e: Event): void {
-  const t = e.target as Node | null
-  if (paneWrapEl.value && t && !paneWrapEl.value.contains(t)) panePopover.value = false
-}
-watch(panePopover, (openP) => {
-  if (openP) document.addEventListener('pointerdown', onPaneOutside, true)
-  else document.removeEventListener('pointerdown', onPaneOutside, true)
-})
-// A pane row's identity is window+pane index; the ANCHOR is identified by matching cwd
-// (panes are keyed by their live cwd here — switching to a row sets the anchor to its cwd).
-function isAnchoredRow(r: PaneRow): boolean { return r.cwd === anchorCwd.value }
-function chooseAnchor(r: PaneRow): void {
-  anchorCwd.value = r.cwd
-  anchorTool.value = r.tool
-  panePopover.value = false
+  return trimmed.slice(i + 1) || '/'
 }
 
 // ── TOP-LEVEL tabs (CHG-016): 历史输入 / 文件 / 会话总览. The selected top tab and the
@@ -700,13 +630,12 @@ watch(() => props.open, (isOpen) => {
     expandedInput.value = null
     void refresh()
   } else {
-    // Minimize (v-show): the panel + FilesPanel (preview/tab/scroll) + the anchor stay
+    // Minimize (v-show): the panel + FilesPanel (preview/tab/scroll) + the lock state stay
     // MOUNTED so re-opening restores exactly. We only dismiss the modal full-screen overlays
-    // (lightbox / textview) + the pane popover, which would otherwise orphan above a hidden
-    // drawer — and reset zoom. The 历史输入 list, files panel, and anchor are untouched.
+    // (lightbox / textview), which would otherwise orphan above a hidden drawer — and reset
+    // zoom. The 历史输入 list, files panel, and the lock/pane state are untouched.
     lightbox.value = null
     textPreview.value = null
-    panePopover.value = false
     resetZoom()
   }
 })
@@ -719,7 +648,6 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('dw:upload-success', onUploadSuccess)
-  document.removeEventListener('pointerdown', onPaneOutside, true)
   if (toastTimer) clearTimeout(toastTimer)
   onResizeEnd() // detach any in-flight resize listeners
 })
@@ -1004,70 +932,17 @@ function glyphClass(name: string): string {
 .rd-close-ico { width: 17px; height: 17px; }
 .rd-close:active { color: #c080ff; }
 
-/* ── Anchored-pane row + pill (CHG: drawer-workbench) ──────────────────────────────
-   A thin row directly below the header tab row. It carries ONLY the compact pane pill so
-   the reading area underneath is untouched. The popover is positioned-absolute off this row. */
-.rd-pane-row {
-  position: relative;
-  display: flex; align-items: center;
-  padding: 4px 10px;
-  background: rgba(192, 128, 255, 0.04);
-  border-bottom: 1px solid #241934;
-  flex-shrink: 0;
+/* ── Pane lock toggle (CHG: drawer-workbench) ──────────────────────────────────────
+   Mirrors the .rd-full / .rd-close header buttons. When LOCKED it turns accent-green so the
+   frozen-pane state is unmistakable at a glance. */
+.rd-lock {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; color: #6f5a90; cursor: pointer;
+  padding: 0 4px; flex-shrink: 0;
 }
-.rd-pane-pill {
-  display: inline-flex; align-items: center; gap: 4px;
-  max-width: 100%;
-  padding: 2px 9px; min-height: 22px;
-  background: #1a1228; border: 1px solid #2e2050; border-radius: 999px;
-  color: #c8a0e8; font-size: 0.64rem; cursor: pointer;
-}
-.rd-pane-pill:active { background: #221636; border-color: #7a4ab0; }
-.rd-pane-dot { color: #80ffb0; font-size: 0.6rem; flex-shrink: 0; }
-.rd-pane-cwd {
-  color: #d8c4f0; max-width: 42vw;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.rd-pane-sep { color: #5a4a78; flex-shrink: 0; }
-.rd-pane-tool { color: #9a86ba; flex-shrink: 0; }
-.rd-pane-caret { color: #6f5a90; flex-shrink: 0; transition: transform 0.15s ease; }
-.rd-pane-caret.is-open { transform: rotate(180deg); }
-
-/* Switcher popover — drops below the pill, lists all live panes; capped + scrollable. */
-.rd-pane-popover {
-  position: absolute; top: calc(100% + 2px); left: 10px;
-  z-index: 50;
-  min-width: 220px; max-width: calc(100% - 20px); max-height: 50vh; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 5px;
-  background: #160f22; border: 1px solid #3a2860; border-radius: 10px;
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.6);
-  scrollbar-width: thin; scrollbar-color: #3a2860 transparent;
-}
-.rd-pane-empty { color: #5a4a78; font-style: italic; font-size: 0.66rem; padding: 8px 6px; text-align: center; }
-.rd-pane-opt {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 7px;
-  background: transparent; border: 1px solid transparent; border-radius: 7px;
-  color: #b08fd0; font-size: 0.64rem; cursor: pointer; text-align: left;
-}
-.rd-pane-opt:active { background: #221636; }
-.rd-pane-opt.is-anchored { background: rgba(192, 128, 255, 0.1); border-color: #4a2a7a; }
-.rd-pane-opt-mark { color: #80ffb0; font-size: 0.6rem; flex-shrink: 0; }
-.rd-pane-opt.is-anchored .rd-pane-opt-mark { color: #80ffb0; }
-.rd-pane-opt:not(.is-anchored) .rd-pane-opt-mark { color: #5a4a78; }
-.rd-pane-opt-win { color: #9a86ba; font-size: 0.58rem; flex-shrink: 0; }
-.rd-pane-opt-cwd {
-  color: #d8c4f0; flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.rd-pane-opt-tool { color: #8a76aa; font-size: 0.58rem; flex-shrink: 0; }
-.rd-pane-opt-live {
-  flex-shrink: 0;
-  padding: 0 5px; border-radius: 5px;
-  background: rgba(96, 216, 144, 0.14); color: #60d890; border: 1px solid #1f5238;
-  font-size: 0.54rem; font-weight: 700; letter-spacing: 0.3px;
-}
+.rd-lock:active { color: #c080ff; }
+.rd-lock.is-locked { color: #60d890; }
+.rd-lock-ico { width: 15px; height: 15px; }
 
 /* Filter bar */
 .rd-filter {

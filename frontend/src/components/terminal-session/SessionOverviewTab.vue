@@ -18,11 +18,12 @@ import { sessionOverview } from '@terminal/api/overview'
 import type { SessionDetail, TurnsSummary, Turn, UnitPrice } from '@ce/types/sessionMetrics'
 import type { AgentTool } from '@terminal/types/terminal'
 
-// cwd + tool are the ANCHORED pane's working dir + agent, OWNED by ResourceDrawer and passed
-// down as STABLE props — the overview no longer reads live tmux, so a tmux pane switch does
-// not yank the metrics the user is reading. They change ONLY when the user re-anchors via
-// the header pill. active mirrors the drawer's `open`: the 3s poll runs only while the drawer
-// is open (no wasted fetches behind a minimized drawer), but the already-fetched data is kept.
+// cwd + tool are the drawer's EFFECTIVE pane working dir + agent, OWNED by ResourceDrawer: in
+// FOLLOW mode they track the live active pane; once the user LOCKS the drawer they freeze, so a
+// main-area pane switch no longer yanks the metrics the user is reading. The overview just
+// consumes them as props + re-fetches when they change. active mirrors the drawer's `open`: the
+// 3s poll runs only while the drawer is open (no wasted fetches behind a minimized drawer), but
+// the already-fetched data is kept.
 const props = defineProps<{ sessionId: string; cwd: string; tool: AgentTool; active: boolean }>()
 
 const detail = ref<SessionDetail | null>(null)
@@ -108,8 +109,8 @@ watch(() => props.sessionId, () => {
   startPoll()
 })
 
-// Anchored cwd OR tool change (user re-anchored via the pill) → re-fetch immediately so the
-// overview tracks the newly-chosen pane, without waiting for the 3s poll. Only when active.
+// Effective cwd OR tool change (followed pane switched, or the user locked/unlocked) →
+// re-fetch immediately so the overview tracks it, without waiting for the 3s poll. Only active.
 watch(() => [props.cwd, props.tool], () => { if (props.active) void refresh() })
 
 // Drawer minimize/restore → pause/resume the poll. On restore do one immediate catch-up so

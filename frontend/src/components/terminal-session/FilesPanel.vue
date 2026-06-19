@@ -30,11 +30,11 @@ import {
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 
-// cwd is the ANCHORED pane's working directory, OWNED by ResourceDrawer and passed down
-// as a STABLE prop (CHG: drawer-workbench). FilesPanel no longer reads the live tmux
-// active-pane cwd, so a tmux pane/window switch does NOT yank the file tree / preview the
-// user is mid-read on; the tree only re-anchors when the user explicitly switches panes via
-// the header pill (which changes this prop). '' → server falls back to the session cwd.
+// cwd is the drawer's EFFECTIVE pane working directory, OWNED by ResourceDrawer (CHG:
+// drawer-workbench). In FOLLOW mode it tracks the live active pane; once the user LOCKS the
+// drawer it freezes, so a main-area pane/window switch no longer yanks the file tree / preview
+// the user is mid-read on. FilesPanel just consumes this prop + re-anchors when it changes.
+// '' → server falls back to the session cwd.
 const props = defineProps<{ sessionId: string; cwd: string }>()
 
 const emit = defineEmits<{
