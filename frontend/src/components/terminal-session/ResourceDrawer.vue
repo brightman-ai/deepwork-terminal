@@ -270,6 +270,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 import FilesPanel from '@terminal/components/terminal-session/FilesPanel.vue'
@@ -430,8 +431,7 @@ const scopeOptions = computed<string[]>(() => {
 })
 
 function matchesSearch(text: string): boolean {
-  const q = search.value.toLowerCase()
-  return !q || text.toLowerCase().includes(q)
+  return fuzzyMatch(search.value, text)
 }
 
 function sortByTime<T extends { t: number }>(arr: T[]): T[] {

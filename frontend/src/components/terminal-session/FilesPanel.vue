@@ -28,6 +28,7 @@ import {
   type RawResult,
 } from '@terminal/api/files'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 
 const props = defineProps<{ sessionId: string }>()
@@ -89,10 +90,9 @@ const recentCats = computed(() => {
 // Client-side quick filter — composes with the category chip filter (both must pass).
 const recentQuery = ref('')
 const filteredRecent = computed(() => {
-  const q = recentQuery.value.trim().toLowerCase()
   return recent.value.filter((f) => {
     if (activeCat.value !== 'all' && catOf(f.name) !== activeCat.value) return false
-    if (q && !f.name.toLowerCase().includes(q)) return false
+    if (!fuzzyMatch(recentQuery.value, f.name)) return false
     return true
   })
 })
