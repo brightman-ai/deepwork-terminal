@@ -34,7 +34,7 @@
         data-testid="resource-drawer"
         @click.self="$emit('update:open', false)"
       >
-        <div class="rd-panel" :style="panelStyle" @mousedown.prevent>
+        <div class="rd-panel" :style="panelStyle" @mousedown="onPanelMousedown">
           <!-- Left-edge resize handle (desktop primarily): drag left to widen the
                panel; width persists to localStorage. Mobile keeps the max-width guard. -->
           <div
@@ -324,7 +324,9 @@ watch(activeTab, (v) => { localStorage.setItem(SUB_TAB_KEY, v) })
 const WIDTH_KEY = 'dw.rd.width'
 const MIN_W = 300
 function maxW(): number {
-  return Math.min(720, Math.round(window.innerWidth * 0.92))
+  // Up to 92vw — near-fullscreen on a PC (the old 720px hard cap was too small for desktop);
+  // a sliver of terminal stays visible. The 全屏 button still gives a true 100vw.
+  return Math.round(window.innerWidth * 0.92)
 }
 function clampW(w: number): number {
   return Math.max(MIN_W, Math.min(maxW(), w))
@@ -381,6 +383,18 @@ function onResizeEnd(): void {
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeEnd)
   window.removeEventListener('pointercancel', onResizeEnd)
+}
+
+// Panel mousedown: by default we preventDefault on the inert chrome so a stray click there
+// neither blurs the terminal nor starts a drag-select of the labels. But interactive controls
+// (the file-search inputs, buttons, links) MUST be allowed to take focus, and selectable
+// content (the file preview) MUST be allowed to start a text selection — otherwise a blanket
+// preventDefault left focus stuck on xterm and made preview text un-selectable. Let those
+// through; swallow the rest.
+function onPanelMousedown(e: MouseEvent): void {
+  const t = e.target as HTMLElement | null
+  if (t?.closest('input, textarea, select, button, a, [contenteditable], .filepreview')) return
+  e.preventDefault()
 }
 
 // Bubble FilesPanel's inject / compose-draft to the host (same chokepoints as the

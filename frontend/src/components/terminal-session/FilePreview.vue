@@ -133,6 +133,17 @@ watch(
 .filepreview {
   background: #0e0b16;
   color: #e6e1f0;
+  /* The preview is for READING + copying — re-enable text selection here (the drawer panel
+     disables it globally to keep its chrome un-selectable). */
+  -webkit-user-select: text;
+  user-select: text;
+}
+.filepreview :deep(.fp-md),
+.filepreview :deep(.fp-code),
+.filepreview :deep(.fp-md *),
+.filepreview :deep(.fp-code *) {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .fp-wrap-toggle {
