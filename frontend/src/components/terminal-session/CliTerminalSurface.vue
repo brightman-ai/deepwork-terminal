@@ -763,17 +763,16 @@ function onClipboard(op: string) {
       }
       break
     case 'paste':
-      // Secure context (HTTPS / localhost) → read the clipboard and inject straight into the
-      // terminal. Insecure context (plain HTTP on a LAN / Tailscale hostname like stwork:8087)
-      // BLOCKS navigator.clipboard.readText entirely, so the button could only fail silently.
-      // Fall back to the compose bar — the OS paste gesture works in a real <textarea>, then Send
-      // pushes it to the terminal. Generic: same path for tmux and a plain shell, iOS and PC.
-      if (window.isSecureContext) {
-        void clipboardText.pasteFromClipboard('paste-button')
-      } else {
-        composeDraft.value = ''
-        activeMode.value = 'compose'
-      }
+      // One goal on EVERY origin: read the clipboard and push it STRAIGHT to the terminal —
+      // the same end effect as the compose Send button, but in one tap and WITHOUT touching the
+      // textarea. On a secure context (HTTPS / the cloudflare tunnel / localhost) that's exactly
+      // what pasteFromClipboard does. On plain HTTP (LAN host like stwork:8087) the browser
+      // BLOCKS programmatic clipboard reads, so it fails (and surfaces a 'needs HTTPS' hint); we
+      // then fall back to opening the compose bar for a manual long-press paste + Send — and we
+      // PRESERVE any existing draft (the old code wrongly cleared it, and never injected).
+      void clipboardText.pasteFromClipboard('paste-button').then((ok) => {
+        if (!ok && activeMode.value !== 'compose') activeMode.value = 'compose'
+      })
       break
     case 'undo':
       sendBinary(encoder.encode('\x1a'))
