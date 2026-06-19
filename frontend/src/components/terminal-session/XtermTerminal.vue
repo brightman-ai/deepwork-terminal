@@ -37,6 +37,7 @@ import {
   summarizeText,
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useXtermKeyboardFallback } from '@terminal/composables/cli/useXtermKeyboardFallback'
+import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import 'xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -55,6 +56,14 @@ const emit = defineEmits<{
   (e: 'resize', cols: number, rows: number): void
   (e: 'ready', terminal: Terminal): void
 }>()
+
+// Mobile uses a smaller cell so the narrow phone screen fits MORE columns. Programs that draw
+// inside the terminal (e.g. Claude Code's file-update diff: a left line-number gutter + indent)
+// then get a wider content area, so less of the row is wasted as left/right margin and more of
+// the file actually shows. Desktop keeps 14 for comfortable reading. isMobile is only resolved
+// in useDeviceDetection's onMounted, so we read it when CONSTRUCTING the terminal (also onMounted,
+// registered later) — NOT at setup time, where it would still be the false default.
+const { isMobile } = useDeviceDetection()
 
 const terminalContainer = ref<HTMLDivElement>()
 const terminalInputProxy = ref<HTMLTextAreaElement>()
@@ -161,7 +170,7 @@ function initTerminal() {
 
   terminal = new Terminal({
     cursorBlink: true,
-    fontSize: 14,
+    fontSize: isMobile.value ? 12 : 14,
     fontFamily: "'Cascadia Code', 'Fira Code', 'Source Code Pro', Menlo, Monaco, monospace",
     theme: {
       background: '#1e1e1e',
