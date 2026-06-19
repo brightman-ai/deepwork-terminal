@@ -34,19 +34,50 @@ const loading = ref(true)
 
 let timer: ReturnType<typeof setInterval> | null = null
 const POLL_MS = 3000
+// Monotonic request id: only the LATEST refresh may apply its response, so an out-of-order
+// landing (the active cwd/tool settles on mobile while several fetches are in flight) can't
+// clobber newer state. Bumped on every refresh + on session switch (invalidates in-flight).
+let seq = 0
+
+function clearData(): void {
+  detail.value = null
+  summary.value = null
+  turns.value = []
+  price.value = null
+}
+// "Has real data": a non-empty transcript that resolved a model or any tokens.
+function hasData(): boolean {
+  const d = detail.value
+  if (!d || (d.turn_count ?? 0) === 0) return false
+  return !!d.model_id || ((summary.value?.input_tokens ?? 0) + (summary.value?.output_tokens ?? 0)) > 0
+}
+// An "uninformative" response: no turns, or a transcript with neither a model nor any
+// tokens — what a transient wrong-cwd / empty-codex-rollout resolution returns.
+function bagEmpty(bag: Awaited<ReturnType<typeof sessionOverview>>): boolean {
+  const d = bag.detail
+  if (!d || (d.turn_count ?? 0) === 0) return true
+  return !d.model_id && ((bag.summary?.input_tokens ?? 0) + (bag.summary?.output_tokens ?? 0)) === 0
+}
 
 async function refresh(): Promise<void> {
   if (!props.sessionId) {
-    detail.value = null
-    summary.value = null
-    turns.value = []
-    price.value = null
+    clearData()
     loading.value = false
     return
   }
+  const mine = ++seq
   // Pass the active pane's cwd AND agentTool so the server routes to the codex-vs-claude
   // metrics extractor for the pane the user is actually looking at (null-safe: '' → claude).
   const bag = await sessionOverview(props.sessionId, tmux.activeCwd.value, tmux.activeTool.value)
+  if (mine !== seq) return // superseded by a newer refresh
+  // Don't replace a data-rich overview with a transient empty one: while the tmux state
+  // settles on mobile the active pane can momentarily resolve to a barely-used transcript
+  // or the wrong (near-empty) codex rollout, which would flash the real numbers to 0. A
+  // genuinely empty session starts empty (hasData() false) and shows the empty shape fine.
+  if (bagEmpty(bag) && hasData()) {
+    loading.value = false
+    return
+  }
   detail.value = bag.detail
   summary.value = bag.summary
   turns.value = bag.turns ?? []
@@ -62,8 +93,11 @@ function stopPoll(): void {
   if (timer) { clearInterval(timer); timer = null }
 }
 
-// Session switch → reset to loading, re-fetch, restart the poll clock.
+// Session switch → drop the previous session's data up-front (so the skip-empty guard in
+// refresh() can't preserve it for the new session), reset to loading, re-fetch, restart poll.
 watch(() => props.sessionId, () => {
+  seq++
+  clearData()
   loading.value = true
   void refresh()
   startPoll()

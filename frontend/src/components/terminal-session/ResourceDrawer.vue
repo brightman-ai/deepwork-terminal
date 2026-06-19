@@ -1059,9 +1059,11 @@ function glyphClass(name: string): string {
      user-select:text, so only a universal !important rule keeps the drag from highlighting
      terminal text and flickering the I-beam cursor. -->
 <style>
-html.dw-resizing, html.dw-resizing * {
+html.dw-resizing, html.dw-resizing * { cursor: ew-resize !important; }
+/* Suppress selection on everything EXCEPT form fields — an !important user-select:none on an
+   <input> blocks typing on iOS WebKit (and the class can briefly stick on a touch drag). */
+html.dw-resizing *:not(input):not(textarea):not([contenteditable]) {
   user-select: none !important;
   -webkit-user-select: none !important;
-  cursor: ew-resize !important;
 }
 </style>
