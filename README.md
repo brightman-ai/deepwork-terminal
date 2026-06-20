@@ -86,32 +86,48 @@ See [guide/](guide/) for full documentation.
 
 ## Build from source
 
-### Go binary only (recommended for servers)
-
-The frontend is **pre-built** and committed to the repo (`internal/spa/dist/`).
-Building the binary requires only Go — no Node.js needed:
+### First time or update to latest (recommended)
 
 ```bash
 git clone https://github.com/brightman-ai/deepwork-terminal
 cd deepwork-terminal
-go build -o dw-terminal ./cmd/dw-terminal/
-```
-
-### Full build (frontend + Go)
-
-If you modify the Vue frontend source (`frontend/src/`), rebuild and re-embed:
-
-```bash
-# Requires Node.js 18+ and npm
 ./build.sh
 ```
 
-`build.sh` runs `npm install` + `vite build`, copies the output to `internal/spa/dist/`,
-then compiles the Go binary. The updated `internal/spa/dist/` should be committed
-alongside your frontend changes so others can build without Node.js.
+`build.sh` handles everything in one step:
 
-> **Headless servers**: if `npm install` triggers a browser download (Playwright/Puppeteer
-> postinstall), the script sets `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` automatically.
+1. Clones (or pulls to latest) the CE App Shell (`brightman-ai/deepwork`) into a sibling directory
+2. Runs `npm install` to pick up any new frontend dependencies
+3. Builds the Vue frontend and embeds it into `internal/spa/dist/`
+4. Downloads any new Go module dependencies (`go mod download`)
+5. Compiles the Go binary → `./dw-terminal`
+
+To update to the latest version after an initial clone:
+
+```bash
+git pull
+./build.sh
+```
+
+Requires: Go 1.21+, Node.js 18+, npm.
+
+> **Headless servers**: `npm install` browser-download hooks (Playwright/Puppeteer) are
+> suppressed automatically via `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`.
+
+### Go binary only (no frontend changes)
+
+The frontend is **pre-built** and committed to `internal/spa/dist/`.
+If you only need to recompile the Go binary:
+
+```bash
+./build.sh --skip-frontend
+```
+
+Or manually:
+
+```bash
+go build -o dw-terminal ./cmd/dw-terminal/
+```
 
 ## License
 
