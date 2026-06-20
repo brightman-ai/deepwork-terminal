@@ -108,7 +108,7 @@ function onBellClick(): void {
   emit('open-notify')
 }
 
-/** waiting in any pane → red; else running anywhere → dim; else no dot. */
+/** waiting in any pane → red; else running anywhere → green; else (idle) no dot. */
 function dotClass(w: TmuxWindowState): string {
   const panes = w.panes ?? []
   if (panes.some(p => p.agentStatus === 'waiting')) return 'tpb-dot--waiting'
@@ -200,8 +200,8 @@ function newWindow(): void {
   height: 5px;
   border-radius: 50%;
 }
-.tpb-dot--waiting { background: #ff5252; }
-.tpb-dot--running { background: #6a6a7a; }
+.tpb-dot--waiting { background: #ff5252; }   /* red — needs your input */
+.tpb-dot--running { background: #3fb950; }   /* green — agent actively running (incl. thinking) */
 
 /* WS7 — contextual notify bell, pushed to the trailing edge. */
 .tpb-spacer { flex: 1; min-width: 6px; }
