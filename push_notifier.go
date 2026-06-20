@@ -181,8 +181,14 @@ func (n *pushNotifier) notify(ev notifyEvent) {
 	if tool == "" {
 		tool = "agent"
 	}
-	// data.url deep-links the SW back to the session via query param.
+	// data.url deep-links the SW back to the session. Prefer the CURRENT tunnel URL
+	// (absolute) so a notification tap opens the live HTTPS origin even when the PWA was
+	// installed from a since-changed tunnel domain; fall back to a relative path when no
+	// tunnel is running (same-origin open).
 	deepURL := "/?session=" + url.QueryEscape(ev.session)
+	if base := n.server.tunnel.PublicURL(); base != "" {
+		deepURL = strings.TrimRight(base, "/") + deepURL
+	}
 
 	payload, _ := json.Marshal(map[string]any{
 		"title": "⏳ 需要你的输入",
