@@ -2,9 +2,8 @@
 # build.sh — Build deepwork-terminal (frontend + Go binary)
 #
 # Usage:
-#   ./build.sh                  # full build (frontend + Go)
+#   ./build.sh                  # full build: pull latest CE App Shell + deps + compile
 #   ./build.sh --skip-frontend  # Go binary only (uses pre-built dist)
-#   ./build.sh --update         # pull latest CE App Shell + deps, then full build
 #
 # The pre-built frontend is committed in internal/spa/dist/.
 # You only need Node.js if you modify the frontend source.
@@ -14,34 +13,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 SKIP_FRONTEND=0
-DO_UPDATE=0
 for arg in "$@"; do
   case "$arg" in
     --skip-frontend) SKIP_FRONTEND=1 ;;
-    --update)        DO_UPDATE=1 ;;
   esac
 done
 
 CE_SHELL="$SCRIPT_DIR/../deepwork"
 
-# --update: pull latest CE App Shell, then npm install and go mod download will
-# pick up any new dependencies automatically below.
-if [ "$DO_UPDATE" -eq 1 ]; then
+if [ "$SKIP_FRONTEND" -eq 0 ]; then
+  echo "=== Building frontend ==="
+
+  # Ensure CE App Shell (brightman-ai/deepwork) is present and up to date.
+  # The @ce Vite alias resolves to ../deepwork/frontend/src — required at build time.
   if [ -d "$CE_SHELL/.git" ]; then
     echo "=== Updating CE App Shell ==="
     git -C "$CE_SHELL" pull --ff-only
   else
-    echo "=== CE App Shell not found — cloning brightman-ai/deepwork ==="
-    git clone --depth 1 https://github.com/brightman-ai/deepwork.git "$CE_SHELL"
-  fi
-fi
-
-if [ "$SKIP_FRONTEND" -eq 0 ]; then
-  echo "=== Building frontend ==="
-
-  # Ensure CE App Shell (brightman-ai/deepwork) is present as a sibling directory.
-  # The @ce Vite alias resolves to ../deepwork/frontend/src — required at build time.
-  if [ ! -d "$CE_SHELL/frontend/src" ]; then
     echo "=== CE App Shell not found — cloning brightman-ai/deepwork ==="
     git clone --depth 1 https://github.com/brightman-ai/deepwork.git "$CE_SHELL"
   fi
