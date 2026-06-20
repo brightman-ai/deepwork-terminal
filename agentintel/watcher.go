@@ -529,17 +529,10 @@ func (w *AgentStateWatcher) currentResponse() AgentIntelResponse {
 				}
 			}
 		}
-
-		// PTY idle override: JSONL says running but terminal silent >5s → waiting.
-		if state.Status == StatusRunning {
-			if lastActive := w.ptySource.LastActivity(); !lastActive.IsZero() {
-				if time.Since(lastActive) > defaultPTYIdleThreshold {
-					state.Status = StatusWaiting
-					state.WaitReason = WaitPrompt
-					state.SignalSource = "pty_idle"
-				}
-			}
-		}
+		// NOTE: PTY-idle silence is NOT used to infer "waiting". A thinking agent is
+		// silent but RUNNING — the old "silent >5s → waiting" override mislabeled it.
+		// Waiting is derived ONLY from output/JSONL signals: AnalyzeOutput above + the
+		// JSONL drivers (interrupted / stalled tool_use). See guide/ux-overhaul WS0.
 	}
 
 	current := state
