@@ -183,9 +183,6 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "tunnel error: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "  Internet:  %s\n", url)
-			// Tunnel origin is now known → unregister any subscriptions bound to a
-			// different (stale) origin so we never push to an un-tappable endpoint.
-			s.push.reconcileOrigin(url)
 		}
 	}()
 

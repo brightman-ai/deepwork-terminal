@@ -3,7 +3,6 @@ package terminal
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -38,10 +37,12 @@ type pushSubscription struct {
 		Auth   string `json:"auth"`
 	} `json:"keys"`
 	SessionID string `json:"sessionId,omitempty"`
-	// Origin is the page origin (scheme://host) the subscription was created under —
-	// i.e. the tunnel HTTPS origin at subscribe time. Lets reconcileOrigin unregister
-	// subscriptions bound to a dead/changed tunnel domain, whose notification tap-target
-	// ("/?session=…") would resolve to a host that no longer exists.
+	// Origin is the page origin (scheme://host) the subscription was created under, kept
+	// as diagnostic metadata. NOTE: subscriptions are NOT dropped on origin change — Web
+	// Push delivery goes via the push service (APNs/FCM), independent of the tunnel, so a
+	// subscription keeps working after the tunnel URL changes. Tap-target liveness is
+	// handled instead by deep-linking notifications to the CURRENT tunnel URL (see
+	// pushNotifier.notify), not by unregistering subs.
 	Origin string `json:"origin,omitempty"`
 }
 
@@ -219,58 +220,6 @@ func (s *pushStore) remove(endpoint string) int {
 	return n
 }
 
-// reconcileOrigin unregisters subscriptions whose origin differs from the current
-// live tunnel origin — i.e. subscriptions created under a now-dead/changed tunnel
-// domain, whose notification tap-target would resolve to a host that no longer exists.
-// Called on startup and whenever the tunnel URL becomes known (tunnel-up).
-//
-// If currentTunnelURL is empty (no tunnel running yet → origin unknown) this is a
-// NO-OP: never drop subscriptions on missing information. Subscriptions whose origin
-// matches the current tunnel are KEPT, so a normal server restart with a stable tunnel
-// URL (kit/tunnel adopt) does not churn them. Legacy subs without an origin are treated
-// as a mismatch and dropped once (the user re-subscribes with an origin). Returns the
-// number unregistered.
-func (s *pushStore) reconcileOrigin(currentTunnelURL string) int {
-	cur := originOf(currentTunnelURL)
-	if cur == "" {
-		return 0
-	}
-	s.mu.Lock()
-	var removed []string
-	for ep, sub := range s.subs {
-		if originOf(sub.Origin) != cur {
-			delete(s.subs, ep)
-			removed = append(removed, ep)
-		}
-	}
-	if len(removed) > 0 {
-		s.persistSubsLocked()
-	}
-	remaining := len(s.subs)
-	s.mu.Unlock()
-	for _, ep := range removed {
-		logger.Info("push unregistered stale subscription (tunnel origin changed)",
-			"endpoint_tail", endpointTail(ep))
-	}
-	// No live subscriptions left → stop the notifier (no busy-spin).
-	if remaining == 0 {
-		s.stopNotifier()
-	}
-	return len(removed)
-}
-
-// originOf normalizes a URL to its scheme://host origin, or "" if empty/unparseable.
-func originOf(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return ""
-	}
-	return u.Scheme + "://" + u.Host
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // HTTP handlers (FIXED CONTRACT — frontend depends on these shapes)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,11 +269,16 @@ func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 // the frontend offers a local self-test in that case).
 func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	subs := s.push.snapshot()
+	// Tap target: current tunnel URL (live) if up, else same-origin root.
+	testURL := "/"
+	if base := s.tunnel.PublicURL(); base != "" {
+		testURL = base
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"title": "✅ 测试通知",
 		"body":  "Deepwork 推送已就绪",
 		"tag":   "dw-test",
-		"data":  map[string]any{"url": "/"},
+		"data":  map[string]any{"url": testURL},
 	})
 	res := s.push.broadcast(payload, subs)
 	logger.Info("push test", "subs", len(subs),
