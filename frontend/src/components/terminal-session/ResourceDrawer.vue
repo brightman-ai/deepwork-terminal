@@ -418,7 +418,10 @@ function onResizeStart(e: PointerEvent): void {
   // the global html.dw-resizing * { user-select:none!important } rule does. Without this
   // the drag highlights terminal text instead of resizing cleanly.
   document.documentElement.classList.add('dw-resizing')
-  window.addEventListener('pointermove', onResizeMove)
+  // {passive:false} is REQUIRED: onResizeMove calls preventDefault() to stop iOS Safari
+  // from scroll-hijacking the touch. A passive listener (the default) silently ignores
+  // preventDefault → the resize "doesn't drag" on touch. Mirrors useEdgeDrag's move listener.
+  window.addEventListener('pointermove', onResizeMove, { passive: false })
   window.addEventListener('pointerup', onResizeEnd)
   window.addEventListener('pointercancel', onResizeEnd)
   e.preventDefault()
