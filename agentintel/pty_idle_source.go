@@ -11,5 +11,3 @@ type PTYIdleSource interface {
 	// TailLines returns the last n lines of visible terminal output for output analysis.
 	TailLines(n int) []string
 }
-
-const defaultPTYIdleThreshold = 5 * time.Second
