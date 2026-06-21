@@ -139,11 +139,13 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	hash := sha256.Sum256(data)
 	hashHex := hex.EncodeToString(hash[:8]) // short hash for comparison
 	if existing := findDuplicateClipboard(sessionDir, hashHex); existing != "" {
-		cwd2 := ""
-		if s2, err2 := s.mgr.Get(id); err2 == nil {
-			cwd2 = s2.WorkingDir()
-		}
-		relPath, _ := filepath.Rel(cwd2, existing)
+		// Resolve the dedup path against the SAME base as the fresh-save branch below
+		// (the live active-pane `cwd`), NOT the session's static launch dir. A PC paste
+		// uploads the same bytes twice — once saved, once deduped — and if the two
+		// branches use different roots the client gets two different strings for one image
+		// (e.g. "tmp/clip/X.png" + "code/.../tmp/clip/X.png"). Same base → identical string
+		// → uniqueOrderedPaths collapses them to one. Mobile uploads once, so it was unaffected.
+		relPath, _ := filepath.Rel(cwd, existing)
 		if relPath == "" {
 			relPath = existing
 		}
