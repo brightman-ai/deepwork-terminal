@@ -31,6 +31,24 @@ type PaneAgentMonitor struct {
 type paneTranscript struct {
 	path      string
 	locatedAt time.Time
+	driver    paneDriver // cached incremental status driver (rebuilt when path changes)
+}
+
+// paneDriver is the minimal incremental-status surface (ClaudeDriver / CodexDriver):
+// Update() parses only NEW transcript lines, so re-reading status each poll is cheap.
+type paneDriver interface {
+	Update() error
+	AgentState() AgentState
+}
+
+func newPaneDriver(path string, tool AgentTool) paneDriver {
+	switch tool {
+	case ToolClaude:
+		return NewClaudeDriver(path, "")
+	case ToolCodex:
+		return NewCodexDriver(path)
+	}
+	return nil
 }
 
 // pathRelocateAfter: re-resolve the latest transcript for a pane occasionally so a brand-new
@@ -51,7 +69,9 @@ func (m *PaneAgentMonitor) Active(key, cwd string, tool AgentTool) bool {
 	if m == nil || tool == ToolNone || key == "" {
 		return true
 	}
-	path := m.path(key, cwd, tool)
+	m.mu.Lock()
+	path := m.entryLocked(key, cwd, tool).path
+	m.mu.Unlock()
 	if path == "" {
 		return true // can't locate yet → assume busy, don't read the terminal as a prompt
 	}
@@ -76,19 +96,53 @@ func (m *PaneAgentMonitor) Prune(keep map[string]bool) {
 	}
 }
 
-// path returns the pane's latest transcript path, cached with periodic re-resolution.
-func (m *PaneAgentMonitor) path(key, cwd string, tool AgentTool) string {
+// Status returns the JSONL-derived agent status for a pane via a cached INCREMENTAL
+// driver (each poll parses only new transcript lines). This is the accurate signal —
+// it knows the pending tool's NAME, so an AskUserQuestion reads as waiting-for-the-
+// user and a Bash/Read reads as executing=running, where a mtime/terminal heuristic
+// cannot tell them apart. ok is false when the transcript isn't locatable yet (the
+// caller then falls back to the terminal read).
+func (m *PaneAgentMonitor) Status(key, cwd string, tool AgentTool) (AgentStatus, bool) {
+	if m == nil || tool == ToolNone || key == "" {
+		return StatusNone, false
+	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	pt := m.entryLocked(key, cwd, tool)
+	if pt.path == "" {
+		return StatusNone, false
+	}
+	if pt.driver == nil {
+		pt.driver = newPaneDriver(pt.path, tool)
+	}
+	if pt.driver == nil {
+		return StatusNone, false
+	}
+	if err := pt.driver.Update(); err != nil {
+		return StatusNone, false
+	}
+	st := pt.driver.AgentState().Status
+	return st, st != ""
+}
+
+// entryLocked returns the pane's cache entry, (re)locating the transcript path
+// periodically (a path change drops the now-stale driver). m.mu MUST be held.
+func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool) *paneTranscript {
 	pt, ok := m.cache[key]
-	m.mu.Unlock()
 	if ok && time.Since(pt.locatedAt) < pathRelocateAfter && pt.path != "" {
-		return pt.path
+		return pt
 	}
 	resolved := m.locate(cwd, tool)
-	m.mu.Lock()
-	m.cache[key] = &paneTranscript{path: resolved, locatedAt: time.Now()}
-	m.mu.Unlock()
-	return resolved
+	if pt == nil {
+		pt = &paneTranscript{}
+		m.cache[key] = pt
+	}
+	if resolved != pt.path {
+		pt.path = resolved
+		pt.driver = nil // path changed → drop stale driver
+	}
+	pt.locatedAt = time.Now()
+	return pt
 }
 
 func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool) string {

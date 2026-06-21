@@ -30,8 +30,6 @@ package terminal
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -197,37 +195,10 @@ func loadOrCreateIlinkKey(dir string) []byte {
 	return key
 }
 
-func (s *ilinkStore) seal(plain []byte) ([]byte, error) {
-	block, err := aes.NewCipher(s.key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, plain, nil), nil
-}
-
-func (s *ilinkStore) open(data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(s.key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) < gcm.NonceSize() {
-		return nil, errors.New("ciphertext too short")
-	}
-	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	return gcm.Open(nil, nonce, ct, nil)
-}
+// seal/open delegate to the shared AES-GCM helpers (notify_providers.go) so the
+// iLink token store and the notify config store use one encryption path (one key).
+func (s *ilinkStore) seal(plain []byte) ([]byte, error) { return aesgcmSeal(s.key, plain) }
+func (s *ilinkStore) open(data []byte) ([]byte, error) { return aesgcmOpen(s.key, data) }
 
 // ilinkAtomicWrite writes data to a temp file then renames it into place so a
 // crash mid-write never leaves a half-written (and now undecryptable) file.

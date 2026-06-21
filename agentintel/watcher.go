@@ -504,8 +504,13 @@ func (w *AgentStateWatcher) currentResponse() AgentIntelResponse {
 	// drivers may set to time.Now() during parsing).
 	// Only override "running" — preserve "waiting" (user may have left a [Y/n]
 	// prompt open for >2min, that's still meaningful).
+	// EXCEPTION: a long-running tool (build/test/codex sub-run) keeps the agent
+	// genuinely RUNNING while its JSONL is quiet but the terminal is still producing
+	// output. PTY *activity* is a positive "alive" signal — distinct from PTY
+	// *silence*, which must NOT be treated as waiting (a thinking agent is silent but
+	// running; see the note below).
 	jsonlFresh := jsonlFileIsFresh(currentPath)
-	if !jsonlFresh && state.Status == StatusRunning {
+	if !jsonlFresh && state.Status == StatusRunning && !w.ptyFreshWithin(2*time.Minute) {
 		state.Status = StatusDone
 		state.WaitReason = WaitNone
 		state.SignalSource = "stale"
@@ -540,6 +545,18 @@ func (w *AgentStateWatcher) currentResponse() AgentIntelResponse {
 		Current:       &current,
 		Notifications: []AgentState{state},
 	}
+}
+
+// ptyFreshWithin reports whether the PTY produced output within d. Positive PTY
+// activity is a "still alive" signal that keeps a long-running tool (whose JSONL has
+// gone quiet) from being mislabeled "done". False when there is no PTY source —
+// JSONL staleness then governs alone.
+func (w *AgentStateWatcher) ptyFreshWithin(d time.Duration) bool {
+	if w.ptySource == nil {
+		return false
+	}
+	last := w.ptySource.LastActivity()
+	return !last.IsZero() && time.Since(last) < d
 }
 
 // jsonlFileIsFresh returns true if the given file was modified within the last 2 minutes.

@@ -25,6 +25,7 @@ type TmuxPaneState struct {
 	Title       string      `json:"title"`
 	PID         int         `json:"pid"`
 	CWD         string      `json:"cwd"`
+	PaneID      string      `json:"paneId,omitempty"` // stable tmux pane id ("%N")
 	AgentTool   AgentTool   `json:"agentTool,omitempty"`
 	AgentStatus AgentStatus `json:"agentStatus,omitempty"`
 }
@@ -371,6 +372,7 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			Active: p.Active,
 			PID:    p.PanePID,
 			CWD:    p.PaneCWD,
+			PaneID: p.PaneID,
 		}
 		if tool, ok := agents[p.PanePID]; ok {
 			ps.AgentTool = tool
@@ -417,6 +419,31 @@ func paneKey(p TmuxPane) string {
 // This keeps the (slightly brittle, version-coupled) prompt scrape OFF the hot path: it runs only
 // for stopped panes, not every agent pane every poll — accurate where it matters, cheap otherwise.
 func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, tool AgentTool) AgentStatus {
+	// Accurate JSONL-derived status (knows the pending tool's NAME): an AskUserQuestion
+	// is waiting for the user; a Bash/Read is executing = running; end_turn = idle. This
+	// fixes the mtime heuristic's two blind spots — a just-written ask card looked
+	// "running", and a silently-running long tool looked "idle". Only Claude's transcript
+	// carries this (stop_reason + tool names); Codex falls through to the terminal read.
+	if tool == ToolClaude {
+		if st, ok := s.paneMonitor.Status(paneKey(p), p.PaneCWD, tool); ok {
+			switch st {
+			case StatusWaiting, StatusIdle:
+				return st
+			case StatusRunning:
+				// A pending tool may instead be blocked on a permission [Y/n] — that prompt
+				// is terminal UI, absent from the transcript — so confirm against the pane.
+				cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+				lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
+				cancel()
+				if err == nil && AnalyzeOutput(lines) == PromptNeedsPermission {
+					return StatusWaiting
+				}
+				return StatusRunning
+			}
+		}
+	}
+
+	// Codex, or Claude transcript not locatable yet: the mtime gate + terminal read.
 	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool) {
 		return StatusRunning
 	}

@@ -34,41 +34,6 @@
             </div>
 
             <div v-show="tab === 'notify'" data-testid="igs-tab-panel-notify">
-            <!-- ════════ 通知机制总览 (SSOT) — 两通道健康 + 投递度量 ════════ -->
-            <div class="igs-overview" data-testid="igs-overview">
-              <div class="igs-ov-channels">
-                <button class="igs-ov-chip is-clickable" :class="webPushChip.cls" data-testid="igs-ov-webpush" @click="webDetailOpen = !webDetailOpen">
-                  🔔 浏览器 · {{ webPushChip.text }} <span class="igs-ov-caret">{{ webDetailOpen ? '▴' : '▾' }}</span>
-                </button>
-                <span class="igs-ov-chip" :class="wechatChip.cls" data-testid="igs-ov-wechat">📲 微信 · {{ wechatChip.text }}</span>
-              </div>
-
-              <!-- 浏览器推送详情 (点击 chip 展开): 地址 + 订阅 + deep-link + 度量 -->
-              <div v-if="webDetailOpen" class="igs-ov-detail" data-testid="igs-ov-webpush-detail">
-                <div class="igs-ov-row"><span>订阅设备</span><span>{{ ilink.webPush.value.subscriptions }} 个</span></div>
-                <div v-for="(s, i) in (ilink.webPush.value.subs || [])" :key="i" class="igs-ov-row igs-ov-row--sub">
-                  <span class="mono">{{ s.origin || '(未知 origin)' }}</span><span class="mono">{{ s.endpointTail }}</span>
-                </div>
-                <div class="igs-ov-row"><span>点击跳转</span><span class="mono">{{ tunnel.publicURL.value || '(本机同源)' }}</span></div>
-                <div class="igs-ov-row"><span>经此通道</span><span>{{ ilink.metrics.value.viaWebPush }} 次</span></div>
-                <div class="igs-ov-row"><span>事件轮询</span><span>{{ ilink.webPush.value.notifierRunning ? '运行中' : '未运行' }}</span></div>
-              </div>
-
-              <p v-if="ilink.metrics.value.events > 0" class="igs-ov-metrics" data-testid="igs-ov-metrics">
-                已通知 {{ ilink.metrics.value.events }} 次 · 微信 {{ ilink.metrics.value.viaIlink }} · 浏览器 {{ ilink.metrics.value.viaWebPush }}<template v-if="ilink.metrics.value.fellBack"> · 降级 {{ ilink.metrics.value.fellBack }}</template><template v-if="ilink.metrics.value.undelivered"> · 未达 {{ ilink.metrics.value.undelivered }}</template><template v-if="lastNotifyText"> · 最近 {{ lastNotifyText }}</template>
-              </p>
-              <p v-else class="igs-ov-metrics igs-ov-metrics--empty" data-testid="igs-ov-metrics-empty">尚无通知记录 —— agent 等待输入时自动推送。</p>
-
-              <!-- 双通道测试: 一键向 A+B 各发一条测试通知 -->
-              <div class="igs-ov-test">
-                <button class="igs-btn igs-btn--ghost" data-testid="igs-notify-test" :disabled="ilink.testBusy.value" @click="onNotifyTest">
-                  {{ ilink.testBusy.value ? '发送中…' : '发送测试通知（两通道）' }}
-                </button>
-                <p class="igs-ov-metrics igs-ov-metrics--empty">会真实发送，并消耗本轮微信配额。</p>
-                <p v-if="notifyTestText" class="igs-ov-metrics mono" data-testid="igs-notify-test-result">{{ notifyTestText }}</p>
-              </div>
-            </div>
-
             <p class="igs-lede">{{ lede }}</p>
 
             <!-- ════════ STATE: already on ═══════════════════════════════════
@@ -411,54 +376,6 @@ const wechatStatusText = computed(() => {
 })
 async function onWechatConnect(): Promise<void> { await ilink.startLogin() }
 async function onWechatLogout(): Promise<void> { await ilink.logout() }
-
-// ── 通知机制总览: two-channel health chips + last-delivery relative time. ──
-const webPushChip = computed(() => {
-  const subs = ilink.webPush.value.subscriptions
-  if (push.subscribed.value || subs > 0) {
-    return { cls: 'is-on', text: subs > 0 ? `已订阅 ${subs}` : '已订阅' }
-  }
-  return { cls: 'is-off', text: '未开启' }
-})
-const wechatChip = computed(() => {
-  const s = ilink.status.value
-  if (s.active) return { cls: 'is-on', text: `已连接 ${s.sentCount}/${s.maxSends}` }
-  if (s.dormant) return { cls: 'is-warn', text: '休眠' }
-  if (s.loggedIn) return { cls: 'is-warn', text: '待激活' }
-  return { cls: 'is-off', text: '未连接' }
-})
-const CHANNEL_LABEL: Record<string, string> = { ilink: '微信', webpush: '浏览器', none: '未送达' }
-const lastNotifyText = computed(() => {
-  const m = ilink.metrics.value
-  if (!m.lastAtMs) return ''
-  const sec = Math.max(0, Math.round((Date.now() - m.lastAtMs) / 1000))
-  const rel = sec < 60 ? `${sec}秒前` : sec < 3600 ? `${Math.round(sec / 60)}分钟前` : `${Math.round(sec / 3600)}小时前`
-  return `${CHANNEL_LABEL[m.lastChannel] ?? m.lastChannel} ${rel}`
-})
-
-// 浏览器 chip 详情展开 + 双通道测试结果.
-const webDetailOpen = ref(false)
-const notifyTestText = ref('')
-async function onNotifyTest(): Promise<void> {
-  notifyTestText.value = ''
-  const { cooldown, result } = await ilink.testBoth()
-  if (cooldown) { notifyTestText.value = '测试有冷却，请稍候再试。'; return }
-  if (!result) { notifyTestText.value = '测试发送失败，请稍后重试。'; return }
-  // 浏览器通道（sent = push 服务已接受，非保证设备显示）
-  let wp: string
-  if (result.webPush.subs === 0) wp = '浏览器: 无订阅'
-  else if (result.webPush.sent > 0) wp = `浏览器: 已发出 ${result.webPush.sent}（留意系统通知）`
-  else if (result.webPush.rejected > 0) wp = `浏览器: 被拒 ${result.webPush.rejected}`
-  else wp = '浏览器: 未送达'
-  // 微信通道（sent = iLink 已接受）
-  const ilinkMap: Record<string, string> = {
-    sent: '微信: 已发出（留意微信）',
-    dormant: '微信: 休眠未发（回机器人一字续订）',
-    ambiguous: '微信: 结果未知（已尝试）',
-    'not-configured': '微信: 未连接',
-  }
-  notifyTestText.value = `${wp} · ${ilinkMap[result.ilink.result] ?? result.ilink.result}`
-}
 
 // One-tap HTTPS: starting the built-in tunnel yields the secure context Web Push needs. Used
 // only by the 'insecure' state, but mounted once so it can reflect an already-running tunnel.
@@ -1055,57 +972,6 @@ async function onSendTest(): Promise<void> {
   align-items: flex-start;
 }
 .igs-test-result { color: #8a8a92; font-size: 0.68rem; line-height: 1.5; }
-
-/* ── 通知机制总览 (SSOT overview) ─────────────────────────────────────── */
-.igs-overview {
-  margin-bottom: 14px;
-  padding: 11px 12px;
-  background: #1a1a1d;
-  border: 1px solid #252528;
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.igs-ov-channels { display: flex; gap: 8px; flex-wrap: wrap; }
-.igs-ov-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  border: 1px solid #353539;
-  background: #232327;
-  color: #c8c8ce;
-}
-.igs-ov-chip.is-on { border-color: #2f5a3a; background: #16221a; color: #70c88c; }
-.igs-ov-chip.is-warn { border-color: #5a4a2f; background: #221d14; color: #d8b48a; }
-.igs-ov-chip.is-off { border-color: #3a3a3f; background: #1f1f23; color: #8a8a92; }
-.igs-ov-chip.is-clickable { cursor: pointer; }
-.igs-ov-chip.is-clickable:active { filter: brightness(1.25); }
-.igs-ov-caret { font-size: 0.6rem; opacity: 0.7; }
-.igs-ov-metrics { color: #9a9aa2; font-size: 0.68rem; line-height: 1.5; margin: 0; }
-.igs-ov-metrics--empty { color: #6b6b72; }
-.igs-ov-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 9px 10px;
-  background: #16161a;
-  border: 1px solid #252528;
-  border-radius: 8px;
-}
-.igs-ov-row { display: flex; justify-content: space-between; gap: 10px; font-size: 0.66rem; color: #9a9aa2; }
-.igs-ov-row > span:first-child { color: #6b6b72; flex-shrink: 0; }
-.igs-ov-row > span:last-child { text-align: right; word-break: break-all; min-width: 0; }
-/* Subscription rows stack vertically so a long origin URL never squeezes the
-   endpoint tail into a one-char-per-line column. */
-.igs-ov-row--sub { flex-direction: column; align-items: flex-start; gap: 1px; padding-left: 8px; border-left: 2px solid #2f5a3a; }
-.igs-ov-row--sub > span { text-align: left; word-break: break-all; }
-.igs-ov-row--sub > span:last-child { color: #6b6b72; font-size: 0.62rem; }
-.igs-ov-test { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; margin-top: 2px; }
 
 /* ── 微信通道 (channel B) ─────────────────────────────────────────────── */
 .igs-wechat {

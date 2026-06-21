@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
+	"github.com/brightman-ai/deepwork-terminal/notify"
 	tunnelkit "github.com/brightman-ai/kit/tunnel"
 	"github.com/brightman-ai/kit/webserve"
 )
@@ -30,7 +31,7 @@ type Server struct {
 	push         *pushStore
 	ilink        *ilinkStore
 	bootstrap    *bootstrapStore
-	metrics      *notifyMetrics
+	coordinator  *notify.Coordinator
 	uploads      *uploadIndex
 	mu           sync.Mutex
 }
@@ -70,12 +71,15 @@ func NewServer(opts ...Option) (*Server, error) {
 	// APNs rejects the token — see resolveVapidSubscriber.
 	s.push = newPushStore(s.config.DataDir, resolveVapidSubscriber(s.config))
 	s.push.server = s
-	// Notification delivery metrics (SSOT) + one-time bootstrap tokens for tap-to-auth.
-	s.metrics = newNotifyMetrics()
+	// One-time bootstrap tokens for tap-to-auth deep links.
 	s.bootstrap = newBootstrapStore()
 	// WeChat iLink notification channel (channel B). Resumes a prior login if one
 	// is persisted. Wired after push so newIlinkStore can reach s.push.ensureNotifier.
 	s.ilink = newIlinkStore(s.config.DataDir, s)
+	// Notification coordinator: fans an Event out to every enabled provider (iLink /
+	// web push / Feishu / DingTalk / WeCom) and is the single delivery-metrics owner.
+	// Built after ilink/push so its adapters can wrap them.
+	s.coordinator = newNotifyCoordinator(s)
 	// If subscriptions survived a restart, resume the background notifier so
 	// push keeps working with no browser tab and no fresh subscribe call.
 	if s.push.count() > 0 {
@@ -230,8 +234,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /ilink/logout", wrap(s.handleIlinkLogout))
 	// Unified notification status + delivery metrics (single source for the UI).
 	s.mux.HandleFunc("GET /notify/status", wrap(s.handleNotifyStatus))
-	// Dual-channel test: fire one test notification down both channels.
+	// Fire one test notification down every enabled channel.
 	s.mux.HandleFunc("POST /notify/test", wrap(s.handleNotifyTest))
+	// Provider config SSOT (shared shape with deepwork-pro): on/off + redacted status,
+	// per-provider webhook settings, per-provider test send. Registered WITHOUT the
+	// /api prefix — the host mounts this mux under http.StripPrefix("/api", …) (see
+	// below), so the client's /api/notify/config reaches /notify/config here.
+	s.mux.HandleFunc("GET /notify/config", wrap(s.handleNotifyConfig))
+	s.mux.HandleFunc("PUT /notify/config", wrap(s.handleNotifyConfigSave))
+	s.mux.HandleFunc("PUT /notify/providers/{kind}/settings", wrap(s.handleNotifyProviderSettings))
+	s.mux.HandleFunc("POST /notify/providers/{kind}/test", wrap(s.handleNotifyProviderTest))
 	// Tap-to-auth: exchange a one-time bootstrap token for the auth code. NOT behind
 	// authWrap — it authenticates by consuming the token itself.
 	s.mux.HandleFunc("GET /auth/bootstrap", s.handleAuthBootstrap)

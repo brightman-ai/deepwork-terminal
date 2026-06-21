@@ -32,6 +32,25 @@ export function formatRelativeTime(isoString: string): string {
 }
 
 /**
+ * Chinese relative time from an epoch-ms timestamp, for the notify health surfaces.
+ *   0 / falsy → "—" (never)
+ *   < 60s     → "N秒前" (≥1, never "0秒前")
+ *   < 60m     → "N分钟前"
+ *   < 24h     → "N小时前"
+ *   else      → "N天前"
+ */
+export function relativeFromMs(atMs: number): string {
+  if (!atMs) return '—'
+  const sec = Math.max(1, Math.round((Date.now() - atMs) / 1000))
+  if (sec < 60) return `${sec}秒前`
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min}分钟前`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr}小时前`
+  return `${Math.round(hr / 24)}天前`
+}
+
+/**
  * Return the exact ISO string in a human-readable local format, for tooltip display.
  */
 export function formatExactTime(isoString: string): string {

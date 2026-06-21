@@ -63,7 +63,13 @@
     >
       <!-- WS7 primary entry — always-visible install/notify icon, top-right of the
            terminal surface (the workbench title row lives in the parent CliTabBar). -->
-      <InstallNotifyIcon class="surface-notify-icon" @open="installGuideOpen = true" />
+      <!-- ONE notification entry: the platform-aware install/notify icon opens the
+           quick notify-provider sheet (toggles/test/status). The PWA-install + browser
+           push-subscribe guide is reached from INSIDE that sheet (its "安装应用 / 开启
+           浏览器通知" action), so there is no second redundant bell. -->
+      <div class="surface-notify-entries">
+        <InstallNotifyIcon @open="notifyQuickOpen = true" />
+      </div>
       <XtermTerminal
         ref="xtermRef"
         :active="active"
@@ -179,6 +185,14 @@
       @close="installGuideOpen = false"
     />
 
+    <!-- Quick notify-provider config sheet — same /api/notify/config SSOT as the
+         settings Notifications section, so toggling/testing stays in lock-step. -->
+    <NotifyQuickSheet
+      :open="notifyQuickOpen"
+      @close="notifyQuickOpen = false"
+      @open-install="notifyQuickOpen = false; installGuideOpen = true"
+    />
+
     <AuthDialog
       :visible="showAuthDialog"
       @dismiss="dismissAuthDialog"
@@ -223,6 +237,7 @@ import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusB
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
+import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickSheet.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
@@ -307,6 +322,7 @@ const attachInputRef = ref<HTMLInputElement>()
 const tmuxDetected = ref(false)
 const tmuxSheetOpen = ref(false)
 const installGuideOpen = ref(false) // WS7: install + notify guide sheet
+const notifyQuickOpen = ref(false) // quick notify-provider config sheet
 
 // WS5: resource drawer open state, persisted across reloads.
 const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
@@ -1112,13 +1128,17 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   padding: 0 8px;
 }
 
-/* WS7 primary entry — floats top-right above xterm; small and unobtrusive so it
-   never covers terminal content the user is reading. */
-.surface-notify-icon {
+/* WS7 primary entries — float top-right above xterm; small and unobtrusive so they
+   never cover terminal content the user is reading. A quick notify bell sits beside
+   the install/notify guide icon. */
+.surface-notify-entries {
   position: absolute;
   top: 4px;
   right: 8px;
   z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 /* Copy-mode active: stop the browser from initiating a scroll/pan from a finger-drag on the

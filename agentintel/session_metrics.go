@@ -167,6 +167,20 @@ type turnAccum struct {
 	seenMsgIDs      map[string]bool // dedup usage per assistant message id
 }
 
+// SessionSummaryForPath parses a KNOWN transcript path into its summary, dispatching
+// by tool. The single path-based resolver: a caller that already resolved a pane's
+// transcript path must use this rather than re-resolving "newest by cwd" (which
+// drifts when several sessions share a directory). Zero summary on empty input.
+func SessionSummaryForPath(path, tool string) SessionSummary {
+	if path == "" {
+		return SessionSummary{}
+	}
+	if tool == "codex" {
+		return parseCodexRollout(path, "", "", false).Summary
+	}
+	return parseTranscript(path, "", "", false).Summary
+}
+
 // parseTranscript streams one transcript into SessionMetrics. The row walk is the SSOT
 // for turn delimitation:
 //   - a "user" row WITH non-empty text content opens a new turn (flush the prior one);

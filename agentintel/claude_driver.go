@@ -13,8 +13,20 @@ type ClaudeSessionState struct {
 	LastUserAt   time.Time
 	LastAssistAt time.Time
 	StopReason   string
+	PendingTool  string // name of the unresolved tool_use (for elicitation detection); "" when none
 	UpdatedAt    time.Time
 }
+
+// elicitationTools are tools whose pending (unresolved) tool_use means the agent is
+// ASKING the user and is genuinely waiting for an answer — not executing work. A
+// non-elicitation tool_use (Bash/Read/Edit…) that is pending means the tool is
+// EXECUTING, i.e. the agent is RUNNING, not waiting.
+var elicitationTools = map[string]bool{
+	"AskUserQuestion": true,
+	"ExitPlanMode":    true,
+}
+
+func isElicitationTool(name string) bool { return elicitationTools[name] }
 
 // ClaudeDriver parses a Claude Code JSONL transcript and derives session state.
 type ClaudeDriver struct {
@@ -50,6 +62,7 @@ func (cd *ClaudeDriver) Update() error {
 			cd.state.StopReason = ""
 			cd.state.Status = StatusRunning
 			cd.state.WaitReason = WaitNone
+			cd.state.PendingTool = "" // tool result arrived → no tool pending
 			// Check for interrupted tool use result.
 			if msg, ok := row["message"].(map[string]any); ok {
 				if content, ok := msg["content"].([]any); ok {
@@ -73,6 +86,7 @@ func (cd *ClaudeDriver) Update() error {
 			}
 			cd.state.Status = StatusRunning
 			cd.state.WaitReason = WaitNone
+			cd.state.PendingTool = "" // recomputed below from this turn's tool_use blocks
 			msg, ok := row["message"].(map[string]any)
 			if !ok {
 				break
@@ -94,6 +108,29 @@ func (cd *ClaudeDriver) Update() error {
 				}
 			} else {
 				cd.state.StopReason = ""
+			}
+			// Capture the pending tool name when this turn ends in a tool call, so
+			// State() can tell an interactive tool (AskUserQuestion — the agent is
+			// asking the user = waiting) from a working tool (Bash/Read — executing =
+			// running). Cleared on the next user line (the tool result arrived).
+			if cd.state.StopReason == "tool_use" {
+				if content, ok := msg["content"].([]any); ok {
+					for _, item := range content {
+						block, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						if bt, _ := block["type"].(string); bt != "tool_use" {
+							continue
+						}
+						if name, _ := block["name"].(string); name != "" {
+							cd.state.PendingTool = name
+							if isElicitationTool(name) {
+								break // an elicitation tool dominates the turn
+							}
+						}
+					}
+				}
 			}
 			// Usage dedup
 			if msgID, ok := msg["id"].(string); ok && msgID != "" {
@@ -129,14 +166,18 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 	// - No data yet (agent just started) → idle (waiting for first prompt)
 	// - LastUserAt > LastAssistAt → running (user sent prompt, agent processing)
 	// - LastAssistAt > LastUserAt with end_turn → idle (turn completed)
-	// - Fresh tool_use → running; stale tool_use (>3s without a new row) → waiting for permission
+	// - tool_use pending: an elicitation tool (AskUserQuestion/ExitPlanMode) → waiting
+	//   for the user's answer; any other tool is EXECUTING → running. A blunt time
+	//   threshold is NOT used — a long-running tool (build/test) is running, not
+	//   waiting. Permission waits are caught by PTY AnalyzeOutput + the interrupted
+	//   flag (watcher.currentResponse), not by elapsed time here.
 	if cd.state.LastUserAt.IsZero() && cd.state.LastAssistAt.IsZero() {
 		// No JSONL data — agent just started, waiting for first prompt.
 		s.Status = StatusIdle
 		s.WaitReason = WaitNone
-	} else if cd.state.StopReason == "tool_use" && !cd.state.UpdatedAt.IsZero() && time.Since(cd.state.UpdatedAt) > 3*time.Second {
+	} else if cd.state.StopReason == "tool_use" && isElicitationTool(cd.state.PendingTool) {
 		s.Status = StatusWaiting
-		s.WaitReason = WaitPermission
+		s.WaitReason = WaitQuestion
 	} else if s.Status != StatusWaiting && !cd.state.LastUserAt.IsZero() && cd.state.LastUserAt.After(cd.state.LastAssistAt) {
 		s.Status = StatusRunning
 		s.WaitReason = WaitNone

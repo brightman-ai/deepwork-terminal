@@ -26,14 +26,19 @@ export interface IlinkStatus {
   qrPending: boolean
 }
 
+export interface NotifyProviderMetric {
+  provider: string
+  sent: number
+  dormant: number
+  failed: number
+  lastSuccessAtMs: number
+  recent: Array<{ atMs: number; outcome: number; detail?: string }>
+}
+
 export interface NotifyMetrics {
   events: number
-  viaIlink: number
-  viaWebPush: number
-  fellBack: number
-  undelivered: number
   lastAtMs: number
-  lastChannel: string
+  perProvider: NotifyProviderMetric[]
 }
 
 export interface PushSubDetail {
@@ -73,7 +78,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 export function useIlink(): IlinkApi {
   const { cliFetch } = useCliAuth()
   const status = ref<IlinkStatus>({ loggedIn: false, active: false, sentCount: 0, maxSends: 10, qrPending: false })
-  const metrics = ref<NotifyMetrics>({ events: 0, viaIlink: 0, viaWebPush: 0, fellBack: 0, undelivered: 0, lastAtMs: 0, lastChannel: '' })
+  const metrics = ref<NotifyMetrics>({ events: 0, lastAtMs: 0, perProvider: [] })
   const webPush = ref<WebPushStatus>({ subscriptions: 0, notifierRunning: false })
   const qrDataUrl = ref('')
   const busy = ref(false)

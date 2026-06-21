@@ -1,102 +1,134 @@
 package terminal
 
-// Notification delivery metrics — the SINGLE source of truth for "what was
-// notified and how". Every agent-waiting event flows through exactly one place,
-// the coordinator (pushNotifier.notify), which records exactly one outcome here.
-// Because there is one writer and one fan-out point, these counters are
-// authoritative (no second tally to drift against).
+// Notification HTTP surface — status + config (provider on/off + redacted settings)
+// + per-provider test send. Delivery metrics are owned by the notify.Coordinator
+// (the single fan-out point), so there is no second tally here to drift against.
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
-	"sync"
-	"time"
+
+	"github.com/brightman-ai/deepwork-terminal/notify"
 )
 
-// notifyTestCooldown rate-limits the manual dual-channel test so rapid taps can't
-// spam real WeChat messages / drain the ~10-per-window iLink quota.
-const notifyTestCooldown = 8 * time.Second
-
-type notifyMetrics struct {
-	mu          sync.Mutex
-	events      int // total agent-waiting events fanned out
-	viaIlink    int // delivered to WeChat
-	viaWebPush  int // delivered via web push (includes ilink→webpush fallback)
-	fellBack    int // ilink was attempted but we fell back to web push
-	undelivered int // no channel delivered
-	lastAt      time.Time
-	lastChannel string    // "ilink" | "webpush" | "none"
-	lastTestAt  time.Time // last manual /notify/test (cooldown gate)
-}
-
-// allowTest returns true at most once per notifyTestCooldown, recording the time.
-func (m *notifyMetrics) allowTest() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := nowFunc()
-	if !m.lastTestAt.IsZero() && now.Sub(m.lastTestAt) < notifyTestCooldown {
-		return false
+// notifyConfigPayload is the single source the UI renders from: per-provider config
+// (enabled) joined with runtime status (configured/healthy/quota) + redacted settings
+// + delivery metrics. Both the full settings section and the quick sheet read this.
+func (s *Server) notifyConfigPayload(r *http.Request) map[string]any {
+	ctx := r.Context()
+	cfg, _ := s.coordinator.Config(ctx)
+	statuses := s.coordinator.Statuses(ctx)
+	providers := make([]map[string]any, 0, len(statuses))
+	for _, st := range statuses {
+		pc, _ := cfg.Get(st.Kind)
+		providers = append(providers, map[string]any{
+			"kind":           st.Kind,
+			"name":           st.Name,
+			"enabled":        st.Enabled,
+			"configured":     st.Configured,
+			"healthy":        st.Healthy,
+			"quota":          st.Quota,
+			"todaySent":      st.TodaySent,
+			"activationHint": st.ActivationHint,
+			"settings":       json.RawMessage(notify.RedactWebhook(pc.Settings)), // creds masked (§12.8)
+		})
 	}
-	m.lastTestAt = now
-	return true
-}
-
-func newNotifyMetrics() *notifyMetrics { return &notifyMetrics{} }
-
-// record logs exactly one delivery outcome for one event. channel is the channel
-// that delivered ("ilink"/"webpush") or "none"; fellBack is true when iLink was
-// tried first but did not deliver.
-func (m *notifyMetrics) record(channel string, fellBack bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.events++
-	m.lastAt = nowFunc()
-	m.lastChannel = channel
-	if fellBack {
-		m.fellBack++
-	}
-	switch channel {
-	case "ilink":
-		m.viaIlink++
-	case "webpush":
-		m.viaWebPush++
-	default:
-		m.undelivered++
+	return map[string]any{
+		"providers": providers,
+		"metrics":   s.coordinator.Metrics(),
 	}
 }
 
-type notifyMetricsView struct {
-	Events      int    `json:"events"`
-	ViaIlink    int    `json:"viaIlink"`
-	ViaWebPush  int    `json:"viaWebPush"`
-	FellBack    int    `json:"fellBack"`
-	Undelivered int    `json:"undelivered"`
-	LastAtMs    int64  `json:"lastAtMs"` // 0 = never
-	LastChannel string `json:"lastChannel"`
+// handleNotifyConfig → GET /api/notify/config. The provider config + status SSOT.
+func (s *Server) handleNotifyConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
 }
 
-func (m *notifyMetrics) view() notifyMetricsView {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var lastMs int64
-	if !m.lastAt.IsZero() {
-		lastMs = m.lastAt.UnixMilli()
+// handleNotifyConfigSave → PUT /api/notify/config. Updates provider on/off toggles
+// (webhook credentials go through handleNotifyProviderSettings so the GET-redacted
+// values are never round-tripped back into storage).
+func (s *Server) handleNotifyConfigSave(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Providers []struct {
+			Kind    string `json:"kind"`
+			Enabled bool   `json:"enabled"`
+		} `json:"providers"`
 	}
-	return notifyMetricsView{
-		Events:      m.events,
-		ViaIlink:    m.viaIlink,
-		ViaWebPush:  m.viaWebPush,
-		FellBack:    m.fellBack,
-		Undelivered: m.undelivered,
-		LastAtMs:    lastMs,
-		LastChannel: m.lastChannel,
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	for _, p := range body.Providers {
+		if err := s.coordinator.SetEnabled(r.Context(), p.Kind, p.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
+}
+
+// handleNotifyProviderSettings → PUT /api/notify/providers/{kind}/settings. Sets a
+// webhook channel's url/secret (encrypted at rest by the config store).
+func (s *Server) handleNotifyProviderSettings(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<10))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := s.coordinator.SetSettings(r.Context(), kind, raw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
+}
+
+// handleNotifyProviderTest → POST /api/notify/providers/{kind}/test. Sends a real
+// test notification to ONE provider (per-provider cooldown; honest outcome, never a
+// fake "sent"; iLink consumes real WeChat quota and the UI warns of that).
+func (s *Server) handleNotifyProviderTest(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	res, ok := s.coordinator.Test(r.Context(), kind, s.notifyTestEvent())
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "测试有冷却，请稍候再试"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"kind": kind, "result": res.Outcome.String()})
+}
+
+// handleNotifyTest → POST /notify/test. Fires a test to every ENABLED provider and
+// returns each channel's honest outcome (or "cooldown" when gated).
+func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
+	e := s.notifyTestEvent()
+	cfg, _ := s.coordinator.Config(r.Context())
+	results := map[string]string{}
+	for _, kind := range s.coordinator.Kinds() {
+		if !cfg.Enabled(kind) {
+			continue
+		}
+		res, ok := s.coordinator.Test(r.Context(), kind, e)
+		if !ok {
+			results[kind] = "cooldown"
+			continue
+		}
+		results[kind] = res.Outcome.String()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func (s *Server) notifyTestEvent() notify.Event {
+	return notify.Event{
+		Title:   "✅ 测试通知",
+		Kind:    notify.KindTest,
+		Summary: "Deepwork 通知链路测试 — 收到即正常",
+		DeepURL: s.notifyDeepURL(""),
 	}
 }
 
-// handleNotifyStatus → GET /notify/status. The unified, single-source view of the
-// whole notification mechanism: both channels' live health + delivery metrics +
-// the current deep-link target. The frontend renders its "通知机制总览" from this
-// one response (no per-channel polling races).
+// handleNotifyStatus → GET /notify/status. Back-compat overview consumed by the
+// current IGS UI: iLink + web-push health sub-objects + tunnel URL + the new
+// provider config/metrics (so the UI can migrate incrementally to /api/notify/config).
 func (s *Server) handleNotifyStatus(w http.ResponseWriter, r *http.Request) {
 	var ilinkView ilinkStatus
 	if s.ilink != nil {
@@ -104,65 +136,13 @@ func (s *Server) handleNotifyStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		ilinkView = ilinkStatus{MaxSends: ilinkMaxSends}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"webPush": map[string]any{
-			"subscriptions":   s.push.count(),
-			"notifierRunning": s.push.notifierRunning(),
-			"subs":            s.push.subsDetails(),
-		},
-		"ilink":     ilinkView,
-		"metrics":   s.metrics.view(),
-		"tunnelUrl": s.tunnel.PublicURL(),
-	})
-}
-
-// handleNotifyTest → POST /notify/test. Fires a test notification down BOTH
-// channels (A web push + B WeChat iLink) so the user can confirm the full chain
-// of each in one tap, and returns each channel's real outcome (never a false
-// "sent"). Behind authWrap.
-func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
-	// Cooldown: the test sends REAL notifications (and consumes iLink quota), so
-	// rate-limit rapid taps.
-	if !s.metrics.allowTest() {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "测试有冷却，请稍候再试"})
-		return
+	payload := s.notifyConfigPayload(r)
+	payload["tunnelUrl"] = s.tunnel.PublicURL()
+	payload["ilink"] = ilinkView
+	payload["webPush"] = map[string]any{
+		"subscriptions":   s.push.count(),
+		"notifierRunning": s.push.notifierRunning(),
+		"subs":            s.push.subsDetails(),
 	}
-	// One deep-link target shared by both channels (so the WeChat test also exercises
-	// the tap-to-auth deep link, not just plain message delivery).
-	deepURL := s.notifyDeepURL("")
-
-	// Channel A — web push broadcast (same path the live notifier uses).
-	subs := s.push.snapshot()
-	wpSent, wpRejected := 0, 0
-	if len(subs) > 0 {
-		payload, _ := json.Marshal(map[string]any{
-			"title": "✅ 测试通知",
-			"body":  "Deepwork 浏览器推送链路正常",
-			"tag":   "dw-notify-test",
-			"data":  map[string]any{"url": deepURL},
-		})
-		res := s.push.broadcast(payload, subs)
-		wpSent, wpRejected = res.delivered, len(res.rejected)
-	}
-
-	// Channel B — WeChat iLink (only delivers when active; honest outcome otherwise).
-	ilinkResult := "not-configured"
-	if s.ilink != nil {
-		testMsg := "✅ 测试通知（微信通道）— Deepwork 通知链路正常\n" + deepURL
-		switch s.ilink.trySend(r.Context(), "notify-test", testMsg) {
-		case ilinkSent:
-			ilinkResult = "sent"
-		case ilinkDormant:
-			ilinkResult = "dormant"
-		case ilinkAmbiguous:
-			ilinkResult = "ambiguous"
-		default:
-			ilinkResult = "not-configured"
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"webPush": map[string]any{"sent": wpSent, "rejected": wpRejected, "subs": len(subs)},
-		"ilink":   map[string]any{"result": ilinkResult},
-	})
+	writeJSON(w, http.StatusOK, payload)
 }
