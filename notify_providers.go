@@ -3,7 +3,7 @@ package terminal
 // Terminal-side wiring of the host-agnostic notify package: the encrypted local
 // ConfigStore, the iLink + web-push Provider adapters (the two channels that are
 // terminal-specific, wrapping existing stores), and the Coordinator that fans an
-// Event out to every enabled channel (iLink / web push / Feishu / DingTalk / WeCom).
+// Event out to every enabled channel (iLink / web push / Feishu / DingTalk / WeCom / Slack).
 
 import (
 	"context"
@@ -48,6 +48,7 @@ func defaultNotifyConfig() notify.Config {
 			{Kind: "feishu", Enabled: false},
 			{Kind: "dingtalk", Enabled: false},
 			{Kind: "wecom", Enabled: false},
+			{Kind: "slack", Enabled: false},
 		},
 	}
 }
@@ -191,8 +192,8 @@ func (p webpushProvider) Status(ctx context.Context, cfg notify.ProviderConfig) 
 // ── coordinator builder ─────────────────────────────────────────────────────────
 
 // newNotifyCoordinator wires the fan-out coordinator with all channels in display
-// order. Webhook channels (Feishu/DingTalk/WeCom) are generic and live in the notify
-// package; iLink + web push are terminal-specific adapters.
+// order. Webhook channels (Feishu/DingTalk/WeCom/Slack) are generic and live in the
+// notify package; iLink + web push are terminal-specific adapters.
 func newNotifyCoordinator(s *Server) *notify.Coordinator {
 	store := newFileConfigStore(s.config.DataDir)
 	return notify.NewCoordinator(store, nowFunc,
@@ -201,6 +202,7 @@ func newNotifyCoordinator(s *Server) *notify.Coordinator {
 		notify.NewFeishuProvider(nowFunc),
 		notify.NewDingTalkProvider(nowFunc),
 		notify.NewWeComProvider(nowFunc),
+		notify.NewSlackProvider(nowFunc),
 	)
 }
 

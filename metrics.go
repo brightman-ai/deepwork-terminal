@@ -77,7 +77,29 @@ func (s *Server) handleNotifyProviderSettings(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	if err := s.coordinator.SetSettings(r.Context(), kind, raw); err != nil {
+	// secret is write-only and a pointer so the UI can distinguish three intents:
+	// omitted/null = keep the existing secret (editing only the URL must not wipe it),
+	// "" = clear it (turn signing off), "<value>" = set/replace it.
+	var in struct {
+		URL    string  `json:"url"`
+		Secret *string `json:"secret"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	merged := notify.WebhookSettings{URL: in.URL}
+	if in.Secret != nil {
+		merged.Secret = *in.Secret // set or clear
+	} else if cfg, cerr := s.coordinator.Config(r.Context()); cerr == nil {
+		if pc, ok := cfg.Get(kind); ok { // keep existing secret
+			var old notify.WebhookSettings
+			_ = json.Unmarshal(pc.Settings, &old)
+			merged.Secret = old.Secret
+		}
+	}
+	out, _ := json.Marshal(merged)
+	if err := s.coordinator.SetSettings(r.Context(), kind, out); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

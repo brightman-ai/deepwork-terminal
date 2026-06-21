@@ -1,15 +1,40 @@
 # deepwork-terminal
 
-A standalone web terminal with authentication, Cloudflare tunnel support, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
+**English** | [简体中文](README_CN.md)
+
+A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) from your phone — with auth, Cloudflare tunnel, Web Push / WeChat notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
+
+## Why deepwork-terminal
+
+You kick off a long refactor in Claude Code and close your laptop. On the way out it stalls on a `Proceed? [Y/n]` — and the rest of the run is wasted. **Agents are async, but you're mobile, and the terminal is pinned to one machine.**
+
+deepwork-terminal moves that terminal — the agent's status, its output files, the `[Y/n]` prompt — onto your phone's browser, and pings you (Web Push **or** WeChat) when an agent actually needs you. Tap the notification, land on the exact session, reply, get back to your day.
+
+Four details that actually change the experience:
+
+1. **Remote screenshot paste** — `Ctrl/Cmd+V` a screenshot on your PC; it lands in the agent's current working directory and the relative path is injected straight into the command line. Mobile file/photo upload works too.
+2. **Watch agents from your phone** — install as a PWA for Web Push and tap to deep-link back to the exact session; WeChat (iLink official channel) as a backup; an agent status strip up top; a keyboard-aware viewport that never covers your input.
+3. **tmux quick-keyboard bar** — one row of buttons for copy / split / switch pane / new session, with your live tmux prefix shown — no shortcuts to memorize.
+4. **Cross-session continuity** — a global upload index, input-history reuse, and a file drawer (image/text preview + fuzzy search) that follow you across sessions.
+
+Honest limits: web-first, no native app yet; early-stage project; iOS Web Push has platform caveats. See Screenshots below.
 
 ## Features
 
-- Full PTY terminal over WebSocket
-- Session management with reconnect support
-- Clipboard paste support
-- Settings portal (workbench API)
+**Watch & steer AI coding agents**
+- Live agent status (running / waiting / idle) for Claude Code & Codex, with per-session token & cost overview
+- Notify on **Web Push (PWA)** and **WeChat (iLink official channel)** when an agent needs you — tap to deep-link back to the exact session
+- Multi-device session takeover — switch between phone and PC mid-task
+
+**Mobile-first terminal**
+- Full PTY terminal over WebSocket, with reconnect
+- Quick-keyboard bar for tmux (copy-mode, split / zoom / switch pane, new / list / detach session) — no shortcuts to memorize, dynamic prefix
+- Paste a screenshot with `Ctrl/Cmd+V` → lands in the active pane's cwd, path injected into the terminal; mobile upload too
+- Resource drawer: cross-session upload index, input-history reuse, image / text preview & fuzzy file search
+
+**Deploy anywhere**
+- Embedded Vue SPA — zero static file serving; ships as a single binary
 - Optional Cloudflare Tunnel (auto-downloads `cloudflared`)
-- Embedded Vue SPA — zero static file serving required
 - Hook points for auth, session lifecycle, and shell customization
 
 ## Install
@@ -68,53 +93,96 @@ dw-terminal --addr :8022
 
 ## Screenshots
 
-### 会话接管与抢占 — 手机 + PC 随时切换
+### Session takeover — switch between phone & PC anytime
 
-多端共享同一终端会话，手机和 PC 可随时接管或抢占控制权，无缝远程切换操作。
+Multiple devices share one terminal session; phone and PC can take over (or preempt) control at will, for seamless remote switching.
 
-![会话接管与抢占](screenshots/support-session-takeover.png)
-
----
-
-### Textarea 文本输入 — 历史不丢失
-
-内置多行文本输入框，发送历史持久保留，复杂命令编辑更方便，告别误触清空的烦恼。
-
-![Textarea 输入](screenshots/support-textarea-input.png)
+![Session takeover](screenshots/support-session-takeover.png)
 
 ---
 
-### 快捷键盘输入
+### Textarea input — history never lost
 
-针对移动端优化的快捷键盘面板，常用控制键一触即达（Ctrl、Esc、Tab、方向键等）。
+A built-in multi-line textarea keeps your send history, makes editing complex commands easier, and saves you from accidental clears.
 
-![快捷键盘](screenshots/support-quick-keyboard.png)
-
----
-
-### Snippets 片段管理 — 快捷输入
-
-保存常用命令片段，点击即插入，减少重复输入，提升效率。
-
-![Snippets 管理](screenshots/support-snippets.png)
+![Textarea input](screenshots/support-textarea-input.png)
 
 ---
 
-### tmux 专项面板 — 快捷切换 Pane
+### Quick keyboard
 
-内置 tmux 集成面板，直观展示所有 pane，一键切换，无需记忆 tmux 快捷键。
+A mobile-optimized quick-keyboard bar puts common control keys one tap away (Ctrl, Esc, Tab, arrow keys, and more).
 
-![tmux 面板](screenshots/support-tmux-panel.png)
+![Quick keyboard](screenshots/support-quick-keyboard.png)
 
 ---
 
-### 截图 / 文件上传为图片 — PC 与移动端均支持
+### Snippets — fast reusable input
 
-从 PC 浏览器或移动端上传截图和文件，自动转为图片链接，供 AI 工具（Codex / Claude）直接访问，快速排查问题。
+Save frequently used command snippets and insert them with a tap — less repetitive typing.
 
-![文件上传](screenshots/support-file-upload.png)
+![Snippets](screenshots/support-snippets.png)
 
-![移动端上传](screenshots/support-mobile-upload.png)
+---
+
+### tmux panel — switch panes fast
+
+A built-in tmux panel shows every pane at a glance and switches with one tap — no need to memorize tmux shortcuts.
+
+![tmux panel](screenshots/support-tmux-panel.png)
+
+---
+
+### Screenshot / file upload as images — PC & mobile
+
+Upload screenshots and files from a desktop browser or mobile; they become image links your AI tools (Codex / Claude) can read directly to debug fast.
+
+![File upload](screenshots/support-file-upload.png)
+
+![Mobile upload](screenshots/support-mobile-upload.png)
+
+## 🔔 Notifications setup
+
+When an agent needs you (waiting on `[Y/n]`, or done), deepwork-terminal pushes to any enabled channel:
+
+| Channel | Default | Credential |
+|---------|:------:|------------|
+| WeChat (iLink) | on | scan-to-login |
+| Browser Web Push (PWA) | on | grant permission |
+| Feishu / Lark | off | webhook URL + secret (sign) |
+| DingTalk | off | webhook URL + secret (sign) |
+| WeCom (企业微信) | off | webhook URL (key in URL) |
+| Slack | off | webhook URL |
+
+Everything is configured in **Settings → Notifications**. Each channel has an **enable toggle**, a **配置 Webhook** form (URL + optional secret), and a **测试 (Test)** button that fires a *real* message and echoes the honest backend result. URLs/secrets are encrypted at rest and redacted in the UI (secret is write-only).
+
+To get each webhook URL:
+
+### Feishu / Lark
+1. In a group: **Settings → Group Bots → Add Bot → Custom Bot**.
+2. Security: choose **签名校验 (Signature verification)** and copy the **secret**.
+3. Copy the **Webhook URL** (`https://open.feishu.cn/open-apis/bot/v2/hook/…`).
+4. App → **配置 Webhook** → paste **URL + Secret** → **保存** → enable → **测试**.
+   - Sign mismatch returns `19021` — recheck the secret. (If you picked "keyword" mode instead, the message must contain that keyword — signature mode is recommended.)
+
+### 🔔 DingTalk
+1. Group → **Settings → Group Assistant → Add Bot → Custom**.
+2. Security: choose **加签 (Additional signature)** and copy the secret (starts with `SEC`).
+3. Copy the Webhook URL (`https://oapi.dingtalk.com/robot/send?access_token=…`).
+4. App → paste **URL + Secret (加签)** → **保存** → enable → **测试**.
+   - Sign error → `310000 sign not match`. Avoid "keyword" mode (messages may be rejected).
+
+### WeCom (企业微信)
+1. Group → **… → Group Bots → Add → Create**.
+2. Copy the Webhook URL (`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…`). The `key` in the URL is the credential — **no secret needed**.
+3. App → paste **URL** (leave Secret blank) → **保存** → enable → **测试**.
+   - `93000` → the URL/key is wrong, or the bot was removed from the group.
+
+### Slack
+1. Create an incoming webhook: **api.slack.com/apps → Create New App → Incoming Webhooks → Activate → Add New Webhook to Workspace**, then pick a channel.
+2. Copy the Webhook URL (`https://hooks.slack.com/services/…`). The URL is the credential — **no secret needed**.
+3. App → paste **URL** (leave Secret blank) → **保存** → enable → **测试**.
+   - Success returns `ok`; a malformed request returns `invalid_payload`. The server must be able to reach `hooks.slack.com` (may need a proxy in some regions).
 
 ## Quick Start (as a library)
 

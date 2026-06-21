@@ -13,7 +13,7 @@
 import { ref } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 
-export type NotifyKind = 'ilink' | 'webpush' | 'feishu' | 'dingtalk' | 'wecom'
+export type NotifyKind = 'ilink' | 'webpush' | 'feishu' | 'dingtalk' | 'wecom' | 'slack'
 
 export interface NotifyQuota {
   used: number
@@ -42,8 +42,9 @@ export interface NotifyProvider {
   quota: NotifyQuota | null
   todaySent: number
   activationHint: string
-  /** Redacted webhook settings: { url?: string } with creds masked. */
-  settings: { url?: string } | null
+  /** Redacted webhook settings with creds masked. `secret` is present (as "••••")
+   *  only when a signing secret is configured — used to show the signing state. */
+  settings: { url?: string; secret?: string } | null
   // ── merged from metrics.perProvider (by kind) so a row has everything it needs ──
   /** 0 = never succeeded. */
   lastSuccessAtMs: number
@@ -86,7 +87,9 @@ const loaded = ref(false)
 const error = ref('')
 
 // The webhook IM channels that accept a url + secret via the settings endpoint.
-export const WEBHOOK_KINDS: NotifyKind[] = ['feishu', 'dingtalk', 'wecom']
+// (Slack uses only the url — the webhook URL is its credential — but shares the same
+// settings form/flow for UI consistency; its build closure ignores the secret.)
+export const WEBHOOK_KINDS: NotifyKind[] = ['feishu', 'dingtalk', 'wecom', 'slack']
 export function isWebhookKind(kind: string): boolean {
   return (WEBHOOK_KINDS as string[]).includes(kind)
 }
@@ -149,14 +152,21 @@ export function useNotifyConfig() {
     }
   }
 
-  /** PUT /api/notify/providers/{kind}/settings — set webhook url + secret. */
-  async function setSettings(kind: string, url: string, secret: string): Promise<boolean> {
+  /**
+   * PUT /api/notify/providers/{kind}/settings — set the webhook url, and the secret
+   * only when intended. `secret` semantics: undefined = leave the existing secret
+   * untouched (editing the URL won't wipe it); '' = clear it (signing off);
+   * a value = set/replace it. Matches the backend's pointer-based merge.
+   */
+  async function setSettings(kind: string, url: string, secret?: string): Promise<boolean> {
     error.value = ''
     try {
+      const body: { url: string; secret?: string } = { url }
+      if (secret !== undefined) body.secret = secret
       const r = await cliFetch(`/api/notify/providers/${kind}/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, secret }),
+        body: JSON.stringify(body),
       })
       if (r.ok) { apply(await r.json()); return true }
       error.value = `保存失败 (${r.status})`
