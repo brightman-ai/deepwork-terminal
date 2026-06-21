@@ -197,6 +197,32 @@ func (s *pushStore) count() int {
 	return len(s.subs)
 }
 
+// notifierRunning reports whether the background event poller is active.
+func (s *pushStore) notifierRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.notifier != nil
+}
+
+// pushSubDetail is the non-sensitive view of one subscription for the UI detail
+// popover: the page origin it was created under + a masked endpoint tail (never
+// the full endpoint, which is a capability URL).
+type pushSubDetail struct {
+	Origin       string `json:"origin"`
+	EndpointTail string `json:"endpointTail"`
+}
+
+// subsDetails returns a privacy-safe summary of each subscription.
+func (s *pushStore) subsDetails() []pushSubDetail {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]pushSubDetail, 0, len(s.subs))
+	for _, sub := range s.subs {
+		out = append(out, pushSubDetail{Origin: sub.Origin, EndpointTail: endpointTail(sub.Endpoint)})
+	}
+	return out
+}
+
 // add stores (or replaces) a subscription, deduped by endpoint, and persists.
 // Returns the new subscription count.
 func (s *pushStore) add(sub pushSubscription) int {
@@ -356,7 +382,9 @@ func (s *pushStore) broadcast(payload []byte, subs []pushSubscription) broadcast
 		s.remove(ep)
 		logger.Info("push pruned gone subscription", "endpoint_tail", endpointTail(ep))
 	}
-	if s.count() == 0 {
+	// Stop the poller only when NO channel needs it: no web-push subs AND iLink not
+	// logged in. Otherwise an iLink-only user would lose their event source.
+	if s.count() == 0 && !(s.server != nil && s.server.ilink.loggedIn()) {
 		go s.stopNotifier()
 	}
 	return broadcastResult{delivered: delivered, rejected: rejected, pruned: len(prune)}
@@ -372,8 +400,9 @@ func (s *Server) handlePushUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := s.push.remove(req.Endpoint)
-	// Last subscription gone → stop the notifier (no busy-spin when nobody listens).
-	if n == 0 {
+	// Last subscription gone → stop the notifier — UNLESS iLink is logged in and
+	// still needs the shared event poller.
+	if n == 0 && !(s.ilink != nil && s.ilink.loggedIn()) {
 		s.push.stopNotifier()
 	}
 	logger.Info("push unsubscribe", "endpoint_tail", endpointTail(req.Endpoint), "count", n)

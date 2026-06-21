@@ -9,7 +9,9 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/google/uuid v1.6.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stretchr/testify v1.11.1
+	github.com/the-yex/wechat-ilink-sdk v0.0.0-20260327015631-c2dc55718bac
 )
 
 require (

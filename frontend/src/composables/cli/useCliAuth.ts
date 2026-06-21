@@ -27,6 +27,29 @@ if (urlAuth) {
 const authCode = ref(localStorage.getItem(AUTH_STORAGE_KEY) || '')
 const showAuthDialog = ref(false)
 
+// One-time bootstrap token from a push-notification deep link. It arrives in the
+// URL FRAGMENT (#bootstrap=…) — a fragment is never sent to the server or in a
+// Referer header, so the bearer token can't leak to tunnel/proxy logs. It is
+// single-use + short-TTL server-side, so even a leaked URL string is worthless.
+// Exchange it for the auth code once, then strip the fragment.
+const bootstrapMatch = window.location.hash.match(/[#&]bootstrap=([^&]+)/)
+if (bootstrapMatch && !urlAuth) {
+  const bootstrapTok = decodeURIComponent(bootstrapMatch[1])
+  window.history.replaceState({}, '', window.location.pathname + window.location.search)
+  void (async () => {
+    try {
+      const resp = await fetch(apiUrl('/auth/bootstrap?token=' + encodeURIComponent(bootstrapTok)))
+      if (resp.ok) {
+        const { authCode: code } = await resp.json() as { authCode?: string }
+        if (code) {
+          localStorage.setItem(AUTH_STORAGE_KEY, code)
+          authCode.value = code
+        }
+      }
+    } catch { /* invalid/expired token → fall back to the manual auth dialog */ }
+  })()
+}
+
 export function useCliAuth() {
   function getAuthCode(): string {
     return authCode.value

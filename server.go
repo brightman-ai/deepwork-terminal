@@ -28,6 +28,9 @@ type Server struct {
 	tunnel       *tunnelkit.Tunnel
 	tmuxProvider TmuxStateProvider
 	push         *pushStore
+	ilink        *ilinkStore
+	bootstrap    *bootstrapStore
+	metrics      *notifyMetrics
 	uploads      *uploadIndex
 	mu           sync.Mutex
 }
@@ -67,6 +70,12 @@ func NewServer(opts ...Option) (*Server, error) {
 	// APNs rejects the token — see resolveVapidSubscriber.
 	s.push = newPushStore(s.config.DataDir, resolveVapidSubscriber(s.config))
 	s.push.server = s
+	// Notification delivery metrics (SSOT) + one-time bootstrap tokens for tap-to-auth.
+	s.metrics = newNotifyMetrics()
+	s.bootstrap = newBootstrapStore()
+	// WeChat iLink notification channel (channel B). Resumes a prior login if one
+	// is persisted. Wired after push so newIlinkStore can reach s.push.ensureNotifier.
+	s.ilink = newIlinkStore(s.config.DataDir, s)
 	// If subscriptions survived a restart, resume the background notifier so
 	// push keeps working with no browser tab and no fresh subscribe call.
 	if s.push.count() > 0 {
@@ -214,6 +223,18 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
 	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
 	s.mux.HandleFunc("POST /push/test", wrap(s.handlePushTest))
+	// WeChat iLink channel (channel B): scan-code login + status + logout.
+	s.mux.HandleFunc("GET /ilink/status", wrap(s.handleIlinkStatus))
+	s.mux.HandleFunc("POST /ilink/login", wrap(s.handleIlinkLogin))
+	s.mux.HandleFunc("GET /ilink/qr", wrap(s.handleIlinkQR))
+	s.mux.HandleFunc("POST /ilink/logout", wrap(s.handleIlinkLogout))
+	// Unified notification status + delivery metrics (single source for the UI).
+	s.mux.HandleFunc("GET /notify/status", wrap(s.handleNotifyStatus))
+	// Dual-channel test: fire one test notification down both channels.
+	s.mux.HandleFunc("POST /notify/test", wrap(s.handleNotifyTest))
+	// Tap-to-auth: exchange a one-time bootstrap token for the auth code. NOT behind
+	// authWrap — it authenticates by consuming the token itself.
+	s.mux.HandleFunc("GET /auth/bootstrap", s.handleAuthBootstrap)
 }
 
 // authWrap wraps a handler with auth checking.

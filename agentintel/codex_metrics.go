@@ -40,6 +40,13 @@ func CodexRolloutExistsForCWD(pl *ProjectLocator, cwd string) bool {
 	return newestCodexRolloutForCWD(pl, cwd) != ""
 }
 
+// CodexNewestRolloutForCWD returns the path of the newest Codex rollout for cwd
+// (preferring a recorded-cwd match), or "". Exported wrapper so callers outside
+// this package (e.g. the notifier) can resolve a Codex transcript name.
+func CodexNewestRolloutForCWD(pl *ProjectLocator, cwd string) string {
+	return newestCodexRolloutForCWD(pl, cwd)
+}
+
 // newestCodexRolloutForCWD returns the path of the rollout to read for cwd, or "".
 // Preference: the newest rollout whose recorded cwd matches; else the newest rollout.
 func newestCodexRolloutForCWD(pl *ProjectLocator, cwd string) string {
