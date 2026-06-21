@@ -381,3 +381,23 @@ func TestResolvePreviewPath_SecurityBranches(t *testing.T) {
 	// (The recent-edited allowlist ESCAPE is covered end-to-end by the API harness:
 	// a transcript-referenced file outside cwd previews 200.)
 }
+
+// TC-FS-…: previewableInRecent keeps the 最近文件 list in lock-step with the preview
+// gate — a path that LOOKS in-tree but symlink-resolves OUTSIDE the session root must
+// be excluded (the "listed but 预览失败" bug, e.g. docs/ symlinked to a sibling repo).
+func TestPreviewableInRecent(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	inTree := filepath.Join(root, "a.txt")
+	require.NoError(t, os.WriteFile(inTree, []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "b.md"), []byte("y"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "docs"))) // docs → sibling repo
+	viaSymlink := filepath.Join(root, "docs", "b.md")                    // lexically in-tree, resolves out
+
+	assert.True(t, previewableInRecent(root, inTree, true), "in-tree file is previewable")
+	assert.False(t, previewableInRecent(root, viaSymlink, true), "symlink-escaping path must be excluded")
+	// Absolute path outside cwd: previewable iff it's a known recent file (mirrors resolvePreviewPath).
+	abs := filepath.Join(outside, "b.md")
+	assert.True(t, previewableInRecent(root, abs, true), "outside-cwd recent file allowed")
+	assert.False(t, previewableInRecent(root, abs, false), "outside-cwd non-recent path excluded")
+}

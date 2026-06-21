@@ -139,11 +139,19 @@ func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
 		seen[it.Path] = true
 		items = append(items, it)
 	}
+	// Only surface files the preview endpoint can actually open. A path whose real
+	// (symlink-resolved) location escapes the session root 403s on preview, so listing
+	// it produced the "shows in 最近文件 but 预览失败" mismatch (e.g. docs/ symlinked to a
+	// sibling repo). Gate with the SAME rule as resolvePreviewPath; knownRecent=true for
+	// transcript entries skips isRecentFile's transcript rescan.
 	for _, f := range agentintel.RecentEditedFiles(pl, cwd) {
+		if !previewableInRecent(cwd, f.Path, true) {
+			continue
+		}
 		push(recentFileItem{Path: f.Path, Name: f.Name, Dir: f.Dir, Tool: f.Tool, TsMs: f.TsMs})
 	}
 	for _, u := range s.uploads.list() {
-		if u.CWD != cwd {
+		if u.CWD != cwd || !previewableInRecent(cwd, u.AbsPath, false) {
 			continue
 		}
 		push(recentFileItem{Path: u.AbsPath, Name: u.Name, Dir: filepath.Dir(u.AbsPath), Tool: "upload", TsMs: u.MtimeMs})
@@ -407,6 +415,19 @@ func resolvePreviewPath(cwd, rel string) (string, error) {
 		return "", errors.New("path not allowed")
 	}
 	return safeResolve(cwd, rel)
+}
+
+// previewableInRecent reports whether path would pass resolvePreviewPath's gate, so
+// the 最近文件 list stays in lock-step with what preview can open (no "listed but
+// 预览失败"). It mirrors resolvePreviewPath but takes knownRecent instead of calling
+// isRecentFile — the caller already knows whether the path came from the recent set,
+// which avoids a redundant (and potentially recursive) transcript rescan.
+func previewableInRecent(cwd, path string, knownRecent bool) bool {
+	if filepath.IsAbs(path) && !pathUnder(cwd, path) {
+		return knownRecent // outside-cwd absolute path: preview allows it iff it's a recent file
+	}
+	_, err := safeResolve(cwd, path) // anchors + symlink-resolves + rejects root escapes
+	return err == nil
 }
 
 // isRecentFile reports whether abs is in the session cwd's recent-edited file set (the
