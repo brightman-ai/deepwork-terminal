@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main
 Installs `dw-terminal` to `~/.local/bin` for **Linux** (amd64/arm64) and **macOS** (universal). On **WSL**, this is the right path — it just works. Pin a version or change the directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.3.0 --dir=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.4.0 --dir=/usr/local/bin
 ```
 
 ### Homebrew (macOS / Linux)
@@ -93,53 +93,73 @@ dw-terminal --addr :8022
 
 ## Screenshots
 
-### Session takeover — switch between phone & PC anytime
+### Standard view — tmux panes + quick-key toolbar
 
-Multiple devices share one terminal session; phone and PC can take over (or preempt) control at will, for seamless remote switching.
-
-![Session takeover](screenshots/support-session-takeover.png)
+![Standard view: tmux panes and the quick-key toolbar](screenshots/ui-standard-tmux-panes.png)
 
 ---
 
-### Textarea input — history never lost
+### Paste, type, or speak to the agent
 
-A built-in multi-line textarea keeps your send history, makes editing complex commands easier, and saves you from accidental clears.
+`Ctrl/Cmd+V` a screenshot and the relative path is injected. The input box is also a normal field, so multi-line text and your phone's voice input go straight in.
 
-![Textarea input](screenshots/support-textarea-input.png)
+![Multi-line text input](screenshots/input-multiline.png)
 
----
-
-### Quick keyboard
-
-A mobile-optimized quick-keyboard bar puts common control keys one tap away (Ctrl, Esc, Tab, arrow keys, and more).
-
-![Quick keyboard](screenshots/support-quick-keyboard.png)
+![Voice input via the system keyboard](screenshots/input-voice.png)
 
 ---
 
-### Snippets — fast reusable input
+### Watch agents from your phone — multi-channel notify
 
-Save frequently used command snippets and insert them with a tap — less repetitive typing.
+Push "an agent is waiting" to wherever you already look — WeChat / Feishu / WeCom / DingTalk.
 
-![Snippets](screenshots/support-snippets.png)
+![Multi-channel notifications](screenshots/notify-channels.png)
+
+WeChat (iLink) quota: each message you send buys ~10 pushes; reply anything to refresh.
+
+![WeChat notify](screenshots/notify-wechat-1.png)
+
+![WeChat notify](screenshots/notify-wechat-2.png)
+
+![WeChat notify — quota refresh](screenshots/notify-wechat-3.png)
+
+![WeChat notify — refreshed](screenshots/notify-wechat-4.png)
+
+A status strip up top shows each session's state plus connection latency.
+
+![Health / latency strip](screenshots/health-latency-bar.png)
 
 ---
 
-### tmux panel — switch panes fast
+### tmux without the shortcuts
 
-A built-in tmux panel shows every pane at a glance and switches with one tap — no need to memorize tmux shortcuts.
+Two toolbars — one for tmux (panes / sessions), one general — with your live prefix shown. No tmux? Multiple terminals still work.
 
-![tmux panel](screenshots/support-tmux-panel.png)
+![Two toolbars: tmux + general](screenshots/toolbar-two-rows.png)
+
+![Multiple terminals without tmux](screenshots/multi-terminal-no-tmux.png)
 
 ---
 
-### Screenshot / file upload as images — PC & mobile
+### Cross-session continuity — uploads, history, file drawer
 
-Upload screenshots and files from a desktop browser or mobile; they become image links your AI tools (Codex / Claude) can read directly to debug fast.
+Past uploads and the prompts you actually typed are reusable from any new session; the file drawer browses the tree and previews files in the browser.
 
-![File upload](screenshots/support-file-upload.png)
+![History: past uploads and inputs](screenshots/history-uploads.png)
 
-![Mobile upload](screenshots/support-mobile-upload.png)
+![File drawer: directory tree](screenshots/file-tree-browse.png)
+
+![File drawer: file preview](screenshots/file-preview.png)
+
+---
+
+### More
+
+Per-session token & cost overview; phone and PC share one session with takeover.
+
+![Session cost overview](screenshots/session-cost.png)
+
+![Multi-device takeover](screenshots/multi-device-takeover.png)
 
 ## 🔔 Notifications setup
 

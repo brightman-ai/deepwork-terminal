@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main
 为 **Linux**（amd64/arm64）和 **macOS**（通用二进制）把 `dw-terminal` 装到 `~/.local/bin`。在 **WSL** 上这条路即可，开箱即用。指定版本或目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.3.2 --dir=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.4.0 --dir=/usr/local/bin
 ```
 
 ### Homebrew（macOS / Linux）
@@ -93,53 +93,73 @@ dw-terminal --addr :8022
 
 ## 截图
 
-### 会话接管与抢占 — 手机 + PC 随时切换
+### 标准界面 — tmux 分屏 + 快捷工具条
 
-多端共享同一终端会话，手机和 PC 可随时接管或抢占控制权，无缝远程切换操作。
-
-![会话接管与抢占](screenshots/support-session-takeover.png)
+![标准界面：tmux 分屏 pane + 顶部快捷工具条](screenshots/ui-standard-tmux-panes.png)
 
 ---
 
-### Textarea 文本输入 — 历史不丢失
+### 粘贴、输入、或语音说给 agent
 
-内置多行文本输入框，发送历史持久保留，复杂命令编辑更方便，告别误触清空的烦恼。
+`Ctrl/Cmd+V` 粘贴截图，相对路径自动注入；输入区本质是普通输入框，多行文本和手机语音输入法也能直接发给 agent。
 
-![Textarea 输入](screenshots/support-textarea-input.png)
+![多行文本输入](screenshots/input-multiline.png)
 
----
-
-### 快捷键盘输入
-
-针对移动端优化的快捷键盘面板，常用控制键一触即达（Ctrl、Esc、Tab、方向键等）。
-
-![快捷键盘](screenshots/support-quick-keyboard.png)
+![语音输入法直接在输入框里用](screenshots/input-voice.png)
 
 ---
 
-### Snippets 片段管理 — 快捷输入
+### 在手机上盯住 agent — 多通道通知
 
-保存常用命令片段，点击即插入，减少重复输入，提升效率。
+把「agent 在等你」推到你本来就在看的 IM——个人微信 / 飞书 / 企业微信 / 钉钉。
 
-![Snippets 管理](screenshots/support-snippets.png)
+![多通道推送](screenshots/notify-channels.png)
+
+个人微信（iLink）配额：每主动发一条消息约换 10 条推送，回任意字符即续。
+
+![个人微信通知](screenshots/notify-wechat-1.png)
+
+![个人微信通知](screenshots/notify-wechat-2.png)
+
+![个人微信通知 — 配额续订](screenshots/notify-wechat-3.png)
+
+![个人微信通知 — 已续订](screenshots/notify-wechat-4.png)
+
+顶部状态条常驻：每个会话的状态 + 连接延迟。
+
+![健康 / 延迟状态条](screenshots/health-latency-bar.png)
 
 ---
 
-### tmux 专项面板 — 快捷切换 Pane
+### 不用记 tmux 快捷键
 
-内置 tmux 集成面板，直观展示所有 pane，一键切换，无需记忆 tmux 快捷键。
+两条工具条——一条管 tmux（pane / 会话），一条通用，并实时显示当前前缀。没装 tmux？照样能开多个终端。
 
-![tmux 面板](screenshots/support-tmux-panel.png)
+![两条工具条：tmux + 通用](screenshots/toolbar-two-rows.png)
+
+![不用 tmux 也能多终端](screenshots/multi-terminal-no-tmux.png)
 
 ---
 
-### 截图 / 文件上传为图片 — PC 与移动端均支持
+### 跨会话连贯 — 上传 / 输入历史 / 文件抽屉
 
-从 PC 浏览器或移动端上传截图和文件，自动转为图片链接，供 AI 工具（Codex / Claude）直接访问，快速排查问题。
+传过的文件、真输入过的 prompt 在任意新会话都能翻到；文件抽屉可在浏览器里浏览目录树、预览文件。
 
-![文件上传](screenshots/support-file-upload.png)
+![历史：传过的图片 / 输入过的 prompt](screenshots/history-uploads.png)
 
-![移动端上传](screenshots/support-mobile-upload.png)
+![文件抽屉：目录树](screenshots/file-tree-browse.png)
+
+![文件抽屉：文件预览](screenshots/file-preview.png)
+
+---
+
+### 还有这些
+
+每会话 token 与成本总览；手机 / PC 共享同一会话，可抢占接管。
+
+![会话成本总览](screenshots/session-cost.png)
+
+![多端接管](screenshots/multi-device-takeover.png)
 
 ## 🔔 通知配置
 
