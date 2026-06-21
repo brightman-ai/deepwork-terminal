@@ -2,7 +2,7 @@
 
 **English** | [简体中文](README_CN.md)
 
-A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) from your phone — with auth, Cloudflare tunnel, Web Push / WeChat notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
+A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) — from your phone or a laptop on the go, reach and drive the desktop/laptop back home where the agent actually runs. With auth, Cloudflare tunnel, Web Push / WeChat notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
 
 ## Why deepwork-terminal
 

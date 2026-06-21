@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-一个**移动端优先的 web 终端，用来在手机上盯住和操控你的 AI 编码 agent**（Claude Code / Codex）——内置鉴权、Cloudflare 隧道、Web Push / 微信通知，以及嵌入式 Vue 前端。一行 `http.Handler` 即可挂进任意 Go 应用。
+一个**移动端优先(移动笔记本/移动手机操控家里的台式机；手机 远程操控家里的笔记本）的 web 终端，用来在手机上盯住和操控你的 AI 编码 agent**（Claude Code / Codex）——内置鉴权、Cloudflare 隧道、Web Push / 微信通知，以及嵌入式 Vue 前端。一行 `http.Handler` 即可挂进任意 Go 应用。
 
 ## 为什么用
 
@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main
 为 **Linux**（amd64/arm64）和 **macOS**（通用二进制）把 `dw-terminal` 装到 `~/.local/bin`。在 **WSL** 上这条路即可，开箱即用。指定版本或目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.3.0 --dir=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.3.2 --dir=/usr/local/bin
 ```
 
 ### Homebrew（macOS / Linux）
