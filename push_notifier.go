@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -142,11 +143,13 @@ func (n *pushNotifier) tick(ctx context.Context) {
 				}
 				n.fired[id] = true
 				n.notify(notifyEvent{
-					paneID:  id,
-					tool:    string(pane.AgentTool),
-					session: sess.Name,
-					window:  win.Index,
-					pane:    pane.Index,
+					paneID:     id,
+					tool:       string(pane.AgentTool),
+					session:    sess.Name,
+					window:     win.Index,
+					windowName: win.Name,
+					pane:       pane.Index,
+					cwd:        pane.CWD,
 				})
 			}
 		}
@@ -159,51 +162,160 @@ func (n *pushNotifier) tick(ctx context.Context) {
 	}
 }
 
-// notifyEvent carries the per-pane facts the payload needs.
+// notifyEvent carries the per-pane facts the message needs — the human-readable
+// location (session/window/pane + names) and the running agent, NOT a URL.
 type notifyEvent struct {
-	paneID  string
-	tool    string
-	session string
-	window  int
-	pane    int
+	paneID     string
+	tool       string // claude / codex / …
+	session    string // tmux session name (or terminal tab name for a plain session)
+	window     int
+	windowName string // the pane's human "name" (tmux pane titles are usually unset/noisy)
+	pane       int
+	cwd        string // for resolving the agent's transcript name
 }
 
-// notify builds the SW payload and sends it to every stored subscription.
-// Failed-gone (404/410) subscriptions are pruned.
+// notify is the channel-agnostic coordinator for ONE agent-waiting event (this is
+// the single fan-out point; event detection + dedupe live in tick's fired set, so
+// channels A/B never double-fire). It tries WeChat iLink (B) first; on delivery it
+// does NOT also web-push (no double notify). On B dormant/ambiguous/not-configured
+// it falls through to Web Push (A), the reliable APNs/FCM baseline.
 func (n *pushNotifier) notify(ev notifyEvent) {
+	// Human-readable content — WHICH agent + WHERE it waits + WHICH transcript. NO
+	// URL: a raw link in the body is unreadable (the user's explicit ask), esp. in
+	// WeChat. The cli type goes in the BODY (not only the title) so channels that
+	// surface only the body still show claude/codex.
+	title := "⏳ 需要你的输入"
+	desc := describeEvent(ev, n.transcriptName(ev.cwd, ev.tool))
+	// Deep-link is used ONLY as the web-push tap target (data.url), never shown as text.
+	deepURL := n.server.notifyDeepURL(ev.session)
+
+	// Channel B — WeChat iLink (primary when active). Plain readable text, NO URL.
+	ilinkAttempted := false
+	if il := n.server.ilink; il != nil {
+		switch il.trySend(context.Background(), ev.paneID, title+"\n"+desc) {
+		case ilinkSent:
+			n.server.metrics.record("ilink", false)
+			logger.Info("notify via ilink", "pane", ev.paneID)
+			return // delivered to WeChat → skip web push
+		case ilinkDormant, ilinkAmbiguous:
+			ilinkAttempted = true // tried but parked/failed → real fallback to A
+		default:
+			// ilinkNotConfigured → B simply isn't set up; not a fallback.
+		}
+	}
+
+	// Channel A — Web Push (baseline / fallback). body = readable; data.url = tap target.
 	store := n.server.push
 	subs := store.snapshot()
 	if len(subs) == 0 {
+		n.server.metrics.record("none", ilinkAttempted)
 		return
 	}
-
-	tool := ev.tool
-	if tool == "" {
-		tool = "agent"
-	}
-	// data.url deep-links the SW back to the session. Prefer the CURRENT tunnel URL
-	// (absolute) so a notification tap opens the live HTTPS origin even when the PWA was
-	// installed from a since-changed tunnel domain; fall back to a relative path when no
-	// tunnel is running (same-origin open).
-	deepURL := "/?session=" + url.QueryEscape(ev.session)
-	if base := n.server.tunnel.PublicURL(); base != "" {
-		deepURL = strings.TrimRight(base, "/") + deepURL
-	}
-
 	payload, _ := json.Marshal(map[string]any{
-		"title": "⏳ 需要你的输入",
-		"body":  fmt.Sprintf("%s · %s:%d 正在等待输入", tool, ev.session, ev.window),
+		"title": title,
+		"body":  desc,
 		"tag":   ev.paneID,
 		"data": map[string]any{
 			"url":       deepURL,
 			"sessionId": ev.session,
 		},
 	})
-
 	// Single source of truth for fan-out delivery + prune (shared with /push/test).
 	res := store.broadcast(payload, subs)
+	if res.delivered > 0 {
+		n.server.metrics.record("webpush", ilinkAttempted)
+	} else {
+		n.server.metrics.record("none", ilinkAttempted)
+	}
 	logger.Info("push sent", "pane", ev.paneID, "subs", len(subs),
 		"delivered", res.delivered, "rejected", len(res.rejected), "pruned", res.pruned)
+}
+
+// notifyDeepURL builds the notification tap target — the SINGLE source for it,
+// shared by the live notifier and the test endpoint. It is the CURRENT cloudflare
+// tunnel URL (absolute) so a tap opens the live HTTPS origin (same-origin relative
+// path when no tunnel runs), plus a one-time bootstrap token in the URL FRAGMENT
+// (#) for tap-to-auth. A fragment is never sent to the server, proxies, or in a
+// Referer header, so the bearer token can't leak to tunnel/access logs.
+func (s *Server) notifyDeepURL(session string) string {
+	deepURL := "/?session=" + url.QueryEscape(session)
+	if base := s.tunnel.PublicURL(); base != "" {
+		deepURL = strings.TrimRight(base, "/") + deepURL
+	}
+	if s.bootstrap != nil {
+		if tok := s.bootstrap.issue(); tok != "" {
+			deepURL += "#bootstrap=" + tok
+		}
+	}
+	return deepURL
+}
+
+// describeEvent builds the human-readable notification body: WHICH agent + WHERE
+// it is (session / window + name / pane index) + WHICH transcript — no URL. e.g.
+// "claude · main · 窗口1 editor · 面板0 · abc123.jsonl". For a plain terminal tab
+// the session field is the tab name (e.g. "终端 2"), so the same shape reads
+// naturally. All user-controllable fields are sanitized to a safe single line.
+func describeEvent(ev notifyEvent, transcript string) string {
+	tool := ev.tool
+	if tool == "" {
+		tool = "agent"
+	}
+	var b strings.Builder
+	b.WriteString(tool)
+	b.WriteString(" · ")
+	b.WriteString(sanitizeField(ev.session))
+	if wn := sanitizeField(ev.windowName); wn != "" {
+		fmt.Fprintf(&b, " · 窗口%d %s", ev.window, wn)
+	} else {
+		fmt.Fprintf(&b, " · 窗口%d", ev.window)
+	}
+	fmt.Fprintf(&b, " · 面板%d", ev.pane)
+	if t := sanitizeField(transcript); t != "" {
+		b.WriteString(" · " + t)
+	}
+	return b.String()
+}
+
+// sanitizeField makes a user-controllable terminal field safe for a one-line
+// notification: control chars / newlines / tabs → space, whitespace collapsed,
+// then truncated. Prevents a crafted (or accidentally multi-line) session /
+// window name / transcript from breaking the message layout or spamming the body.
+func sanitizeField(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r < 0x20 {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	const max = 48
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
+	}
+	return s
+}
+
+// transcriptName resolves the running agent's transcript file name from its CWD
+// (best effort; empty when not resolvable). NOTE: it picks the newest transcript
+// under the project dir — accurate for the common one-session-per-dir case, but
+// may misattribute when multiple same-tool sessions share a CWD. Called only on a
+// waiting transition, so the one ReadDir stays off the 2s poll hot path.
+func (n *pushNotifier) transcriptName(cwd, tool string) string {
+	if cwd == "" {
+		return ""
+	}
+	pl := agentintel.NewProjectLocator()
+	switch tool {
+	case "claude":
+		if files, err := pl.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
+			return filepath.Base(files[0])
+		}
+	case "codex":
+		if p := agentintel.CodexNewestRolloutForCWD(pl, cwd); p != "" {
+			return filepath.Base(p)
+		}
+	}
+	return ""
 }
 
 // pushOutcomeKind classifies the result of a single send attempt.
