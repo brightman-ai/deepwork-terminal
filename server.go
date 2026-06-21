@@ -30,7 +30,6 @@ type Server struct {
 	tmuxProvider TmuxStateProvider
 	push         *pushStore
 	ilink        *ilinkStore
-	bootstrap    *bootstrapStore
 	coordinator  *notify.Coordinator
 	uploads      *uploadIndex
 	mu           sync.Mutex
@@ -71,8 +70,6 @@ func NewServer(opts ...Option) (*Server, error) {
 	// APNs rejects the token — see resolveVapidSubscriber.
 	s.push = newPushStore(s.config.DataDir, resolveVapidSubscriber(s.config))
 	s.push.server = s
-	// One-time bootstrap tokens for tap-to-auth deep links.
-	s.bootstrap = newBootstrapStore()
 	// WeChat iLink notification channel (channel B). Resumes a prior login if one
 	// is persisted. Wired after push so newIlinkStore can reach s.push.ensureNotifier.
 	s.ilink = newIlinkStore(s.config.DataDir, s)
@@ -244,9 +241,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /notify/config", wrap(s.handleNotifyConfigSave))
 	s.mux.HandleFunc("PUT /notify/providers/{kind}/settings", wrap(s.handleNotifyProviderSettings))
 	s.mux.HandleFunc("POST /notify/providers/{kind}/test", wrap(s.handleNotifyProviderTest))
-	// Tap-to-auth: exchange a one-time bootstrap token for the auth code. NOT behind
-	// authWrap — it authenticates by consuming the token itself.
-	s.mux.HandleFunc("GET /auth/bootstrap", s.handleAuthBootstrap)
 }
 
 // authWrap wraps a handler with auth checking.

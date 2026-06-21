@@ -385,18 +385,14 @@ func (n *pushNotifier) saveState() {
 // notifyDeepURL builds the notification tap target — the SINGLE source for it,
 // shared by the live notifier and the test endpoint. It is the CURRENT cloudflare
 // tunnel URL (absolute) so a tap opens the live HTTPS origin (same-origin relative
-// path when no tunnel runs), plus a one-time bootstrap token in the URL FRAGMENT
-// (#) for tap-to-auth. A fragment is never sent to the server, proxies, or in a
-// Referer header, so the bearer token can't leak to tunnel/access logs.
+// path when no tunnel runs). It carries NO auth token: a tap lands on the normal
+// auth gate. (Earlier builds embedded a one-time bootstrap token in the URL fragment
+// for tap-to-auth; that was dropped so a notification — especially one fanned out to
+// a shared IM group webhook — never doubles as a login link.)
 func (s *Server) notifyDeepURL(session string) string {
 	deepURL := "/?session=" + url.QueryEscape(session)
 	if base := s.tunnel.PublicURL(); base != "" {
 		deepURL = strings.TrimRight(base, "/") + deepURL
-	}
-	if s.bootstrap != nil {
-		if tok := s.bootstrap.issue(); tok != "" {
-			deepURL += "#bootstrap=" + tok
-		}
 	}
 	return deepURL
 }
