@@ -38,6 +38,12 @@ brew install brightman-ai/tap/dw-terminal
 go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
 ```
 
+> **Slow or blocked network?** Set a proxy so module + Go-toolchain downloads succeed
+> (`./build.sh` and `install.sh --from-source` already default to this):
+> ```bash
+> GOPROXY=https://goproxy.cn,direct go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
+> ```
+
 No Go installed but want a source build? The installer can bootstrap the latest stable Go:
 
 ```bash
