@@ -2,9 +2,11 @@ package terminal
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -169,6 +171,96 @@ func TestFilesRaw_TextBinaryAndSize(t *testing.T) {
 	require.NoError(t, err)
 	defer rd.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, rd.StatusCode)
+}
+
+// TC-FS-04b: /files/raw serves raster images inline with an image content-type, honors a
+// larger size cap for them, and gracefully falls back to text for a mislabeled image.
+func TestFilesRaw_Image(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+
+	// Minimal PNG: 8-byte signature + an IHDR chunk header (NUL bytes → sniffs as binary).
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01")
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "shot.png"), png, 0o644))
+	// A ".png" that's actually text → should preview as text, not a broken image.
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "fake.png"), []byte("not really an image"), 0o644))
+	// An image past the TEXT cap but within the IMAGE cap → still served inline.
+	bigImg := make([]byte, rawPreviewMaxBytes+1024)
+	copy(bigImg, png) // keep the NUL-bearing header so it sniffs as binary
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "big.png"), bigImg, 0o644))
+
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "img", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "img")
+
+	// Real PNG → image/png, raw bytes (not a JSON sentinel).
+	rp, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, "shot.png"), "")
+	require.NoError(t, err)
+	defer rp.Body.Close()
+	assert.Equal(t, http.StatusOK, rp.StatusCode)
+	assert.Equal(t, "image/png", rp.Header.Get("Content-Type"))
+	head := make([]byte, 8)
+	n, _ := io.ReadFull(rp.Body, head)
+	assert.Equal(t, "\x89PNG\r\n\x1a\n", string(head[:n]))
+
+	// Mislabeled .png (text) → text/plain, body is the text (graceful fallback).
+	rf, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, "fake.png"), "")
+	require.NoError(t, err)
+	defer rf.Body.Close()
+	assert.True(t, strings.HasPrefix(rf.Header.Get("Content-Type"), "text/plain"))
+	fb := make([]byte, 64)
+	fn, _ := rf.Body.Read(fb)
+	assert.Contains(t, string(fb[:fn]), "not really an image")
+
+	// Image over the text cap but under the image cap → still served as image (not tooLarge).
+	rbig, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, "big.png"), "")
+	require.NoError(t, err)
+	defer rbig.Body.Close()
+	assert.Equal(t, http.StatusOK, rbig.StatusCode)
+	assert.Equal(t, "image/png", rbig.Header.Get("Content-Type"))
+}
+
+// workbenchCWD prefers a valid client cwd (tmux active pane), else a live/static session
+// cwd (non-tmux). This is the SSOT both the files drawer and clipboard upload resolve through.
+func TestWorkbenchCWD_Resolution(t *testing.T) {
+	_, sm, srv := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "wb", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "wb")
+
+	// A valid absolute client cwd is preferred (the active-pane cwd the client sends).
+	other := t.TempDir()
+	got, ok := srv.workbenchCWD(sess.ID, other)
+	assert.True(t, ok)
+	assert.Equal(t, other, got)
+
+	// No client cwd → resolves a real existing dir (live shell cwd on Linux, else session cwd).
+	got2, ok2 := srv.workbenchCWD(sess.ID, "")
+	assert.True(t, ok2)
+	require.NotEmpty(t, got2)
+	info, statErr := os.Stat(got2)
+	require.NoError(t, statErr)
+	assert.True(t, info.IsDir())
+
+	// A non-absolute client cwd is ignored (never used as-is).
+	got3, _ := srv.workbenchCWD(sess.ID, "relative/path")
+	assert.NotEqual(t, "relative/path", got3)
+
+	// Unknown session → not ok.
+	_, ok4 := srv.workbenchCWD("does-not-exist", "")
+	assert.False(t, ok4)
+}
+
+// imageContentType maps known raster extensions and ignores text/non-image ones.
+func TestImageContentType(t *testing.T) {
+	assert.Equal(t, "image/png", imageContentType(".png"))
+	assert.Equal(t, "image/jpeg", imageContentType(".jpg"))
+	assert.Equal(t, "image/jpeg", imageContentType(".jpeg"))
+	assert.Equal(t, "image/webp", imageContentType(".webp"))
+	assert.Equal(t, "", imageContentType(".svg"), "svg is text/XML, not an inline raster image")
+	assert.Equal(t, "", imageContentType(".go"))
+	assert.Equal(t, "", imageContentType(""))
 }
 
 // TC-FS-05: GET /files/recent stats agent-edited files; vanished ones list exists:false.

@@ -8,7 +8,7 @@
  *
  *   GET /files/recent?session=<id>          → { items: RecentFileItem[] }
  *   GET /files/tree?session=<id>&path=<rel> → { cwd, rel, entries: TreeEntry[] }
- *   GET /files/raw?session=<id>&path=<rel>  → text bytes | {binary} | {tooLarge}
+ *   GET /files/raw?session=<id>&path=<rel>  → text bytes | image bytes | {binary} | {tooLarge}
  *
  * Auth: same authed cliFetch (X-CLI-Auth) the rest of the terminal API uses.
  */
@@ -62,12 +62,18 @@ export interface SearchEntry {
  * Result of GET /files/raw. The server returns one of three body shapes; we
  * normalize them into a tagged union so the caller renders the right affordance:
  *   - { kind:'text', text }      — previewable text bytes
+ *   - { kind:'image', url }      — raster image: a blob: object URL for <img> (see below)
  *   - { kind:'binary', size }    — binary file: offer download, no inline preview
- *   - { kind:'tooLarge', size }  — >1MiB: offer download, no inline preview
+ *   - { kind:'tooLarge', size }  — too large: offer download, no inline preview
  *   - { kind:'error' }           — fetch failed / not found / forbidden
+ *
+ * NOTE on images: /files/raw needs the X-CLI-Auth header, so a plain <img src=…> (an
+ * unauthenticated GET) would 401. We instead read the body as a blob and hand back an
+ * object URL. The caller MUST URL.revokeObjectURL(url) when the preview goes away.
  */
 export type RawResult =
   | { kind: 'text'; text: string }
+  | { kind: 'image'; url: string }
   | { kind: 'binary'; size: number }
   | { kind: 'tooLarge'; size: number }
   | { kind: 'error' }
@@ -132,10 +138,9 @@ export async function filesSearch(sessionId: string, cwd: string | undefined, q:
 }
 
 /**
- * GET /files/raw — fetch a file for inline preview. Distinguishes text vs
- * binary/tooLarge by inspecting the response Content-Type: the server streams
- * text/* with the file's content-type, but returns application/json for the
- * {binary}/{tooLarge} metadata sentinels.
+ * GET /files/raw — fetch a file for inline preview. Distinguishes the body shapes by
+ * the response Content-Type: image/* → an image (wrapped in an object URL), text/plain
+ * → text, application/json → the {binary}/{tooLarge} metadata sentinels.
  */
 export async function filesRaw(sessionId: string, relPath: string, cwd?: string): Promise<RawResult> {
   if (!sessionId) return { kind: 'error' }
@@ -146,6 +151,10 @@ export async function filesRaw(sessionId: string, relPath: string, cwd?: string)
     const resp = await cliFetch(cliApi(path))
     if (!resp.ok) return { kind: 'error' }
     const ct = resp.headers.get('Content-Type') || ''
+    if (ct.startsWith('image/')) {
+      // Wrap the authed bytes in an object URL so <img> can render them without re-fetching.
+      return { kind: 'image', url: URL.createObjectURL(await resp.blob()) }
+    }
     if (ct.includes('application/json')) {
       const meta = (await resp.json()) as { binary?: boolean; tooLarge?: boolean; size?: number }
       if (meta.tooLarge) return { kind: 'tooLarge', size: meta.size ?? 0 }

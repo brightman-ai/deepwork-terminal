@@ -90,7 +90,15 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// - Images: {cwd}/tmp/clip/{MM-dd-HH}/{HHmmSSS}-{hash}.{ext}
 	// - Files:  {cwd}/tmp/files/{MM-dd-HH}/{original-name}
 	now := time.Now()
-	cwd := sess.WorkingDir()
+	// Where the upload lands. Prefer the live active-pane cwd the client sends (the same
+	// resolution the files drawer uses) so the file appears where the CLI actually is —
+	// not the session's static launch dir. For a non-tmux terminal (no client cwd),
+	// workbenchCWD probes the shell's live cwd; it only falls back to the launch dir as a
+	// last resort. This is the fix for "图片传飞" (uploads saved under home, not the agent cwd).
+	cwd, _ := s.workbenchCWD(id, r.FormValue("cwd"))
+	if cwd == "" {
+		cwd = sess.WorkingDir()
+	}
 	subDir := "clip"
 	if !isImage {
 		subDir = "files"
