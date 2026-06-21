@@ -15,9 +15,9 @@
  * model here. The pieces it would reuse (PanelPane search, CanvasPane readonly) are
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X, Link2 } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X, Link2, Image as ImageIcon } from 'lucide-vue-next'
 import {
   filesRecent,
   filesTree,
@@ -62,13 +62,17 @@ async function loadRecent(): Promise<void> {
 // ── 格式分类筛选 (recent) ──
 // Group recent files by a small set of human categories so a long mixed list can be
 // filtered to "just the markdown" / "just the code" with one tap (mobile chip row).
+// image:[…] mirrors the backend's imageContentType() (files.go) — the raster types served
+// as image/* and rendered inline. Keep the two lists in step. svg stays under style (it's
+// XML, previewed as text).
 const CAT_EXT: Record<string, string[]> = {
   doc: ['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'org'],
   code: ['go', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'vue', 'py', 'rs', 'rb', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'cc', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'sql', 'proto'],
   config: ['json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'env', 'xml', 'lock', 'dockerfile'],
   style: ['css', 'scss', 'less', 'html', 'svg'],
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif'],
 }
-const CAT_LABEL: Record<string, string> = { all: '全部', doc: '文档', code: '代码', config: '配置', style: '样式', other: '其他' }
+const CAT_LABEL: Record<string, string> = { all: '全部', doc: '文档', code: '代码', config: '配置', style: '样式', image: '图片', other: '其他' }
 function fileExt(name: string): string {
   if (name.toLowerCase() === 'dockerfile') return 'dockerfile'
   const parts = name.split('.')
@@ -79,12 +83,16 @@ function catOf(name: string): string {
   for (const [cat, exts] of Object.entries(CAT_EXT)) if (exts.includes(e)) return cat
   return 'other'
 }
+// isImage reuses the category SSOT (CAT_EXT.image) so the icon/preview never drift from the chips.
+function isImage(name: string): boolean {
+  return catOf(name) === 'image'
+}
 const activeCat = ref('all')
 // Only surface categories that actually have files, in a stable order, each with a count.
 const recentCats = computed(() => {
   const counts: Record<string, number> = {}
   for (const f of recent.value) counts[catOf(f.name)] = (counts[catOf(f.name)] || 0) + 1
-  const order = ['doc', 'code', 'config', 'style', 'other']
+  const order = ['doc', 'code', 'config', 'style', 'image', 'other']
   const cats = [{ key: 'all', label: CAT_LABEL.all, count: recent.value.length }]
   for (const k of order) if (counts[k]) cats.push({ key: k, label: CAT_LABEL[k], count: counts[k] })
   return cats
@@ -217,7 +225,14 @@ interface Preview {
 const preview = ref<Preview | null>(null)
 const previewLoading = ref(false)
 
+// Free a previous image preview's object URL (created in filesRaw) before it's replaced,
+// so blob bytes don't leak for the session's lifetime.
+function revokePreviewUrl(): void {
+  if (preview.value?.result.kind === 'image') URL.revokeObjectURL(preview.value.result.url)
+}
+
 async function previewRel(name: string, absPath: string, rel: string): Promise<void> {
+  revokePreviewUrl()
   previewLoading.value = true
   preview.value = { name, absPath, result: { kind: 'text', text: '' } }
   try {
@@ -240,8 +255,10 @@ async function previewTreeFile(entry: TreeEntry): Promise<void> {
   await previewRel(entry.name, entryAbsPath(entry), entryRelPath(entry))
 }
 function closePreview(): void {
+  revokePreviewUrl()
   preview.value = null
 }
+onUnmounted(revokePreviewUrl)
 
 // ── inject / compose bubbling ──
 function injectPath(path: string): void {
@@ -399,7 +416,8 @@ defineExpose({ loadRecent, loadTree })
           :class="{ 'opacity-50': !f.exists }"
           :data-testid="`fp-recent-${f.name}`"
         >
-          <FileText class="size-4 shrink-0 text-muted-foreground" />
+          <ImageIcon v-if="isImage(f.name)" class="size-4 shrink-0 text-muted-foreground" />
+          <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <button class="min-w-0 flex-1 text-left" type="button" :title="f.path" @click="previewRecent(f)">
             <span class="block text-xs font-medium truncate text-foreground">{{ f.name }}</span>
             <span class="mt-0.5 flex items-center gap-1.5 text-[0.6rem] text-muted-foreground truncate">
@@ -492,6 +510,7 @@ defineExpose({ loadRecent, loadTree })
             :data-testid="`fp-search-${e.rel}`"
           >
             <Folder v-if="e.isDir" class="size-4 shrink-0 text-primary/80" />
+            <ImageIcon v-else-if="isImage(e.name)" class="size-4 shrink-0 text-muted-foreground" />
             <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
             <button
               class="min-w-0 flex-1 text-left"
@@ -527,6 +546,7 @@ defineExpose({ loadRecent, loadTree })
             :data-testid="`fp-tree-${e.name}`"
           >
             <Folder v-if="e.isDir" class="size-4 shrink-0 text-primary/80" />
+            <ImageIcon v-else-if="isImage(e.name)" class="size-4 shrink-0 text-muted-foreground" />
             <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
             <button
               class="min-w-0 flex-1 text-left text-xs truncate"
@@ -552,7 +572,8 @@ defineExpose({ loadRecent, loadTree })
     <Transition name="fp-fade">
       <div v-if="preview" class="fp-preview absolute inset-0 flex flex-col bg-background z-10" data-testid="fp-preview">
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
-          <FileText class="size-4 shrink-0 text-muted-foreground" />
+          <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
+          <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium truncate text-foreground" :title="preview.absPath">{{ preview.name }}</span>
           <!-- 复制内容 (primary — a content preview's copy means "copy what I'm reading") -->
           <button
@@ -585,6 +606,9 @@ defineExpose({ loadRecent, loadTree })
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
           <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" />
+          <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
+            <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
+          </div>
           <div v-else-if="preview.result.kind === 'binary'" class="flex flex-col items-center justify-center gap-2 h-full px-4 text-center">
             <Download class="size-7 text-muted-foreground/60" />
             <p class="text-xs text-muted-foreground">二进制文件，无法预览</p>

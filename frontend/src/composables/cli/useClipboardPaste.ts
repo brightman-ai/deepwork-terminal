@@ -10,6 +10,7 @@
 import { ref } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 
 export interface PasteResult {
@@ -44,6 +45,10 @@ export function useClipboardPaste(sessionId: () => string) {
   const uploading = ref(false)
   const lastError = ref('')
   const { cliFetch } = useCliAuth()
+  // Same per-session tmux store the drawer uses: activeCwd is the LIVE active-pane cwd.
+  // We send it so the upload lands where the CLI actually is, not the session's launch dir.
+  // Empty for a non-tmux terminal (no panes) → the server resolves the shell's live cwd.
+  const tmux = useTmuxState(sessionId)
 
   /**
    * Process a paste event. Returns resolved PasteResult.
@@ -121,6 +126,8 @@ export function useClipboardPaste(sessionId: () => string) {
       const formData = new FormData()
       formData.append('file', blob, uploadName)
       formData.append('mime', mime)
+      const cwd = tmux.activeCwd.value
+      if (cwd) formData.append('cwd', cwd)
 
       const resp = await cliFetch(cliApi(`/sessions/${sessionId()}/paste-upload`), {
         method: 'POST',

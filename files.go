@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -17,6 +18,11 @@ import (
 // files return {tooLarge:true,size} metadata instead — the drawer's preview is for
 // glancing at agent产物 (md/code), not downloading blobs.
 const rawPreviewMaxBytes = 1 << 20 // 1 MiB
+
+// imagePreviewMaxBytes caps how large an image /files/raw streams inline. Images get a
+// larger budget than text (rawPreviewMaxBytes) because screenshots routinely exceed
+// 1 MiB; past this they return {tooLarge} like any other oversized file.
+const imagePreviewMaxBytes = 10 << 20 // 10 MiB
 
 // binarySniffBytes is how many leading bytes we inspect for a NUL byte when
 // deciding text-vs-binary.
@@ -279,11 +285,13 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 
 // handleFilesRaw handles GET /files/raw?session=<id>&path=<rel>.
 //
-// Same path safety as /files/tree. A directory → 400. A file >1MiB →
-// {tooLarge:true,size} (200). A binary file (NUL byte in the first 8KiB, or a
-// non-text content-type) → {binary:true,size} (200). Otherwise the text bytes are
-// streamed with a Content-Type derived from the extension and a no-cache header (the
-// file on disk is mutable — agents may rewrite it between previews).
+// Same path safety as /files/tree. A directory → 400. An oversized file →
+// {tooLarge:true,size} (200) (1MiB for text, 10MiB for images). A raster image with a
+// known extension is streamed with its image/* Content-Type so the client renders it
+// inline (<img>). Any other binary (NUL byte in the first 8KiB, or a non-text
+// content-type) → {binary:true,size} (200). Otherwise the text bytes are streamed as
+// text/plain with a no-cache header (the file on disk is mutable — agents may rewrite
+// it between previews).
 func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
@@ -306,7 +314,14 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "is a directory"})
 		return
 	}
-	if info.Size() > rawPreviewMaxBytes {
+	imgCT := imageContentType(strings.ToLower(filepath.Ext(target)))
+
+	// Images get a larger inline budget than text (screenshots often exceed 1 MiB).
+	sizeCap := int64(rawPreviewMaxBytes)
+	if imgCT != "" {
+		sizeCap = imagePreviewMaxBytes
+	}
+	if info.Size() > sizeCap {
 		writeJSON(w, http.StatusOK, map[string]any{"tooLarge": true, "size": info.Size()})
 		return
 	}
@@ -325,6 +340,19 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		n = 0
 	}
 	head = head[:n]
+
+	// A known image extension whose bytes really are binary → stream it with its image
+	// content-type so the client renders <img>. A ".png" that's actually text (not binary)
+	// falls through to the text path, so a mislabeled file still previews gracefully.
+	if imgCT != "" && isBinaryContent(head) {
+		w.Header().Set("Content-Type", imgCT)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(head)
+		_, _ = io.Copy(w, f) // stream the remainder past the sniffed head
+		return
+	}
 
 	if isBinaryContent(head) {
 		writeJSON(w, http.StatusOK, map[string]any{"binary": true, "size": info.Size()})
@@ -402,7 +430,37 @@ func (s *Server) workbenchCWD(sessionID, cwdParam string) (string, bool) {
 			return cwdParam, true
 		}
 	}
-	return s.sessionCWD(sessionID)
+	// No usable client cwd. For tmux the client always sends the active pane's cwd
+	// (pane_current_path); a non-tmux terminal has no such signal, so resolve the shell's
+	// LIVE cwd from /proc — uploads + browsing then follow `cd` instead of the static launch
+	// dir. Falls back to the session's creation cwd off-Linux or when the link can't be read.
+	if sess, err := s.mgr.Get(sessionID); err == nil {
+		if live := liveShellCWD(sess); live != "" {
+			return live, true
+		}
+		return sess.CWD, true
+	}
+	return "", false
+}
+
+// liveShellCWD returns the current working directory of the session's shell process via
+// /proc/<pid>/cwd (Linux/WSL). Returns "" off-Linux, on error, or if the target isn't a
+// directory, so callers fall back to the static session cwd. NOTE: for a tmux session this
+// is tmux's own cwd, not the active pane's — callers must prefer the client-supplied pane
+// cwd first (workbenchCWD does).
+func liveShellCWD(sess *Session) string {
+	pid := sess.ShellPID()
+	if pid <= 0 {
+		return ""
+	}
+	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return ""
+	}
+	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
 }
 
 // safeResolve joins a client-supplied relative path onto the session cwd and proves
@@ -518,4 +576,30 @@ func isBinaryContent(head []byte) bool {
 		}
 	}
 	return float64(ctrl)/float64(len(head)) > 0.3
+}
+
+// imageContentType maps a lowercased file extension (with dot) to its image MIME type,
+// or "" if it isn't a raster image the drawer previews inline. SVG is intentionally
+// absent: it's XML (served + rendered as text), and an <img>-loaded SVG can smuggle
+// markup. This is the backend SSOT for "served as an image"; the frontend groups files
+// into the 图片 category by the matching extension list in FilesPanel.vue.
+func imageContentType(ext string) string {
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".ico":
+		return "image/x-icon"
+	case ".avif":
+		return "image/avif"
+	default:
+		return ""
+	}
 }
