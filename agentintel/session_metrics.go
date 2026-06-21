@@ -1,7 +1,9 @@
 package agentintel
 
 import (
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brightman-ai/kit/pricing"
@@ -124,7 +126,9 @@ func SessionMetricsForCWD(pl *ProjectLocator, cwd, sessionID, title string, acti
 	if path == "" {
 		return sm
 	}
-	return parseTranscript(path, sessionID, title, active)
+	// Incremental cache: first open parses the file, later opens ingest only newly-appended
+	// rows, so re-opening the overview as the session grows is O(new bytes), not O(file).
+	return overviewMetricsCache.metricsFor(path, sessionID, title, active, time.Now())
 }
 
 // newestClaudeTranscript returns the most-recently-modified .jsonl for cwd, or "" if
@@ -188,111 +192,205 @@ func SessionSummaryForPath(path, tool string) SessionSummary {
 //     tool result back — it stays inside the current turn, it does NOT open one;
 //   - "assistant" rows accumulate into the open turn (usage summed, tool_use counted,
 //     first/last assistant ts tracked).
-func parseTranscript(path, sessionID, title string, active bool) SessionMetrics {
-	var turns []TurnMetrics
-	var cur *turnAccum
-	turnNo := 0
+// transcriptAccum is the incremental parse state for ONE transcript: the per-turn walk
+// (finalized turns + the in-progress cur), aggregate counters, and a persistent reader whose
+// offset advances across calls. update() ingests only NEW rows; snapshot() renders metrics
+// non-destructively (the in-progress turn shows but is NOT finalized, so the next update keeps
+// appending to it). One-shot parseTranscript and the cached overview path share this code.
+type transcriptAccum struct {
+	mu     sync.Mutex
+	reader *JSONLReader
 
-	var earliestTs, latestTs time.Time
-	var modelID string
-	toolErrors := 0
-	sawToolResult := false
-	cost := &costState{seenMsgIDs: map[string]bool{}}
+	turns      []TurnMetrics
+	cur        *turnAccum
+	turnNo     int
+	earliestTs time.Time
+	latestTs   time.Time
+	modelID    string
+	toolErrors int
+	sawToolRes bool
+	cost       *costState
 
-	flush := func() {
-		if cur == nil {
-			return
+	lastAccess time.Time
+}
+
+func newTranscriptAccum(path string) *transcriptAccum {
+	return &transcriptAccum{reader: NewJSONLReader(path), cost: &costState{seenMsgIDs: map[string]bool{}}}
+}
+
+func (a *transcriptAccum) flush() {
+	if a.cur == nil {
+		return
+	}
+	a.turnNo++
+	a.turns = append(a.turns, finalizeTurn(a.turnNo, a.cur))
+	a.cur = nil
+}
+
+// ingest folds ONE row into the running state (the SSOT turn-delimitation walk).
+func (a *transcriptAccum) ingest(row map[string]any) bool {
+	rowType, _ := row["type"].(string)
+	ts := parseTime(row)
+	if !ts.IsZero() {
+		if a.earliestTs.IsZero() || ts.Before(a.earliestTs) {
+			a.earliestTs = ts
 		}
-		turnNo++
-		turns = append(turns, finalizeTurn(turnNo, cur))
-		cur = nil
+		if ts.After(a.latestTs) {
+			a.latestTs = ts
+		}
 	}
 
-	reader := NewJSONLReader(path)
-	_ = reader.ReadNewFunc(func(row map[string]any) bool {
-		rowType, _ := row["type"].(string)
-		ts := parseTime(row)
+	msg, _ := row["message"].(map[string]any)
+
+	switch rowType {
+	case "user":
+		text, isToolResultOnly, errs := inspectUserContent(msg)
+		if errs > 0 {
+			a.toolErrors += errs
+			a.sawToolRes = true
+		}
+		// A pure tool_result echo belongs to the current turn.
+		if isToolResultOnly {
+			if a.cur != nil {
+				a.sawToolRes = true
+			}
+			return true
+		}
+		// Real user prompt → start a fresh turn.
+		a.flush()
+		a.cur = &turnAccum{
+			userInput:  truncate(text, userInputMax),
+			userTs:     ts,
+			seenMsgIDs: map[string]bool{},
+		}
+
+	case "assistant":
+		if a.cur == nil {
+			// Assistant activity before any user prompt (rare: system seed). Open an
+			// anonymous turn so its tokens/tools aren't lost.
+			a.cur = &turnAccum{userTs: ts, seenMsgIDs: map[string]bool{}}
+		}
 		if !ts.IsZero() {
-			if earliestTs.IsZero() || ts.Before(earliestTs) {
-				earliestTs = ts
+			if a.cur.firstAssistTs.IsZero() || ts.Before(a.cur.firstAssistTs) {
+				a.cur.firstAssistTs = ts
 			}
-			if ts.After(latestTs) {
-				latestTs = ts
+			if ts.After(a.cur.lastAssistTs) {
+				a.cur.lastAssistTs = ts
 			}
+			a.cur.hasAssist = true
 		}
-
-		msg, _ := row["message"].(map[string]any)
-
-		switch rowType {
-		case "user":
-			text, isToolResultOnly, errs := inspectUserContent(msg)
-			if errs > 0 {
-				toolErrors += errs
-				sawToolResult = true
-			}
-			// A pure tool_result echo belongs to the current turn.
-			if isToolResultOnly {
-				if cur != nil {
-					// any tool_result presence means is_error info is derivable
-					sawToolResult = true
-				}
-				return true
-			}
-			// Real user prompt → start a fresh turn.
-			flush()
-			cur = &turnAccum{
-				userInput:  truncate(text, userInputMax),
-				userTs:     ts,
-				seenMsgIDs: map[string]bool{},
-			}
-
-		case "assistant":
-			if cur == nil {
-				// Assistant activity before any user prompt (rare: system seed). Open an
-				// anonymous turn so its tokens/tools aren't lost.
-				cur = &turnAccum{userTs: ts, seenMsgIDs: map[string]bool{}}
-			}
-			if !ts.IsZero() {
-				if cur.firstAssistTs.IsZero() || ts.Before(cur.firstAssistTs) {
-					cur.firstAssistTs = ts
-				}
-				if ts.After(cur.lastAssistTs) {
-					cur.lastAssistTs = ts
-				}
-				cur.hasAssist = true
-			}
-			if msg == nil {
-				return true
-			}
-			if m, ok := msg["model"].(string); ok && m != "" {
-				modelID = m
-			}
-			accumulateAssistant(cur, msg, cost)
+		if msg == nil {
+			return true
 		}
-		return true
-	})
-	flush()
+		if m, ok := msg["model"].(string); ok && m != "" {
+			a.modelID = m
+		}
+		accumulateAssistant(a.cur, msg, a.cost)
+	}
+	return true
+}
 
+// update ingests rows appended since the last call (O(new bytes)). A truncated/replaced file
+// (size < the reader offset) resets the accumulator so we never double-count or serve stale.
+func (a *transcriptAccum) update() {
+	if info, err := os.Stat(a.reader.path); err == nil && info.Size() < a.reader.offset {
+		a.reset()
+	}
+	_ = a.reader.ReadNewFunc(a.ingest)
+}
+
+func (a *transcriptAccum) reset() {
+	a.reader.offset = 0
+	a.turns = nil
+	a.cur = nil
+	a.turnNo = 0
+	a.earliestTs = time.Time{}
+	a.latestTs = time.Time{}
+	a.modelID = ""
+	a.toolErrors = 0
+	a.sawToolRes = false
+	a.cost = &costState{seenMsgIDs: map[string]bool{}}
+}
+
+// snapshot renders metrics for the rows ingested so far WITHOUT consuming the in-progress
+// turn. The active turn shows provisionally (same number flush would assign); cost is walk-
+// level (accumulated per assistant message) so it already includes the in-progress turn.
+func (a *transcriptAccum) snapshot(sessionID, title string, active bool) SessionMetrics {
+	turns := a.turns
+	if a.cur != nil {
+		// Full slice expression forces copy-on-append so a.turns' backing array is untouched.
+		turns = append(a.turns[:len(a.turns):len(a.turns)], finalizeTurn(a.turnNo+1, a.cur))
+	}
 	if turns == nil {
 		turns = []TurnMetrics{}
 	}
-
 	detail := SessionDetail{
 		ID:        sessionID,
 		Title:     title,
 		Active:    active,
 		TurnCount: len(turns),
-		ModelID:   modelID,
-		CreatedAt: rfc3339OrEmpty(earliestTs),
-		UpdatedAt: rfc3339OrEmpty(latestTs),
+		ModelID:   a.modelID,
+		CreatedAt: rfc3339OrEmpty(a.earliestTs),
+		UpdatedAt: rfc3339OrEmpty(a.latestTs),
 		EndedAt:   nil,
 	}
-	summary := aggregate(turns, earliestTs, sawToolResult, toolErrors)
-	// Set cost (Σ per-message tiered, accumulated during the walk) + the model's
-	// reference unit price. Unknown model → no priced message → total_cost nil + price
-	// nil (honest, never a fabricated 0).
-	price := enrichPricing(modelID, cost, &summary)
+	summary := aggregate(turns, a.earliestTs, a.sawToolRes, a.toolErrors)
+	// Cost (Σ per-message tiered, accumulated during the walk) + the model's reference unit
+	// price. Unknown model → no priced message → total_cost nil (honest, never a fabricated 0).
+	price := enrichPricing(a.modelID, a.cost, &summary)
 	return SessionMetrics{Detail: detail, Summary: summary, Turns: turns, Price: price}
+}
+
+func parseTranscript(path, sessionID, title string, active bool) SessionMetrics {
+	a := newTranscriptAccum(path)
+	a.update()
+	return a.snapshot(sessionID, title, active)
+}
+
+// maxMetricsAccums bounds the overview metrics cache (one accum per active transcript). LRU
+// by last access — a few concurrently-watched sessions, not the whole history.
+const maxMetricsAccums = 8
+
+type metricsCache struct {
+	mu sync.Mutex
+	m  map[string]*transcriptAccum
+}
+
+var overviewMetricsCache = &metricsCache{m: make(map[string]*transcriptAccum)}
+
+// metricsFor returns incrementally-updated metrics for a transcript path: the first call
+// parses the file, later calls ingest only newly-appended rows, so re-opening the overview
+// while a session grows is O(new bytes), not O(file). Truncation/rotation is handled in update.
+func (c *metricsCache) metricsFor(path, sessionID, title string, active bool, now time.Time) SessionMetrics {
+	c.mu.Lock()
+	a := c.m[path]
+	if a == nil {
+		if len(c.m) >= maxMetricsAccums {
+			c.evictOldestLocked()
+		}
+		a = newTranscriptAccum(path)
+		c.m[path] = a
+	}
+	a.lastAccess = now
+	c.mu.Unlock()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.update()
+	return a.snapshot(sessionID, title, active)
+}
+
+func (c *metricsCache) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	for k, a := range c.m {
+		if oldestKey == "" || a.lastAccess.Before(oldest) {
+			oldestKey, oldest = k, a.lastAccess
+		}
+	}
+	if oldestKey != "" {
+		delete(c.m, oldestKey)
+	}
 }
 
 // accumulateAssistant folds one assistant message into the open turn: usage tokens
