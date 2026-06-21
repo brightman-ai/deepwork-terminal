@@ -226,6 +226,26 @@ func NewWeComProvider(now func() time.Time) Provider {
 	}, now)
 }
 
+// ── Slack incoming webhook ─────────────────────────────────────────────────────
+// Plain {"text":...} message. The webhook URL itself is the credential — no signing,
+// the Secret field is unused (same model as WeCom). Slack renders **mrkdwn**, not
+// standard markdown: links are <url|text> and bold is *text*, so we build the link
+// natively instead of reusing markdownBody (which emits [text](url) Slack shows raw).
+// Success is HTTP 200 + the plain-text body "ok" (not JSON); classifyWebhook handles
+// that — an unparseable body leaves all code pointers nil → OutcomeSent.
+
+func NewSlackProvider(now func() time.Time) Provider {
+	return newWebhook("slack", "Slack", func(ws WebhookSettings, e Event, t time.Time) (string, []byte) {
+		text := "*" + e.Title + "*\n" + PlainText(e) // title isn't in PlainText; bold it (mrkdwn)
+		if e.DeepURL != "" {
+			text += "\n<" + e.DeepURL + "|打开 Deepwork>" // mrkdwn link, NOT [text](url)
+		}
+		payload := map[string]any{"text": text}
+		body, _ := json.Marshal(payload)
+		return ws.URL, body // URL is the secret; no signing
+	}, now)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func appendQuery(u, k, v string) string {

@@ -55,13 +55,34 @@ function toggleForm(p: NotifyProvider): void {
   }
 }
 
+/** A signing secret is configured iff the redacted settings carry a (masked) secret. */
+function hasSecret(p: NotifyProvider): boolean {
+  return !!p.settings?.secret
+}
+
 async function onSaveSettings(p: NotifyProvider): Promise<void> {
   if (busySettings[p.kind]) return
   busySettings[p.kind] = true
   formSaved[p.kind] = false
   try {
-    const ok = await notify.setSettings(p.kind, formUrl[p.kind] || '', formSecret[p.kind] || '')
+    // Blank secret = leave the existing one untouched (omit it), so editing only the
+    // URL never wipes signing. To remove signing, use 清除签名 (sends an explicit '').
+    const typed = formSecret[p.kind]
+    const ok = await notify.setSettings(p.kind, formUrl[p.kind] || '', typed ? typed : undefined)
     if (ok) { formSaved[p.kind] = true; formSecret[p.kind] = ''; formOpen[p.kind] = false }
+  } finally {
+    busySettings[p.kind] = false
+  }
+}
+
+/** Explicitly clear the signing secret (signing off) — distinct from "leave blank". */
+async function onClearSecret(p: NotifyProvider): Promise<void> {
+  if (busySettings[p.kind]) return
+  busySettings[p.kind] = true
+  try {
+    if (await notify.setSettings(p.kind, formUrl[p.kind] || p.settings?.url || '', '')) {
+      formSecret[p.kind] = ''
+    }
   } finally {
     busySettings[p.kind] = false
   }
@@ -119,13 +140,20 @@ async function onSaveSettings(p: NotifyProvider): Promise<void> {
             />
           </label>
           <label class="nsec-field">
-            <span class="nsec-field-lbl">Secret（加签，可选）</span>
+            <span class="nsec-field-lbl">
+              Secret（加签，可选）
+              <span class="nsec-sign-state" :data-testid="`notify-sign-state-${p.kind}`">
+                · {{ hasSecret(p) ? '已加签' : '未加签' }}
+              </span>
+            </span>
             <input
               v-model="formSecret[p.kind]"
               class="nsec-input mono"
               type="password"
-              placeholder="留空表示不修改 / 不加签"
+              :placeholder="hasSecret(p) ? '留空＝保持现有密钥' : '可选：填入以启用加签'"
               autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
               spellcheck="false"
               :data-testid="`notify-secret-${p.kind}`"
             />
@@ -138,9 +166,17 @@ async function onSaveSettings(p: NotifyProvider): Promise<void> {
               :data-testid="`notify-save-${p.kind}`"
               @click="onSaveSettings(p)"
             >{{ busySettings[p.kind] ? '保存中…' : '保存' }}</button>
+            <button
+              v-if="hasSecret(p)"
+              class="nsec-btn nsec-btn--ghost"
+              type="button"
+              :disabled="busySettings[p.kind]"
+              :data-testid="`notify-clear-secret-${p.kind}`"
+              @click="onClearSecret(p)"
+            >清除签名</button>
             <span v-if="formSaved[p.kind]" class="nsec-saved">已保存</span>
           </div>
-          <p class="nsec-field-hint">URL/Secret 加密存储；展示时已脱敏，Secret 不回显。</p>
+          <p class="nsec-field-hint">URL/Secret 加密存储、展示已脱敏、Secret 不回显。留空保存不改动原密钥；「清除签名」关闭加签。</p>
         </div>
       </div>
     </div>
@@ -198,6 +234,7 @@ async function onSaveSettings(p: NotifyProvider): Promise<void> {
 }
 .nsec-field { display: flex; flex-direction: column; gap: 3px; }
 .nsec-field-lbl { font-size: 10px; color: hsl(var(--muted-foreground)); text-transform: uppercase; letter-spacing: 0.05em; }
+.nsec-sign-state { text-transform: none; letter-spacing: 0; opacity: 0.85; }
 .nsec-input {
   width: 100%;
   padding: 6px 8px;

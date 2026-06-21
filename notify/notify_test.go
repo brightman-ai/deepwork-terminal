@@ -3,6 +3,9 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -176,5 +179,65 @@ func TestClassifyWebhook(t *testing.T) {
 		if got := classifyWebhook(c.status, []byte(c.body)); got != c.want {
 			t.Errorf("classifyWebhook(%d,%q) = %v, want %v", c.status, c.body, got, c.want)
 		}
+	}
+}
+
+// Offline 加签 oracle: feishuSign/dingtalkSign must match an HMAC-SHA256 computed by
+// an INDEPENDENT implementation (Python, per each vendor's官方算法) for fixed vectors.
+// This catches any drift in the signing math (key vs data, seconds vs millis, the
+// "\n" join) WITHOUT a live bot — the cheapest signature-correctness check. WeCom and
+// Slack are intentionally absent: neither signs (the webhook URL is the credential).
+func TestWebhookSigningVectors(t *testing.T) {
+	// Feishu: base64(HMAC-SHA256(key = "<ts_sec>\n<secret>", data = "")), ts in SECONDS.
+	if got := feishuSign("1700000000", "feishu-secret"); got != "OrBzY1Y01Gq+HgJsl+7OfWcMVwc7YocohQm5iiZwjhU=" {
+		t.Fatalf("feishuSign vector mismatch (algo drift?): got %s", got)
+	}
+	// DingTalk: base64(HMAC-SHA256(key = secret, data = "<ts_ms>\n<secret>")), ts in MILLIS.
+	if got := dingtalkSign("1700000000000", "ding-secret"); got != "nqq88ibHb0KGsDlurqi82ts6x3l4frnYUqJn0JfHX9o=" {
+		t.Fatalf("dingtalkSign vector mismatch (algo drift?): got %s", got)
+	}
+}
+
+// Slack speaks mrkdwn, not standard markdown: the deep link must render as
+// <url|text> (NOT [text](url)), the payload is {"text":...}, the webhook URL is the
+// only credential (no signing query), and a plain-text "ok" body (not JSON) is a
+// success. Captures a real POST to assert all four differences from the other IMs.
+func TestSlackProviderPayload(t *testing.T) {
+	var gotBody []byte
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok")) // Slack returns plain text, not JSON
+	}))
+	defer srv.Close()
+
+	p := NewSlackProvider(fixedNow)
+	cfg := ProviderConfig{Kind: "slack", Enabled: true}
+	cfg.Settings, _ = json.Marshal(WebhookSettings{URL: srv.URL, Secret: "ignored"})
+	e := Event{Title: "agent 等待", Kind: KindWaiting, Counts: Counts{Waiting: 1}, DeepURL: "https://x.example/?session=foo"}
+
+	out, _ := p.Send(context.Background(), e, cfg)
+	if out != OutcomeSent {
+		t.Fatalf(`plain "ok" body should be OutcomeSent, got %v`, out)
+	}
+	if gotQuery != "" {
+		t.Fatalf("slack must not append a signing query, got %q", gotQuery)
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf(`body is not {"text":...}: %s`, gotBody)
+	}
+	if !strings.Contains(payload.Text, "<https://x.example/?session=foo|打开 Deepwork>") {
+		t.Fatalf("deep link must be mrkdwn <url|text>:\n%s", payload.Text)
+	}
+	if strings.Contains(payload.Text, "](") {
+		t.Fatalf("must NOT use standard markdown [text](url):\n%s", payload.Text)
+	}
+	if !strings.Contains(payload.Text, "agent 等待") {
+		t.Fatalf("title missing from text:\n%s", payload.Text)
 	}
 }
