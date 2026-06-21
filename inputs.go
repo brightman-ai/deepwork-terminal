@@ -15,6 +15,15 @@ import (
 // archive, so a couple hundred is plenty and keeps the JSONL scan cheap.
 const inputsCap = 200
 
+// inputsTailBytes bounds the tail window parsed per Claude transcript (recent prompts live
+// at the end, so the last few MB hold the newest ones without parsing a 30MB+ file from the
+// start). inputsScanMaxFiles bounds how many transcripts/rollouts the cross-project scan
+// inspects (lists are mtime newest-first; the early-stop usually trips first anyway).
+const (
+	inputsTailBytes    = 4 << 20 // 4 MiB
+	inputsScanMaxFiles = 60
+)
+
 // inputItem is one HUMAN prompt extracted from a claude/codex transcript. Only
 // prompts the user actually typed are surfaced — assistant turns, tool results,
 // synthetic command echoes and meta/sidechain rows are all excluded upstream.
@@ -77,9 +86,15 @@ func dedupeInputs(in []inputItem) []inputItem {
 // transcripts are newest-first, so the first files yield the freshest prompts.
 func collectClaudeInputs(pl *agentintel.ProjectLocator) []inputItem {
 	var out []inputItem
-	for _, path := range pl.ClaudeAllSessionFiles() {
+	files := pl.ClaudeAllSessionFiles()
+	if len(files) > inputsScanMaxFiles {
+		files = files[:inputsScanMaxFiles]
+	}
+	for _, path := range files {
 		reader := agentintel.NewJSONLReader(path)
-		_ = reader.ReadNewFunc(func(row map[string]any) bool {
+		// Tail-read: recent prompts live at the end; this bounds each parse to the last few
+		// MB instead of the whole transcript. Claude rows are self-contained (no head needed).
+		_ = reader.ReadTailFunc(inputsTailBytes, func(row map[string]any) bool {
 			it, ok := claudeRowToInput(row)
 			if ok {
 				out = append(out, it)
@@ -174,7 +189,13 @@ func extractClaudeText(content any) string {
 // The session's cwd comes from the rollout's session_meta header.
 func collectCodexInputs(pl *agentintel.ProjectLocator) []inputItem {
 	var out []inputItem
-	for _, path := range pl.CodexSessionFiles() {
+	files := pl.CodexSessionFiles()
+	if len(files) > inputsScanMaxFiles {
+		files = files[:inputsScanMaxFiles]
+	}
+	// Codex rollouts need the head (session_meta carries cwd), so tail-read doesn't apply;
+	// the early-stop + file-count bound keep this from walking the whole rollout history.
+	for _, path := range files {
 		reader := agentintel.NewJSONLReader(path)
 		cwd := ""
 		sessionID := ""
