@@ -12,12 +12,12 @@ deepwork-terminal moves that terminal — the agent's status, its output files, 
 
 Four details that actually change the experience:
 
-1. **Remote screenshot paste** — `Ctrl/Cmd+V` a screenshot on your PC; it lands in the agent's current working directory and the relative path is injected straight into the command line. Mobile file/photo upload works too.
+1. **Remote screenshot paste** — `Ctrl/Cmd+V` a screenshot on your PC; it lands in the agent's current working directory and the relative path is injected straight into the command line. Mobile file/photo upload works too — and since the input box is just a normal field, multi-line text and your phone's **voice input** go straight to the agent.
 2. **Watch agents from your phone** — install as a PWA for Web Push and tap to deep-link back to the exact session; WeChat (iLink official channel) as a backup; an agent status strip up top; a keyboard-aware viewport that never covers your input.
-3. **tmux quick-keyboard bar** — one row of buttons for copy / split / switch pane / new session, with your live tmux prefix shown — no shortcuts to memorize.
+3. **tmux quick-keyboard bar** — one row of buttons for copy / split / switch pane / new session, with your live tmux prefix shown — no shortcuts to memorize. No tmux? You can still run multiple terminals, just without pane splits.
 4. **Cross-session continuity** — a global upload index, input-history reuse, and a file drawer (image/text preview + fuzzy search) that follow you across sessions.
 
-Honest limits: web-first, no native app yet; early-stage project; iOS Web Push has platform caveats. See Screenshots below.
+**Who it's for**: people who run agents heavily and step away from the desk often. **Not for**: someone who only codes in one window on one machine and never goes remote — you don't need this.
 
 ## Features
 
@@ -184,6 +184,14 @@ To get each webhook URL:
 3. App → paste **URL** (leave Secret blank) → **保存** → enable → **测试**.
    - Success returns `ok`; a malformed request returns `invalid_payload`. The server must be able to reach `hooks.slack.com` (may need a proxy in some regions).
 
+## Limitations (honest)
+
+A project that only sells itself isn't worth trusting — a few boundaries up front:
+
+- **No native app** — it's web-first (PWA), not an App Store application; iOS Web Push has platform caveats.
+- **Early-stage** — few stars yet; ecosystem, docs, and community are all early.
+- **Local-only** — it's a remote control for the machine the agent runs on, not a cloud agent-scheduler. You can still reach it over HTTPS from anywhere via the built-in Cloudflare Tunnel.
+
 ## Quick Start (as a library)
 
 ```bash
@@ -250,6 +258,10 @@ Or manually:
 ```bash
 go build -o dw-terminal ./cmd/dw-terminal/
 ```
+
+## Contributing
+
+Open source under MIT. If you run Claude Code / Codex heavily and often work away from your desk, give it a try — a ⭐ or an issue is always welcome.
 
 ## License
 
