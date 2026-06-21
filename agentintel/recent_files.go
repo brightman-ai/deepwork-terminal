@@ -11,6 +11,16 @@ import (
 // the JSONL scan cheap.
 const RecentFilesCap = 30
 
+// recentScanTailBytes bounds how much of each transcript's TAIL we parse. Recent edits
+// live near the end, so reading the last few MB finds the newest RecentFilesCap files
+// without parsing a multi-MB (sometimes 30MB+) transcript from the start — the cause of
+// the slow first load. recentScanMaxFiles bounds the cross-project fallback / Codex scans
+// (file lists are mtime-sorted newest-first, so the recent slice carries recent edits).
+const (
+	recentScanTailBytes = 4 << 20 // 4 MiB per transcript
+	recentScanMaxFiles  = 40
+)
+
 // editToolNames is the SSOT signal for "claude/codex 生成或修改的文件": tool_use
 // blocks whose name is a structured file-edit tool carrying input.file_path. Bash
 // is excluded on purpose (input.command 非结构化路径，易误判), per CHG-016 D2.
@@ -93,9 +103,15 @@ func scanClaudeEditRows(pl *ProjectLocator, projectCWD string) []RecentFile {
 		return out
 	}
 
-	// Fallback: scan everything, filter by row cwd matching the project.
+	// Fallback: scan recent transcripts, filter by row cwd matching the project. Bounded to
+	// the newest recentScanMaxFiles (the list is mtime-sorted) so this never walks the whole
+	// history (1000+ transcripts) just because a cwd didn't map to an encoded project dir.
 	want := canonicalCWD(projectCWD)
-	for _, path := range pl.ClaudeAllSessionFiles() {
+	all := pl.ClaudeAllSessionFiles()
+	if len(all) > recentScanMaxFiles {
+		all = all[:recentScanMaxFiles]
+	}
+	for _, path := range all {
 		out = append(out, claudeEditRowsFromFile(path, want)...)
 	}
 	return out
@@ -108,7 +124,10 @@ func scanClaudeEditRows(pl *ProjectLocator, projectCWD string) []RecentFile {
 func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 	var out []RecentFile
 	reader := NewJSONLReader(path)
-	_ = reader.ReadNewFunc(func(row map[string]any) bool {
+	// Tail-read: recent edits are near the end; this bounds the parse to the last few MB
+	// instead of the whole (possibly 30MB+) transcript. Claude rows are self-contained
+	// (each carries its own cwd + timestamp), so a tail window needs no file header.
+	_ = reader.ReadTailFunc(recentScanTailBytes, func(row map[string]any) bool {
 		if wantCWD != "" {
 			cwd, _ := row["cwd"].(string)
 			if canonicalCWD(cwd) != wantCWD {
@@ -165,7 +184,14 @@ func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 func scanCodexEditRows(pl *ProjectLocator, projectCWD string) []RecentFile {
 	var out []RecentFile
 	want := canonicalCWD(projectCWD)
-	for _, path := range pl.CodexSessionFiles() {
+	// Codex rollouts are global (not per-project); we must read each file's head
+	// (session_meta carries cwd) so tail-read doesn't apply, but bound the count to the
+	// newest recentScanMaxFiles so this isn't an unbounded all-history scan.
+	files := pl.CodexSessionFiles()
+	if len(files) > recentScanMaxFiles {
+		files = files[:recentScanMaxFiles]
+	}
+	for _, path := range files {
 		reader := NewJSONLReader(path)
 		cwd := ""
 		_ = reader.ReadNewFunc(func(row map[string]any) bool {
