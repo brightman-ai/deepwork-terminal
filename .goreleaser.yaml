@@ -59,11 +59,12 @@ release:
   draft: false
   prerelease: auto
 
-# Homebrew: pushes a formula to github.com/brightman-ai/homebrew-tap on release.
-# brew installs strip the macOS quarantine attribute, so `brew install` works even
-# before notarization. Requires repo secret HOMEBREW_TAP_GITHUB_TOKEN (a PAT with
-# write access to the tap repo). Create the empty tap repo once before first release.
-brews:
+# Homebrew Cask: pushes a cask to github.com/brightman-ai/homebrew-tap on release.
+# (goreleaser deprecated `brews`/formulae for prebuilt binaries in favour of casks.)
+# Cask installs strip the macOS quarantine attribute, so `brew install` works even
+# before notarization. macOS-only — Linux users use curl|sh or `go install`.
+# Requires repo secret HOMEBREW_TAP_GITHUB_TOKEN (a PAT with write access to the tap repo).
+homebrew_casks:
   - name: dw-terminal
     repository:
       owner: brightman-ai
@@ -71,8 +72,3 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/brightman-ai/deepwork-terminal"
     description: "Standalone web terminal with auth, Cloudflare tunnel, and an embedded Vue frontend"
-    license: "MIT"
-    install: |
-      bin.install "dw-terminal"
-    test: |
-      system "#{bin}/dw-terminal", "--version"
