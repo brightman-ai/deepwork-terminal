@@ -17,8 +17,9 @@ const RecentFilesCap = 30
 // the slow first load. recentScanMaxFiles bounds the cross-project fallback / Codex scans
 // (file lists are mtime-sorted newest-first, so the recent slice carries recent edits).
 const (
-	recentScanTailBytes = 4 << 20 // 4 MiB per transcript
-	recentScanMaxFiles  = 40
+	recentScanTailBytes = 4 << 20 // 4 MiB — tail window per transcript
+	recentTranscriptN   = 3       // newest transcripts parsed per tool (covers /clear)
+	codexProbeCap       = 40      // max Codex rollout heads probed when matching cwd
 )
 
 // editToolNames is the SSOT signal for "claude/codex 生成或修改的文件": tool_use
@@ -57,9 +58,50 @@ type RecentFile struct {
 // A missing transcript store, a malformed line, or an unreadable file never fails —
 // it just yields fewer (or zero) files. Empty is a valid answer.
 func RecentEditedFiles(pl *ProjectLocator, projectCWD string) []RecentFile {
-	rows := scanClaudeEditRows(pl, projectCWD)
-	rows = append(rows, scanCodexEditRows(pl, projectCWD)...)
+	// Parse only the project's recentTranscriptN newest transcripts (Claude + Codex) for this
+	// cwd, tail-read. NOT every project transcript or every Codex rollout (the old all-files
+	// scan was the multi-second first load). N>1 keeps recent files visible across `/clear`,
+	// since the cleared session's prior transcript is still among the newest N.
+	var rows []RecentFile
+	if files, err := pl.ClaudeSessionFiles(projectCWD); err == nil { // mtime newest-first
+		for _, p := range capPaths(files, recentTranscriptN) {
+			rows = append(rows, claudeEditRowsFromFile(p, "")...)
+		}
+	}
+	for _, p := range recentCodexRolloutsForCWD(pl, projectCWD, recentTranscriptN) {
+		rows = append(rows, codexEditRowsFromFile(p, projectCWD)...)
+	}
 	return dedupeAndCap(rows)
+}
+
+func capPaths(s []string, n int) []string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// recentCodexRolloutsForCWD returns up to n newest Codex rollouts whose recorded cwd matches.
+// It probes only each rollout's head (rolloutCWD reads the leading session_meta and stops
+// early) and bounds how many files it inspects, so a Claude-only project doesn't pay a full
+// Codex-history walk.
+func recentCodexRolloutsForCWD(pl *ProjectLocator, cwd string, n int) []string {
+	want := canonicalCWD(cwd)
+	var out []string
+	checked := 0
+	for _, p := range pl.CodexSessionFiles() { // newest-mtime first
+		if checked >= codexProbeCap {
+			break
+		}
+		checked++
+		if want == "" || canonicalCWD(rolloutCWD(p)) == want {
+			out = append(out, p)
+			if len(out) >= n {
+				break
+			}
+		}
+	}
+	return out
 }
 
 // dedupeAndCap collapses rows to one-per-path keeping the newest timestamp, sorts
@@ -86,41 +128,9 @@ func dedupeAndCap(rows []RecentFile) []RecentFile {
 	return out
 }
 
-// scanClaudeEditRows walks Claude transcripts for the target project and pulls out
-// edit-tool file paths. We resolve the project's transcript directory directly from
-// the cwd (ClaudeProjectDir encoding); if that dir is missing/empty we fall back to
-// scanning ALL transcripts and filtering by each row's cwd, so the feature still
-// works when a session's cwd doesn't map cleanly to an encoded project dir.
-func scanClaudeEditRows(pl *ProjectLocator, projectCWD string) []RecentFile {
-	var out []RecentFile
-
-	// Primary: the project's own transcript dir (cheap, precise).
-	files, err := pl.ClaudeSessionFiles(projectCWD)
-	if err == nil && len(files) > 0 {
-		for _, path := range files {
-			out = append(out, claudeEditRowsFromFile(path, "")...)
-		}
-		return out
-	}
-
-	// Fallback: scan recent transcripts, filter by row cwd matching the project. Bounded to
-	// the newest recentScanMaxFiles (the list is mtime-sorted) so this never walks the whole
-	// history (1000+ transcripts) just because a cwd didn't map to an encoded project dir.
-	want := canonicalCWD(projectCWD)
-	all := pl.ClaudeAllSessionFiles()
-	if len(all) > recentScanMaxFiles {
-		all = all[:recentScanMaxFiles]
-	}
-	for _, path := range all {
-		out = append(out, claudeEditRowsFromFile(path, want)...)
-	}
-	return out
-}
-
-// claudeEditRowsFromFile extracts edit-tool file paths from one transcript. When
-// wantCWD is non-empty, only rows whose cwd matches are kept (used by the fallback
-// scan); when empty, every edit row is kept (the file already belongs to the
-// project's transcript dir).
+// claudeEditRowsFromFile extracts edit-tool file paths from one transcript. wantCWD is
+// normally "" (the file already belongs to the resolved project transcript); when non-empty
+// only rows whose cwd matches are kept.
 func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 	var out []RecentFile
 	reader := NewJSONLReader(path)
@@ -181,17 +191,12 @@ func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 // stable, so this is best-effort: it recognizes a function_call payload whose name
 // looks like a file edit and carries a file_path/path argument. Anything it can't
 // confidently parse is skipped (never an error), per CHG-016 D2.
-func scanCodexEditRows(pl *ProjectLocator, projectCWD string) []RecentFile {
+func codexEditRowsFromFile(path, projectCWD string) []RecentFile {
 	var out []RecentFile
 	want := canonicalCWD(projectCWD)
-	// Codex rollouts are global (not per-project); we must read each file's head
-	// (session_meta carries cwd) so tail-read doesn't apply, but bound the count to the
-	// newest recentScanMaxFiles so this isn't an unbounded all-history scan.
-	files := pl.CodexSessionFiles()
-	if len(files) > recentScanMaxFiles {
-		files = files[:recentScanMaxFiles]
-	}
-	for _, path := range files {
+	// One rollout (already resolved to this cwd). Full-read is fine for a single file; we
+	// need the head (session_meta carries cwd) so tail-read doesn't apply here.
+	{
 		reader := NewJSONLReader(path)
 		cwd := ""
 		_ = reader.ReadNewFunc(func(row map[string]any) bool {
