@@ -126,23 +126,42 @@ func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two signals, merged: (1) agent edits from the project's recent transcripts (carry tool
+	// attribution + precise ts), (2) files uploaded into this cwd (clipboard/attachment — not
+	// Write/Edit tool_use, so the transcript can't see them). Transcript entries win on dedup.
 	pl := agentintel.NewProjectLocator()
-	files := agentintel.RecentEditedFiles(pl, cwd)
+	seen := make(map[string]bool)
+	var items []recentFileItem
+	push := func(it recentFileItem) {
+		if it.Path == "" || seen[it.Path] {
+			return
+		}
+		seen[it.Path] = true
+		items = append(items, it)
+	}
+	for _, f := range agentintel.RecentEditedFiles(pl, cwd) {
+		push(recentFileItem{Path: f.Path, Name: f.Name, Dir: f.Dir, Tool: f.Tool, TsMs: f.TsMs})
+	}
+	for _, u := range s.uploads.list() {
+		if u.CWD != cwd {
+			continue
+		}
+		push(recentFileItem{Path: u.AbsPath, Name: u.Name, Dir: filepath.Dir(u.AbsPath), Tool: "upload", TsMs: u.MtimeMs})
+	}
 
-	items := make([]recentFileItem, 0, len(files))
-	for _, f := range files {
-		item := recentFileItem{
-			Path: f.Path,
-			Name: f.Name,
-			Dir:  f.Dir,
-			Tool: f.Tool,
-			TsMs: f.TsMs,
+	// Newest-first across both signals, then cap, then stat only the survivors.
+	sort.SliceStable(items, func(i, j int) bool { return items[i].TsMs > items[j].TsMs })
+	if len(items) > agentintel.RecentFilesCap {
+		items = items[:agentintel.RecentFilesCap]
+	}
+	for i := range items {
+		if info, err := os.Stat(items[i].Path); err == nil && !info.IsDir() {
+			items[i].Size = info.Size()
+			items[i].Exists = true
 		}
-		if info, err := os.Stat(f.Path); err == nil && !info.IsDir() {
-			item.Size = info.Size()
-			item.Exists = true
-		}
-		items = append(items, item)
+	}
+	if items == nil {
+		items = []recentFileItem{}
 	}
 	writeJSON(w, http.StatusOK, recentFilesResponse{Items: items})
 }
