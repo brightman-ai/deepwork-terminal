@@ -107,7 +107,10 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   ref="$TAG"; [ "$VERSION" = latest ] && ref="latest"
   info "Building $BINARY from source (go install @$ref) ..."
   mkdir -p "$INSTALL_DIR"
-  GOBIN="$INSTALL_DIR" go install "github.com/$REPO/cmd/$BINARY@$ref"
+  # Default to a China-friendly proxy (falls back to direct) so slow/blocked networks can
+  # still fetch modules + the Go toolchain. Override with GOPROXY=... before running.
+  GOBIN="$INSTALL_DIR" GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" \
+    go install "github.com/$REPO/cmd/$BINARY@$ref"
 else
   # ---- download prebuilt binary ---------------------------------------------
   # macOS ships a single universal (amd64+arm64) archive.
