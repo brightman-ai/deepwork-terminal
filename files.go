@@ -71,7 +71,17 @@ type searchEntry struct {
 
 type searchResponse struct {
 	Entries []searchEntry `json:"entries"`
+	// Truncated is true when the walk hit a cap (too many hits or a tree larger than
+	// searchMaxScan) and stopped early, so the result set is incomplete. The client
+	// surfaces this so a huge tree (e.g. a monorepo cwd) reads as "narrow your search",
+	// not "no such file" — silent truncation otherwise hides files that exist.
+	Truncated bool `json:"truncated,omitempty"`
 }
+
+// errSearchBudget aborts the search WalkDir once a cap is hit. Returning filepath.SkipDir
+// from a FILE entry only skips its siblings — the walk keeps grinding the rest of a giant
+// tree (slow). A sentinel error returned from the walk fn stops WalkDir immediately.
+var errSearchBudget = errors.New("search budget exhausted")
 
 // searchMaxResults caps how many hits /files/search returns — a quick-open list, not a
 // full index dump. searchMaxScan caps how many tree entries we walk before stopping, so
@@ -254,8 +264,9 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]searchEntry, 0, 64)
 	scanned := 0
+	truncated := false
 	// WalkDir does NOT follow symlinks, so traversal stays within the real subtree.
-	_ = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			// Unreadable dir/file: skip it (or its subtree) but keep walking the rest.
 			if d != nil && d.IsDir() {
@@ -270,8 +281,12 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 			return filepath.SkipDir
 		}
 		scanned++
+		// Budget hit → abort the ENTIRE walk via sentinel, not filepath.SkipDir. SkipDir on a
+		// file entry only skips its siblings, so the walk would keep grinding a giant tree
+		// after we stopped emitting (slow) AND starve late-sorted dirs (e.g. tmp/) of matches.
 		if scanned > searchMaxScan || len(out) >= searchMaxResults {
-			return filepath.SkipDir // stop descending; WalkDir keeps the walk bounded
+			truncated = true
+			return errSearchBudget
 		}
 		if !matchesFuzzy(terms, d.Name()) {
 			return nil
@@ -295,9 +310,14 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	// Cap (the SkipDir guard stops descent, but a wide single level can still overshoot).
+	// A real walk error (not our stop sentinel) means traversal ended early → partial results.
+	if walkErr != nil && !errors.Is(walkErr, errSearchBudget) {
+		truncated = true
+	}
+	// Cap overshoot guard (a wide single level can append past the limit before the budget check).
 	if len(out) > searchMaxResults {
 		out = out[:searchMaxResults]
+		truncated = true
 	}
 	// Directories first, then by rel path — a stable, scannable quick-open order.
 	sort.SliceStable(out, func(i, j int) bool {
@@ -307,7 +327,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		return out[i].Rel < out[j].Rel
 	})
 
-	writeJSON(w, http.StatusOK, searchResponse{Entries: out})
+	writeJSON(w, http.StatusOK, searchResponse{Entries: out, Truncated: truncated})
 }
 
 // handleFilesRaw handles GET /files/raw?session=<id>&path=<rel>.

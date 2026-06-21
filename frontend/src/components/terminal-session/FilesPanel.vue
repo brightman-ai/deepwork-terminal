@@ -168,6 +168,7 @@ function entryRelPath(entry: TreeEntry): string {
 // list from GET /files/search; clearing it returns to breadcrumb browse at the current dir.
 const treeQuery = ref('')
 const searchResults = ref<SearchEntry[]>([])
+const searchTruncated = ref(false) // server hit a cap → results incomplete (huge cwd)
 const searching = ref(false)
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0 // guards against out-of-order responses clobbering a newer query
@@ -177,7 +178,10 @@ async function runSearch(q: string): Promise<void> {
   searching.value = true
   try {
     const res = await filesSearch(props.sessionId, props.cwd, q)
-    if (seq === searchSeq) searchResults.value = res
+    if (seq === searchSeq) {
+      searchResults.value = res.entries
+      searchTruncated.value = res.truncated
+    }
   } finally {
     if (seq === searchSeq) searching.value = false
   }
@@ -191,6 +195,7 @@ watch(treeQuery, (q) => {
     searchSeq++ // cancel any in-flight result
     searching.value = false
     searchResults.value = []
+    searchTruncated.value = false
     return
   }
   searchTimer = setTimeout(() => { void runSearch(trimmed) }, 250)
@@ -500,6 +505,13 @@ defineExpose({ loadRecent, loadTree })
 
       <!-- ── search results (recursive, flat) — VS-Code quick-open style ── -->
       <div v-if="treeQuery.trim()" class="flex-1 overflow-y-auto p-2" data-testid="fp-search-results">
+        <div
+          v-if="searchTruncated"
+          class="mx-2 mb-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400"
+          data-testid="fp-search-truncated"
+        >
+          结果过多，已截断 — 当前目录很大（可能不是你以为的工程根）。请缩小搜索词，或切到目标目录再搜。
+        </div>
         <div v-if="searching && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">搜索中…</div>
         <div v-else-if="!searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
         <ul v-else class="flex flex-col gap-0.5">

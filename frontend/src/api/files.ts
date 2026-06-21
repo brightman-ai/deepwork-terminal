@@ -59,6 +59,16 @@ export interface SearchEntry {
 }
 
 /**
+ * Result of GET /files/search. `truncated` is true when the walk hit a cap (too many
+ * hits, or a tree larger than the server's scan budget) and stopped early — the UI
+ * surfaces it so a huge cwd reads as "narrow your search", not "file doesn't exist".
+ */
+export interface SearchResult {
+  entries: SearchEntry[]
+  truncated: boolean
+}
+
+/**
  * Result of GET /files/raw. The server returns one of three body shapes; we
  * normalize them into a tagged union so the caller renders the right affordance:
  *   - { kind:'text', text }      — previewable text bytes
@@ -119,21 +129,21 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
 
 /**
  * GET /files/search — recursively find files/dirs under cwd whose NAME contains q
- * (case-insensitive), VS-Code quick-open style. Returns [] on an empty query or any
- * error so the caller can render an empty list without special-casing.
+ * (case-insensitive), VS-Code quick-open style. Returns an empty result on an empty
+ * query or any error so the caller can render an empty list without special-casing.
  */
-export async function filesSearch(sessionId: string, cwd: string | undefined, q: string): Promise<SearchEntry[]> {
-  if (!sessionId || !q.trim()) return []
+export async function filesSearch(sessionId: string, cwd: string | undefined, q: string): Promise<SearchResult> {
+  if (!sessionId || !q.trim()) return { entries: [], truncated: false }
   const { cliFetch } = useCliAuth()
   try {
     let path = withScope('/files/search', sessionId, cwd)
     path += `&q=${encodeURIComponent(q)}`
     const resp = await cliFetch(cliApi(path))
-    if (!resp.ok) return []
-    const data = (await resp.json()) as { entries?: SearchEntry[] }
-    return data.entries ?? []
+    if (!resp.ok) return { entries: [], truncated: false }
+    const data = (await resp.json()) as { entries?: SearchEntry[]; truncated?: boolean }
+    return { entries: data.entries ?? [], truncated: data.truncated ?? false }
   } catch {
-    return []
+    return { entries: [], truncated: false }
   }
 }
 

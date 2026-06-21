@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -331,6 +332,8 @@ func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
 	// Dirs sort before files.
 	require.NotEmpty(t, out.Entries)
 	assert.True(t, out.Entries[0].IsDir, "directories sort first")
+	// A small tree fits well under the caps → results are complete, not truncated.
+	assert.False(t, out.Truncated, "small tree must not be flagged truncated")
 
 	// Empty query → empty list, 200.
 	r2, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, ""), "")
@@ -340,6 +343,33 @@ func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
 	var out2 searchResponse
 	require.NoError(t, json.NewDecoder(r2.Body).Decode(&out2))
 	assert.Empty(t, out2.Entries)
+}
+
+// TC-FS-07: when more entries match than searchMaxResults, the walk stops early (sentinel
+// abort, NOT filepath.SkipDir which only skips siblings) and flags Truncated so the client
+// can say "narrow your search" instead of silently dropping matches. Regression guard for
+// the bug where a giant cwd was both slow (walk never terminated) AND hid late-sorted files.
+func TestFilesSearch_TruncatesWhenResultsExceedCap(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	// More matching files than the result cap, all in one dir → forces the cap path.
+	for i := 0; i < searchMaxResults+25; i++ {
+		name := fmt.Sprintf("widget-%04d.go", i)
+		require.NoError(t, os.WriteFile(filepath.Join(cwd, name), []byte("x"), 0o644))
+	}
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "trunc", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "trunc")
+
+	resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, "widget"), "")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out searchResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	assert.Len(t, out.Entries, searchMaxResults, "results are capped at searchMaxResults")
+	assert.True(t, out.Truncated, "cap hit → Truncated flag set")
 }
 
 func TestIsBinaryContent(t *testing.T) {
