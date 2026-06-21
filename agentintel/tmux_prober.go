@@ -20,6 +20,7 @@ type TmuxPane struct {
 	PaneIndex      int
 	PanePID        int
 	PaneCWD        string // pane's current working directory
+	PaneID         string // stable tmux pane id ("%N") — survives index reuse / window reorder
 	Active         bool   // window is the active window in the session
 	LastActivityAt int64  // unix timestamp of last pane activity (from tmux)
 }
@@ -186,7 +187,7 @@ func parseTmuxPanes(out string) ([]TmuxPane, error) {
 		if len(fields) < 6 {
 			continue
 		}
-		var sessionName, sessionWindow, windowName, paneCWD string
+		var sessionName, sessionWindow, windowName, paneCWD, paneID string
 		var windowIdx, paneIdx, panePID int
 		var active bool
 		var err1, err2, err3 error
@@ -206,6 +207,9 @@ func parseTmuxPanes(out string) ([]TmuxPane, error) {
 			paneCWD = fields[6]
 			if len(fields) >= 8 {
 				lastActivity, _ = strconv.ParseInt(fields[7], 10, 64)
+			}
+			if len(fields) >= 9 {
+				paneID = fields[8]
 			}
 		} else {
 			sessionWindow = fields[0]
@@ -236,6 +240,7 @@ func parseTmuxPanes(out string) ([]TmuxPane, error) {
 			PaneIndex:      paneIdx,
 			PanePID:        panePID,
 			PaneCWD:        paneCWD,
+			PaneID:         paneID,
 			Active:         active,
 			LastActivityAt: lastActivity,
 		})
@@ -253,6 +258,7 @@ func tmuxPaneFormat() string {
 		"#{window_active}",
 		"#{pane_current_path}",
 		"#{pane_last_activity}",
+		"#{pane_id}", // stable per-pane id ("%N") — survives index reuse/window reorder
 	}
 	return strings.Join(fields, tmuxFieldSep)
 }

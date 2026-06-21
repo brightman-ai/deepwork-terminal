@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	webpush "github.com/SherClockHolmes/webpush-go"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
+	"github.com/brightman-ai/deepwork-terminal/notify"
 )
 
 // Background Web Push notifier.
@@ -43,6 +45,12 @@ const (
 	pushSendTimeout = 10 * time.Second
 	// pushBodyLogLimit caps how much of a push service's error body we log/return.
 	pushBodyLogLimit = 256
+	// notifyPerPaneCooldown suppresses re-notifying the same pane within this window
+	// (a chatty pane that flaps running→idle→running won't flood).
+	notifyPerPaneCooldown = 2 * time.Minute
+	// notifyCoalesceWindow buffers transitions briefly so several panes that finish
+	// close together collapse into ONE merged notification.
+	notifyCoalesceWindow = 5 * time.Second
 )
 
 // pushNotifier is the running poller. Owned by pushStore; one at a time.
@@ -51,9 +59,16 @@ type pushNotifier struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	// fired tracks panes currently in the "waiting" state we've already pushed
-	// for, keyed by stable pane id ("session:window:pane"). Dedupes re-fires.
-	fired map[string]bool
+	// Per-pane tracking (keyed by stable pane id "session:window:pane").
+	prev         map[string]agentintel.AgentStatus // last status — drives running→idle/waiting transitions
+	meta         map[string]paneMeta               // last-seen tool/cwd/location/transcript
+	lastNotified map[string]time.Time              // per-pane cooldown
+	pending      map[string]bool                   // panes triggered in the current (coalescing) batch
+	pendingSince time.Time
+
+	baseline  map[string]agentintel.SessionSummary // transcriptPath → summary at last notification (delta source)
+	archived  map[string]archivedRec               // transcriptPath → closed-pane session (today-scoped)
+	lastFlush time.Time
 }
 
 // ensureNotifier starts the background notifier if tmux is installed and not
@@ -69,14 +84,20 @@ func (s *pushStore) ensureNotifier() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &pushNotifier{
-		server: s.server,
-		cancel: cancel,
-		done:   make(chan struct{}),
-		fired:  map[string]bool{},
+		server:       s.server,
+		cancel:       cancel,
+		done:         make(chan struct{}),
+		prev:         map[string]agentintel.AgentStatus{},
+		meta:         map[string]paneMeta{},
+		lastNotified: map[string]time.Time{},
+		pending:      map[string]bool{},
+		baseline:     map[string]agentintel.SessionSummary{},
+		archived:     map[string]archivedRec{},
 	}
 	s.notifier = n
 	s.mu.Unlock()
 
+	n.loadState() // restore per-pane status + delivery metrics before the loop starts
 	go n.run(ctx)
 	logger.Info("push notifier started")
 }
@@ -98,6 +119,7 @@ func (s *pushStore) stopNotifier() {
 // run is the poll loop. It exits on ctx cancel.
 func (n *pushNotifier) run(ctx context.Context) {
 	defer close(n.done)
+	defer n.saveState() // persist last-known state on shutdown
 	ticker := time.NewTicker(notifyPollInterval)
 	defer ticker.Stop()
 	for {
@@ -110,8 +132,9 @@ func (n *pushNotifier) run(ctx context.Context) {
 	}
 }
 
-// tick computes the current tmux state, diffs waiting panes, and fires pushes
-// for new waiting transitions.
+// tick polls the tmux topology, detects per-pane running→{idle,waiting} transitions
+// (a turn just completed / a prompt appeared), buffers them through a per-pane
+// cooldown + a short coalescing window, and tracks panes that vanish as "archived".
 func (n *pushNotifier) tick(ctx context.Context) {
 	provider := n.server.tmuxProvider
 	if provider == nil {
@@ -128,107 +151,235 @@ func (n *pushNotifier) tick(ctx context.Context) {
 		return
 	}
 
-	// Collect the set of panes currently waiting, then diff against fired.
-	waitingNow := map[string]bool{}
+	now := time.Now()
+	pl := agentintel.NewProjectLocator()
+	current := map[string]bool{}
+
 	for _, sess := range st.Sessions {
 		for _, win := range sess.Windows {
 			for _, pane := range win.Panes {
-				if pane.AgentStatus != agentintel.StatusWaiting {
+				tool := string(pane.AgentTool)
+				stt := pane.AgentStatus
+				// Live = a pane with an agent in an interactive state. Others (no agent /
+				// exited) fall through and become "archived" if previously tracked.
+				if tool == "" || (stt != agentintel.StatusRunning && stt != agentintel.StatusIdle && stt != agentintel.StatusWaiting) {
 					continue
 				}
 				id := fmt.Sprintf("%s:%d:%d", sess.Name, win.Index, pane.Index)
-				waitingNow[id] = true
-				if n.fired[id] {
-					continue // already notified while it stays waiting → dedupe
+				current[id] = true
+				n.meta[id] = paneMeta{
+					tool: tool, cwd: pane.CWD, session: sess.Name,
+					windowName: win.Name, window: win.Index, pane: pane.Index,
+					transcriptPath: transcriptPath(pl, pane.CWD, tool),
 				}
-				n.fired[id] = true
-				n.notify(notifyEvent{
-					paneID:     id,
-					tool:       string(pane.AgentTool),
-					session:    sess.Name,
-					window:     win.Index,
-					windowName: win.Name,
-					pane:       pane.Index,
-					cwd:        pane.CWD,
-				})
+				prev := n.prev[id]
+				n.prev[id] = stt
+				// Trigger: the pane FINISHED working (running → idle/waiting). Excludes
+				// fresh-start idle and startup-existing state (prev must be running).
+				if prev == agentintel.StatusRunning && (stt == agentintel.StatusIdle || stt == agentintel.StatusWaiting) {
+					if last, ok := n.lastNotified[id]; ok && now.Sub(last) < notifyPerPaneCooldown {
+						continue // per-pane cooldown: don't re-notify within the window
+					}
+					if len(n.pending) == 0 {
+						n.pendingSince = now
+					}
+					n.pending[id] = true
+				}
 			}
 		}
 	}
-	// Drop panes that left the waiting state so a future transition re-fires.
-	for id := range n.fired {
-		if !waitingNow[id] {
-			delete(n.fired, id)
+
+	// Panes that vanished (closed / agent exited) → archived, keyed by transcript.
+	for id := range n.prev {
+		if current[id] {
+			continue
 		}
+		m := n.meta[id]
+		if m.transcriptPath != "" {
+			n.archived[m.transcriptPath] = archivedRec{tool: m.tool, cwd: m.cwd, closedAt: now}
+		}
+		delete(n.prev, id)
+		delete(n.meta, id)
+		delete(n.lastNotified, id)
+		delete(n.pending, id)
 	}
-}
-
-// notifyEvent carries the per-pane facts the message needs — the human-readable
-// location (session/window/pane + names) and the running agent, NOT a URL.
-type notifyEvent struct {
-	paneID     string
-	tool       string // claude / codex / …
-	session    string // tmux session name (or terminal tab name for a plain session)
-	window     int
-	windowName string // the pane's human "name" (tmux pane titles are usually unset/noisy)
-	pane       int
-	cwd        string // for resolving the agent's transcript name
-}
-
-// notify is the channel-agnostic coordinator for ONE agent-waiting event (this is
-// the single fan-out point; event detection + dedupe live in tick's fired set, so
-// channels A/B never double-fire). It tries WeChat iLink (B) first; on delivery it
-// does NOT also web-push (no double notify). On B dormant/ambiguous/not-configured
-// it falls through to Web Push (A), the reliable APNs/FCM baseline.
-func (n *pushNotifier) notify(ev notifyEvent) {
-	// Human-readable content — WHICH agent + WHERE it waits + WHICH transcript. NO
-	// URL: a raw link in the body is unreadable (the user's explicit ask), esp. in
-	// WeChat. The cli type goes in the BODY (not only the title) so channels that
-	// surface only the body still show claude/codex.
-	title := "⏳ 需要你的输入"
-	desc := describeEvent(ev, n.transcriptName(ev.cwd, ev.tool))
-	// Deep-link is used ONLY as the web-push tap target (data.url), never shown as text.
-	deepURL := n.server.notifyDeepURL(ev.session)
-
-	// Channel B — WeChat iLink (primary when active). Plain readable text, NO URL.
-	ilinkAttempted := false
-	if il := n.server.ilink; il != nil {
-		switch il.trySend(context.Background(), ev.paneID, title+"\n"+desc) {
-		case ilinkSent:
-			n.server.metrics.record("ilink", false)
-			logger.Info("notify via ilink", "pane", ev.paneID)
-			return // delivered to WeChat → skip web push
-		case ilinkDormant, ilinkAmbiguous:
-			ilinkAttempted = true // tried but parked/failed → real fallback to A
-		default:
-			// ilinkNotConfigured → B simply isn't set up; not a fallback.
+	// Archived is a "today" set — prune anything not closed today.
+	for path, rec := range n.archived {
+		if !sameDay(rec.closedAt, now) {
+			delete(n.archived, path)
 		}
 	}
 
-	// Channel A — Web Push (baseline / fallback). body = readable; data.url = tap target.
-	store := n.server.push
-	subs := store.snapshot()
-	if len(subs) == 0 {
-		n.server.metrics.record("none", ilinkAttempted)
+	// Flush the coalesced batch once the window has elapsed.
+	if len(n.pending) > 0 && now.Sub(n.pendingSince) >= notifyCoalesceWindow {
+		n.flush(now, pl)
+	}
+}
+
+// flush computes the live + archived metrics, builds one (merged) notification with
+// the stats body, sends it through the A/B coordinator, and advances the baseline.
+func (n *pushNotifier) flush(now time.Time, pl *agentintel.ProjectLocator) {
+	var live, triggered []liveSession
+	liveSumm := map[string]agentintel.SessionSummary{}
+	for id, stt := range n.prev {
+		m := n.meta[id]
+		if m.tool == "" || m.cwd == "" {
+			continue
+		}
+		summ := computeSummary(pl, m.cwd, m.tool, stt == agentintel.StatusRunning)
+		if m.transcriptPath != "" {
+			liveSumm[m.transcriptPath] = summ
+		}
+		ls := liveSession{
+			tool: m.tool, session: m.session, window: m.window, windowName: m.windowName, pane: m.pane,
+			status: stt, summary: summ, activeToday: isTodayFile(m.transcriptPath, now),
+		}
+		live = append(live, ls)
+		if n.pending[id] {
+			triggered = append(triggered, ls)
+		}
+	}
+
+	var archivedToday []agentintel.SessionSummary
+	archivedTodayCount, archivedSinceNotif := 0, 0
+	for _, rec := range n.archived {
+		archivedToday = append(archivedToday, computeSummary(pl, rec.cwd, rec.tool, false))
+		archivedTodayCount++
+		if rec.closedAt.After(n.lastFlush) {
+			archivedSinceNotif++
+		}
+	}
+
+	delta := computeDelta(liveSumm, n.baseline)
+	today := computeToday(live, archivedToday)
+
+	deepSession := ""
+	if len(triggered) > 0 {
+		deepSession = triggered[0].session
+	} else if len(live) > 0 {
+		deepSession = live[0].session
+	}
+	summary := buildSummaryBlocks(delta, today, archivedSinceNotif, archivedTodayCount, now.Sub(n.lastFlush), !n.lastFlush.IsZero())
+	event := buildNotifyEvent(triggered, live, summary, n.server.notifyDeepURL(deepSession))
+
+	// Advance baseline + per-pane cooldowns, clear the batch.
+	n.baseline = liveSumm
+	for id := range n.pending {
+		n.lastNotified[id] = now
+	}
+	n.pending = map[string]bool{}
+	n.lastFlush = now
+
+	// Fan out asynchronously so a slow channel (a 10-15s network send) never blocks
+	// the 2s poll loop and make it miss state transitions. Baseline/lastFlush were
+	// already advanced above, so the next tick is consistent regardless of send timing.
+	// The coordinator records delivery metrics internally (its own lock).
+	go func() {
+		rec := n.server.coordinator.Send(context.Background(), event)
+		logger.Info("notify fanned out", "providers", len(rec.Results))
+	}()
+	n.saveState() // persist prev + lastFlush (this batch's send metrics land next save)
+}
+
+// ── per-pane metadata + archived record + IO helpers ────────────────────────
+
+type paneMeta struct {
+	tool, cwd, session, windowName string
+	window, pane                   int
+	transcriptPath                 string
+}
+
+type archivedRec struct {
+	tool, cwd string
+	closedAt  time.Time
+}
+
+// transcriptPath resolves a pane's transcript file path from its CWD (best effort).
+func transcriptPath(pl *agentintel.ProjectLocator, cwd, tool string) string {
+	if cwd == "" {
+		return ""
+	}
+	switch tool {
+	case "claude":
+		if files, err := pl.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
+			return files[0]
+		}
+	case "codex":
+		return agentintel.CodexNewestRolloutForCWD(pl, cwd)
+	}
+	return ""
+}
+
+// computeSummary parses a session's transcript into its metrics summary (turns /
+// tokens / cost). Called only at flush, so the parse is off the 2s poll hot path.
+func computeSummary(pl *agentintel.ProjectLocator, cwd, tool string, active bool) agentintel.SessionSummary {
+	return overviewMetrics(pl, cwd, "", "", active, tool).Summary
+}
+
+func isTodayFile(path string, now time.Time) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return sameDay(fi.ModTime(), now)
+}
+
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
+// ── state persistence (per-pane status + delivery metrics survive a restart) ────
+//
+// Persisting the per-pane status (prev) means a turn that finished while the server
+// was down is still detected on the first tick after restart (not silently missed);
+// persisting the coordinator metrics means the per-provider send history / "why it
+// failed last" survives a restart (the troubleshooting intent). Saved ONLY from the
+// notifier goroutine (flush + shutdown), so prev needs no extra lock; the coordinator
+// metrics snapshot is itself mutex-guarded.
+
+type notifierState struct {
+	Prev      map[string]agentintel.AgentStatus `json:"prev"`
+	LastFlush time.Time                          `json:"lastFlush"`
+	Metrics   notify.MetricsState               `json:"metrics"`
+}
+
+func (n *pushNotifier) statePath() string {
+	return filepath.Join(n.server.config.DataDir, "notify-state.json")
+}
+
+func (n *pushNotifier) loadState() {
+	b, err := os.ReadFile(n.statePath())
+	if err != nil {
 		return
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"title": title,
-		"body":  desc,
-		"tag":   ev.paneID,
-		"data": map[string]any{
-			"url":       deepURL,
-			"sessionId": ev.session,
-		},
-	})
-	// Single source of truth for fan-out delivery + prune (shared with /push/test).
-	res := store.broadcast(payload, subs)
-	if res.delivered > 0 {
-		n.server.metrics.record("webpush", ilinkAttempted)
-	} else {
-		n.server.metrics.record("none", ilinkAttempted)
+	var st notifierState
+	if json.Unmarshal(b, &st) != nil {
+		return
 	}
-	logger.Info("push sent", "pane", ev.paneID, "subs", len(subs),
-		"delivered", res.delivered, "rejected", len(res.rejected), "pruned", res.pruned)
+	if st.Prev != nil {
+		n.prev = st.Prev
+	}
+	n.lastFlush = st.LastFlush
+	if n.server.coordinator != nil {
+		n.server.coordinator.RestoreMetrics(st.Metrics)
+	}
+}
+
+func (n *pushNotifier) saveState() {
+	st := notifierState{Prev: n.prev, LastFlush: n.lastFlush}
+	if n.server.coordinator != nil {
+		st.Metrics = n.server.coordinator.MetricsSnapshot()
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(n.statePath(), b, 0600)
 }
 
 // notifyDeepURL builds the notification tap target — the SINGLE source for it,
@@ -250,32 +401,6 @@ func (s *Server) notifyDeepURL(session string) string {
 	return deepURL
 }
 
-// describeEvent builds the human-readable notification body: WHICH agent + WHERE
-// it is (session / window + name / pane index) + WHICH transcript — no URL. e.g.
-// "claude · main · 窗口1 editor · 面板0 · abc123.jsonl". For a plain terminal tab
-// the session field is the tab name (e.g. "终端 2"), so the same shape reads
-// naturally. All user-controllable fields are sanitized to a safe single line.
-func describeEvent(ev notifyEvent, transcript string) string {
-	tool := ev.tool
-	if tool == "" {
-		tool = "agent"
-	}
-	var b strings.Builder
-	b.WriteString(tool)
-	b.WriteString(" · ")
-	b.WriteString(sanitizeField(ev.session))
-	if wn := sanitizeField(ev.windowName); wn != "" {
-		fmt.Fprintf(&b, " · 窗口%d %s", ev.window, wn)
-	} else {
-		fmt.Fprintf(&b, " · 窗口%d", ev.window)
-	}
-	fmt.Fprintf(&b, " · 面板%d", ev.pane)
-	if t := sanitizeField(transcript); t != "" {
-		b.WriteString(" · " + t)
-	}
-	return b.String()
-}
-
 // sanitizeField makes a user-controllable terminal field safe for a one-line
 // notification: control chars / newlines / tabs → space, whitespace collapsed,
 // then truncated. Prevents a crafted (or accidentally multi-line) session /
@@ -293,29 +418,6 @@ func sanitizeField(s string) string {
 		s = string(r[:max]) + "…"
 	}
 	return s
-}
-
-// transcriptName resolves the running agent's transcript file name from its CWD
-// (best effort; empty when not resolvable). NOTE: it picks the newest transcript
-// under the project dir — accurate for the common one-session-per-dir case, but
-// may misattribute when multiple same-tool sessions share a CWD. Called only on a
-// waiting transition, so the one ReadDir stays off the 2s poll hot path.
-func (n *pushNotifier) transcriptName(cwd, tool string) string {
-	if cwd == "" {
-		return ""
-	}
-	pl := agentintel.NewProjectLocator()
-	switch tool {
-	case "claude":
-		if files, err := pl.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
-			return filepath.Base(files[0])
-		}
-	case "codex":
-		if p := agentintel.CodexNewestRolloutForCWD(pl, cwd); p != "" {
-			return filepath.Base(p)
-		}
-	}
-	return ""
 }
 
 // pushOutcomeKind classifies the result of a single send attempt.
