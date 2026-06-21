@@ -1,0 +1,78 @@
+# GoReleaser config — cross-platform release for deepwork-terminal.
+# Runs in CI on tag push (see .github/workflows/release.yml). Produces prebuilt
+# binaries for Linux (amd64/arm64) and a macOS universal binary, plus a Homebrew
+# formula. The embedded Vue SPA ships from the committed internal/spa/dist, so CI
+# needs NO Node — only Go. Local dry run: `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: dw-terminal
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: dw-terminal
+    main: ./cmd/dw-terminal
+    binary: dw-terminal
+    env:
+      - CGO_ENABLED=0           # pure-Go: enables static cross-compile (creack/pty et al. are CGO-free)
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"   # reproducible builds
+
+# Merge the two darwin builds into one universal binary. This means a single
+# macOS artifact to sign + notarize (see scripts/macos-sign.sh) instead of two.
+universal_binaries:
+  - id: dw-terminal
+    replace: true
+
+archives:
+  - id: dw-terminal
+    ids:
+      - dw-terminal
+    # install.sh constructs exactly this name: dw-terminal_<version>_<os>_<arch>.tar.gz
+    # (version has no leading "v"; os = linux|darwin; arch = amd64|arm64|all)
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: brightman-ai
+    name: deepwork-terminal
+  draft: false
+  prerelease: auto
+
+# Homebrew: pushes a formula to github.com/brightman-ai/homebrew-tap on release.
+# brew installs strip the macOS quarantine attribute, so `brew install` works even
+# before notarization. Requires repo secret HOMEBREW_TAP_GITHUB_TOKEN (a PAT with
+# write access to the tap repo). Create the empty tap repo once before first release.
+brews:
+  - name: dw-terminal
+    repository:
+      owner: brightman-ai
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/brightman-ai/deepwork-terminal"
+    description: "Standalone web terminal with auth, Cloudflare tunnel, and an embedded Vue frontend"
+    license: "MIT"
+    install: |
+      bin.install "dw-terminal"
+    test: |
+      system "#{bin}/dw-terminal", "--version"

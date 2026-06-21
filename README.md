@@ -12,6 +12,54 @@ A standalone web terminal with authentication, Cloudflare tunnel support, and an
 - Embedded Vue SPA — zero static file serving required
 - Hook points for auth, session lifecycle, and shell customization
 
+## Install
+
+Fastest path — a prebuilt binary, **no Go or Node required**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh
+```
+
+Installs `dw-terminal` to `~/.local/bin` for **Linux** (amd64/arm64) and **macOS** (universal). On **WSL**, this is the right path — it just works. Pin a version or change the directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.3.0 --dir=/usr/local/bin
+```
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install brightman-ai/tap/dw-terminal
+```
+
+### Go (developers, Go ≥ 1.26)
+
+```bash
+go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
+```
+
+No Go installed but want a source build? The installer can bootstrap the latest stable Go:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --from-source --install-go
+```
+
+### Manual download
+
+Grab a tarball from the [Releases page](https://github.com/brightman-ai/deepwork-terminal/releases) and put `dw-terminal` on your `PATH`.
+
+### Verify & run
+
+```bash
+dw-terminal --version
+dw-terminal --addr :8022
+```
+
+**Platform notes**
+
+- **Linux / WSL** — one Linux binary covers both. On WSL2 a Windows browser reaches the server at `http://localhost:<port>`.
+- **macOS** — release binaries are signed with a Developer ID and notarized, so Gatekeeper allows them. (Homebrew and the install script also clear the quarantine flag as a fallback.)
+
 ## Screenshots
 
 ### 会话接管与抢占 — 手机 + PC 随时切换
@@ -109,7 +157,7 @@ git pull
 ./build.sh
 ```
 
-Requires: Go 1.21+, Node.js 18+, npm.
+Requires: Go 1.26+, Node.js 18+, npm.
 
 > **Headless servers**: `npm install` browser-download hooks (Playwright/Puppeteer) are
 > suppressed automatically via `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`.

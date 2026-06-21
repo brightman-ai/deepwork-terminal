@@ -1,0 +1,38 @@
+name: release
+
+# Tagging vX.Y.Z and pushing the tag triggers a full cross-platform release:
+# GoReleaser builds the binaries, attaches them to a GitHub Release, and updates
+# the Homebrew tap. No Node here — the Vue SPA ships from committed internal/spa/dist.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create the GitHub Release + upload assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # GoReleaser needs full history + tags
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod   # tracks the toolchain pinned in go.mod
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with write access to brightman-ai/homebrew-tap. If unset, the brew
+          # step fails but binaries still publish — create the secret to enable it.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
