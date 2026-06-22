@@ -253,6 +253,17 @@ func (s *Server) handleHudLog(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleVersion handles GET /version — returns the running binary's build version so the
+// UI can show it (the tab bar). Release builds inject it via ldflags; source builds report
+// "dev". Falls back to "dev" if the embedding host never set Config.Version.
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	v := s.config.Version
+	if v == "" {
+		v = "dev"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"version": v})
+}
+
 // handleWebSocket handles GET /sessions/{id}/ws — WebSocket terminal I/O.
 // Binary frames carry raw terminal data; Text/JSON frames carry control messages.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {

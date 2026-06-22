@@ -13,6 +13,7 @@ type Config struct {
 	MaxSessions  int    // max concurrent sessions, default 100
 	AuthCode     string // auto-generated auth code, printed to console on start
 	DataDir      string // data directory for persistence
+	Version      string // build version (e.g. "v0.4.0"), surfaced to the UI via GET /version; "dev" for source builds
 
 	// VapidSubscriber is the VAPID JWT "sub" claim — a contact identifying the app
 	// server to the push service. Apple APNs (iOS Web Push) REJECTS a token whose sub

@@ -32,6 +32,7 @@ func main() {
 
 	cfg := terminal.DefaultConfig()
 	cfg.Addr = *addr
+	cfg.Version = version
 	if *authCode != "" {
 		cfg.AuthCode = *authCode
 	}

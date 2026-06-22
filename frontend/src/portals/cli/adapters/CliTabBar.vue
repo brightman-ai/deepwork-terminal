@@ -67,6 +67,14 @@
 
     <!-- Spacer + right-side status (settings icon) -->
     <div class="cli-tab-bar__spacer" />
+    <!-- Build version — unobtrusive, right-aligned (pinned right by the spacer, doesn't scroll
+         with the tabs). Lets a user tell which release they're on without opening a terminal. -->
+    <span
+      v-if="versionLabel"
+      class="cli-tab-bar__version"
+      data-testid="cli-portal-version"
+      :title="'deepwork-terminal ' + versionLabel"
+    >{{ versionLabel }}</span>
     <!-- PWA-only refresh: a standalone PWA has no address bar / F5, so a wedged state can't be
          reloaded. Force-fresh via /fresh (bypasses any stale cached index.html). -->
     <button
@@ -82,9 +90,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
 import type { WorkbenchGroup } from '@terminal/types/workbench'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 interface TabRuntime {
   agentState: { status?: string } | null
@@ -110,6 +120,23 @@ const emit = defineEmits<{
   (e: 'rename-cancel'): void
   (e: 'toggle-group', groupId: string): void
 }>()
+
+// Build version, fetched once from GET /version. goreleaser injects the tag WITHOUT a
+// leading "v" (e.g. "0.4.0"), so prefix it for display; a non-numeric build like "dev"
+// is shown as-is. Empty until fetched (and stays empty on failure → the badge hides).
+const { cliFetch } = useCliAuth()
+const version = ref('')
+const versionLabel = computed(() => {
+  const v = version.value
+  if (!v) return ''
+  return /^\d/.test(v) ? 'v' + v : v
+})
+onMounted(async () => {
+  try {
+    const r = await cliFetch(cliApi('/version'))
+    if (r.ok) version.value = ((await r.json()) as { version?: string }).version ?? ''
+  } catch { /* badge just stays hidden */ }
+})
 
 // A standalone PWA has no browser chrome (no address bar, no F5), so show an in-app refresh.
 const isPWA = computed(
@@ -310,4 +337,18 @@ function tabNeedsInput(tabId: string): boolean {
 
 /* Spacer */
 .cli-tab-bar__spacer { flex: 1; min-width: 8px; }
+
+/* Build version — muted, unobtrusive, pinned right (after the spacer). */
+.cli-tab-bar__version {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 10px;
+  font-size: 0.62rem;
+  letter-spacing: 0.3px;
+  color: hsl(var(--muted-foreground));
+  opacity: 0.55;
+  white-space: nowrap;
+  user-select: text;
+}
 </style>
