@@ -86,6 +86,7 @@ import { focusWithoutViewportScroll, resetViewportScroll } from '@terminal/compo
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
+  summarizeText,
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useServerStore } from '@terminal/composables/cli/useServerStore'
 
@@ -221,7 +222,14 @@ function autoResize() {
   ta.style.height = 'auto'
   ta.style.height = Math.min(ta.scrollHeight, cap) + 'px'
 }
-function onInput() {
+function onInput(e: Event) {
+  const ie = e as InputEvent
+  reportCliInputDiagnostic('compose.input', {
+    isComposing: ie.isComposing,
+    inputType: ie.inputType,
+    eventData: summarizeText(ie.data),
+    modelValue: summarizeText(text.value),
+  })
   autoResize()
   saveDraft()
 }
@@ -241,6 +249,7 @@ function onTextareaFocus() {
 function send() {
   const val = text.value
   if (!val) return
+  reportCliInputDiagnostic('compose.send', { value: summarizeText(val) })
   pushHistory(val)
   emit('send', val)
   text.value = ''
