@@ -2,12 +2,21 @@ package terminal
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 )
+
+// debugInputBytes, when DW_DEBUG_INPUT=1, logs every raw input frame received from the
+// client (one WS binary frame = one xterm onData emit on desktop) as a Go-quoted string +
+// hex. Diagnostic-only: it captures exactly what reaches the PTY, so an IME composition
+// leak/duplication (e.g. wubi code "dm" or a doubled "是") shows up frame-by-frame without
+// the user doing anything special. Off by default (raw keystrokes are sensitive).
+var debugInputBytes = os.Getenv("DW_DEBUG_INPUT") == "1"
 
 const maxInputSummaryCodes = 8
 const maxOutputAfterSubmitLogs = 8
@@ -37,6 +46,14 @@ var terminalInputTrackers sync.Map
 func observeTerminalInput(ctx context.Context, sessionID string, data []byte) {
 	if len(data) == 0 {
 		return
+	}
+
+	if debugInputBytes {
+		logger.Info("dbg.input.frame",
+			"id", sessionID,
+			"q", fmt.Sprintf("%q", data),
+			"hex", hex.EncodeToString(data),
+			"len", len(data))
 	}
 
 	terminalInputFramesTotal.Inc()
