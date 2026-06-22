@@ -3,6 +3,7 @@ package agentintel
 import (
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,14 @@ var editToolNames = map[string]bool{
 	"Edit":         true,
 	"MultiEdit":    true,
 	"NotebookEdit": true,
+}
+
+// imageExts is the set of raster image extensions the drawer previews inline.
+// Mirrors imageContentType() in files.go — keep in step.
+var imageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true,
+	".gif": true, ".webp": true, ".bmp": true,
+	".ico": true, ".avif": true,
 }
 
 // RecentFile is one file an agent wrote/edited, attributed from a transcript
@@ -162,9 +171,6 @@ func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 				continue
 			}
 			name, _ := m["name"].(string)
-			if !editToolNames[name] {
-				continue
-			}
 			input, ok := m["input"].(map[string]any)
 			if !ok {
 				continue
@@ -173,11 +179,21 @@ func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 			if fp == "" {
 				continue
 			}
+			tool := name
+			if editToolNames[name] {
+				// Write/Edit/MultiEdit/NotebookEdit — always include.
+			} else if name == "Read" && imageExts[strings.ToLower(filepath.Ext(fp))] {
+				// Read of an image file: agent just produced/inspected this image
+				// (e.g. simctl screenshot → Read). Surface it in the 图片 tab.
+				tool = "read-image"
+			} else {
+				continue
+			}
 			out = append(out, RecentFile{
 				Path: fp,
 				Name: filepath.Base(fp),
 				Dir:  filepath.Dir(fp),
-				Tool: name,
+				Tool: tool,
 				TsMs: tsMs,
 			})
 		}
