@@ -60,10 +60,14 @@ else
 fi
 
 echo "=== Building Go binary ==="
+# Stamp the version from git so a source build's UI badge / --version shows where it sits
+# relative to the last release (e.g. "v0.5.0" on a tag, "v0.5.0-3-g1a2b3c4" three commits
+# past it). Falls back to "dev" outside a git checkout (main.go then derives dev-<hash>).
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 # Allow caller to override GOPROXY; default to goproxy.cn which works in China
 # and falls back to direct. Machines with direct access to proxy.golang.org can
 # override: GOPROXY=https://proxy.golang.org,direct ./build.sh
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go mod download
-GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go build -o dw-terminal ./cmd/dw-terminal/
+GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go build -ldflags "-X main.version=${VERSION}" -o dw-terminal ./cmd/dw-terminal/
 
 echo "=== Done: ./dw-terminal ==="
