@@ -198,6 +198,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /uploads/raw", wrap(s.handleUploadsRaw))
 	s.mux.HandleFunc("GET /inputs", wrap(s.handleInputs))
 	s.mux.HandleFunc("POST /debug/logs", wrap(s.handleHudLog))
+	s.mux.HandleFunc("GET /version", wrap(s.handleVersion))
 	s.mux.HandleFunc("GET /settings", wrap(s.handleGetSettings))
 	s.mux.HandleFunc("GET /system", wrap(s.handleSystem))
 	s.mux.HandleFunc("GET /tunnel/status", wrap(s.handleTunnelStatus))
