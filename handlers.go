@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"time"
 
@@ -237,7 +239,9 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHudLog handles POST /debug/logs.
-// Accepts HUD diagnostic data and logs it.
+// Accepts client diagnostic events and prints each one to stderr so they
+// appear in the server's log stream. Only active when the client has
+// cli_diag enabled — zero overhead in normal usage.
 func (s *Server) handleHudLog(w http.ResponseWriter, r *http.Request) {
 	var req HudLogRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -245,10 +249,18 @@ func (s *Server) handleHudLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, _ := json.Marshal(req)
-	logger.Info("hud log received",
-		"sessionId", req.SessionID,
-		"size", len(data))
+	// Print each diagnostic event as a structured line to stderr.
+	if len(req.Events) > 0 && string(req.Events) != "null" {
+		var events []json.RawMessage
+		if err := json.Unmarshal(req.Events, &events); err == nil {
+			for _, ev := range events {
+				fmt.Fprintf(os.Stderr, "[cli-diag] %s\n", ev)
+			}
+		} else {
+			// Fallback: print raw if not an array.
+			fmt.Fprintf(os.Stderr, "[cli-diag] %s\n", req.Events)
+		}
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

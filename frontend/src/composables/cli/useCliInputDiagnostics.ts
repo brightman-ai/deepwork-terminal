@@ -1,9 +1,50 @@
 import { createLogger } from '@ce/utils/obs'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 const log = createLogger('cli-input')
 const QUERY_KEY = 'cli_diag'
 const STORAGE_KEY = 'cli_input_diag'
+const AUTH_STORAGE_KEY = 'cli_auth_code'
+const FLUSH_INTERVAL_MS = 2_000
+const MAX_BUFFER = 200
 const MAX_CODE_POINTS = 8
+
+// ── Server flush ──────────────────────────────────────────────────────────────
+// Buffer events and POST to /debug/logs every FLUSH_INTERVAL_MS so they appear
+// in the server's stderr without any DevTools required.
+interface DiagEvent { ts: number; msg: string; [k: string]: unknown }
+const _buf: DiagEvent[] = []
+let _flushTimer: ReturnType<typeof setInterval> | null = null
+
+function _startFlush(): void {
+  if (_flushTimer !== null) return
+  _flushTimer = setInterval(_flush, FLUSH_INTERVAL_MS)
+}
+
+async function _flush(): Promise<void> {
+  if (_buf.length === 0) return
+  const events = _buf.splice(0)
+  const auth = typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_STORAGE_KEY) ?? '' : ''
+  try {
+    await fetch(cliApi('/debug/logs'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CLI-Auth': auth,
+        'X-Auth-Code': auth,
+      },
+      body: JSON.stringify({ events }),
+    })
+  } catch {
+    // Best-effort — drop on network error.
+  }
+}
+
+function _pushEvent(msg: string, ext: Record<string, unknown>): void {
+  _buf.push({ ts: Date.now(), msg, ...ext })
+  if (_buf.length > MAX_BUFFER) _buf.splice(0, _buf.length - MAX_BUFFER)
+  _startFlush()
+}
 const OUTPUT_AFTER_SUBMIT_WINDOW_MS = 2_000
 const MAX_OUTPUT_AFTER_SUBMIT_LOGS = 8
 const OUTPUT_AFTER_SUBMIT_MIN_LOG_INTERVAL_MS = 250
@@ -109,11 +150,9 @@ function activeElementSnapshot() {
 
 export function reportCliInputDiagnostic(msg: string, ext: DiagnosticContext = {}): void {
   if (!isCliInputDiagnosticsEnabled()) return
-  log.info(msg, {
-    ...ext,
-    viewport: viewportSnapshot(),
-    active: activeElementSnapshot(),
-  })
+  const ctx = { ...ext, viewport: viewportSnapshot(), active: activeElementSnapshot() }
+  log.info(msg, ctx)
+  _pushEvent(msg, ctx)
 }
 
 function eventPayload(event: Event, element: HTMLElement, context: DiagnosticContext) {

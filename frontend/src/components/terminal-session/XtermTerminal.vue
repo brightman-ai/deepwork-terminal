@@ -142,6 +142,15 @@ function onProxyKeydown(event: KeyboardEvent) {
   }
 }
 
+// composingText tracks the CURRENT in-progress composition text from the
+// xterm-helper-textarea. Updated on every compositionupdate; cleared on
+// compositionend. Used by the onData filter below to strip the trailing
+// in-progress text that xterm.js accidentally reads when it flushes a
+// compositionend result asynchronously and the next composition has already
+// started. (Log evidence: compositionend at T+0ms, compositionstart at T+8ms,
+// onData fires at T+25ms reading textarea that now contains prevComposed+newKey.)
+let composingText = ''
+
 function attachXtermKeydownFallback(textarea: HTMLTextAreaElement | null): () => void {
   if (!textarea) return () => {}
   const onKeydown = (event: KeyboardEvent) => {
@@ -149,6 +158,11 @@ function attachXtermKeydownFallback(textarea: HTMLTextAreaElement | null): () =>
   }
   const onComposition = (event: CompositionEvent) => {
     xtermKeydownFallback.notifyComposition(event.type)
+    if (event.type === 'compositionupdate') {
+      composingText = event.data ?? ''
+    } else if (event.type === 'compositionend') {
+      composingText = ''
+    }
   }
 
   textarea.addEventListener('keydown', onKeydown, true)
@@ -161,6 +175,7 @@ function attachXtermKeydownFallback(textarea: HTMLTextAreaElement | null): () =>
     textarea.removeEventListener('compositionstart', onComposition, true)
     textarea.removeEventListener('compositionupdate', onComposition, true)
     textarea.removeEventListener('compositionend', onComposition, true)
+    composingText = ''
   }
 }
 
@@ -215,16 +230,31 @@ function initTerminal() {
   // keydown handler (100% reliable). onData only handles IME/paste (multi-char/non-ASCII).
   // On Chrome/Edge, onData handles everything normally.
   terminal.onData((data: string) => {
-    const bytes = encoder.encode(data)
+    // Strip any trailing in-progress composition text that xterm.js accidentally
+    // included due to its async compositionend read-back: when compositionend fires
+    // and xterm.js reads the textarea value ~25ms later, a new composition may have
+    // already started and written its first key(s) into the textarea, causing xterm
+    // to send prevComposed+newComposingKey as one chunk. We know the in-progress
+    // text because compositionupdate keeps composingText current.
+    let cleanData = data
+    if (composingText && data.length > composingText.length && data.endsWith(composingText)) {
+      cleanData = data.slice(0, data.length - composingText.length)
+      reportCliInputDiagnostic('xterm.onData.strip-composing', {
+        original: summarizeText(data),
+        stripped: summarizeText(cleanData),
+        composingText: summarizeText(composingText),
+      })
+    }
+    const bytes = encoder.encode(cleanData)
     xtermKeydownFallback.notifyTerminalData(bytes)
-    if (isWKWebView && data.length === 1 && data.charCodeAt(0) < 128) {
+    if (isWKWebView && cleanData.length === 1 && cleanData.charCodeAt(0) < 128) {
       reportCliInputDiagnostic('xterm.onData.skip', {
         route: 'wk-single-ascii',
-        data: summarizeText(data),
+        data: summarizeText(cleanData),
       })
       return // WKWebView: single ASCII handled by document keydown in TerminalPage
     }
-    reportCliInputDiagnostic('xterm.onData.emit', { data: summarizeText(data) })
+    reportCliInputDiagnostic('xterm.onData.emit', { data: summarizeText(cleanData) })
     emit('data', bytes)
   })
 
