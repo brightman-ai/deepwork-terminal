@@ -475,7 +475,8 @@ defineExpose({ loadRecent, loadTree })
       </div>
 
       <!-- breadcrumb + copy current path (browse mode only) -->
-      <div v-show="!treeQuery.trim()" class="shrink-0 flex items-center gap-1 border-b border-border px-2 py-1.5 text-[0.62rem] text-muted-foreground overflow-x-auto">
+      <div v-show="!treeQuery.trim()" class="shrink-0 flex flex-col border-b border-border">
+        <div class="flex items-center gap-1 px-2 py-1.5 text-[0.62rem] text-muted-foreground overflow-x-auto">
         <button
           v-if="treeRel"
           class="p-0.5 rounded hover:bg-muted/50 shrink-0"
@@ -501,6 +502,14 @@ defineExpose({ loadRecent, loadTree })
           <Check v-if="copiedKey === 'cwd'" class="size-3 text-green-500" />
           <Copy v-else class="size-3" />
         </button>
+        </div>
+        <!-- 根目录时显示绝对路径，帮助区分多工程 -->
+        <div
+          v-if="!treeRel && treeCwd"
+          class="px-2 pb-1 text-[0.58rem] text-muted-foreground/50 truncate select-all"
+          :title="treeCwd"
+          data-testid="fp-tree-cwd-abs"
+        >{{ treeCwd }}</div>
       </div>
 
       <!-- ── search results (recursive, flat) — VS-Code quick-open style ── -->
