@@ -17,7 +17,13 @@ export interface WorkbenchTab {
   name: string
   cwd: string
   engine: string      // "shell" | "claude" | "codex"
-  sessionId?: string  // TerminalHost session ID (运行时绑定, 未连接时为空)
+  sessionId?: string  // TerminalHost session ID (运行时绑定, 未连接时为空).
+                      // For a REMOTE tab this holds the session id ON THE PEER instance —
+                      // all bindSession / tabsWithSession machinery is reused unchanged;
+                      // remotePeerId is what marks the tab remote + routes its base.
+  remotePeerId?: string // when set, this tab connects to a registered remote peer (mesh
+                        // direct-connect) instead of the same-origin host. Optional →
+                        // backward compatible (a tab without it is local). See useRemotePeers.
 }
 
 export interface WorkbenchConfig {
@@ -37,14 +43,19 @@ export function createTab(opts: {
   cwd?: string
   engine?: string
   groupId: string
+  remotePeerId?: string
 }): WorkbenchTab {
-  return {
+  const tab: WorkbenchTab = {
     id: genId(),
     groupId: opts.groupId,
     name: opts.name || '终端',  // caller should provide sequenced name like "终端 1"
     cwd: opts.cwd || '~',
     engine: opts.engine || 'shell',
   }
+  // Set at creation (not post-assigned) so the tab's FIRST persist already carries it — a remote
+  // tab must never round-trip through storage as a local one (it would get a local session).
+  if (opts.remotePeerId) tab.remotePeerId = opts.remotePeerId
+  return tab
 }
 
 /** 创建新 group 的工厂函数 */

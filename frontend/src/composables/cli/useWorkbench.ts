@@ -88,7 +88,7 @@ export function useWorkbench() {
 
   function addTab(
     groupId: string,
-    opts?: { name?: string; cwd?: string; engine?: string }
+    opts?: { name?: string; cwd?: string; engine?: string; remotePeerId?: string }
   ): WorkbenchTab {
     const cfg = ensureConfig()
     const group = cfg.groups.find(g => g.id === groupId)

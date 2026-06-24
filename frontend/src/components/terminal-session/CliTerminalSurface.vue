@@ -10,6 +10,12 @@
       <button class="btn-reconnect" data-testid="btn-reconnect" @click="wsReconnect()">重新连接</button>
     </div>
 
+    <!-- Remote unreachable from this page (e.g. an https page can't reach an http-only peer, or
+         the peer config was removed). We do NOT connect (never silently fall back to localhost). -->
+    <div v-if="remoteUnreachable" class="remote-unreachable-banner" data-testid="remote-unreachable-banner">
+      <span>{{ connError || '该远程在当前页面不可达' }}</span>
+    </div>
+
     <!-- Per-surface status row — the SSOT. A SIBLING directly above .terminal-body (NOT
          inside it, so its taps never reach copy-mode touch handlers / the touchball). It
          is single-occupancy: when THIS session's shell is attached to tmux the pane bar
@@ -24,6 +30,18 @@
            count. This is the ONLY connection-health widget (the host tab bar no longer renders a
            duplicate) → no double 'ms', single source for terminal + pro. -->
     <div class="surface-status-row" :class="{ 'is-tmux': tmuxAttached }" data-testid="surface-status-row">
+      <!-- Machine chip: which host this terminal runs on. Shown for every tab in a cross-machine
+           workbench so "我在哪台" is always one glance away (local = subtle 本机, remote = peer). -->
+      <span
+        v-if="machineLabel"
+        class="surface-machine-chip"
+        :class="{ 'is-remote': isRemote }"
+        :title="machineLabel"
+        data-testid="surface-machine-chip"
+      >
+        <component :is="isRemote ? Server : Monitor" :size="11" />
+        <span class="smc-label">{{ machineLabel }}</span>
+      </span>
       <div class="ssr-main">
         <TmuxPaneBar
           v-if="tmuxReady && tmuxAttached"
@@ -222,6 +240,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { Monitor, Server } from 'lucide-vue-next'
 import { Terminal } from 'xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -265,6 +284,16 @@ const props = defineProps<{
   sessionId: string
   sessionName: string
   active: boolean
+  /** Remote-tab connection (mesh). Empty/undefined → local same-origin terminal (unchanged).
+   *  Resolved once per tab by useRemotePeers.resolveTabConnection (the single source). */
+  wsBase?: string
+  authToken?: string
+  machineLabel?: string
+  isRemote?: boolean
+  /** Set when a remote tab can't be reached from the current page (bad scheme / deleted peer).
+   *  The surface then shows an error and does NOT connect (so it can't silently fall back to a
+   *  same-origin/local WS). */
+  connError?: string
 }>()
 
 const emit = defineEmits<{
@@ -370,7 +399,14 @@ const {
   sendBinary: sendBinaryRaw,
   sendResize,
   onMessage,
-} = useWebSocketClient(() => props.sessionId)
+} = useWebSocketClient(() => props.sessionId, { wsBase: () => props.wsBase, authToken: () => props.authToken })
+
+// A remote tab that can't be reached FROM THIS PAGE (https→no cloudflare addr, peer deleted,
+// missing code → empty wsBase) must NOT connect: without this guard the empty wsBase would fall
+// back to the same-origin (local) WS and silently attach this tab to localhost. We show an error
+// banner instead and skip every connect path.
+const remoteUnreachable = computed(() => !!props.isRemote && (!!props.connError || !props.wsBase))
+function connectGuarded() { if (!remoteUnreachable.value) connect() }
 
 const inputTelemetry = useCliTerminalInputTelemetry({
   surface: 'workbench',
@@ -443,7 +479,7 @@ function hasTmuxAgentTopology(state: AgentState | null, list: AgentState[]): boo
 
 watch(() => props.active, (isActive) => {
   if (isActive) {
-    connect()
+    connectGuarded()
     // tab 切换后重新 fit，消除 v-show 隐藏时 xterm 无法测量尺寸的问题
     nextTick(() => {
       const xterm = xtermRef.value
@@ -615,7 +651,7 @@ onMounted(() => {
   window.visualViewport?.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
   window.visualViewport?.addEventListener('resize', lockKeyboardViewportScroll)
   // Connect immediately if active
-  if (props.active) connect()
+  if (props.active) connectGuarded()
 })
 
 onUnmounted(() => {
@@ -687,7 +723,7 @@ function onTerminalReady(terminal: Terminal) {
       }
     }
   )
-  connect()
+  connectGuarded()
 }
 
 function onTerminalData(data: Uint8Array) {
@@ -1128,6 +1164,30 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   padding: 0 8px;
 }
 
+/* Machine chip — small, leads the status row. Local is muted (本机); remote is tinted so a
+   cross-machine tab is recognizable at a glance. Truncates so a long peer/host never eats the row. */
+.surface-machine-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 44vw;
+  padding: 0 8px;
+  font-size: 0.66rem;
+  letter-spacing: 0.2px;
+  color: hsl(var(--muted-foreground, 240 5% 65%));
+  border-right: 1px solid hsl(var(--border, 240 4% 24%));
+}
+.surface-machine-chip .smc-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.surface-machine-chip.is-remote {
+  color: #7fb2ff;
+}
+.surface-machine-chip.is-remote :deep(svg) { color: #7fb2ff; }
+
 /* WS7 primary entries — float top-right above xterm; small and unobtrusive so they
    never cover terminal content the user is reading. A quick notify bell sits beside
    the install/notify guide icon. */
@@ -1168,6 +1228,19 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   border: none;
   border-radius: 4px;
   cursor: pointer;
+}
+
+.remote-unreachable-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  background: rgba(255, 152, 0, 0.14);
+  border-bottom: 1px solid #ff9800;
+  color: #ffb74d;
+  font-size: 0.8rem;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 .is-mobile .bottom-bar {

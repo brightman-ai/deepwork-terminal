@@ -13,9 +13,13 @@ import (
 )
 
 func generateAuthCode() string {
-	b := make([]byte, 4)
+	// 16 bytes = 128-bit. The mesh remote-terminal feature sends this code cross-origin (and a
+	// public cloudflare tunnel exposes it), so the auto-generated default must not be brute-forceable.
+	// Deployments that set -auth-code keep their own (e.g. a short LAN-only code); this only governs
+	// the generated fallback.
+	b := make([]byte, 16)
 	rand.Read(b) //nolint:errcheck
-	return hex.EncodeToString(b) // 8-char hex code like "a3f7b2c1"
+	return hex.EncodeToString(b) // 32-char hex (128-bit)
 }
 
 // workbench persistence — stores tab layout as JSON file

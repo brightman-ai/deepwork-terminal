@@ -10,7 +10,16 @@ import { wsUrl } from '@ce/utils/runtimeBase'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export interface WebSocketClientOptions {
-  authToken?: string
+  /** Auth code. Value or getter — a getter is read live on every (re)connect, so a peer/code
+   *  change is picked up without remounting. */
+  authToken?: string | (() => string | undefined)
+  /**
+   * Absolute WS origin for a REMOTE tab (mesh direct-connect), e.g. 'ws://stwork:8087' or
+   * 'wss://x.trycloudflare.com'. Empty/undefined → same-origin (via @ce wsUrl), the local
+   * tab path, unchanged. Value or getter (read live per connect). Resolved per tab by
+   * useRemotePeers.resolveTabConnection.
+   */
+  wsBase?: string | (() => string | undefined)
   maxReconnectAttempts?: number
   /** Telemetry tick in ms — RTT ping + bandwidth/traffic sampling cadence (default 2000). */
   telemetryInterval?: number
@@ -72,9 +81,21 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   let onBinaryMessage: ((data: ArrayBuffer) => void) | null = null
   let onControlMessage: ((msg: WSControlMessage) => void) | null = null
 
+  function resolveOpt(v?: string | (() => string | undefined)): string {
+    return (typeof v === 'function' ? v() : v) || ''
+  }
+
   function getWsUrl(): string {
-    let url = wsUrl(cliApi(`/sessions/${sessionId()}/ws`))
-    const token = opts.authToken || localStorage.getItem('cli_auth_code') || ''
+    // Remote tab: build against the peer's absolute WS origin (same path; the peer runs the
+    // same binary, so cliApi's prefix matches). Local tab: same-origin via @ce wsUrl — unchanged.
+    const path = cliApi(`/sessions/${sessionId()}/ws`)
+    const base = resolveOpt(opts.wsBase)
+    let url = base ? base + path : wsUrl(path)
+    // A REMOTE tab (base set) uses ONLY the peer's code — NEVER the local cli_auth_code fallback,
+    // which would leak this machine's auth to a remote host AND connect with the wrong credential.
+    // A local tab keeps the browser-stored code fallback. (WS can't set headers, so auth rides the
+    // query — wss-TLS protects it on the cloudflare path; the LAN http path is link-local.)
+    const token = base ? resolveOpt(opts.authToken) : (resolveOpt(opts.authToken) || localStorage.getItem('cli_auth_code') || '')
     if (token) url += `?auth=${encodeURIComponent(token)}`
     return url
   }
