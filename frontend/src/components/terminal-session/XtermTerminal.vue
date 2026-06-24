@@ -37,6 +37,7 @@ import {
   summarizeText,
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useXtermKeyboardFallback } from '@terminal/composables/cli/useXtermKeyboardFallback'
+import { clearXtermHelperTextareaValue } from '@terminal/composables/cli/useXtermHelperTextarea'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import 'xterm/css/xterm.css'
 
@@ -150,6 +151,7 @@ function onProxyKeydown(event: KeyboardEvent) {
 // started. (Log evidence: compositionend at T+0ms, compositionstart at T+8ms,
 // onData fires at T+25ms reading textarea that now contains prevComposed+newKey.)
 let composingText = ''
+let compositionActive = false
 
 function attachXtermKeydownFallback(textarea: HTMLTextAreaElement | null): () => void {
   if (!textarea) return () => {}
@@ -158,24 +160,34 @@ function attachXtermKeydownFallback(textarea: HTMLTextAreaElement | null): () =>
   }
   const onComposition = (event: CompositionEvent) => {
     xtermKeydownFallback.notifyComposition(event.type)
-    if (event.type === 'compositionupdate') {
+    if (event.type === 'compositionstart') {
+      compositionActive = true
+    } else if (event.type === 'compositionupdate') {
+      compositionActive = true
       composingText = event.data ?? ''
     } else if (event.type === 'compositionend') {
+      compositionActive = false
       composingText = ''
     }
+  }
+  const onBlur = () => {
+    if (!compositionActive) clearXtermHelperTextareaValue(textarea, 'blur')
   }
 
   textarea.addEventListener('keydown', onKeydown, true)
   textarea.addEventListener('compositionstart', onComposition, true)
   textarea.addEventListener('compositionupdate', onComposition, true)
   textarea.addEventListener('compositionend', onComposition, true)
+  textarea.addEventListener('blur', onBlur, true)
 
   return () => {
     textarea.removeEventListener('keydown', onKeydown, true)
     textarea.removeEventListener('compositionstart', onComposition, true)
     textarea.removeEventListener('compositionupdate', onComposition, true)
     textarea.removeEventListener('compositionend', onComposition, true)
+    textarea.removeEventListener('blur', onBlur, true)
     composingText = ''
+    compositionActive = false
   }
 }
 
@@ -252,10 +264,12 @@ function initTerminal() {
         route: 'wk-single-ascii',
         data: summarizeText(cleanData),
       })
+      if (!compositionActive) clearXtermHelperTextareaValue(helperTextarea, 'xterm.onData.skip')
       return // WKWebView: single ASCII handled by document keydown in TerminalPage
     }
     reportCliInputDiagnostic('xterm.onData.emit', { data: summarizeText(cleanData) })
     emit('data', bytes)
+    if (!compositionActive) clearXtermHelperTextareaValue(helperTextarea, 'xterm.onData.emit')
   })
 
   // onKey: special keys + Ctrl combos on WKWebView.

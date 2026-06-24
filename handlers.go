@@ -22,6 +22,11 @@ const (
 	// wsWriteTimeout is the timeout for writing a single WS message.
 	wsWriteTimeout = 10 * time.Second
 
+	// wsReplayMaxBytes caps attach/reconnect replay. The ring buffer still keeps
+	// 1 MiB for local history, but pushing the full buffer before interactive WS
+	// traffic makes remote tabs feel sticky on reconnect.
+	wsReplayMaxBytes = 256 * 1024
+
 	// tmuxStatePollInterval controls how often the WS writer recomputes tmux
 	// topology and pushes a tmux_state frame on change. Kept light (~1s) so the
 	// frontend stays current without a heavy poll; the provider is time-boxed.
@@ -324,13 +329,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Send replay buffer first. Strip terminal report-queries (DA/DSR/color/…): replaying them
 	// would make the browser terminal re-answer, and on a reconnect into tmux copy-mode those
 	// stray answers are read as keys (the mysterious "(search up)"). See stripDeviceQueries.
-	replay := stripDeviceQueries(sess.Buffer.Read())
+	bufferBytes := sess.Buffer.Len()
+	replayRaw := sess.Buffer.ReadTail(wsReplayMaxBytes)
+	replayTruncated := bufferBytes > len(replayRaw)
+	replay := stripDeviceQueries(replayRaw)
 	terminalWSConnectionsTotal.Inc()
 	terminalLogger.Info(attachLogCtx, "cli ws connected",
 		"session_id", id,
 		"sub_id", subID,
 		"remote_addr", r.RemoteAddr,
-		"replay_bytes", len(replay))
+		"buffer_bytes", bufferBytes,
+		"replay_bytes", len(replay),
+		"replay_limit_bytes", wsReplayMaxBytes,
+		"replay_truncated", replayTruncated)
 	// Wrap in a closure so time.Since is evaluated at disconnect (when the deferred
 	// func runs), not at defer registration — otherwise duration_ms is always ~0.
 	defer func() {
@@ -351,7 +362,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		terminalLogger.Info(attachLogCtx, "cli ws replay sent",
 			"session_id", id,
 			"sub_id", subID,
-			"replay_bytes", len(replay))
+			"buffer_bytes", bufferBytes,
+			"replay_bytes", len(replay),
+			"replay_limit_bytes", wsReplayMaxBytes,
+			"replay_truncated", replayTruncated)
 	}
 
 	// Push session metadata immediately after replay so the frontend can enable

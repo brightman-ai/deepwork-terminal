@@ -67,14 +67,22 @@ export function isCliInputDiagnosticsEnabled(): boolean {
   const query = params.get(QUERY_KEY)
   try {
     if (query === '1') {
-      window.localStorage.setItem(STORAGE_KEY, '1')
+      window.sessionStorage.setItem(STORAGE_KEY, '1')
+      window.localStorage.removeItem(STORAGE_KEY)
       return true
     }
     if (query === '0') {
       window.localStorage.removeItem(STORAGE_KEY)
+      window.sessionStorage.removeItem(STORAGE_KEY)
       return false
     }
-    return window.localStorage.getItem(STORAGE_KEY) === '1'
+    // Older builds persisted this flag in localStorage, so one diagnostic session could make
+    // later normal terminal use slow on that origin. Treat it as stale and clear it.
+    if (window.localStorage.getItem(STORAGE_KEY) === '1') {
+      window.localStorage.removeItem(STORAGE_KEY)
+      return false
+    }
+    return window.sessionStorage.getItem(STORAGE_KEY) === '1'
   } catch {
     return query === '1'
   }
@@ -151,7 +159,7 @@ function activeElementSnapshot() {
 export function reportCliInputDiagnostic(msg: string, ext: DiagnosticContext = {}): void {
   if (!isCliInputDiagnosticsEnabled()) return
   const ctx = { ...ext, viewport: viewportSnapshot(), active: activeElementSnapshot() }
-  log.info(msg, ctx)
+  log.debug(msg, ctx)
   _pushEvent(msg, ctx)
 }
 

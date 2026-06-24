@@ -110,6 +110,22 @@ func TestSessionManager_Create(t *testing.T) {
 	assert.Regexp(t, `^\d{4}-\d{4}$`, sess2.Name)
 }
 
+func TestPTYEnvForBrowserTerminal(t *testing.T) {
+	got := ptyEnv([]string{
+		"PATH=/bin",
+		"TERM=dumb",
+		"COLORTERM=old",
+		"SHELL=/bin/zsh",
+	})
+
+	assert.Contains(t, got, "PATH=/bin")
+	assert.Contains(t, got, "SHELL=/bin/zsh")
+	assert.Contains(t, got, "TERM=xterm-256color")
+	assert.Contains(t, got, "COLORTERM=truecolor")
+	assert.NotContains(t, got, "TERM=dumb")
+	assert.NotContains(t, got, "COLORTERM=old")
+}
+
 // TC-08-SM-02: SessionManager.List() returns all sessions.
 func TestSessionManager_List(t *testing.T) {
 	sm, _ := newTestManager(t)

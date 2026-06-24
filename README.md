@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main
 Installs `dw-terminal` to `~/.local/bin` for **Linux** (amd64/arm64) and **macOS** (universal). On **WSL**, this is the right path — it just works. Pin a version or change the directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.5.0 --dir=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.5.1 --dir=/usr/local/bin
 ```
 
 ### Homebrew (macOS / Linux)
