@@ -26,6 +26,11 @@
         :session-id="tab.sessionId!"
         :session-name="tab.name"
         :active="tab.id === activeTabId"
+        :ws-base="tab.wsBase"
+        :auth-token="tab.authToken"
+        :machine-label="tab.machineLabel"
+        :is-remote="tab.isRemote"
+        :conn-error="tab.connError"
         :ref="(el) => onSurfaceRef(tab.id, el)"
         :data-testid="`cli-portal-surface-${tab.id}`"
         @agent-state="(s) => emit('agent-state', tab.id, s)"
@@ -45,6 +50,13 @@ interface TabWithSession {
   id: string
   name: string
   sessionId?: string
+  // Remote-tab connection (mesh), resolved upstream by resolveTabConnection. Local tabs leave
+  // wsBase/authToken empty → CliTerminalSurface falls back to its same-origin behavior.
+  wsBase?: string
+  authToken?: string
+  machineLabel?: string
+  isRemote?: boolean
+  connError?: string
 }
 
 defineProps<{

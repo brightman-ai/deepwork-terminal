@@ -14,6 +14,7 @@
       @switch="switchTab"
       @close="closeTab"
       @add="quickCreateTab"
+      @add-remote="openRemoteDialog"
       @rename-start="startRenameTab"
       @rename-input="renameValue = $event"
       @rename-commit="commitRename"
@@ -33,13 +34,16 @@
       :loading="loading"
       :error="error"
       :active-tab-id="activeTab?.id"
-      :tabs-with-session="allTabsWithSession"
+      :tabs-with-session="surfaceTabs"
       @register-surface="registerSurface"
       @agent-state="onTabAgentState"
       @agent-notifications="onTabAgentNotifications"
       @session-exit="onTabSessionExit"
       @connection-change="onTabConnectionChange"
     />
+
+    <!-- Remote-terminal picker (mesh): add/select a peer, then open a tab connected to it. -->
+    <RemoteTermDialog v-model:open="remoteDialogOpen" :on-connect="createRemoteTab" />
   </div>
 </template>
 
@@ -49,6 +53,7 @@ import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
 import { CliTabBar, CliTerminalView } from './adapters'
+import RemoteTermDialog from '@terminal/components/terminal-session/RemoteTermDialog.vue'
 
 const runtime = usePortalRuntime({
   portalId: 'cli',
@@ -62,11 +67,12 @@ const {
   loading, error, groups, activeTab, showGroupHeaders,
   toggleGroupCollapsed,
   tabRuntimes, registerSurface,
-  allTabsWithSession,
+  surfaceTabs,
   onTabAgentState, onTabAgentNotifications, onTabSessionExit, onTabConnectionChange,
   switchTab, closeTab,
   renamingTabId, renameValue, startRenameTab, commitRename, cancelRename,
   quickCreateTab,
+  remoteDialogOpen, openRemoteDialog, createRemoteTab,
 } = useCliState(runtime)
 </script>
 

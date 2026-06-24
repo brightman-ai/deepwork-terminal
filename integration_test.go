@@ -253,6 +253,23 @@ func TestIntegration_NoAuthToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w3.Code)
 }
 
+func TestIntegration_CORSPreflightAllowsRemoteSessionAuth(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodOptions, "/api/sessions", nil)
+	req.Header.Set("Origin", "http://stmac:8087")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "X-CLI-Auth, Content-Type")
+
+	w := httptest.NewRecorder()
+	corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("preflight should be answered before auth/session handlers")
+	})).ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, "http://stmac:8087", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "X-CLI-Auth")
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Methods"), "POST")
+}
+
 // TC-08-I-12: HUD log upload.
 func TestIntegration_HudLogUpload(t *testing.T) {
 	server, _, _ := NewTestCLIServer(t)

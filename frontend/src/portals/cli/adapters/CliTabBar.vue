@@ -58,12 +58,31 @@
       </template>
     </template>
 
-    <!-- Add tab -->
+    <!-- Add tab — branches into 本机 / 远程 via a small dropdown (Teleported so the tab bar's
+         overflow:hidden can't clip it). -->
     <button
+      ref="addBtnRef"
       class="cli-tab-bar__tab cli-tab-bar__tab--add"
       data-testid="cli-portal-add-tab"
-      @click="emit('add')"
+      @click="toggleAddMenu"
     >+</button>
+    <Teleport to="body">
+      <div
+        v-if="addMenuOpen"
+        class="cli-add-menu-scrim"
+        data-testid="cli-portal-add-menu"
+        @click.self="addMenuOpen = false"
+      >
+        <div class="cli-add-menu" :style="addMenuStyle">
+          <button class="cli-add-menu__item" data-testid="cli-portal-add-local" @click="pickAdd('local')">
+            <Monitor :size="15" /><span>本机终端</span>
+          </button>
+          <button class="cli-add-menu__item" data-testid="cli-portal-add-remote" @click="pickAdd('remote')">
+            <Server :size="15" /><span>远程终端…</span>
+          </button>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Spacer + right-side status (settings icon) -->
     <div class="cli-tab-bar__spacer" />
@@ -91,7 +110,7 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
+import { RefreshCw, Monitor, Server } from 'lucide-vue-next'
 import type { WorkbenchGroup } from '@terminal/types/workbench'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
@@ -114,6 +133,7 @@ const emit = defineEmits<{
   (e: 'switch', tabId: string): void
   (e: 'close', tabId: string): void
   (e: 'add'): void
+  (e: 'add-remote'): void
   (e: 'rename-start', tabId: string): void
   (e: 'rename-input', value: string): void
   (e: 'rename-commit'): void
@@ -137,6 +157,22 @@ onMounted(async () => {
     if (r.ok) version.value = ((await r.json()) as { version?: string }).version ?? ''
   } catch { /* badge just stays hidden */ }
 })
+
+// ── Add-tab dropdown (本机 / 远程) ──
+const addBtnRef = ref<HTMLButtonElement | null>(null)
+const addMenuOpen = ref(false)
+const addMenuStyle = ref<Record<string, string>>({})
+function toggleAddMenu() {
+  if (addMenuOpen.value) { addMenuOpen.value = false; return }
+  const r = addBtnRef.value?.getBoundingClientRect()
+  if (r) addMenuStyle.value = { top: `${r.bottom + 4}px`, left: `${r.left}px` }
+  addMenuOpen.value = true
+}
+function pickAdd(which: 'local' | 'remote') {
+  addMenuOpen.value = false
+  if (which === 'local') emit('add')
+  else emit('add-remote')
+}
 
 // A standalone PWA has no browser chrome (no address bar, no F5), so show an in-app refresh.
 const isPWA = computed(
@@ -351,4 +387,38 @@ function tabNeedsInput(tabId: string): boolean {
   white-space: nowrap;
   user-select: text;
 }
+
+/* Add-tab dropdown (Teleported to body; scoped styles still apply via the data-v attr). The
+   full-screen scrim catches an outside-click to dismiss; the menu floats at the + button. */
+.cli-add-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+.cli-add-menu {
+  position: fixed;
+  min-width: 168px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: hsl(var(--popover, 240 6% 12%));
+  border: 1px solid hsl(var(--border, 240 4% 24%));
+  border-radius: 10px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+}
+.cli-add-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: hsl(var(--foreground, 0 0% 92%));
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.cli-add-menu__item:hover { background: hsl(var(--accent, 240 4% 20%)); }
+.cli-add-menu__item :deep(svg) { color: hsl(var(--muted-foreground)); flex-shrink: 0; }
 </style>

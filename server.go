@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net"
 	"net/http"
@@ -115,7 +116,9 @@ func (s *Server) Service() TerminalSessionService {
 // The SPA is the embedded Vue frontend (built by build.sh).
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	root := http.NewServeMux()
-	root.Handle("/api/", http.StripPrefix("/api", s.mux))
+	// CORS on the API so another deepwork-terminal instance's page (mesh remote terminal) can
+	// reach this one's REST cross-origin. Standalone only — when EMBEDDED the host owns headers.
+	root.Handle("/api/", corsMiddleware(http.StripPrefix("/api", s.mux)))
 	// /fresh — a bookmarkable cache-buster: redirect to "/" with a unique query so the
 	// browser can't reuse a stale cached index.html and loads the current build. A manual
 	// escape hatch alongside the no-cache index.html + the in-app auto-reloader; the user's
@@ -134,8 +137,18 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// domain. The CSP carries no upgrade-insecure-requests, so HTTP origins load fine and
 	// clipboard keeps its execCommand fallback. When EMBEDDED (Handler()) the host (pro)
 	// owns the headers — this wraps only the standalone listener. SSOT: kit/webserve.
+	// CSP mirrors webserve.SPACSP("'none'") EXCEPT connect-src: the remote-terminal mesh has THIS
+	// page open WebSocket/fetch directly to OTHER deepwork-terminal instances (user-added peers at
+	// arbitrary http LAN / https cloudflare hosts), which 'self' would block at the CSP layer. We
+	// can't enumerate peer hosts ahead of time, so connect-src allows the needed schemes. Tradeoff:
+	// looser XSS-exfiltration defense — acceptable for a tool that already grants full shell access;
+	// every other directive stays strict. (Built inline to keep the change in this repo, not kit.)
+	const meshCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:; " +
+		"worker-src 'self'; manifest-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; " +
+		"frame-ancestors 'self'; form-action 'self'"
 	secured := webserve.Config{
-		CSP:          webserve.SPACSP("'none'"),
+		CSP:          meshCSP,
 		FrameOptions: "SAMEORIGIN",
 		HSTS:         false,
 	}.Middleware(root)
@@ -263,7 +276,10 @@ func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
 				token = cookie.Value
 			}
 		}
-		if token != s.config.AuthCode {
+		// Constant-time compare so a remote attacker can't time-probe the code byte-by-byte —
+		// the mesh sends this code cross-origin, widening who can guess at it. (Returns 0 when
+		// lengths differ, which is fine — that only leaks length, not content.)
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.config.AuthCode)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "unauthorized",
 			})
@@ -271,4 +287,28 @@ func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// corsMiddleware lets another deepwork-terminal instance's browser page call THIS instance's
+// REST cross-origin (the mesh remote-terminal feature). It reflects the request Origin but
+// deliberately does NOT set Access-Control-Allow-Credentials: the auth code carried in the
+// explicit X-CLI-Auth header is the ONLY gate, so cookies must never ride along (that would turn
+// an open CORS policy into a CSRF vector). Without credentials, browsers won't attach cookies
+// cross-origin and won't expose responses to a caller lacking the code. Preflight (OPTIONS) is
+// answered here, before auth, since it carries no credentials.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Add("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-CLI-Auth, X-Auth-Code")
+			w.Header().Set("Access-Control-Max-Age", "600")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
