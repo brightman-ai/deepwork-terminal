@@ -4,6 +4,7 @@
   <div
     class="connection-status" :class="[statusClass, { 'is-clickable': status === 'connected' }]"
     data-testid="cli-connection-status"
+    :title="targetLabel ? `连接目标: ${targetLabel}` : undefined"
     @click="status === 'connected' && (popOpen = !popOpen)"
   >
     <span class="status-indicator" />
@@ -22,6 +23,7 @@
     </Teleport>
     <div v-if="popOpen" class="net-pop" data-testid="cli-connection-pop" @click.stop>
       <div class="net-pop-row"><span>状态</span><span class="np-ok">已连接</span></div>
+      <div v-if="targetLabel" class="net-pop-row"><span>目标</span><span>{{ targetLabel }}</span></div>
       <div class="net-pop-row"><span>延迟 RTT</span><span :class="rttClass">{{ safeRtt > 0 ? safeRtt + ' ms' : '—' }}</span></div>
       <div class="net-pop-row"><span>连接时长</span><span>{{ safeUptime > 0 ? formatDuration(safeUptime) : '—' }}</span></div>
       <div class="net-pop-sep" />
@@ -49,6 +51,8 @@ const props = defineProps<{
   rxTotal?: number
   /** seconds since the current connection opened */
   uptimeSec?: number
+  /** Human-readable endpoint label for this exact WS connection. */
+  targetLabel?: string
 }>()
 
 const statusClass = computed(() => `status-${props.status}`)

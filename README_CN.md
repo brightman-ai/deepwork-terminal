@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main
 为 **Linux**（amd64/arm64）和 **macOS**（通用二进制）把 `dw-terminal` 装到 `~/.local/bin`。在 **WSL** 上这条路即可，开箱即用。指定版本或目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.5.0 --dir=/usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh -s -- --version=v0.5.1 --dir=/usr/local/bin
 ```
 
 ### Homebrew（macOS / Linux）

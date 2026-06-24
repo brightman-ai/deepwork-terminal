@@ -60,6 +60,7 @@ func DefaultPTYFactory(opts PTYStartOptions) (*os.File, *exec.Cmd, error) {
 		if opts.CWD != "" {
 			c.Dir = opts.CWD
 		}
+		c.Env = ptyEnv(os.Environ())
 		return c
 	}
 	cmd := newCmd()
@@ -76,6 +77,18 @@ func DefaultPTYFactory(opts PTYStartOptions) (*os.File, *exec.Cmd, error) {
 		}
 	}
 	return ptmx, cmd, nil
+}
+
+func ptyEnv(env []string) []string {
+	out := make([]string, 0, len(env)+2)
+	for _, item := range env {
+		if strings.HasPrefix(item, "TERM=") || strings.HasPrefix(item, "COLORTERM=") {
+			continue
+		}
+		out = append(out, item)
+	}
+	out = append(out, "TERM=xterm-256color", "COLORTERM=truecolor")
+	return out
 }
 
 // splitShell tokenizes a shell command string into program + args, honouring

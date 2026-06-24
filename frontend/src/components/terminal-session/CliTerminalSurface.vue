@@ -66,6 +66,7 @@
         :tx-total="netStats.txTotal ?? 0"
         :rx-total="netStats.rxTotal ?? 0"
         :uptime-sec="netStats.uptimeSec ?? 0"
+        :target-label="machineLabel || '本机'"
         data-testid="surface-connection-status"
       />
     </div>

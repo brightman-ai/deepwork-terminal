@@ -92,7 +92,7 @@
       v-if="versionLabel"
       class="cli-tab-bar__version"
       data-testid="cli-portal-version"
-      :title="'deepwork-terminal ' + versionLabel"
+      :title="'deepwork-terminal ' + fullVersionLabel"
     >{{ versionLabel }}</span>
     <!-- PWA-only refresh: a standalone PWA has no address bar / F5, so a wedged state can't be
          reloaded. Force-fresh via /fresh (bypasses any stale cached index.html). -->
@@ -141,16 +141,26 @@ const emit = defineEmits<{
   (e: 'toggle-group', groupId: string): void
 }>()
 
-// Build version, fetched once from GET /version. goreleaser injects the tag WITHOUT a
-// leading "v" (e.g. "0.4.0"), so prefix it for display; a non-numeric build like "dev"
-// is shown as-is. Empty until fetched (and stays empty on failure → the badge hides).
+// Build version, fetched once from GET /version. Keep the badge short: release builds and
+// dirty source builds both display as vX.Y.Z; the full string remains in the title.
 const { cliFetch } = useCliAuth()
 const version = ref('')
-const versionLabel = computed(() => {
-  const v = version.value
+const fullVersionLabel = computed(() => formatFullVersion(version.value))
+const versionLabel = computed(() => formatShortVersion(version.value))
+
+function formatFullVersion(raw: string): string {
+  const v = raw.trim()
   if (!v) return ''
   return /^\d/.test(v) ? 'v' + v : v
-})
+}
+
+function formatShortVersion(raw: string): string {
+  const full = formatFullVersion(raw)
+  const match = full.match(/^v?(\d+\.\d+\.\d+)/)
+  return match ? `v${match[1]}` : full
+}
+
+// Empty until fetched (and stays empty on failure → the badge hides).
 onMounted(async () => {
   try {
     const r = await cliFetch(cliApi('/version'))
