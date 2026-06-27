@@ -36,26 +36,26 @@
       </svg>
       <span class="tqb-cap">cp</span>
     </button>
-    <button class="tqb-btn" data-testid="tmux-quick-pgup" title="Page Up" @click="send('\x1b[5~')"><span class="tqb-cap">PgUp</span></button>
-    <button class="tqb-btn" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
-    <!-- Half-page up/down — copy-mode scroll for the cross-screen copy flow (overlap halves,
-         easier to stitch). Only present while attached (no tmux client → no copy-mode → nothing
-         to scroll). The motion runs SERVER-SIDE (POST /tmux/copy-motion → send-keys -X) rather
-         than via keystrokes: the prefix `[` + command-prompt route silently no-ops for these
-         motions, and a raw key depends on mode-keys. Config-independent, never leaks to the shell. -->
+    <button class="tqb-btn tqb-btn--scroll" data-testid="tmux-quick-pgup" title="Page Up" @click="send('\x1b[5~')"><span class="tqb-cap">PgUp</span></button>
+    <button class="tqb-btn tqb-btn--scroll" data-testid="tmux-quick-pgdn" title="Page Down" @click="send('\x1b[6~')"><span class="tqb-cap">PgDn</span></button>
+    <!-- Half-page up/down — a STABLE half-screen scroll, buffer-aware. Routes through the
+         surface's onSendKey (the sentinel below): in a fullscreen TUI (alt screen, e.g. claude-code)
+         it scrolls the app itself a fixed half-screen via forwarded mouse-wheel; in the normal
+         buffer it runs tmux copy-mode half-page (server-side, reaching tmux's full scrollback).
+         Only while attached (no tmux client → nothing to scroll). -->
     <button
       v-if="attached"
-      class="tqb-btn"
+      class="tqb-btn tqb-btn--scroll"
       data-testid="tmux-quick-halfpgup"
-      title="Half Page Up (copy-mode)"
-      @click="tmux.runCopyMotion('halfpage-up')"
+      title="Half Page Up"
+      @click="send('dw:scroll-half-up')"
     ><span class="tqb-cap">½↑</span></button>
     <button
       v-if="attached"
-      class="tqb-btn"
+      class="tqb-btn tqb-btn--scroll"
       data-testid="tmux-quick-halfpgdn"
-      title="Half Page Down (copy-mode)"
-      @click="tmux.runCopyMotion('halfpage-down')"
+      title="Half Page Down"
+      @click="send('dw:scroll-half-down')"
     ><span class="tqb-cap">½↓</span></button>
     <button class="tqb-btn tqb-btn--danger" data-testid="tmux-quick-ctrlc" title="Ctrl+C" @click="send('\x03')"><span class="tqb-cap">^C</span></button>
     <button class="tqb-btn" data-testid="tmux-quick-up" title="Arrow Up" @click="send('\x1b[A')"><span class="tqb-glyph">↑</span></button>
@@ -243,9 +243,20 @@ function send(key: string): void {
   white-space: nowrap;
   transition: background 0.08s, transform 0.08s;
 }
-.tqb-btn:active { background: #2a1c48; transform: translateY(1px) scale(0.96); border-bottom-width: 1px; }
+.tqb-btn:active { background: #3a2860; transform: translateY(1px) scale(0.93); border-bottom-width: 1px; }
 .tqb-cap { font-size: 0.62rem; line-height: 1; }
 .tqb-glyph { font-size: 0.85rem; line-height: 1; }
+
+/* Scroll buttons (cp / PgUp / PgDn / ½↑ / ½↓) — the most-used one-handed targets. Wider hit area,
+   brighter resting tint and a stronger press feedback than the dense action row (REQ-SCROLL-04). */
+.tqb-btn--scroll {
+  min-width: 50px;
+  padding: 0 12px;
+  color: #d6b8f4;
+  border-color: #4c3676;
+}
+.tqb-btn--scroll .tqb-cap { font-size: 0.7rem; font-weight: 600; }
+.tqb-btn--scroll:active { background: #4a3284; transform: translateY(1px) scale(0.9); }
 
 /* Ctrl-C accent — red, matching the existing toolbar danger idiom. */
 .tqb-btn--danger {
