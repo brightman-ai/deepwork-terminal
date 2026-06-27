@@ -60,6 +60,9 @@ export interface TmuxStateStore {
    *  inject keystrokes: the prefix `[` + command-prompt route silently no-ops for these
    *  motions, and a raw key depends on mode-keys. Best-effort; resolves once dispatched. */
   runCopyMotion: (motion: CopyMotion) => Promise<void>
+  /** Force a server-side full redraw to this client (POST /tmux/refresh) to resync the web
+   *  terminal's grid when xterm's buffer has diverged from tmux's model (ghosting). Best-effort. */
+  runRefreshClient: () => Promise<void>
   /** Create a new tmux session and switch this client onto it via POST /tmux/new-session.
    *  Server-side (keystroke `new-session` is unreliable + refuses to nest in a client). */
   newSession: () => Promise<void>
@@ -162,6 +165,18 @@ function createStore(sessionId: () => string): TmuxStateStore {
     } catch { /* best-effort scroll — a transient failure just means no scroll this tap */ }
   }
 
+  // Force a server-side full redraw to this session's tmux client. Resyncs the web terminal's
+  // xterm grid when it has diverged from tmux's model (ghosting under fullscreen TUIs — stale
+  // cells that a client-side term.refresh can't clear because the divergence is in xterm's
+  // buffer). Best-effort: a transient failure just means the residue lingers until the next one.
+  async function runRefreshClient(): Promise<void> {
+    const id = sessionId()
+    if (!id) return
+    try {
+      await cliFetch(cliApi(`/tmux/refresh?session=${encodeURIComponent(id)}`), { method: 'POST' })
+    } catch { /* best-effort resync */ }
+  }
+
   async function newSession(): Promise<void> {
     const id = sessionId()
     if (!id) return
@@ -187,7 +202,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, activeCwd, activeTool, prefixSeq, runCopyMotion, newSession, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, activeCwd, activeTool, prefixSeq, runCopyMotion, runRefreshClient, newSession, handleWSMessage, fetchSnapshot,
   }
 }
 

@@ -443,6 +443,9 @@ function robustFitAndResize() {
   if (term && term.cols > 0 && term.rows > 0) {
     sendResize(term.cols, term.rows)
     hud.updateSnapshot({ pty: `${term.cols}x${term.rows}` })
+    // Ghosting guard: a resize/reflow (mobile keyboard show/hide, rotation, reattach) can leave
+    // stale cells when a fullscreen TUI repaints differentially. Force a full repaint after the fit.
+    term.refresh(0, term.rows - 1)
   }
 }
 
@@ -633,13 +636,27 @@ function disarmPaste(): void {
   pasteArmed.value = false
 }
 
-// While a selection is active, swallow finger-drag scrolling on the terminal body so the
-// gesture adjusts anchors instead of scrolling the xterm viewport / page out from under the
-// selection (the source of the "selection jumps on Safari scroll" bug). Must be a NON-passive
-// listener — a `@touchmove.passive` template binding cannot call preventDefault. Intentional
-// scrolling still happens via edgeScroll (anchor at top/bottom edge) and the PgUp/PgDn keys.
+// Non-passive touchmove listener (a `@touchmove.passive` template binding cannot preventDefault):
+//   1. While SELECTING — swallow the finger-drag so it adjusts anchors instead of scrolling the
+//      viewport / page out from under the selection ("selection jumps on Safari scroll" bug).
+//   2. Idle, NORMAL buffer — let it through: xterm's own viewport momentum-scroll handles it.
+//   3. Idle, ALTERNATE screen (fullscreen TUI) — xterm has no scrollback, so a finger swipe would
+//      do NOTHING (the reported "touch scroll is bad" in flicker mode). Convert the swipe into the
+//      app's own scroll via scrollGesture (mouse-wheel / PgUp-PgDn), one cell-height per step.
 function onTerminalBodyTouchMove(e: TouchEvent) {
-  if (!isMobile.value || !isSelecting.value) return
+  if (!isMobile.value) return
+  if (isSelecting.value) { e.preventDefault(); return }
+  const term = xtermRef.value?.terminal?.()
+  if (!term || term.buffer.active.type !== 'alternate') return
+  const touch = e.touches[0]
+  if (!touch) return
+  const cellH = (terminalBodyRef.value?.clientHeight ?? 0) / Math.max(1, term.rows) || 18
+  const dy = touch.clientY - termLastScrollY
+  if (Math.abs(dy) < cellH) return  // accumulate until at least one full cell of travel
+  const lines = Math.trunc(dy / cellH)
+  termLastScrollY = touch.clientY
+  // finger DOWN (dy>0) reveals EARLIER content → scroll back (dir -1); finger UP → forward (+1).
+  scrollGesture(term, lines > 0 ? -1 : 1, Math.min(Math.abs(lines), term.rows))
   e.preventDefault()
 }
 
@@ -657,6 +674,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (viewportScrollLockRaf) window.cancelAnimationFrame(viewportScrollLockRaf)
+  if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
   terminalBodyRef.value?.removeEventListener('touchmove', onTerminalBodyTouchMove)
   document.removeEventListener('keydown', onKeydownDirect, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
@@ -667,6 +685,30 @@ onUnmounted(() => {
 })
 
 // ─── Terminal callbacks ───────────────────────────────────────────────────────
+
+// Last-seen xterm buffer type ('normal' | 'alternate'); a change drives the ghosting refresh.
+let lastBufferType = ''
+
+// Ghosting guard for the ALTERNATE screen (fullscreen TUI: claude-code "flicker mode", tmux).
+// Symptom (reproduced): tmux's pane model (capture-pane) is CLEAN, but the web terminal shows
+// stale glyphs from a previous frame (e.g. a "0" column left after two-digit content scrolls away)
+// — residue that lives in xterm's BUFFER, diverged from tmux. Proven in-session: a client-side
+// `term.refresh()` does NOT clear it (it re-renders the same diverged buffer); only a server-side
+// `tmux refresh-client` (resend every cell) does. So we debounce a refresh-client: during a
+// continuous stream this stays armed and does NOT fire (no extra full redraws mid-stream); it
+// fires once the output settles — when the user reads and residue would be visible.
+let ghostRefreshTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleGhostRefresh(): void {
+  if (!tmux.attached.value) return
+  const term = xtermRef.value?.terminal?.()
+  if (!term || term.buffer.active.type !== 'alternate') return
+  if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
+  ghostRefreshTimer = setTimeout(() => {
+    ghostRefreshTimer = null
+    const t = xtermRef.value?.terminal?.()
+    if (t && t.buffer.active.type === 'alternate') void tmux.runRefreshClient()
+  }, 160)
+}
 
 function onTerminalReady(terminal: Terminal) {
   if (isMobile.value) {
@@ -692,6 +734,15 @@ function onTerminalReady(terminal: Terminal) {
   terminal.onRender(() => {
     const vY = terminal.buffer.active.viewportY
     if (viewportY.value !== vY) viewportY.value = vY
+    // Ghosting guard: when Claude Code's fullscreen TUI switches buffers (normal↔alternate on
+    // launch/exit/resize-reflow), stale cells from the previous buffer can linger in the canvas
+    // renderer. Force a full repaint on the transition so no residue survives. Guarded on the
+    // type CHANGE so it fires once per switch (refresh re-renders, but type is then unchanged).
+    const bt = terminal.buffer.active.type
+    if (bt !== lastBufferType) {
+      lastBufferType = bt
+      terminal.refresh(0, terminal.rows - 1)
+    }
   })
   terminalRows.value = terminal.rows
 
@@ -700,6 +751,7 @@ function onTerminalReady(terminal: Terminal) {
       const bytes = new Uint8Array(data)
       inputTelemetry.recordOutput(bytes, 'ws-binary')
       xtermRef.value?.write(bytes)
+      scheduleGhostRefresh()
     },
     (msg: WSControlMessage) => {
       switch (msg.type) {
@@ -930,11 +982,13 @@ function onDrawerComposeDraft(text: string) {
 
 let termTouchStartX = 0
 let termTouchStartY = 0
+// Running anchor for incremental swipe-to-scroll (alt-screen): advanced one cell-height at a time.
+let termLastScrollY = 0
 
 function onTerminalTouchStart(e: TouchEvent) {
   if (!isMobile.value) return
   const touch = e.touches[0]
-  if (touch) { termTouchStartX = touch.clientX; termTouchStartY = touch.clientY }
+  if (touch) { termTouchStartX = touch.clientX; termTouchStartY = touch.clientY; termLastScrollY = touch.clientY }
 }
 
 function onTerminalTouchEnd(e: TouchEvent) {
@@ -1061,22 +1115,42 @@ function onAnchorDrag(anchorId: 1 | 2, cell: CellCoord) {
   applyXtermSelection()
 }
 
+// Buffer- & mouse-mode-aware scroll: the ONE place that knows HOW to scroll the current surface,
+// so every scroll affordance (finger-swipe, anchor-drag edge scroll) behaves the same across the
+// two Claude Code TUI render modes.
+//   · Normal buffer (old inline TUI / shell): xterm owns the scrollback → scroll its viewport.
+//   · Alternate screen (new "fullscreen"/"flicker" TUI: tmux, claude-code): the APP owns the
+//     screen and xterm holds NO scrollback. Forward the gesture to the app instead:
+//       - app enabled mouse tracking (claude-code does, DECSET 1003) → SGR mouse-wheel (smooth,
+//         line-wise; the app scrolls its own transcript);
+//       - otherwise (plain pager: less/man) → PgUp/PgDn.
+//   dir: -1 = back/up (toward history), +1 = forward/down.
+function scrollGesture(term: Terminal, dir: 1 | -1, lines = 1): void {
+  if (term.buffer.active.type !== 'alternate') {
+    term.scrollLines(dir * lines)
+    return
+  }
+  const mouseMode = (term as any).modes?.mouseTrackingMode as string | undefined
+  if (mouseMode && mouseMode !== 'none') {
+    const btn = dir < 0 ? 64 : 65 // SGR mouse wheel: 64 = up, 65 = down
+    const col = Math.max(1, Math.min(term.cols, Math.ceil(term.cols / 2)))
+    const row = Math.max(1, Math.min(term.rows, Math.ceil(term.rows / 2)))
+    const seq = `\x1b[<${btn};${col};${row}M`
+    for (let i = 0; i < lines; i++) sendBinary(encoder.encode(seq))
+  } else {
+    for (let i = 0; i < lines; i++) sendBinary(encoder.encode(dir < 0 ? '\x1b[5~' : '\x1b[6~'))
+  }
+}
+
 let lastEdgeScrollAt = 0
 function edgeScroll(term: Terminal, dir: 1 | -1) {
   const now = Date.now()
   if (now - lastEdgeScrollAt < 120) return  // throttle
   lastEdgeScrollAt = now
-  if (term.buffer.active.type === 'alternate') {
-    // Alt-screen TUI (tmux / claude-code): xterm holds NO scrollback here — history lives in
-    // the app/tmux. Nudge the app's own pager with PgUp/PgDn so the view scrolls. Caveat:
-    // the selection cannot extend across an app-managed scroll (off-screen lines are not in
-    // xterm's buffer).
-    sendBinary(encoder.encode(dir < 0 ? '\x1b[5~' : '\x1b[6~'))
-    hud.record('touch', 'copy-mode edge scroll → PgUp/PgDn (alt-screen)')
-  } else {
-    term.scrollLines(dir)
-    hud.record('touch', `copy-mode edge scroll ${dir > 0 ? 'down' : 'up'}`)
-  }
+  // Caveat (alt-screen): the selection cannot extend across an app-managed scroll — off-screen
+  // lines are not in xterm's buffer. The scroll itself still works via scrollGesture.
+  scrollGesture(term, dir, 1)
+  hud.record('touch', `edge scroll ${dir > 0 ? 'down' : 'up'}`)
 }
 
 function applyXtermSelection() {
