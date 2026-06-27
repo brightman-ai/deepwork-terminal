@@ -66,6 +66,20 @@ func (s *TmuxStateService) NewSession(ctx context.Context, shellPID int) (string
 	return name, nil
 }
 
+// RefreshClient forces tmux to fully redraw the screen to the client attached through
+// shellPID. The web UI calls this to resync when xterm.js's grid has DIVERGED from tmux's
+// model — ghosting: stale glyphs from a previous frame that survive in xterm's BUFFER (not just
+// its renderer), so a client-side repaint can't clear them. tmux's incremental client update
+// occasionally leaves such residue under a fullscreen TUI's differential redraws; a server-side
+// `refresh-client` resends every cell and clears it (proven: a manual refresh-client fixes the
+// residue while term.refresh does not). No size change → no reflow flicker.
+func (s *TmuxStateService) RefreshClient(ctx context.Context, shellPID int) error {
+	if client := s.prober.FindClientName(ctx, shellPID); client != "" {
+		return tmuxCommandContext(ctx, "refresh-client", "-t", client).Run()
+	}
+	return tmuxCommandContext(ctx, "refresh-client").Run()
+}
+
 // paneInMode reports whether the target pane is currently in a mode (copy-mode etc.).
 // A query failure reads as "not in mode" so the caller enters copy-mode defensively.
 func (s *TmuxStateService) paneInMode(ctx context.Context, target string) bool {

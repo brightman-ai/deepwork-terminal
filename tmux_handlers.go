@@ -101,6 +101,30 @@ func (s *Server) handleTmuxNewSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"name": name})
 }
 
+// TmuxRefresher is an OPTIONAL provider capability: force a full server-side redraw to the
+// caller's tmux client. Used by the UI to resync xterm.js when its buffer has diverged from
+// tmux's model (ghosting under fullscreen TUIs). Default provider implements it.
+type TmuxRefresher interface {
+	RefreshClient(ctx context.Context, shellPID int) error
+}
+
+// handleTmuxRefresh handles POST /tmux/refresh?session=<id>. Forces tmux to fully redraw the
+// screen to that session's client, resyncing the web terminal's grid. Best-effort: a missing
+// client still attempts a generic refresh-client.
+func (s *Server) handleTmuxRefresh(w http.ResponseWriter, r *http.Request) {
+	refresher, ok := s.tmuxProvider.(TmuxRefresher)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "refresh unsupported"})
+		return
+	}
+	shellPID := s.shellPIDForQuery(r.URL.Query().Get("session"))
+	if err := refresher.RefreshClient(r.Context(), shellPID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // shellPIDForQuery resolves a session ID to its shell PID, or 0 if absent/unknown.
 func (s *Server) shellPIDForQuery(sessionID string) int {
 	if sessionID == "" {
