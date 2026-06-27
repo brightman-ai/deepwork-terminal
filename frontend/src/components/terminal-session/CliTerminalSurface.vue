@@ -873,7 +873,26 @@ function onTogglePanel(panel: 'numpad' | 'compose') {
   hud.record('state', `panel: ${activeMode.value}`)
 }
 
+// Sentinels emitted by TmuxQuickBar's ½↑/½↓ buttons (NOT byte sequences sent to the PTY) — they
+// route a half-page scroll through onSendKey so it is buffer-aware with a STABLE distance.
+const HALF_PAGE_UP = 'dw:scroll-half-up'
+const HALF_PAGE_DOWN = 'dw:scroll-half-down'
+
 function onSendKey(key: string) {
+  // ½↑/½↓: alt screen (fullscreen TUI) → scroll the app a fixed half-screen via scrollGesture
+  // (stable, predictable distance per press); normal buffer → tmux copy-mode half-page, which
+  // reaches tmux's full scrollback history. Intercept BEFORE any byte is sent.
+  if (key === HALF_PAGE_UP || key === HALF_PAGE_DOWN) {
+    const t = xtermRef.value?.terminal?.()
+    const dir: 1 | -1 = key === HALF_PAGE_UP ? -1 : 1
+    if (t && t.buffer.active.type === 'alternate') {
+      scrollGesture(t, dir, Math.max(1, Math.floor(t.rows / 2)))
+    } else {
+      void tmux.runCopyMotion(dir < 0 ? 'halfpage-up' : 'halfpage-down')
+    }
+    hud.record('keyboard', `½${dir < 0 ? '↑' : '↓'} half-page scroll`)
+    return
+  }
   const term = xtermRef.value?.terminal?.()
   if (term && (key === '\x1b[5~' || key === '\x1b[6~')) {
     sendBinary(encoder.encode(key))
@@ -1138,7 +1157,10 @@ function scrollGesture(term: Terminal, dir: 1 | -1, lines = 1): void {
     const seq = `\x1b[<${btn};${col};${row}M`
     for (let i = 0; i < lines; i++) sendBinary(encoder.encode(seq))
   } else {
-    for (let i = 0; i < lines; i++) sendBinary(encoder.encode(dir < 0 ? '\x1b[5~' : '\x1b[6~'))
+    // Pager without mouse tracking (less/man): no per-line scroll key, so approximate by paging —
+    // ~one PgUp/PgDn per screenful of requested lines (at least one nudge).
+    const pages = Math.max(1, Math.round(lines / Math.max(1, term.rows - 1)))
+    for (let i = 0; i < pages; i++) sendBinary(encoder.encode(dir < 0 ? '\x1b[5~' : '\x1b[6~'))
   }
 }
 
