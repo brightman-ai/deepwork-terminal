@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brightman-ai/deepwork-terminal/authgate"
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
 	"github.com/brightman-ai/deepwork-terminal/notify"
 	tunnelkit "github.com/brightman-ai/kit/tunnel"
@@ -33,6 +35,7 @@ type Server struct {
 	ilink        *ilinkStore
 	coordinator  *notify.Coordinator
 	uploads      *uploadIndex
+	authThrottle *authgate.Throttle
 	mu           sync.Mutex
 }
 
@@ -53,6 +56,7 @@ func NewServer(opts ...Option) (*Server, error) {
 		s.config.AuthCode = generateAuthCode()
 	}
 	s.tunnel = tunnelkit.New(s.config.DataDir)
+	s.authThrottle = authgate.NewThrottle()
 	s.uploads = newUploadIndex(s.config.DataDir)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Default in-process tmux provider so standalone gets tmux state without a host.
@@ -281,11 +285,32 @@ func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
 		// the mesh sends this code cross-origin, widening who can guess at it. (Returns 0 when
 		// lengths differ, which is fine — that only leaks length, not content.)
 		if subtle.ConstantTimeCompare([]byte(token), []byte(s.config.AuthCode)) != 1 {
+			// Global failure throttle: the default code is short (~39-bit) and a public tunnel
+			// collapses all source IPs to localhost, so a single shared failure budget is what
+			// actually bounds a brute-force. ONLY failures are charged — the success path below is
+			// never delayed, so an honest login stays instant even mid-attack. See authThrottle.
+			delay := s.authThrottle.Penalty()
+			if delay > 0 {
+				// Park this failed attempt to slow a guessing flood, but bail if the client hangs
+				// up so we don't accumulate stuck goroutines. Then signal Retry-After + 429.
+				select {
+				case <-time.After(delay):
+				case <-r.Context().Done():
+					return
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(delay.Seconds()))))
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"error": "too many attempts",
+				})
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "unauthorized",
 			})
 			return
 		}
+		// Correct code → clear any built-up penalty so a later honest typo gets the full free burst.
+		s.authThrottle.Reset()
 		next(w, r)
 	}
 }

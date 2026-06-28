@@ -7,8 +7,8 @@
         ref="inputRef"
         v-model="code"
         type="text"
-        placeholder="6-character auth code"
-        maxlength="10"
+        placeholder="auth code"
+        maxlength="64"
         autocomplete="off"
         @keyup.enter="submit"
       />
@@ -69,6 +69,13 @@ async function submit() {
       emit('authenticated')
     } else if (resp.status === 401) {
       error.value = 'Invalid auth code. Please try again.'
+    } else if (resp.status === 429) {
+      // Server throttled repeated failures (brute-force brake). Surface the wait so the user
+      // isn't left staring at a generic error — the correct code still works once the wait clears.
+      const ra = resp.headers.get('Retry-After')
+      error.value = ra
+        ? `Too many attempts — wait ${ra}s, then try again.`
+        : 'Too many attempts — wait a moment, then try again.'
     } else {
       error.value = `Server error (${resp.status}). Please try again.`
     }
