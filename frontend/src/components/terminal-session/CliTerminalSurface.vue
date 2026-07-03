@@ -87,6 +87,20 @@
            push-subscribe guide is reached from INSIDE that sheet (its "安装应用 / 开启
            浏览器通知" action), so there is no second redundant bell. -->
       <div class="surface-notify-entries">
+        <button
+          v-if="tuiState === 'collapsed'"
+          class="surface-tui-entry"
+          type="button"
+          title="复制/滚动失效 — 点此切到经典模式"
+          aria-label="复制/滚动失效 — 切到经典模式"
+          data-testid="tui-mode-entry"
+          @click="tuiReopen()"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="14" rx="2" /><path d="M8 21h8" /><path d="M12 18v3" />
+          </svg>
+          <span class="surface-tui-dot" />
+        </button>
         <InstallNotifyIcon @open="notifyQuickOpen = true" />
       </div>
       <XtermTerminal
@@ -212,6 +226,15 @@
       @open-install="notifyQuickOpen = false; installGuideOpen = true"
     />
 
+    <!-- Claude fullscreen → copy/scroll broken advisory; switch flips the live session to classic. -->
+    <TuiModeSheet
+      :open="tuiState === 'prompt'"
+      :can-switch="agentState?.status !== 'running'"
+      :busy="tuiSwitching"
+      @close="tuiDefer()"
+      @switch="onTuiSwitch"
+    />
+
     <AuthDialog
       :visible="showAuthDialog"
       @dismiss="dismissAuthDialog"
@@ -258,6 +281,7 @@ import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
 import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
 import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickSheet.vue'
+import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
@@ -271,6 +295,7 @@ import { useHudCollector } from '@terminal/composables/cli/useHudCollector'
 import { useCliPasteResolver } from '@terminal/composables/cli/useCliPasteResolver'
 import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
+import { useTuiAdvisory } from '@terminal/composables/cli/useTuiAdvisory'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
 import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
@@ -307,7 +332,7 @@ const emit = defineEmits<{
 // ─── Composables ─────────────────────────────────────────────────────────────
 
 const { isMobile } = useDeviceDetection()
-const { showAuthDialog, dismissAuthDialog } = useCliAuth()
+const { showAuthDialog, dismissAuthDialog, cliFetch } = useCliAuth()
 
 const focusSM = useFocusStateMachine()
 const anchorSM = useAnchorStateMachine()
@@ -353,6 +378,27 @@ const tmuxDetected = ref(false)
 const tmuxSheetOpen = ref(false)
 const installGuideOpen = ref(false) // WS7: install + notify guide sheet
 const notifyQuickOpen = ref(false) // quick notify-provider config sheet
+
+// "Claude is in fullscreen → copy/scroll broken" advisory. Fed by the terminal buffer-type change
+// (alternate = fullscreen). Switching sends `/tui default` to the live session (normal buffer →
+// copy/scroll restored); optional persist writes tui=classic to ~/.claude/settings.json.
+const { state: tuiState, noteFullscreen: tuiNoteFullscreen, reopen: tuiReopen, defer: tuiDefer, resolved: tuiResolved } = useTuiAdvisory()
+const tuiSwitching = ref(false)
+async function onTuiSwitch({ persist }: { persist: boolean }): Promise<void> {
+  if (agentState.value?.status === 'running') return // idle gate (UI already disables; defensive)
+  tuiSwitching.value = true
+  try {
+    // `/tui default` relaunches claude in the classic (normal-buffer) renderer with the conversation
+    // intact — we just type it at the idle prompt over the same input channel as the keyboard.
+    sendBinary(encoder.encode('/tui default\r'), 'tui-switch')
+    if (persist) {
+      try { await cliFetch('/api/claude/tui-classic', { method: 'POST' }) } catch { /* best-effort */ }
+    }
+    tuiResolved()
+  } finally {
+    tuiSwitching.value = false
+  }
+}
 
 // WS5: resource drawer open state, persisted across reloads.
 const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
@@ -742,6 +788,8 @@ function onTerminalReady(terminal: Terminal) {
     if (bt !== lastBufferType) {
       lastBufferType = bt
       terminal.refresh(0, terminal.rows - 1)
+      // alternate = Claude entered fullscreen (copy/scroll break); normal = it left → advisory clears.
+      tuiNoteFullscreen(bt === 'alternate')
     }
   })
   terminalRows.value = terminal.rows
@@ -1296,6 +1344,35 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+/* Collapsed advisory entry — sits beside the install/notify icon, amber to match its nudge dot. */
+.surface-tui-entry {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: #f08a3c;
+  cursor: pointer;
+  flex-shrink: 0;
+  touch-action: manipulation;
+  transition: color 0.1s, background 0.1s;
+}
+.surface-tui-entry:hover { background: rgba(255, 255, 255, 0.06); }
+.surface-tui-entry:active { transform: scale(0.94); }
+.surface-tui-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f08a3c;
+  box-shadow: 0 0 0 2px #141416;
 }
 
 /* Copy-mode active: stop the browser from initiating a scroll/pan from a finger-drag on the
