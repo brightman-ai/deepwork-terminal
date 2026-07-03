@@ -230,6 +230,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /tmux/copy-motion", wrap(s.handleTmuxCopyMotion))
 	s.mux.HandleFunc("POST /tmux/refresh", wrap(s.handleTmuxRefresh))
 	s.mux.HandleFunc("POST /tmux/new-session", wrap(s.handleTmuxNewSession))
+	// Persist Claude Code's tui=classic (opt-in "remember" half of the fullscreen→classic advisory).
+	s.mux.HandleFunc("POST /claude/tui-classic", wrap(s.handleClaudeTuiClassic))
 	// Session workbench file service (CHG-016): anchored to session.CWD, traversal-safe.
 	// recent = transcript tool_use signal; tree = single dir level; raw = bounded preview.
 	s.mux.HandleFunc("GET /files/recent", wrap(s.handleFilesRecent))
