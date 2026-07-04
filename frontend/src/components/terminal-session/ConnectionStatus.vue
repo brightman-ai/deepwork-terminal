@@ -9,6 +9,14 @@
   >
     <span class="status-indicator" />
     <span v-if="status !== 'connected'" class="status-text">{{ statusText }}</span>
+    <!-- Non-intrusive diagnostic for a failing (usually remote) connection: an ⓘ that
+         opens the classified reason (auth code? IP/port unreachable?) so a stuck
+         "Connecting…" isn't a dead end. Only shown when we actually have a reason. -->
+    <button
+      v-if="diagnostic && status !== 'connected'"
+      class="status-diag" type="button" data-testid="cli-conn-diagnostic"
+      :title="diagnostic" @click.stop="popOpen = !popOpen"
+    >ⓘ</button>
     <template v-if="status === 'connected'">
       <span v-if="safeRtt > 0" class="net-stat net-rtt" :class="rttClass">{{ safeRtt }}ms</span>
       <span class="net-stat net-speed" v-if="safeDownBps > 0 || safeUpBps > 0">
@@ -21,7 +29,12 @@
     <Teleport to="body">
       <div v-if="popOpen" class="net-pop-backdrop" @click="popOpen = false" />
     </Teleport>
-    <div v-if="popOpen" class="net-pop" data-testid="cli-connection-pop" @click.stop>
+    <div v-if="popOpen && diagnostic && status !== 'connected'" class="net-pop net-pop--diag" data-testid="cli-connection-diag-pop" @click.stop>
+      <div class="net-pop-diag-title">连不上？可能原因</div>
+      <div class="net-pop-diag-reason">{{ diagnostic }}</div>
+      <div v-if="targetLabel" class="net-pop-row"><span>目标</span><span>{{ targetLabel }}</span></div>
+    </div>
+    <div v-else-if="popOpen" class="net-pop" data-testid="cli-connection-pop" @click.stop>
       <div class="net-pop-row"><span>状态</span><span class="np-ok">已连接</span></div>
       <div v-if="targetLabel" class="net-pop-row"><span>目标</span><span>{{ targetLabel }}</span></div>
       <div class="net-pop-row"><span>延迟 RTT</span><span :class="rttClass">{{ safeRtt > 0 ? safeRtt + ' ms' : '—' }}</span></div>
@@ -53,6 +66,8 @@ const props = defineProps<{
   uptimeSec?: number
   /** Human-readable endpoint label for this exact WS connection. */
   targetLabel?: string
+  /** Classified failure reason for a stuck/failed connection (remote peers). Shown via the ⓘ. */
+  diagnostic?: string
 }>()
 
 const statusClass = computed(() => `status-${props.status}`)
@@ -62,8 +77,9 @@ const safeUpBps = computed(() => props.uploadBps ?? 0)
 const safeTxTotal = computed(() => props.txTotal ?? 0)
 const safeRxTotal = computed(() => props.rxTotal ?? 0)
 const safeUptime = computed(() => props.uptimeSec ?? 0)
-// Don't leave the popover hanging if the connection drops while it's open.
-watch(() => props.status, (s) => { if (s !== 'connected') popOpen.value = false })
+// Close the CONNECTED-stats popover when the connection drops — but keep the popover usable
+// for the diagnostic case (a failing connection with a reason still wants its ⓘ popover).
+watch(() => props.status, (s) => { if (s !== 'connected' && !props.diagnostic) popOpen.value = false })
 const statusText = computed(() => {
   switch (props.status) {
     case 'connecting': return 'Connecting...'
@@ -180,6 +196,15 @@ function formatDuration(sec: number): string {
 .net-pop-row > span:last-child { font-weight: 600; font-variant-numeric: tabular-nums; }
 .net-pop-row .np-ok { color: #4caf50; }
 .net-pop-sep { height: 1px; background: #2e2050; margin: 5px 0; }
+
+.status-diag {
+  background: transparent; border: none; padding: 0 2px; cursor: pointer;
+  color: currentColor; opacity: 0.75; font-size: 0.72rem; line-height: 1;
+}
+.status-diag:hover { opacity: 1; }
+.net-pop--diag { white-space: normal; max-width: 240px; }
+.net-pop-diag-title { color: #f4b7b7; font-size: 0.66rem; font-weight: 600; margin-bottom: 4px; }
+.net-pop-diag-reason { color: #e9d8f4; font-size: 0.7rem; line-height: 1.5; margin-bottom: 6px; }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>

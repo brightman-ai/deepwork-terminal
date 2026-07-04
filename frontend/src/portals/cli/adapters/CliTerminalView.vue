@@ -31,6 +31,7 @@
         :machine-label="tab.machineLabel"
         :is-remote="tab.isRemote"
         :conn-error="tab.connError"
+        :diagnose="tab.diagnose"
         :ref="(el) => onSurfaceRef(tab.id, el)"
         :data-testid="`cli-portal-surface-${tab.id}`"
         @agent-state="(s) => emit('agent-state', tab.id, s)"
