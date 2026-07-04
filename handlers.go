@@ -309,7 +309,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.CloseNow()
-
+	// A paste can be large; coder/websocket's default read limit is 32KB, so a big paste would
+	// trip StatusMessageTooBig and CLOSE the connection (input lost / "paste failed"). Keystrokes
+	// are tiny, so this only matters for paste — raise it generously so a paste flows in one frame.
+	conn.SetReadLimit(16 << 20) // 16 MiB
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	inputLogCtx := obs.WithStage(ctx, stgTerminalInput)
