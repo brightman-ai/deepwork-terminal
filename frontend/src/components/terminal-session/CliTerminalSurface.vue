@@ -67,6 +67,7 @@
         :rx-total="netStats.rxTotal ?? 0"
         :uptime-sec="netStats.uptimeSec ?? 0"
         :target-label="machineLabel || '本机'"
+        :diagnostic="connDiagnostic"
         data-testid="surface-connection-status"
       />
     </div>
@@ -320,6 +321,9 @@ const props = defineProps<{
    *  The surface then shows an error and does NOT connect (so it can't silently fall back to a
    *  same-origin/local WS). */
   connError?: string
+  /** Classifies a LIVE connection failure (auth vs unreachable vs HTTPS-block) by probing the
+   *  peer's REST — surfaced through the connection chip so a stuck "Connecting…" isn't a dead end. */
+  diagnose?: () => Promise<{ ok: boolean; error?: string }>
 }>()
 
 const emit = defineEmits<{
@@ -383,6 +387,9 @@ const notifyQuickOpen = ref(false) // quick notify-provider config sheet
 // (alternate = fullscreen). Switching sends `/tui default` to the live session (normal buffer →
 // copy/scroll restored); optional persist writes tui=classic to ~/.claude/settings.json.
 const { state: tuiState, noteFullscreen: tuiNoteFullscreen, reopen: tuiReopen, defer: tuiDefer, resolved: tuiResolved } = useTuiAdvisory()
+// Attaching to tmux retroactively makes a showing advisory a false positive (tmux copy-mode works)
+// → clear it. Detaching re-evaluates on the next buffer-type change.
+watch(tmuxAttached, (att) => { if (att) tuiNoteFullscreen(false) })
 const tuiSwitching = ref(false)
 async function onTuiSwitch({ persist }: { persist: boolean }): Promise<void> {
   if (agentState.value?.status === 'running') return // idle gate (UI already disables; defensive)
@@ -495,16 +502,41 @@ function robustFitAndResize() {
   }
 }
 
+// Connection diagnostic: a REMOTE tab that never opens its WS just shows "Connecting…" forever
+// with no clue why. On the first failure we classify it once (probe the peer's REST via props.diagnose,
+// which reuses probePeer's SSOT: 401=auth code, timeout/refused=IP/port unreachable, HTTPS→HTTP block)
+// and surface the reason through the connection chip's ⓘ. Cleared on a successful connect.
+const runtimeDiag = ref('')
+let everConnected = false
+let diagInFlight = false
+async function classifyFailure(): Promise<void> {
+  if (diagInFlight || !props.isRemote || !props.diagnose || everConnected) return
+  diagInFlight = true
+  try {
+    const r = await props.diagnose()
+    // ok = auth + network fine, so the failure is the WS channel itself (proxy / path / upgrade).
+    runtimeDiag.value = r.ok ? 'REST 可达且认证通过 —— WS 通道/代理/路径异常，非认证或地址问题' : (r.error || '无法连接')
+  } catch { /* keep whatever we had */ } finally {
+    diagInFlight = false
+  }
+}
+// connError (config-level: bad scheme / deleted peer) takes priority over the runtime probe.
+const connDiagnostic = computed(() => props.connError || runtimeDiag.value)
+
 // Emit connection status changes
 watch(wsStatus, (val) => {
   emit('connection-change', val)
   hud.updateSnapshot({ ws: val })
   if (val === 'connected') {
+    everConnected = true
+    runtimeDiag.value = '' // healthy again → drop any stale reason
     // DOM layout 可能还没稳定 (特别是 Wails 首次渲染)，阶梯式 fit:
     // 100ms (快速响应) → 500ms (layout 稳定) → 1500ms (最终校准)
     setTimeout(robustFitAndResize, 100)
     setTimeout(robustFitAndResize, 500)
     setTimeout(robustFitAndResize, 1500)
+  } else if ((val === 'disconnected' || val === 'reconnecting') && props.isRemote && !everConnected) {
+    void classifyFailure()
   }
 }, { immediate: true })
 
@@ -788,8 +820,11 @@ function onTerminalReady(terminal: Terminal) {
     if (bt !== lastBufferType) {
       lastBufferType = bt
       terminal.refresh(0, terminal.rows - 1)
-      // alternate = Claude entered fullscreen (copy/scroll break); normal = it left → advisory clears.
-      tuiNoteFullscreen(bt === 'alternate')
+      // alternate = Claude entered fullscreen; normal = it left → advisory clears. BUT only prompt
+      // OUTSIDE tmux: inside tmux the user has copy-mode + our forwarded mouse-wheel scroll, so
+      // alt-screen does NOT break their scroll/copy — firing there is a false positive (the whole
+      // advisory is aimed at the raw web terminal). See tmuxAttached watcher for the live clear.
+      tuiNoteFullscreen(bt === 'alternate' && !tmuxAttached.value)
     }
   })
   terminalRows.value = terminal.rows
