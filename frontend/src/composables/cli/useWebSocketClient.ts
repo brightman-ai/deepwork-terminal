@@ -7,7 +7,7 @@
 import { ref, reactive, onUnmounted } from 'vue'
 import type { WSConnectionStatus, WSControlMessage } from '@terminal/types/terminal'
 import { wsUrl } from '@ce/utils/runtimeBase'
-import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { cliApi, peerApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export interface WebSocketClientOptions {
   /** Auth code. Value or getter — a getter is read live on every (re)connect, so a peer/code
@@ -86,10 +86,11 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   }
 
   function getWsUrl(): string {
-    // Remote tab: build against the peer's absolute WS origin (same path; the peer runs the
-    // same binary, so cliApi's prefix matches). Local tab: same-origin via @ce wsUrl — unchanged.
-    const path = cliApi(`/sessions/${sessionId()}/ws`)
+    // Remote tab (base set): the peer is a standalone deepwork-terminal at /api/* — use peerApi
+    // so the path does NOT carry THIS instance's embed prefix (e.g. pro's '/cli', which would
+    // 404 on the peer). Local tab: same-origin via @ce wsUrl with the local cliApi prefix.
     const base = resolveOpt(opts.wsBase)
+    const path = base ? peerApi(`/sessions/${sessionId()}/ws`) : cliApi(`/sessions/${sessionId()}/ws`)
     let url = base ? base + path : wsUrl(path)
     // A REMOTE tab (base set) uses ONLY the peer's code — NEVER the local cli_auth_code fallback,
     // which would leak this machine's auth to a remote host AND connect with the wrong credential.
