@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
@@ -87,9 +90,21 @@ var errSearchBudget = errors.New("search budget exhausted")
 // full index dump. searchMaxScan caps how many tree entries we walk before stopping, so
 // a giant subtree can't hang the request.
 const (
+	// searchMaxResults is how many ranked hits the client gets (a quick-open list, not an index).
 	searchMaxResults = 200
-	searchMaxScan    = 20000
+	// searchCollectCap is how many raw hits we gather during the walk BEFORE ranking + trimming
+	// to searchMaxResults. Collecting more than we return means a common term ("graph", 200+
+	// matches) no longer gets truncated to the first N in WALK order and buries the file you
+	// actually want — we rank the fuller set, then keep the top searchMaxResults.
+	searchCollectCap = 1200
+	// searchMaxScan caps tree entries walked before giving up (was 20000 — too small for real
+	// project trees, which silently truncated files that exist, e.g. late-sorted tmp/).
+	searchMaxScan = 120000
 )
+
+// searchTimeBudget bounds a search's wall-clock so a giant tree can't hang the request even
+// under the raised scan cap; hitting it marks the result truncated (partial, not "not found").
+const searchTimeBudget = 2500 * time.Millisecond
 
 // searchSkipDirs are directory names we never descend into — build artifacts, vendored
 // deps, caches and VCS internals that bury real source under tens of thousands of files.
@@ -120,6 +135,65 @@ func matchesFuzzy(terms []string, name string) bool {
 		}
 	}
 	return true
+}
+
+// searchScore ranks a matched hit for the query terms so the most relevant survive the
+// trim to searchMaxResults: a term at the name's start beats one at a word boundary beats an
+// incidental mid-substring, with a mild penalty for longer names (a tight match outranks a
+// coincidental one). This is why "graph" surfaces "XGraph…docx" instead of burying it under
+// the first N "paragraph"/"graphql" hits the walk happened to reach.
+func searchScore(name string, terms []string) int {
+	ln := strings.ToLower(name)
+	score := 0
+	for _, t := range terms {
+		idx := strings.Index(ln, t)
+		switch {
+		case idx < 0:
+			// term not in the (single) name — only happens for dirs matched via a parent; ignore.
+		case idx == 0:
+			score += 100
+		case isWordBoundary(name, idx):
+			score += 60
+		default:
+			score += 20
+		}
+	}
+	return score - len(ln)/12
+}
+
+// isWordBoundary reports whether the match at byte idx begins a "word" within name — right
+// after a separator (-_. /) or at a camelCase hump (so "graph" scores as a word start in
+// "XGraph"). Operates on the ORIGINAL-case name so casing humps are visible.
+func isWordBoundary(name string, idx int) bool {
+	if idx <= 0 || idx >= len(name) {
+		return false
+	}
+	switch name[idx-1] {
+	case '-', '_', '.', ' ', '/':
+		return true
+	}
+	cur := name[idx]
+	// Upper-case char after a non-upper, OR standing after a lone capital (X|Graph): a hump.
+	if cur >= 'A' && cur <= 'Z' {
+		prev := name[idx-1]
+		return !(prev >= 'A' && prev <= 'Z' && idx >= 2 && name[idx-2] >= 'A' && name[idx-2] <= 'Z')
+	}
+	return false
+}
+
+// attachmentDisposition builds a Content-Disposition value that survives non-ASCII filenames
+// (e.g. Chinese .docx names): an ASCII-sanitized fallback for old clients plus the RFC 5987
+// UTF-8 form modern browsers prefer.
+func attachmentDisposition(name string) string {
+	ascii := make([]rune, 0, len(name))
+	for _, r := range name {
+		if r < 0x20 || r == '"' || r == '\\' || r > 0x7e {
+			ascii = append(ascii, '_')
+		} else {
+			ascii = append(ascii, r)
+		}
+	}
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", string(ascii), url.PathEscape(name))
 }
 
 // handleFilesRecent handles GET /files/recent?session=<id>.
@@ -265,6 +339,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	out := make([]searchEntry, 0, 64)
 	scanned := 0
 	truncated := false
+	deadline := time.Now().Add(searchTimeBudget)
 	// WalkDir does NOT follow symlinks, so traversal stays within the real subtree.
 	walkErr := filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -284,7 +359,10 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		// Budget hit → abort the ENTIRE walk via sentinel, not filepath.SkipDir. SkipDir on a
 		// file entry only skips its siblings, so the walk would keep grinding a giant tree
 		// after we stopped emitting (slow) AND starve late-sorted dirs (e.g. tmp/) of matches.
-		if scanned > searchMaxScan || len(out) >= searchMaxResults {
+		// Stop on scan count, collected-hit count, OR wall-clock (checked every 1024 entries) —
+		// whichever comes first. Collect up to searchCollectCap (> searchMaxResults) so ranking
+		// has a fuller set to pick the best from.
+		if scanned > searchMaxScan || len(out) >= searchCollectCap || (scanned%1024 == 0 && time.Now().After(deadline)) {
 			truncated = true
 			return errSearchBudget
 		}
@@ -314,18 +392,37 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	if walkErr != nil && !errors.Is(walkErr, errSearchBudget) {
 		truncated = true
 	}
-	// Cap overshoot guard (a wide single level can append past the limit before the budget check).
-	if len(out) > searchMaxResults {
-		out = out[:searchMaxResults]
+	// Rank the collected hits by relevance, then keep the top searchMaxResults — so the file
+	// you want surfaces even when a common term matched far more than we return. Score desc,
+	// then dirs first, then newest, then rel path for a stable, scannable order.
+	scored := make([]struct {
+		e searchEntry
+		s int
+	}, len(out))
+	for i, e := range out {
+		scored[i].e = e
+		scored[i].s = searchScore(e.Name, terms)
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].s != scored[j].s {
+			return scored[i].s > scored[j].s
+		}
+		if scored[i].e.IsDir != scored[j].e.IsDir {
+			return scored[i].e.IsDir
+		}
+		if scored[i].e.MtimeMs != scored[j].e.MtimeMs {
+			return scored[i].e.MtimeMs > scored[j].e.MtimeMs
+		}
+		return scored[i].e.Rel < scored[j].e.Rel
+	})
+	if len(scored) > searchMaxResults {
+		scored = scored[:searchMaxResults]
 		truncated = true
 	}
-	// Directories first, then by rel path — a stable, scannable quick-open order.
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].IsDir != out[j].IsDir {
-			return out[i].IsDir
-		}
-		return out[i].Rel < out[j].Rel
-	})
+	out = make([]searchEntry, len(scored))
+	for i := range scored {
+		out[i] = scored[i].e
+	}
 
 	writeJSON(w, http.StatusOK, searchResponse{Entries: out, Truncated: truncated})
 }
@@ -361,6 +458,27 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "is a directory"})
 		return
 	}
+
+	// Download mode: stream the FULL bytes as an attachment for ANY file — text, image, binary,
+	// or oversized — bypassing the inline-preview size caps and text/binary body-shape sniffing.
+	// The preview shapes (text/image/{binary}/{tooLarge}) are for glancing; download is the escape
+	// hatch to actually get the file (FilesPanel 下载 button, works for un-previewable formats too).
+	if r.URL.Query().Get("download") == "1" {
+		f, ferr := os.Open(target)
+		if ferr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", attachmentDisposition(filepath.Base(target)))
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, f)
+		return
+	}
+
 	imgCT := imageContentType(strings.ToLower(filepath.Ext(target)))
 
 	// Images get a larger inline budget than text (screenshots often exceed 1 MiB).

@@ -177,3 +177,39 @@ export async function filesRaw(sessionId: string, relPath: string, cwd?: string)
     return { kind: 'error' }
   }
 }
+
+/**
+ * GET /files/raw?…&download=1 — fetch the FULL bytes of any file (text / image / binary /
+ * oversized) and save them locally. Works for formats preview can't render. /files/raw needs
+ * the X-CLI-Auth header, so a bare <a download> (unauthenticated GET) would 401 — we fetch
+ * authed, wrap the bytes in an object URL, and click a synthetic anchor. `name` is the suggested
+ * filename. Returns true on success.
+ */
+export async function filesDownload(
+  sessionId: string,
+  relPath: string,
+  name: string,
+  cwd?: string,
+): Promise<boolean> {
+  if (!sessionId) return false
+  const { cliFetch } = useCliAuth()
+  try {
+    let path = withScope('/files/raw', sessionId, cwd)
+    if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+    path += '&download=1'
+    const resp = await cliFetch(cliApi(path))
+    if (!resp.ok) return false
+    const url = URL.createObjectURL(await resp.blob())
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name || 'download'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    // Revoke after the click has consumed the URL (next macrotask).
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+    return true
+  } catch {
+    return false
+  }
+}
