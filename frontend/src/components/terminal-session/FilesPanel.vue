@@ -23,6 +23,7 @@ import {
   filesTree,
   filesSearch,
   filesRaw,
+  filesDownload,
   type RecentFileItem,
   type TreeEntry,
   type SearchEntry,
@@ -225,6 +226,9 @@ function onSearchHit(entry: SearchEntry): void {
 interface Preview {
   name: string
   absPath: string
+  /** The exact rel/path handed to filesRaw — reused verbatim by download so path
+   *  resolution is identical to what the preview already opened. */
+  rel: string
   result: RawResult
 }
 const preview = ref<Preview | null>(null)
@@ -239,10 +243,10 @@ function revokePreviewUrl(): void {
 async function previewRel(name: string, absPath: string, rel: string): Promise<void> {
   revokePreviewUrl()
   previewLoading.value = true
-  preview.value = { name, absPath, result: { kind: 'text', text: '' } }
+  preview.value = { name, absPath, rel, result: { kind: 'text', text: '' } }
   try {
     const result = await filesRaw(props.sessionId, rel, props.cwd)
-    preview.value = { name, absPath, result }
+    preview.value = { name, absPath, rel, result }
   } finally {
     previewLoading.value = false
   }
@@ -270,6 +274,14 @@ function injectPath(path: string): void {
   if (!path) { toast('无法插入：缺少路径'); return }
   emit('inject', path)
   toast('已插入对话')
+}
+
+// Download the previewed file's real bytes — ANY format, incl. binary / oversized that can't
+// preview inline. Reuses the SAME rel the preview fetched, so /files/raw resolves identically.
+async function doDownload(): Promise<void> {
+  const p = preview.value
+  if (!p) return
+  if (!(await filesDownload(props.sessionId, p.rel, p.name, props.cwd))) toast('下载失败')
 }
 
 // ── copy affordance ──
@@ -617,6 +629,15 @@ defineExpose({ loadRecent, loadTree })
             <Check v-if="copiedKey === 'p'" class="size-3.5 text-green-500" />
             <Link2 v-else class="size-3.5" />
           </button>
+          <!-- 下载 (works for EVERY format — text/image/binary/oversized — via /files/raw?download=1) -->
+          <button
+            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            type="button" title="下载文件"
+            data-testid="fp-preview-download"
+            @click="doDownload"
+          >
+            <Download class="size-3.5" />
+          </button>
           <button
             class="px-1.5 py-1 rounded text-[0.6rem] text-green-500 border border-border hover:bg-muted/50"
             type="button" title="插入到对话"
@@ -634,13 +655,19 @@ defineExpose({ loadRecent, loadTree })
             <Download class="size-7 text-muted-foreground/60" />
             <p class="text-xs text-muted-foreground">二进制文件，无法预览</p>
             <p class="text-[0.62rem] text-muted-foreground/70 tabular-nums">{{ fmtSize(preview.result.size) }}</p>
-            <button class="mt-1 px-2 py-1 rounded text-[0.62rem] text-green-500 border border-border hover:bg-muted/50" type="button" @click="injectPath(preview.absPath)">插入路径到对话</button>
+            <div class="mt-1 flex items-center gap-2">
+              <button class="px-2 py-1 rounded text-[0.62rem] font-medium text-green-500 border border-green-500/60 hover:bg-green-500/10" type="button" @click="doDownload">下载</button>
+              <button class="px-2 py-1 rounded text-[0.62rem] text-green-500 border border-border hover:bg-muted/50" type="button" @click="injectPath(preview.absPath)">插入路径到对话</button>
+            </div>
           </div>
           <div v-else-if="preview.result.kind === 'tooLarge'" class="flex flex-col items-center justify-center gap-2 h-full px-4 text-center">
             <FileText class="size-7 text-muted-foreground/60" />
             <p class="text-xs text-muted-foreground">文件过大（&gt;1MB），无法预览</p>
             <p class="text-[0.62rem] text-muted-foreground/70 tabular-nums">{{ fmtSize(preview.result.size) }}</p>
-            <button class="mt-1 px-2 py-1 rounded text-[0.62rem] text-green-500 border border-border hover:bg-muted/50" type="button" @click="injectPath(preview.absPath)">插入路径到对话</button>
+            <div class="mt-1 flex items-center gap-2">
+              <button class="px-2 py-1 rounded text-[0.62rem] font-medium text-green-500 border border-green-500/60 hover:bg-green-500/10" type="button" @click="doDownload">下载</button>
+              <button class="px-2 py-1 rounded text-[0.62rem] text-green-500 border border-border hover:bg-muted/50" type="button" @click="injectPath(preview.absPath)">插入路径到对话</button>
+            </div>
           </div>
           <div v-else class="flex items-center justify-center h-full text-xs text-muted-foreground italic">预览失败</div>
         </div>
