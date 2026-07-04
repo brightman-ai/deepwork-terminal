@@ -1,6 +1,8 @@
 package agentintel
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -138,5 +140,66 @@ func TestCodexDriver_AgentState(t *testing.T) {
 	}
 	if as.InputTokens != 200 {
 		t.Errorf("input tokens: got %d", as.InputTokens)
+	}
+}
+
+// TestCodexDriver_TurnLifecycle asserts the driver derives Running during a turn
+// and Waiting once the turn completes. The Waiting result is the running→waiting
+// transition push_notifier fires the turn-end notification on — before this the
+// driver only ever emitted Running, so Codex sessions never notified.
+func TestCodexDriver_TurnLifecycle(t *testing.T) {
+	// Mid-turn: task_started + a response_item → Running.
+	midTurn := writeJSONL(t, []map[string]any{
+		makeCodexRow("session_meta", map[string]any{"model": "gpt-5.5"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_started"}),
+		makeCodexRow("response_item", map[string]any{"type": "message"}),
+	})
+	d := NewCodexDriver(midTurn)
+	if err := d.Update(); err != nil {
+		t.Fatalf("Update error: %v", err)
+	}
+	if got := d.State().Status; got != StatusRunning {
+		t.Errorf("mid-turn status: got %q, want %q", got, StatusRunning)
+	}
+
+	// Turn complete: the full sequence ending in task_complete → Waiting.
+	done := writeJSONL(t, []map[string]any{
+		makeCodexRow("session_meta", map[string]any{"model": "gpt-5.5"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_started"}),
+		makeCodexRow("response_item", map[string]any{"type": "message"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_complete"}),
+	})
+	d2 := NewCodexDriver(done)
+	if err := d2.Update(); err != nil {
+		t.Fatalf("Update error: %v", err)
+	}
+	if got := d2.State().Status; got != StatusWaiting {
+		t.Errorf("post-turn status: got %q, want %q (turn-end → notify trigger)", got, StatusWaiting)
+	}
+}
+
+// TestCodexLatestSession_RecursiveWalk guards the fix for the notification bug:
+// Codex nests rollouts under sessions/YYYY/MM/DD/, so a flat ReadDir of the base
+// dir found zero .jsonl files → the pane's transcript was unlocatable → the pane
+// read as perpetually Running → never notified. The locator must walk recursively.
+func TestCodexLatestSession_RecursiveWalk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	nested := filepath.Join(home, ".codex", "sessions", "2026", "07", "02")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rollout := filepath.Join(nested, "rollout-2026-07-02T08-23-50-abc.jsonl")
+	if err := os.WriteFile(rollout, []byte(`{"type":"session_meta"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	pl := NewProjectLocator()
+	got, err := pl.CodexLatestSession("/any/cwd")
+	if err != nil {
+		t.Fatalf("CodexLatestSession error: %v (flat ReadDir regressed?)", err)
+	}
+	if got != rollout {
+		t.Errorf("got %q, want nested rollout %q", got, rollout)
 	}
 }
