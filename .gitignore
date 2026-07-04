@@ -27,3 +27,4 @@ docs/
 
 # goreleaser build output (root); internal/spa/dist is separate + tracked
 /dist/
+tmp/

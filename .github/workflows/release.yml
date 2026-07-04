@@ -36,3 +36,68 @@ jobs:
           # PAT with write access to brightman-ai/homebrew-tap. If unset, the brew
           # step fails but binaries still publish — create the secret to enable it.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  # ── Sign + notarize the macOS binary ────────────────────────────────────────
+  # GoReleaser (above) runs on Linux and publishes an UNSIGNED darwin binary, so
+  # macOS Gatekeeper blocks it ("Apple could not verify … free of malware"). This
+  # job runs on a real Mac, re-signs the published universal binary with the
+  # Developer ID cert, notarizes it via Apple's notary service, re-uploads the
+  # signed tarball (clobber), and bumps the Cask sha256 in the tap — all via the
+  # existing scripts/macos-sign.sh. It is the exact manual step, automated.
+  #
+  # NO-OP until armed: the job `if` gates on the repo VARIABLE ENABLE_MACOS_SIGNING
+  # (the `secrets` context is NOT allowed in a job-level `if`; `vars` is). Until you
+  # set that variable to "true", releases still publish (unsigned) without failing
+  # and no macOS runner is spun up.
+  #
+  # Brief window: between goreleaser finishing and this job finishing (~minutes)
+  # the release/cask point at the unsigned binary. After this job, both are signed.
+  #
+  # To arm — add repo VARIABLE (Settings → Secrets and variables → Actions → Variables):
+  #   ENABLE_MACOS_SIGNING = true
+  # and add repo SECRETS (… → Secrets):
+  #   APPLE_CERT_P12_B64      base64 of your "Developer ID Application" cert .p12
+  #                           (export from Keychain, then: base64 -i cert.p12 | pbcopy)
+  #   APPLE_CERT_PW           the .p12 export password
+  #   APPLE_NOTARY_APPLE_ID   Apple ID email used for notarization
+  #   APPLE_NOTARY_PASSWORD   app-specific password for that Apple ID
+  #   APPLE_TEAM_ID           your 10-char Developer Team ID
+  #   HOMEBREW_TAP_GITHUB_TOKEN  PAT with write to BOTH deepwork-terminal (release
+  #                           asset re-upload) AND homebrew-tap (cask sha bump)
+  sign-macos:
+    needs: goreleaser
+    runs-on: macos-latest
+    if: ${{ vars.ENABLE_MACOS_SIGNING == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Import Developer ID signing certificate
+        env:
+          APPLE_CERT_P12_B64: ${{ secrets.APPLE_CERT_P12_B64 }}
+          APPLE_CERT_PW: ${{ secrets.APPLE_CERT_PW }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KP="ephemeral-$GITHUB_RUN_ID"
+          security create-keychain -p "$KP" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KP" "$KEYCHAIN"
+          echo "$APPLE_CERT_P12_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_PW" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN"
+          # Prepend our keychain to the search list so codesign finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign, notarize, re-upload, bump tap
+        env:
+          # notary credentials consumed by scripts/macos-sign.sh
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # gh auth for BOTH the release asset re-upload and the tap push.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          gh auth setup-git   # so `git push` to the tap uses GH_TOKEN
+          bash scripts/macos-sign.sh "${{ github.ref_name }}" --upload --update-tap

@@ -118,13 +118,27 @@ if [ "$DO_TAP" -eq 1 ]; then
   info "Updating $TAP_REPO formula sha256 ..."
   tapdir="$work/tap"
   gh repo clone "$TAP_REPO" "$tapdir" -- --depth 1 || die "could not clone $TAP_REPO"
-  formula="$tapdir/Formula/$BINARY.rb"
+  # GoReleaser now ships a Cask (Casks/<name>.rb), not a Formula. Support both
+  # layouts + a bare file, newest layout first.
+  formula="$tapdir/Casks/$BINARY.rb"
+  [ -f "$formula" ] || formula="$tapdir/Formula/$BINARY.rb"
   [ -f "$formula" ] || formula="$tapdir/$BINARY.rb"
-  [ -f "$formula" ] || die "formula not found in tap repo"
-  # Replace the sha256 that follows the darwin_all url line.
+  [ -f "$formula" ] || die "cask/formula not found in tap repo"
+  # Replace the darwin sha256. The Cask puts `sha256` on the line BEFORE the
+  # `url ...darwin_all.tar.gz` line; the old Formula put it AFTER. Handle both by
+  # patching whichever sha256 line is adjacent to the darwin_all url line.
   awk -v sha="$NEWSHA" '
-    /_darwin_all\.tar\.gz/ { print; getline; sub(/sha256 "[0-9a-f]+"/, "sha256 \"" sha "\""); print; next }
-    { print }' "$formula" > "$formula.tmp" && mv "$formula.tmp" "$formula"
+    NR>1 {
+      if ($0 ~ /_darwin_all\.tar\.gz/ && prev ~ /sha256 "[0-9a-f]+"/) {
+        sub(/sha256 "[0-9a-f]+"/, "sha256 \"" sha "\"", prev)   # cask: sha before url
+      }
+      print prev
+    }
+    prev ~ /_darwin_all\.tar\.gz/ && /sha256 "[0-9a-f]+"/ {
+      sub(/sha256 "[0-9a-f]+"/, "sha256 \"" sha "\"")            # formula: sha after url
+    }
+    { prev=$0 }
+    END { print prev }' "$formula" > "$formula.tmp" && mv "$formula.tmp" "$formula"
   git -C "$tapdir" add -A
   git -C "$tapdir" commit -m "dw-terminal: notarized macOS build for $TAG"
   git -C "$tapdir" push
