@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"math"
 	"net"
@@ -217,6 +216,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /debug/logs", wrap(s.handleHudLog))
 	s.mux.HandleFunc("GET /version", wrap(s.handleVersion))
 	s.mux.HandleFunc("GET /settings", wrap(s.handleGetSettings))
+	s.mux.HandleFunc("POST /auth/rotate", wrap(s.handleRotateAuthCode))
 	s.mux.HandleFunc("GET /system", wrap(s.handleSystem))
 	s.mux.HandleFunc("GET /tunnel/status", wrap(s.handleTunnelStatus))
 	s.mux.HandleFunc("POST /tunnel/start", wrap(s.handleTunnelStart))
@@ -283,10 +283,11 @@ func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
 				token = cookie.Value
 			}
 		}
-		// Constant-time compare so a remote attacker can't time-probe the code byte-by-byte —
-		// the mesh sends this code cross-origin, widening who can guess at it. (Returns 0 when
-		// lengths differ, which is fine — that only leaks length, not content.)
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.config.AuthCode)) != 1 {
+		// authgate.CodeMatches is the SSOT auth-code comparison: constant-time (no
+		// byte-by-byte timing probe — the mesh/tunnel widens who can guess) over the
+		// normalized form (case-fold + strip hyphens/space, no entropy lost), shared
+		// verbatim with deepwork-pro's WebUI middleware so the two boundaries agree.
+		if !authgate.CodeMatches(token, s.authCode()) {
 			// Global failure throttle: the default code is short (~39-bit) and a public tunnel
 			// collapses all source IPs to localhost, so a single shared failure budget is what
 			// actually bounds a brute-force. ONLY failures are charged — the success path below is

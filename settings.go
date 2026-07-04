@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -161,12 +162,16 @@ func (s *Server) saveStoreToDisk(data json.RawMessage) {
 	os.WriteFile(path, data, 0644)        //nolint:errcheck
 }
 
-// handleSystem returns system info for the settings page.
+// handleSystem returns system info for the settings page + onboarding (the help
+// center reads tmuxInstalled/os to decide whether to show the tmux install step
+// and which command to display for the host OS).
 func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"port":   s.Port(),
-		"pid":    os.Getpid(),
-		"commit": "dev",
+		"port":          s.Port(),
+		"pid":           os.Getpid(),
+		"commit":        "dev",
+		"os":            runtime.GOOS,
+		"tmuxInstalled": s.tmuxInstalled(),
 	})
 }
 
