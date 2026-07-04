@@ -12,6 +12,7 @@
         autocomplete="off"
         @keyup.enter="submit"
       />
+      <p class="auth-tip">Not case-sensitive — the dash is optional.</p>
       <p v-if="error" class="auth-error">{{ error }}</p>
       <div class="auth-actions">
         <button @click="$emit('dismiss')">Cancel</button>
@@ -130,6 +131,12 @@ async function submit() {
 .auth-dialog input:focus {
   border-color: #1976d2;
   outline: none;
+}
+.auth-tip {
+  color: #777;
+  font-size: 0.75rem;
+  margin: 0 0 8px;
+  text-align: center;
 }
 .auth-error {
   color: #f44336;

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +252,114 @@ func TestIntegration_NoAuthToken(t *testing.T) {
 	w3 := httptest.NewRecorder()
 	handler(w3, reqLocal)
 	assert.Equal(t, http.StatusUnauthorized, w3.Code)
+}
+
+// Auth code matching is case- and separator-insensitive (normalizeAuthCode): the
+// display form is XXXX-XXXX but a friend may type it lowercase or without the dash.
+func TestIntegration_AuthCodeLenientInput(t *testing.T) {
+	srv, err := NewServer(WithConfig(Config{
+		Addr:         ":0",
+		DefaultShell: "/bin/sh",
+		BufferSize:   4096,
+		MaxSessions:  10,
+		AuthCode:     "AB2C-D3EF", // stored with the display dash
+	}))
+	require.NoError(t, err)
+
+	handler := srv.authWrap(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	req := func(token string) int {
+		r, _ := http.NewRequest("GET", "/sessions", nil)
+		r.RemoteAddr = "10.0.0.5:12345"
+		r.Header.Set("X-CLI-Auth", token)
+		w := httptest.NewRecorder()
+		handler(w, r)
+		return w.Code
+	}
+
+	for _, ok := range []string{"AB2C-D3EF", "ab2c-d3ef", "AB2CD3EF", "ab2cd3ef", "Ab2c-D3ef"} {
+		assert.Equal(t, http.StatusOK, req(ok), "lenient form %q should authenticate", ok)
+	}
+	for _, bad := range []string{"AB2C-D3EE", "wrong", ""} {
+		assert.Equal(t, http.StatusUnauthorized, req(bad), "wrong code %q must be rejected", bad)
+	}
+}
+
+// Rotating the auth code invalidates the old one immediately (the recovery path
+// when a shared ?auth= link leaks) and makes the new one authenticate.
+func TestIntegration_RotateAuthCode(t *testing.T) {
+	srv, err := NewServer(WithConfig(Config{
+		Addr: ":0", DefaultShell: "/bin/sh", BufferSize: 4096, MaxSessions: 10,
+		AuthCode: "OLD1-OLD2",
+	}))
+	require.NoError(t, err)
+
+	handler := srv.authWrap(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	auth := func(token string) int {
+		r, _ := http.NewRequest("GET", "/sessions", nil)
+		r.RemoteAddr = "10.0.0.5:12345"
+		r.Header.Set("X-CLI-Auth", token)
+		w := httptest.NewRecorder()
+		handler(w, r)
+		return w.Code
+	}
+	assert.Equal(t, http.StatusOK, auth("OLD1-OLD2"), "old code works before rotate")
+
+	// Rotate.
+	rw := httptest.NewRecorder()
+	rr, _ := http.NewRequest("POST", "/auth/rotate", nil)
+	srv.handleRotateAuthCode(rw, rr)
+	require.Equal(t, http.StatusOK, rw.Code)
+	var body struct {
+		AuthCode string `json:"authCode"`
+	}
+	require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &body))
+	require.NotEmpty(t, body.AuthCode)
+	assert.NotEqual(t, "OLD1-OLD2", body.AuthCode)
+
+	assert.Equal(t, http.StatusUnauthorized, auth("OLD1-OLD2"), "old code rejected after rotate")
+	assert.Equal(t, http.StatusOK, auth(body.AuthCode), "new code authenticates")
+}
+
+// Posting {"code":"..."} to /auth/rotate sets a user-supplied CUSTOM code (manual edit);
+// an empty body rotates to random (covered by TestIntegration_RotateAuthCode).
+func TestIntegration_SetCustomAuthCode(t *testing.T) {
+	srv, err := NewServer(WithConfig(Config{
+		Addr: ":0", DefaultShell: "/bin/sh", BufferSize: 4096, MaxSessions: 10,
+		AuthCode: "OLD1-OLD2",
+	}))
+	require.NoError(t, err)
+	handler := srv.authWrap(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	auth := func(token string) int {
+		r, _ := http.NewRequest("GET", "/sessions", nil)
+		r.RemoteAddr = "10.0.0.5:12345"
+		r.Header.Set("X-CLI-Auth", token)
+		w := httptest.NewRecorder()
+		handler(w, r)
+		return w.Code
+	}
+
+	// Set a custom code.
+	rw := httptest.NewRecorder()
+	rr, _ := http.NewRequest("POST", "/auth/rotate", strings.NewReader(`{"code":"MyTeam-2026"}`))
+	srv.handleRotateAuthCode(rw, rr)
+	require.Equal(t, http.StatusOK, rw.Code)
+	var body struct {
+		AuthCode string `json:"authCode"`
+	}
+	require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &body))
+	assert.Equal(t, "MyTeam-2026", body.AuthCode) // stored verbatim (matching normalizes)
+
+	assert.Equal(t, http.StatusUnauthorized, auth("OLD1-OLD2"), "old code rejected")
+	assert.Equal(t, http.StatusOK, auth("MyTeam-2026"), "custom code works")
+	assert.Equal(t, http.StatusOK, auth("myteam2026"), "custom code matches case/dash-insensitively")
+
+	// A blank/whitespace-only custom code is rejected (400).
+	bw := httptest.NewRecorder()
+	br, _ := http.NewRequest("POST", "/auth/rotate", strings.NewReader(`{"code":"  -  "}`))
+	srv.handleRotateAuthCode(bw, br)
+	assert.Equal(t, http.StatusBadRequest, bw.Code)
 }
 
 func TestIntegration_CORSPreflightAllowsRemoteSessionAuth(t *testing.T) {
