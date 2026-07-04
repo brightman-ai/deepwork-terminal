@@ -13,7 +13,7 @@
 import { ref } from 'vue'
 import type { WorkbenchTab } from '@terminal/types/workbench'
 import { useServerStore } from '@terminal/composables/cli/useServerStore'
-import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { peerApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 const PEERS_KEY = 'remotePeers'
 const LOCAL_AUTH_KEY = 'cli_auth_code'
@@ -191,7 +191,7 @@ export function useRemotePeers() {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 6000)
     try {
-      const resp = await fetch(normalizeUrl(httpBase) + cliApi('/sessions'), {
+      const resp = await fetch(normalizeUrl(httpBase) + peerApi('/sessions'), {
         headers: { 'X-CLI-Auth': code },
         signal: ctrl.signal,
       })

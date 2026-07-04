@@ -98,6 +98,9 @@ export function useCliState(runtime: PortalRuntimeResult) {
         machineLabel: conn.machineLabel,
         isRemote: conn.isRemote,
         connError: conn.error,
+        // Classify a live connection failure (auth code? IP/port unreachable? HTTPS→HTTP block?)
+        // by hitting the SAME REST the WS relies on. Reuses probePeer (SSOT) — no second classifier.
+        diagnose: () => remotePeers.probePeer(conn.httpBase, conn.authToken),
       }
     }),
   )
