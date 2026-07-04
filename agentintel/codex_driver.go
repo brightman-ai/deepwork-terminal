@@ -53,23 +53,32 @@ func (cd *CodexDriver) Update() error {
 			if payload == nil {
 				break
 			}
-			evType, _ := payload["type"].(string)
-			if evType != "token_count" {
-				break
+			switch evType, _ := payload["type"].(string); evType {
+			case "task_started":
+				// A turn began.
+				cd.state.Status = StatusRunning
+			case "task_complete":
+				// Turn finished → the pane is now waiting for the user's next
+				// input. This running→waiting transition is exactly what
+				// push_notifier keys off to fire the turn-end web push; without
+				// handling task_complete the driver only ever emitted Running, so
+				// Codex sessions never notified. [contrast: claude_driver end_turn]
+				cd.state.Status = StatusWaiting
+			case "token_count":
+				info, ok := payload["info"].(map[string]any)
+				if !ok {
+					break
+				}
+				usage, ok := info["total_token_usage"].(map[string]any)
+				if !ok {
+					break
+				}
+				// Codex values are already cumulative totals — take latest directly.
+				cd.state.InputTokens = intFromAny(usage["input"])
+				cd.state.OutputTokens = intFromAny(usage["output"])
+				cd.state.CachedTokens = intFromAny(usage["cached"])
+				cd.state.TotalTokens = intFromAny(usage["total"])
 			}
-			info, ok := payload["info"].(map[string]any)
-			if !ok {
-				break
-			}
-			usage, ok := info["total_token_usage"].(map[string]any)
-			if !ok {
-				break
-			}
-			// Codex values are already cumulative totals — take latest directly.
-			cd.state.InputTokens = intFromAny(usage["input"])
-			cd.state.OutputTokens = intFromAny(usage["output"])
-			cd.state.CachedTokens = intFromAny(usage["cached"])
-			cd.state.TotalTokens = intFromAny(usage["total"])
 
 		case "response_item":
 			cd.state.Status = StatusRunning

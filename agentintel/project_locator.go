@@ -144,40 +144,22 @@ func (pl *ProjectLocator) CodexSessionFiles() []string {
 	return paths
 }
 
-// CodexLatestSession finds the most recent Codex rollout JSONL for a project.
-// Falls back to scanning ~/.codex/sessions/ by modification time when sqlite is unavailable.
+// CodexLatestSession finds the most recent Codex rollout JSONL.
+//
+// It MUST use the recursive walk (CodexSessionFiles): Codex nests rollouts by
+// date under sessions/YYYY/MM/DD/rollout-*.jsonl, so a flat os.ReadDir of the
+// base dir finds only the year DIRECTORIES and zero .jsonl files — which made
+// this always return ErrNotExist. That in turn left every Codex pane's
+// transcript unlocatable, so PaneAgentMonitor.Active fell back to "assume busy"
+// and the pane read as perpetually Running → the running→waiting transition that
+// fires the turn-end push never happened → Codex sessions never notified.
+// (projectPath is not used yet — Codex rollouts aren't keyed by cwd; newest wins,
+// matching CodexSessionFiles. Per-cwd matching would parse each rollout's
+// session_meta.cwd, a future refinement.)
 func (pl *ProjectLocator) CodexLatestSession(projectPath string) (string, error) {
-	sessionDir := pl.CodexSessionDir()
-	entries, err := os.ReadDir(sessionDir)
-	if err != nil {
-		return "", err
-	}
-
-	type fileInfo struct {
-		path    string
-		modTime int64
-	}
-	var files []fileInfo
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		files = append(files, fileInfo{
-			path:    filepath.Join(sessionDir, e.Name()),
-			modTime: info.ModTime().UnixNano(),
-		})
-	}
-
+	files := pl.CodexSessionFiles() // recursive, newest-first
 	if len(files) == 0 {
 		return "", os.ErrNotExist
 	}
-
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime > files[j].modTime
-	})
-	return files[0].path, nil
+	return files[0], nil
 }
