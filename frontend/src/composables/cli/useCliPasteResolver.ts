@@ -433,18 +433,21 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     const uniquePaths = uniqueOrderedPaths(paths)
     const deduped = paths.length - uniquePaths.length
     if (deduped > 0) metrics.dedupedInjectedPaths += deduped
-    const payload = formatPathsForPty(uniquePaths)
+    // Prefix each path with `@` so downstream claude/codex CLIs treat it as a
+    // file reference instead of literal text. Idempotent (won't double-prefix).
+    const referencePaths = withReferencePrefix(uniquePaths)
+    const payload = formatPathsForPty(referencePaths)
     options.sendBinary(encoder.encode(payload))
     metrics.injectedPayloads++
-    options.hudRecord?.('state', `clipboard ${source}: ${uniquePaths.join(' ')}`)
+    options.hudRecord?.('state', `clipboard ${source}: ${referencePaths.join(' ')}`)
     log.info('cli.clipboard.injected_paths', {
       surface: options.surface,
       source,
-      path_count: uniquePaths.length,
+      path_count: referencePaths.length,
       original_path_count: paths.length,
       deduped_paths: deduped,
       payload_chars: payload.length,
-      paths: uniquePaths,
+      paths: referencePaths,
       metrics: metricSnapshot(),
     }, trace)
   }
@@ -551,6 +554,20 @@ export function uniqueOrderedPaths(paths: string[]): string[] {
     result.push(path)
   }
   return result
+}
+
+const REFERENCE_PREFIX = '@'
+
+/**
+ * Prefix each filesystem path with `@` so downstream claude/codex CLIs recognize
+ * it as a file reference (`@tmp/clip/…png`) rather than literal text. Idempotent:
+ * a path already starting with `@` is left untouched (no double-prefix).
+ * Applied ONLY to path injections — never to plain-text paste.
+ */
+export function withReferencePrefix(paths: string[]): string[] {
+  return paths.map(path =>
+    path.startsWith(REFERENCE_PREFIX) ? path : `${REFERENCE_PREFIX}${path}`,
+  )
 }
 
 export function shouldProbeNativeClipboard(snapshot: ClipboardSnapshot, env: PasteEnvironment): boolean {

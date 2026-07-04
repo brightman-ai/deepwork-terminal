@@ -11,6 +11,18 @@ Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
 })
 
+// The resolver module transitively imports useCliAuth, which reads
+// window.location at module-load time. Stub a minimal window so the import
+// graph evaluates under bun's DOM-less test runtime.
+Object.defineProperty(globalThis, 'window', {
+  value: {
+    location: { search: '', pathname: '/', hash: '' },
+    history: { replaceState: () => {} },
+    localStorage: localStorageStub,
+  },
+  configurable: true,
+})
+
 type ClipboardSnapshot = import('../../../composables/cli/useCliPasteResolver').ClipboardSnapshot
 type PasteEnvironment = import('../../../composables/cli/useCliPasteResolver').PasteEnvironment
 
@@ -59,6 +71,31 @@ describe('CliPasteResolver pure helpers', () => {
     const paths = ['tmp/clip/a.png', 'tmp/clip/a.png', 'tmp/clip/b.png', 'tmp/clip/a.png']
     expect(uniqueOrderedPaths(paths)).toEqual(['tmp/clip/a.png', 'tmp/clip/b.png'])
     expect(formatPathsForPty(paths)).toBe('tmp/clip/a.png tmp/clip/b.png ')
+  })
+
+  test('prefixes injected paths with @ so CLIs treat them as file references', async () => {
+    const { withReferencePrefix } = await helpers()
+    // Bare paths gain an @ prefix.
+    expect(withReferencePrefix(['tmp/clip/07-04-20/xxx.png'])).toEqual(['@tmp/clip/07-04-20/xxx.png'])
+    expect(withReferencePrefix(['tmp/clip/a.png', 'tmp/clip/b.png'])).toEqual([
+      '@tmp/clip/a.png',
+      '@tmp/clip/b.png',
+    ])
+    // Idempotent: an already-prefixed path is not double-prefixed.
+    expect(withReferencePrefix(['@tmp/clip/a.png', 'tmp/clip/b.png'])).toEqual([
+      '@tmp/clip/a.png',
+      '@tmp/clip/b.png',
+    ])
+  })
+
+  test('end-to-end injection prefixes @ then keeps quoting + trailing space', async () => {
+    const { formatPathsForPty, withReferencePrefix, uniqueOrderedPaths } = await helpers()
+    // Mirrors injectPaths: dedupe -> @-prefix -> format for PTY.
+    const injected = (paths: string[]) => formatPathsForPty(withReferencePrefix(uniqueOrderedPaths(paths)))
+    expect(injected(['tmp/clip/07-04-20/xxx.png'])).toBe('@tmp/clip/07-04-20/xxx.png ')
+    expect(injected(['tmp/clip/a.png', 'tmp/clip/a.png', 'tmp/clip/b.png'])).toBe('@tmp/clip/a.png @tmp/clip/b.png ')
+    // Paths needing shell-quoting keep the @ inside the quotes.
+    expect(injected(['/Users/me/My File.png'])).toBe("'@/Users/me/My File.png' ")
   })
 
   test('probes native clipboard only when server-local runtime also has a file hint', async () => {
