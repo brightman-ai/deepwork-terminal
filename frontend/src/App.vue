@@ -6,11 +6,17 @@
     @dismiss="dismissAuthDialog"
     @authenticated="onAuthenticated"
   />
+  <!-- Global guide out of in-app webviews (WeChat etc.) where push/clipboard break -->
+  <InAppBrowserGuide />
+  <!-- Persistent help / new-user onboarding entry -->
+  <HelpCenter />
 </template>
 
 <script setup lang="ts">
 // Root application component — renders the active route view.
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
+import InAppBrowserGuide from '@terminal/components/terminal-session/InAppBrowserGuide.vue'
+import HelpCenter from '@terminal/components/terminal-session/HelpCenter.vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { useBuildVersion } from '@terminal/composables/cli/useBuildVersion'
 
