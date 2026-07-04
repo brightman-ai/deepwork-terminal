@@ -68,23 +68,26 @@ async function refresh(): Promise<void> {
     return
   }
   const mine = ++seq
-  // Pass the ANCHORED pane's cwd AND agentTool so the server routes to the codex-vs-claude
-  // metrics extractor for the pane the drawer is anchored to (null-safe: '' → claude).
-  const bag = await sessionOverview(props.sessionId, props.cwd, props.tool)
-  if (mine !== seq) return // superseded by a newer refresh
-  // Don't replace a data-rich overview with a transient empty one: while the tmux state
-  // settles on mobile the active pane can momentarily resolve to a barely-used transcript
-  // or the wrong (near-empty) codex rollout, which would flash the real numbers to 0. A
-  // genuinely empty session starts empty (hasData() false) and shows the empty shape fine.
-  if (bagEmpty(bag) && hasData()) {
-    loading.value = false
-    return
+  try {
+    // Pass the ANCHORED pane's cwd AND agentTool so the server routes to the codex-vs-claude
+    // metrics extractor for the pane the drawer is anchored to (null-safe: '' → claude).
+    const bag = await sessionOverview(props.sessionId, props.cwd, props.tool)
+    if (mine !== seq) return // superseded by a newer refresh
+    // Don't replace a data-rich overview with a transient empty one: while the tmux state
+    // settles on mobile the active pane can momentarily resolve to a barely-used transcript
+    // or the wrong (near-empty) codex rollout, which would flash the real numbers to 0. A
+    // genuinely empty session starts empty (hasData() false) and shows the empty shape fine.
+    if (bagEmpty(bag) && hasData()) return
+    detail.value = bag.detail
+    summary.value = bag.summary
+    turns.value = bag.turns ?? []
+    price.value = bag.price ?? null
+  } catch {
+    // A failed fetch (404 / network) must NOT leave the pane stuck on its loading affordance
+    // forever (the "blank overview" symptom) — fall through so the empty shape renders.
+  } finally {
+    if (mine === seq) loading.value = false
   }
-  detail.value = bag.detail
-  summary.value = bag.summary
-  turns.value = bag.turns ?? []
-  price.value = bag.price ?? null
-  loading.value = false
 }
 
 // startPoll only arms the 3s timer when the drawer is ACTIVE (open). A minimized drawer

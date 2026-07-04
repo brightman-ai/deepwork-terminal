@@ -1,10 +1,27 @@
 package terminal
 
 import (
+	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
+
+// liveCWD returns the shell's CURRENT working directory via /proc/<pid>/cwd (Linux).
+// Unlike the session's CREATION cwd, this follows the user's `cd`, so the overview
+// finds the claude/codex transcript for the dir where the agent is ACTUALLY running
+// even without tmux to report an active-pane cwd. "" on any error (non-Linux, gone, …).
+func liveCWD(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return ""
+	}
+	return dir
+}
 
 // handleSessionOverview handles GET /sessions/{id}/overview.
 //
@@ -39,11 +56,18 @@ func (s *Server) handleSessionOverview(w http.ResponseWriter, r *http.Request) {
 	active := sess.Status != StatusExited
 	sess.mu.Unlock()
 
-	// Prefer the LIVE active tmux pane cwd (frontend-supplied) so the overview follows
-	// pane/window switches; fall back to the session's creation cwd.
+	// cwd resolution, most→least specific:
+	//   1. frontend-supplied active tmux pane cwd (follows pane/window switches),
+	//   2. the session shell's LIVE cwd (/proc/<pid>/cwd) — follows `cd` even without
+	//      tmux, so a plain-shell session still resolves the agent's actual dir,
+	//   3. the session's creation cwd as a last resort.
+	// Without (2) a non-tmux session that cd'd into a project resolved the stale creation
+	// dir and the overview (and Files panel) came up empty.
 	cwd := baseCWD
 	if lc, ok := s.workbenchCWD(id, r.URL.Query().Get("cwd")); ok && lc != "" {
 		cwd = lc
+	} else if live := liveCWD(sess.ShellPID()); live != "" {
+		cwd = live
 	}
 
 	pl := agentintel.NewProjectLocator()
