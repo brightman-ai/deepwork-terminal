@@ -379,6 +379,29 @@ func TestIntegration_CORSPreflightAllowsRemoteSessionAuth(t *testing.T) {
 	assert.Contains(t, w.Header().Get("Access-Control-Allow-Methods"), "POST")
 }
 
+// Chrome Private Network Access: a page fetching a LAN/tailscale (private/local) peer sends
+// Access-Control-Request-Private-Network on the preflight. Without the ack the browser blocks the
+// mesh fetch with an opaque "Failed to fetch" — the reported remote-terminal "地址不可达" even
+// though the ordinary CORS headers are all present. The middleware must echo the ack, but only
+// when asked (don't advertise PNA gratuitously).
+func TestIntegration_CORSPreflightAcksPrivateNetwork(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodOptions, "/api/sessions", nil)
+	req.Header.Set("Origin", "http://stmac:8087")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	w := httptest.NewRecorder()
+	corsMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Private-Network"))
+
+	req2, _ := http.NewRequest(http.MethodOptions, "/api/sessions", nil)
+	req2.Header.Set("Origin", "http://stmac:8087")
+	req2.Header.Set("Access-Control-Request-Method", "GET")
+	w2 := httptest.NewRecorder()
+	corsMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(w2, req2)
+	assert.Empty(t, w2.Header().Get("Access-Control-Allow-Private-Network"))
+}
+
 // TC-08-I-12: HUD log upload.
 func TestIntegration_HudLogUpload(t *testing.T) {
 	server, _, _ := NewTestCLIServer(t)

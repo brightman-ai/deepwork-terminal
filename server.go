@@ -345,6 +345,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}
 		if r.Method == http.MethodOptions {
+			// Private Network Access (Chrome 104+): a page fetching a peer on a LAN/tailscale
+			// (private/local) address space sends Access-Control-Request-Private-Network on the
+			// preflight; without this ack the browser blocks the mesh fetch with an opaque
+			// "Failed to fetch" (the reported remote-terminal "地址不可达") EVEN THOUGH the normal
+			// CORS headers are all present. Echo the ack so the cross-origin peer probe/WS survive.
+			if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+				w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
