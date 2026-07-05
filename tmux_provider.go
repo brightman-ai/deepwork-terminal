@@ -48,6 +48,10 @@ func (p *defaultTmuxProvider) NewSession(ctx context.Context, shellPID int) (str
 	return p.svc.NewSession(ctx, shellPID)
 }
 
+// SetOverviewActive satisfies TmuxOverviewToggler — gates per-window tail capture on whether a
+// client has the Agent Overview open.
+func (p *defaultTmuxProvider) SetOverviewActive(v bool) { p.svc.SetOverviewActive(v) }
+
 // WithTmuxProvider overrides the default in-process tmux provider.
 // Hosts use this to supply a richer snapshot; standalone needs nothing.
 func WithTmuxProvider(p TmuxStateProvider) Option {

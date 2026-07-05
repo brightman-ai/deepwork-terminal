@@ -230,6 +230,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /tmux/copy-motion", wrap(s.handleTmuxCopyMotion))
 	s.mux.HandleFunc("POST /tmux/refresh", wrap(s.handleTmuxRefresh))
 	s.mux.HandleFunc("POST /tmux/new-session", wrap(s.handleTmuxNewSession))
+	s.mux.HandleFunc("POST /tmux/overview", wrap(s.handleTmuxOverview))
 	// Persist Claude Code's tui=classic (opt-in "remember" half of the fullscreen→classic advisory).
 	s.mux.HandleFunc("POST /claude/tui-classic", wrap(s.handleClaudeTuiClassic))
 	// Session workbench file service (CHG-016): anchored to session.CWD, traversal-safe.
@@ -238,6 +239,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /files/tree", wrap(s.handleFilesTree))
 	s.mux.HandleFunc("GET /files/search", wrap(s.handleFilesSearch))
 	s.mux.HandleFunc("GET /files/raw", wrap(s.handleFilesRaw))
+	// Session review (git diff): changed files + per-file unified diff for the workbench
+	// cwd's repository. Read-only; every git arg is passed as a slice (no shell injection).
+	s.mux.HandleFunc("GET /git/diff", wrap(s.handleGitDiff))
 	// Session overview metrics (CHG-017): turn/summary breakdown of the CURRENT claude
 	// transcript for the session cwd. Feeds the shared @ce OverviewPanel.
 	s.mux.HandleFunc("GET /sessions/{id}/overview", wrap(s.handleSessionOverview))
