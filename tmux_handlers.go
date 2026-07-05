@@ -125,6 +125,31 @@ func (s *Server) handleTmuxRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// TmuxOverviewToggler is an OPTIONAL provider capability: gate per-window live-tail capture on
+// whether a client has the Agent Overview open — so tail costs nothing when nobody's viewing it.
+type TmuxOverviewToggler interface {
+	SetOverviewActive(v bool)
+}
+
+// handleTmuxOverview handles POST /tmux/overview. Body: { "open": true|false }. Turns the Agent
+// Overview's per-window tail capture on/off. Best-effort + idempotent; unsupported provider 501s.
+func (s *Server) handleTmuxOverview(w http.ResponseWriter, r *http.Request) {
+	toggler, ok := s.tmuxProvider.(TmuxOverviewToggler)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "overview toggle unsupported"})
+		return
+	}
+	var body struct {
+		Open bool `json:"open"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	toggler.SetOverviewActive(body.Open)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // shellPIDForQuery resolves a session ID to its shell PID, or 0 if absent/unknown.
 func (s *Server) shellPIDForQuery(sessionID string) int {
 	if sessionID == "" {
