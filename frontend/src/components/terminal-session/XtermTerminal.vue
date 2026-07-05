@@ -73,10 +73,21 @@ let terminal: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
 let resizeDebounce: ReturnType<typeof setTimeout> | null = null
+let renderSyncRaf = 0
+let renderSyncTrailing: ReturnType<typeof setTimeout> | null = null
+let renderSyncBurstReset: ReturnType<typeof setTimeout> | null = null
+let renderSyncBurstTotal = 0
+let renderSyncLastRefreshAt = 0
 const diagnosticCleanups: Array<() => void> = []
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+const renderSyncDecoder = new TextDecoder()
 const transcriptLimit = 24000
+const renderSyncLargeWriteBytes = 4096
+const renderSyncBurstBytes = 8192
+const renderSyncBurstWindowMs = 120
+const renderSyncMinIntervalMs = 120
+const renderSyncTrailingMs = 80
 const isWKWebView = typeof navigator !== 'undefined' && navigator.userAgent.includes('AppleWebKit') &&
   !navigator.userAgent.includes('Chrome') &&
   !navigator.userAgent.includes('Safari')
@@ -110,6 +121,63 @@ function appendTranscript(data: string | Uint8Array) {
     .replace(/\r/g, '\n')
   if (!clean) return
   transcript.value = (transcript.value + clean).slice(-transcriptLimit)
+}
+
+function dataLength(data: string | Uint8Array): number {
+  return typeof data === 'string' ? data.length : data.byteLength
+}
+
+function hasEscapeByte(data: string | Uint8Array): boolean {
+  return typeof data === 'string' ? data.includes('\x1b') : data.includes(0x1b)
+}
+
+function decodeForRenderSyncScan(data: string | Uint8Array): string {
+  return typeof data === 'string' ? data : renderSyncDecoder.decode(data)
+}
+
+function containsFullscreenRedrawSequence(data: string | Uint8Array): boolean {
+  const raw = decodeForRenderSyncScan(data)
+  return /\x1b\[\?25[lh]/.test(raw)
+    || /\x1b\[(?:2J|3J|[0-9;]*K|[0-9;]+[Hf]|[0-9;]+r)/.test(raw)
+    || /\x1b\[\?(?:1049|47|1047)[hl]/.test(raw)
+}
+
+function shouldSyncRenderAfterWrite(data: string | Uint8Array): boolean {
+  const len = dataLength(data)
+  if (len >= renderSyncLargeWriteBytes) return true
+  renderSyncBurstTotal += len
+  if (renderSyncBurstReset) clearTimeout(renderSyncBurstReset)
+  renderSyncBurstReset = setTimeout(() => {
+    renderSyncBurstReset = null
+    renderSyncBurstTotal = 0
+  }, renderSyncBurstWindowMs)
+  if (renderSyncBurstTotal >= renderSyncBurstBytes) {
+    renderSyncBurstTotal = 0
+    return true
+  }
+  if (!hasEscapeByte(data)) return false
+  return containsFullscreenRedrawSequence(data)
+}
+
+function refreshVisibleRows() {
+  if (!terminal || terminal.rows <= 0) return
+  terminal.refresh(0, terminal.rows - 1)
+}
+
+function scheduleRenderSyncRefresh() {
+  const now = Date.now()
+  if (!renderSyncRaf && now - renderSyncLastRefreshAt >= renderSyncMinIntervalMs) {
+    renderSyncRaf = window.requestAnimationFrame(() => {
+      renderSyncRaf = 0
+      renderSyncLastRefreshAt = Date.now()
+      refreshVisibleRows()
+    })
+  }
+  if (renderSyncTrailing) clearTimeout(renderSyncTrailing)
+  renderSyncTrailing = setTimeout(() => {
+    renderSyncTrailing = null
+    refreshVisibleRows()
+  }, renderSyncTrailingMs)
 }
 
 function sendProxyText(text: string) {
@@ -337,6 +405,9 @@ onUnmounted(() => {
   xtermKeydownFallback.dispose()
   for (const cleanup of diagnosticCleanups.splice(0)) cleanup()
   if (resizeDebounce) clearTimeout(resizeDebounce)
+  if (renderSyncRaf) window.cancelAnimationFrame(renderSyncRaf)
+  if (renderSyncTrailing) clearTimeout(renderSyncTrailing)
+  if (renderSyncBurstReset) clearTimeout(renderSyncBurstReset)
   if (resizeObserver) resizeObserver.disconnect()
   if (terminal) terminal.dispose()
 })
@@ -347,7 +418,10 @@ onUnmounted(() => {
  */
 function write(data: string | Uint8Array) {
   initTerminal()
-  terminal?.write(data)
+  const shouldRefresh = shouldSyncRenderAfterWrite(data)
+  terminal?.write(data, () => {
+    if (shouldRefresh) scheduleRenderSyncRefresh()
+  })
   appendTranscript(data)
 }
 
