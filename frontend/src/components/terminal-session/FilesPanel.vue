@@ -17,7 +17,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronLeft, Download, Search, X, Link2, Image as ImageIcon } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, Download, Link2, Image as ImageIcon } from 'lucide-vue-next'
 import {
   filesRecent,
   filesTree,
@@ -31,6 +31,7 @@ import {
 } from '@terminal/api/files'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
+import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
 
 // cwd is the drawer's EFFECTIVE pane working directory, OWNED by ResourceDrawer (CHG:
 // drawer-workbench). In FOLLOW mode it tracks the live active pane; once the user LOCKS the
@@ -391,24 +392,13 @@ defineExpose({ loadRecent, loadTree })
     <!-- ── 最近文件 ── -->
     <div v-show="subTab === 'recent'" class="flex-1 flex flex-col overflow-hidden">
       <!-- Quick filter (client-side, instant) — composes with the category chips below. -->
-      <div v-if="recent.length" class="shrink-0 flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
-        <Search class="size-3.5 shrink-0 text-muted-foreground/70" />
-        <input
-          v-model="recentQuery"
-          type="text"
-          inputmode="search"
-          placeholder="筛选最近文件…"
-          class="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
-          data-testid="fp-recent-search"
-        />
-        <button
-          v-if="recentQuery"
-          class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
-          type="button" title="清除"
-          data-testid="fp-recent-search-clear"
-          @click="recentQuery = ''"
-        ><X class="size-3.5" /></button>
-      </div>
+      <DrawerSearchBox
+        v-if="recent.length"
+        v-model="recentQuery"
+        placeholder="筛选最近文件…"
+        testid="fp-recent-search"
+        class="shrink-0 border-b border-border/40 px-2 py-1.5"
+      />
       <!-- Format filter chips — only when the recent set actually spans >1 category. -->
       <div v-if="recent.length && recentCats.length > 2" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
         <button
@@ -467,24 +457,12 @@ defineExpose({ loadRecent, loadTree })
     <!-- ── 目录树 ── -->
     <div v-show="subTab === 'tree'" class="flex flex-col flex-1 overflow-hidden">
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
-      <div class="shrink-0 flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
-        <Search class="size-3.5 shrink-0 text-muted-foreground/70" />
-        <input
-          v-model="treeQuery"
-          type="text"
-          inputmode="search"
-          placeholder="搜索文件 / 目录（递归）…"
-          class="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
-          data-testid="fp-tree-search"
-        />
-        <button
-          v-if="treeQuery"
-          class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
-          type="button" title="清除"
-          data-testid="fp-tree-search-clear"
-          @click="treeQuery = ''"
-        ><X class="size-3.5" /></button>
-      </div>
+      <DrawerSearchBox
+        v-model="treeQuery"
+        placeholder="搜索文件 / 目录（递归）…"
+        testid="fp-tree-search"
+        class="shrink-0 border-b border-border/40 px-2 py-1.5"
+      />
 
       <!-- breadcrumb + copy current path (browse mode only) -->
       <div v-show="!treeQuery.trim()" class="shrink-0 flex flex-col border-b border-border">

@@ -147,6 +147,67 @@ export async function filesSearch(sessionId: string, cwd: string | undefined, q:
   }
 }
 
+/** One changed file in GET /git/diff (session review — read-only). */
+export interface GitDiffFile {
+  /** Single-letter status: M/A/D/R/? (the UI colors the row by it). */
+  status: string
+  /** Repo-root-relative path, forward slashes. */
+  path: string
+  /** Pre-rename path — set only for a rename ("old → new"). */
+  orig?: string
+  added: number
+  deleted: number
+  /** True when git couldn't render a text diff (binary change). */
+  binary?: boolean
+  /** Unified diff body (may be clipped — see truncated — or empty when the budget was spent). */
+  diff: string
+  /** True when THIS file's diff was clipped to the per-file byte cap. */
+  truncated?: boolean
+}
+
+/**
+ * Result of GET /git/diff. Always a valid shape so the UI renders an empty state without
+ * special-casing an error status:
+ *   - notGit  → cwd resolved but isn't a git work tree ("非 git 仓库")
+ *   - noCwd   → no working directory could be resolved ("cwd 缺失")
+ *   - truncated → the changeset hit a file-count / total-byte cap
+ *   - error   → CLIENT-side only: the fetch itself failed
+ */
+export interface GitDiffResult {
+  root: string
+  files: GitDiffFile[]
+  notGit: boolean
+  noCwd: boolean
+  truncated: boolean
+  error: boolean
+}
+
+/**
+ * GET /git/diff — the workbench cwd's repo changed files + per-file unified diff (whole
+ * working tree: staged + unstaged + untracked). Read-only. Soft-fails to a graceful empty
+ * result on any error so the caller never has to special-case a failure status.
+ */
+export async function gitDiff(sessionId: string, cwd?: string): Promise<GitDiffResult> {
+  const empty: GitDiffResult = { root: '', files: [], notGit: false, noCwd: false, truncated: false, error: false }
+  if (!sessionId) return { ...empty, noCwd: true }
+  const { cliFetch } = useCliAuth()
+  try {
+    const resp = await cliFetch(cliApi(withScope('/git/diff', sessionId, cwd)))
+    if (!resp.ok) return { ...empty, error: true }
+    const data = (await resp.json()) as Partial<GitDiffResult>
+    return {
+      root: data.root ?? '',
+      files: data.files ?? [],
+      notGit: data.notGit ?? false,
+      noCwd: data.noCwd ?? false,
+      truncated: data.truncated ?? false,
+      error: false,
+    }
+  } catch {
+    return { ...empty, error: true }
+  }
+}
+
 /**
  * GET /files/raw — fetch a file for inline preview. Distinguishes the body shapes by
  * the response Content-Type: image/* → an image (wrapped in an object URL), text/plain

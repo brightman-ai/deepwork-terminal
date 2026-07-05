@@ -129,13 +129,11 @@
               :title="sortNewest ? '最新在前' : '最早在前'"
               @click="sortNewest = !sortNewest"
             >{{ sortNewest ? '最新 ↓' : '最早 ↑' }}</button>
-            <input
-              v-model.trim="search"
-              class="rd-search"
-              type="search"
-              inputmode="search"
+            <DrawerSearchBox
+              v-model="search"
               placeholder="搜索…"
-              data-testid="rd-filter-search"
+              testid="rd-filter-search"
+              class="rd-search-box"
             />
           </div>
 
@@ -230,7 +228,12 @@
             />
           </div>
 
-          <!-- ════ TOP TAB 3 · 会话总览 (@ce shared SSOT pane, terminal fetch wrapper) ════ -->
+          <!-- ════ TOP TAB 3 · 审核 (git diff of the anchored cwd's repo — read-only) ════ -->
+          <div v-show="topTab === 'review'" class="rd-toppane">
+            <ReviewPanel :session-id="sessionId" :cwd="effectiveCwd" />
+          </div>
+
+          <!-- ════ TOP TAB 4 · 会话总览 (@ce shared SSOT pane, terminal fetch wrapper) ════ -->
           <div v-show="topTab === 'overview'" class="rd-toppane">
             <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open" />
           </div>
@@ -299,6 +302,8 @@ import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type 
 import type { AgentTool } from '@terminal/types/terminal'
 import FilesPanel from '@terminal/components/terminal-session/FilesPanel.vue'
 import SessionOverviewTab from '@terminal/components/terminal-session/SessionOverviewTab.vue'
+import ReviewPanel from '@terminal/components/terminal-session/ReviewPanel.vue'
+import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
 
 // sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
 // no longer used to fetch resources, which are now global/cross-session.
@@ -351,17 +356,18 @@ function baseName(path: string): string {
 
 // ── TOP-LEVEL tabs (CHG-016): 历史输入 / 文件 / 会话总览. The selected top tab and the
 // 历史输入 sub-tab both persist to localStorage so the drawer reopens where it was left.
-type TopKey = 'history' | 'files' | 'overview'
+type TopKey = 'history' | 'files' | 'review' | 'overview'
 const TOP_TAB_KEY = 'dw.rd.tab'
 const SUB_TAB_KEY = 'dw.rd.subtab'
 function loadTop(): TopKey {
   const v = localStorage.getItem(TOP_TAB_KEY)
-  return v === 'files' || v === 'overview' || v === 'history' ? v : 'history'
+  return v === 'files' || v === 'review' || v === 'overview' || v === 'history' ? v : 'history'
 }
 const topTab = ref<TopKey>(loadTop())
 const topTabs: { key: TopKey; label: string }[] = [
   { key: 'history', label: '历史输入' },
   { key: 'files', label: '文件' },
+  { key: 'review', label: '审核' },
   { key: 'overview', label: '会话总览' },
 ]
 watch(topTab, (v) => { localStorage.setItem(TOP_TAB_KEY, v) })
@@ -946,7 +952,7 @@ function glyphClass(name: string): string {
   border-bottom: 1px solid #241934;
   flex-shrink: 0;
 }
-.rd-select, .rd-sort, .rd-search {
+.rd-select, .rd-sort {
   background: #1a1228; border: 1px solid #2e2050; border-radius: 6px;
   color: #c8a0e8; font-size: 0.66rem; padding: 4px 7px; min-height: 26px;
   outline: none;
@@ -954,9 +960,10 @@ function glyphClass(name: string): string {
 .rd-select { flex: 0 1 auto; max-width: 38%; }
 .rd-sort { cursor: pointer; flex-shrink: 0; white-space: nowrap; }
 .rd-sort:active { background: #2e1c52; }
-.rd-search { flex: 1; min-width: 0; }
-.rd-search::placeholder { color: #5a4a78; }
-.rd-search:focus, .rd-select:focus { border-color: #7a4ab0; }
+.rd-select:focus { border-color: #7a4ab0; }
+/* 历史输入搜索改用共享原语 DrawerSearchBox（与 select/sort 并列，占满剩余宽）；
+   Vue scoped 会把本组件 scope id 打到子组件根节点，故此类命中 DrawerSearchBox 根。 */
+.rd-search-box { flex: 1; min-width: 0; }
 
 /* Body */
 .rd-body {
