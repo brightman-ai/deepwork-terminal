@@ -39,8 +39,12 @@ export interface TmuxPaneState {
 export interface TmuxWindowState {
   index: number
   name: string
+  /** Stable tmux window id ("@N") — survives index reuse/reorder. Seen-state keys on it. */
+  windowId?: string
   active: boolean
   panes: TmuxPaneState[]
+  /** Last few lines of the window's active pane — the Agent Overview's per-window live tail. */
+  tail?: string[]
 }
 export interface TmuxSessionState {
   name: string

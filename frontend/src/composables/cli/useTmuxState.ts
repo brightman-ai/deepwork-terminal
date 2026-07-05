@@ -55,6 +55,8 @@ export interface TmuxStateStore {
   activeTool: ComputedRef<AgentTool>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
+  /** Key sequence to select a window by index (this-client-scoped, valid for any index). */
+  selectWindowSeq: (index: number) => string
   /** Run a semantic copy-mode scroll motion via POST /tmux/copy-motion — the server
    *  drives it as a direct `send-keys -X <motion>` against the tmux socket. We do NOT
    *  inject keystrokes: the prefix `[` + command-prompt route silently no-ops for these
@@ -66,6 +68,8 @@ export interface TmuxStateStore {
   /** Create a new tmux session and switch this client onto it via POST /tmux/new-session.
    *  Server-side (keystroke `new-session` is unreliable + refuses to nest in a client). */
   newSession: () => Promise<void>
+  /** Tell the server the Agent Overview opened/closed → gates per-window tail capture. */
+  setOverviewActive: (open: boolean) => Promise<void>
   /** Apply a pushed { type: "tmux_state" } WS frame payload. */
   handleWSMessage: (payload: unknown) => void
   /** One-shot GET snapshot — called on init. */
@@ -150,6 +154,15 @@ function createStore(sessionId: () => string): TmuxStateStore {
     return bytesToString(prefixBytes.value) + suffix
   }
 
+  // Key sequence to select a window by index, scoped to THIS tmux client. tmux binds prefix+0..9
+  // to select-window (clean + instant); for index ≥10 that would send prefix+'1' then leak a '0'
+  // into the pane, so those route through the command prompt (prefix ':' select-window -t N ⏎),
+  // still this-client-scoped and valid for any index. SSOT for both the bar and the overview.
+  function selectWindowSeq(index: number): string {
+    if (index >= 0 && index <= 9) return prefixSeq(String(index))
+    return prefixSeq(':') + `select-window -t ${index}\r`
+  }
+
   async function runCopyMotion(motion: CopyMotion): Promise<void> {
     // Drive the scroll on the SERVER via `send-keys -X <motion>` against the tmux socket.
     // The keystroke route (prefix `[`, then the command prompt) was proven to silently no-op
@@ -185,6 +198,19 @@ function createStore(sessionId: () => string): TmuxStateStore {
     } catch { /* best-effort — the ~1s topology poll still surfaces a created session */ }
   }
 
+  // Tell the server whether the Agent Overview is open, so it captures per-window tail only while
+  // someone is viewing it (zero extra cost otherwise). Best-effort — a miss just means tail stays
+  // at its last state until the next toggle.
+  async function setOverviewActive(open: boolean): Promise<void> {
+    try {
+      await cliFetch(cliApi('/tmux/overview'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ open }),
+      })
+    } catch { /* best-effort */ }
+  }
+
   function handleWSMessage(payload: unknown): void {
     if (payload && typeof payload === 'object') {
       state.value = payload as TmuxState
@@ -202,7 +228,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, activeCwd, activeTool, prefixSeq, runCopyMotion, runRefreshClient, newSession, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, activeCwd, activeTool, prefixSeq, selectWindowSeq, runCopyMotion, runRefreshClient, newSession, setOverviewActive, handleWSMessage, fetchSnapshot,
   }
 }
 

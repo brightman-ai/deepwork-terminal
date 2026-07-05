@@ -29,25 +29,20 @@
            pushed off by a long tmux window list, so it stays fully visible regardless of pane
            count. This is the ONLY connection-health widget (the host tab bar no longer renders a
            duplicate) → no double 'ms', single source for terminal + pro. -->
+    <!-- Machine identity is NOT duplicated here (方向 Y): remote tabs are marked on the tab strip
+         (TopTabBar ServerIcon + peer name) and the ConnectionStatus widget already carries the
+         target-label, so a standalone 本机/远端 chip in this row was pure redundancy. -->
     <div class="surface-status-row" :class="{ 'is-tmux': tmuxAttached }" data-testid="surface-status-row">
-      <!-- Machine chip: which host this terminal runs on. Shown for every tab in a cross-machine
-           workbench so "我在哪台" is always one glance away (local = subtle 本机, remote = peer). -->
-      <span
-        v-if="machineLabel"
-        class="surface-machine-chip"
-        :class="{ 'is-remote': isRemote }"
-        :title="machineLabel"
-        data-testid="surface-machine-chip"
-      >
-        <component :is="isRemote ? Server : Monitor" :size="11" />
-        <span class="smc-label">{{ machineLabel }}</span>
-      </span>
       <div class="ssr-main">
         <TmuxPaneBar
           v-if="tmuxReady && tmuxAttached"
           :session-id="sessionId"
+          :overview-open="overviewOpen"
+          :rollup="ovRollup"
+          :status-by-index="ovStatusByIndex"
           @send-key="onSendKey"
           @open-notify="openInstallGuide"
+          @toggle-overview="toggleOverview"
         />
         <AgentStatusBadge
           v-else-if="tmuxReady && (agentState || notifications.length > 0)"
@@ -114,6 +109,25 @@
         @resize="onTerminalResize"
         @ready="onTerminalReady"
       />
+      <!-- Agent Overview: an overlay over the (still-mounted) terminal so xterm keeps its state
+           behind it. Picking a card switches to that window + closes back to the live terminal. -->
+      <!-- Overlay sits INSIDE .terminal-body, whose touch handlers drive copy-mode. Stop touches
+           here so a tap on a card switches windows WITHOUT leaking through to place a copy-mode
+           selection (mobile-safari: the tap otherwise left the terminal stuck in a selection). -->
+      <div
+        v-if="overviewOpen"
+        class="terminal-overview-overlay"
+        @touchstart.stop
+        @touchend.stop
+        @pointerdown.stop
+      >
+        <AgentOverview
+          :groups="ovGroups"
+          :rollup="ovRollup"
+          :is-mobile="isMobile"
+          @select="onOverviewSelect"
+        />
+      </div>
     </div>
 
     <!-- 底栏 (mobile only) -->
@@ -265,7 +279,6 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { Monitor, Server } from 'lucide-vue-next'
 import { Terminal } from 'xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -276,6 +289,7 @@ import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.v
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
+import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
 import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
@@ -298,6 +312,7 @@ import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import { useTuiAdvisory } from '@terminal/composables/cli/useTuiAdvisory'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { useAgentOverview } from '@terminal/composables/cli/useAgentOverview'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
 import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
@@ -360,6 +375,28 @@ const tmuxAttached = computed(() => tmux.attached.value)
 // render NEITHER the pane bar NOR the agent badge (both would be a guessed state). The row
 // keeps its height from the always-present ConnectionStatus on the right → no layout jump.
 const tmuxReady = computed(() => tmux.ready.value)
+// ── Agent Overview: the dashboard view of THIS tmux session. ONE useAgentOverview instance is
+// the SSOT for both the pane bar's roll-up/badge and the overview grid (they share seen-state).
+const overviewOpen = ref(false)
+const {
+  groups: ovGroups,
+  rollup: ovRollup,
+  statusByIndex: ovStatusByIndex,
+  markViewed: ovMarkViewed,
+} = useAgentOverview(tmux.windows, overviewOpen)
+function toggleOverview(): void {
+  overviewOpen.value = !overviewOpen.value
+}
+// Pick a window from the overview: switch to it (PRIMARY — select-window, any index) + mark seen
+// + close back to the live terminal.
+function onOverviewSelect(index: number): void {
+  onSendKey(tmux.selectWindowSeq(index))
+  const w = tmux.windows.value.find((win) => win.index === index)
+  if (w) ovMarkViewed(w)
+  overviewOpen.value = false
+}
+// Single sync point: any open/close (toggle OR card-tap) tells the server to gate tail capture.
+watch(overviewOpen, (open) => { void tmux.setOverviewActive(open) })
 // WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
 useForegroundAgentNotify(() => props.sessionId)
 const keyCastr = useKeyCastrHud()
@@ -1308,6 +1345,16 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   min-height: 0;
 }
 
+/* Agent Overview overlay — covers the terminal (kept mounted behind) while open. */
+.terminal-overview-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #0e0b16;
+}
+
 /* Per-surface status row (SSOT for both hosts). A single horizontal bar above .terminal-body.
    ssr-main grows + scrolls (tmux windows / agent badge); ssr-health is PINNED to the trailing
    edge and never scrolls, so the heartbeat stays fully visible no matter how many tmux windows
@@ -1343,30 +1390,6 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   align-items: center;
   padding: 0 8px;
 }
-
-/* Machine chip — small, leads the status row. Local is muted (本机); remote is tinted so a
-   cross-machine tab is recognizable at a glance. Truncates so a long peer/host never eats the row. */
-.surface-machine-chip {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 44vw;
-  padding: 0 8px;
-  font-size: 0.66rem;
-  letter-spacing: 0.2px;
-  color: hsl(var(--muted-foreground, 240 5% 65%));
-  border-right: 1px solid hsl(var(--border, 240 4% 24%));
-}
-.surface-machine-chip .smc-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.surface-machine-chip.is-remote {
-  color: #7fb2ff;
-}
-.surface-machine-chip.is-remote :deep(svg) { color: #7fb2ff; }
 
 /* WS7 primary entries — float top-right above xterm; small and unobtrusive so they
    never cover terminal content the user is reading. A quick notify bell sits beside
