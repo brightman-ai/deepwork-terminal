@@ -34,6 +34,7 @@
           @click="emit('select', w.index)"
         >
           <div class="ao-card-head">
+            <span class="ao-idx">{{ w.index }}</span>
             <span class="ao-card-name">{{ w.name || '#' + w.index }}</span>
             <span class="ao-card-badge" :class="`s-${g.status}`">{{ statusLabel(g.status) }}</span>
             <span v-if="windowTool(w)" class="ao-card-tool">{{ windowTool(w) }}</span>
@@ -62,6 +63,7 @@
             @click="emit('select', a.w.index)"
           >
             <div class="ao-card-head">
+              <span class="ao-idx">{{ a.w.index }}</span>
               <span class="ao-card-name">{{ a.w.name || '#' + a.w.index }}</span>
               <span class="ao-card-badge" :class="`s-${a.status}`">{{ statusLabel(a.status) }}</span>
               <span v-if="windowTool(a.w)" class="ao-card-tool">{{ windowTool(a.w) }}</span>
@@ -95,6 +97,7 @@
               :data-testid="`overview-card-${w.index}`"
               @click="emit('select', w.index)"
             >
+              <span class="ao-idx">{{ w.index }}</span>
               <span class="ao-idle-name">{{ w.name || '#' + w.index }}</span>
               <span v-if="windowCwd(w)" class="ao-idle-cwd">{{ windowCwd(w) }}</span>
             </button>
@@ -113,6 +116,7 @@
           @click="emit('select', w.index)"
         >
           <div class="ao-card-head">
+            <span class="ao-idx">{{ w.index }}</span>
             <span class="ao-card-name">{{ w.name || '#' + w.index }}</span>
             <span class="ao-card-badge s-idle">空闲</span>
             <span v-if="windowTool(w)" class="ao-card-tool">{{ windowTool(w) }}</span>
@@ -369,6 +373,23 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 }
 
 .ao-card-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+/* tmux 窗口编号徽章：概览每项恒显 w.index，与 pane bar 编号对齐 —— 对回 tab + 区分同名窗口。 */
+.ao-idx {
+  flex-shrink: 0;
+  min-width: 1.3em;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #2a1f3a;
+  border: 1px solid #3a2860;
+  color: #b08fd0;
+  font-family: var(--dw-mono, ui-monospace, monospace);
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.55;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ao-card--big .ao-idx { font-size: 0.68rem; }
 .ao-card-name {
   font-size: 0.82rem;
   font-weight: 700;
