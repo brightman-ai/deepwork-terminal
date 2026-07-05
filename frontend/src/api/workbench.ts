@@ -22,8 +22,8 @@ export async function fetchWorkbenchConfig(): Promise<WorkbenchConfig> {
   if (resp.status === 404) {
     return createDefaultWorkbenchConfig()
   }
-  if (resp.status === 401) {
-    // Auth dialog will handle this — return defaults silently, reload will retry.
+  if (resp.status === 401 || resp.status === 429) {
+    // Auth dialog will handle (401 = wrong code, 429 = throttled) — return defaults silently.
     return createDefaultWorkbenchConfig()
   }
   if (!resp.ok) {
@@ -42,8 +42,8 @@ export async function saveWorkbenchConfig(config: WorkbenchConfig): Promise<void
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
   })
-  if (resp.status === 401) {
-    // Auth dialog will handle — silently skip, reload will retry.
+  if (resp.status === 401 || resp.status === 429) {
+    // Auth dialog will handle (401 = wrong code, 429 = throttled) — silently skip.
     return
   }
   if (!resp.ok) {
