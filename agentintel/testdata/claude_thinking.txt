@@ -1,0 +1,40 @@
+     /home/ubuntu/code/stwork/deepwork-pro/frontend/
+     src/v2/portals/cli/CliV2.vue:56:// as its own
+     row (#tabs slot), which is the only tab nav on
+     phones. One TopTabBar either way.
+     /home/ubuntu/code/stwork/deepwork-pro/frontend/
+     src/v2/portals/cli/CliV2.vue:71:// longer
+     occupy a topbar row — they live in the per-tab
+     hover / long-press tip (TopTabBar),
+
+● B 已后台开跑。条结构摸清了。现在做 A 的
+  brainstorm。先补 brainstorm 方法卡 + tab/连接 chip
+  落点细节打底：
+
+● Read(/home/ubuntu/.claude/workflow_tg/cards/TG-BRAINSTO
+  RM.md)
+  ⎿  Read 39 lines
+
+● Read(/home/ubuntu/code/stwork/deepwork-terminal/fronten
+  d/src/components/terminal-session/CliTerminalSurface.vu
+  e · lines 30-99)
+  ⎿  Read 70 lines
+
+● Read(/home/ubuntu/code/stwork/deepwork-pro/frontend/src
+  /v2/shell/TopTabBar.vue · lines 1-120)
+  ⎿  Read 120 lines
+
+✢ Reticulating… (still thinking with xhigh effort)
+
+─────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────
+  🤖 Opus 4.8 | 💰 $417.47 | 🧠 123.1K(12%) | fast✗ | …
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← fo…
+                                          126032 tokens
+        globalVersion: 2.1.199 · latestVersion: 2.1.201
+                                                  Debug
+
+  ● main
+  ◯ general-purpose  Implement t… 1m 16s · ↓ 57.3k tokens
+

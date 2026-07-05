@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,11 +33,28 @@ type TmuxPaneState struct {
 
 // TmuxWindowState is one window with its panes.
 type TmuxWindowState struct {
-	Index  int             `json:"index"`
-	Name   string          `json:"name"`
-	Active bool            `json:"active"`
-	Panes  []TmuxPaneState `json:"panes"`
+	Index int    `json:"index"`
+	Name  string `json:"name"`
+	// WindowID is tmux's stable "@N" id — survives index reuse/reorder, unlike Index. The Agent
+	// Overview keys its per-window seen-state on it so a reused index can't inherit stale state.
+	WindowID string          `json:"windowId,omitempty"`
+	Active   bool            `json:"active"`
+	Panes    []TmuxPaneState `json:"panes"`
+	// Tail is the last few lines of this window's active pane, for the Agent Overview's
+	// per-window live preview. Optional: absent when capture failed or is disabled.
+	Tail []string `json:"tail,omitempty"`
 }
+
+// overviewTailLines caps how many trailing lines each window's Agent-Overview tail carries.
+// The PC overview's active cards grow to fill the viewport, so the tail must carry enough real
+// output to fill a tall card (not leave it padded/empty) — the card then bottom-aligns + clips
+// to whatever height it actually gets. The whole screen is captured regardless (CaptureWindowTail),
+// so this only widens the post-strip cap; it's still naturally bounded by the source pane's height.
+const overviewTailLines = 40
+
+// overviewTailTimeout bounds each per-window tail capture. It is well under tmuxCmdTimeout so N
+// windows' tails can't monopolise the poll's budget or starve the status captures.
+const overviewTailTimeout = 400 * time.Millisecond
 
 // TmuxSessionState is one tmux session with its windows.
 type TmuxSessionState struct {
@@ -85,6 +103,10 @@ type TmuxStateService struct {
 	prober      *TmuxProber
 	inspector   *ProcessInspector
 	paneMonitor *PaneAgentMonitor
+
+	// overviewActive gates the per-window tail capture: true only while some client has the Agent
+	// Overview open (POST /tmux/overview). Off → the poll does zero extra capture-pane work.
+	overviewActive atomic.Bool
 
 	mu             sync.Mutex
 	installed      bool
@@ -263,6 +285,10 @@ func (s *TmuxStateService) Attached(ctx context.Context, shellPID int) bool {
 	return s.prober.DetectTmux(cctx, shellPID)
 }
 
+// SetOverviewActive toggles per-window tail capture on/off — called when a client opens/closes
+// the Agent Overview (via POST /tmux/overview). Off by default so tail costs nothing until asked.
+func (s *TmuxStateService) SetOverviewActive(v bool) { s.overviewActive.Store(v) }
+
 // State builds the full TmuxState snapshot. shellPID (optional, 0 to skip) is
 // used to compute the Attached flag for the calling session's shell.
 //
@@ -344,6 +370,15 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		session string
 		window  int
 	}
+	// winTool: the agent tool of each window's ACTIVE pane — the pane a bare "session:window"
+	// tail capture targets. It drives per-agent chrome stripping of the overview tail; a window
+	// whose active pane is a bare shell / non-agent maps to ToolNone → the tail is left raw.
+	winTool := make(map[winKey]AgentTool)
+	for _, p := range panes {
+		if p.PaneActive {
+			winTool[winKey{p.SessionName, p.WindowIndex}] = agents[p.PanePID]
+		}
+	}
 	sessionOrder := []string{}
 	sessionSeen := map[string]bool{}
 	winOrder := map[string][]int{}
@@ -360,11 +395,24 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		if !winSeen[wk] {
 			winSeen[wk] = true
 			winOrder[p.SessionName] = append(winOrder[p.SessionName], p.WindowIndex)
-			winMeta[wk] = TmuxWindowState{
-				Index:  p.WindowIndex,
-				Name:   p.WindowName,
-				Active: p.Active,
+			m := TmuxWindowState{
+				Index:    p.WindowIndex,
+				Name:     p.WindowName,
+				WindowID: p.WindowID,
+				Active:   p.Active,
 			}
+			// Per-window live tail for the Agent Overview — captured ONLY while a client has the
+			// overview open, so heads-down-in-one-terminal costs nothing. Bounded lines + a short
+			// timeout so a slow window can't stall the poll. A bare session:window target captures
+			// the window's active pane (background windows included, no switch needed).
+			if s.overviewActive.Load() {
+				tctx, tcancel := context.WithTimeout(ctx, overviewTailTimeout)
+				if tail, terr := s.prober.CaptureWindowTail(tctx, p.SessionWindow, winTool[wk], overviewTailLines); terr == nil {
+					m.Tail = tail
+				}
+				tcancel()
+			}
+			winMeta[wk] = m
 		}
 
 		ps := TmuxPaneState{

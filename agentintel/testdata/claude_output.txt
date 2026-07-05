@@ -1,0 +1,40 @@
+          ply` req `{goal_id, actions[]}` 单事务：
+          status→UPDATE wb_objects.status（复用既
+          有转换合法性，如有状态机校验则走它）；no
+          te→INSERT wb_items(type='addition', titl
+          e='周会纪要', summary=note_md, raised_by
+          =author)；ledger→同 1.2 PUT 逻辑；new_ro
+          w→复用 CommitStaging 单行路径（对象+face
+          t+ref 挂指定子 goal）。全成或全滚（INV-9
+          ）。
+      43
+
+● Bash(go build -o bin/deepwork ./cmd/deepwork && kill
+      $(pgrep -f 'bin/deepwork --webui' | head -1)
+      2>/dev/null; sleep 1; nohup ./bin/deepwork --webui
+      > /tmp/dw-webui.log 2>&1 & disown; sleep 3; node -e
+      "fetch('http://localhost:8080/api/health').then(r=
+      >r.json()).then(j=>console.log('pid',j.runtime.pid)
+      )")
+  ⎿  pid 3518970
+  ⎿  (timeout 3m)
+
+✻ 实施 P2 台账+周会更新… (37s · ↓ 1.3k tokens)
+  ⎿  ◼ P2 实施+验证（台账表视图 + 周会更新模式）
+     ◻ P3 实施+验证（一键滚动 + 月报组装导出）
+     ◻ 全旅程体验验收（dw-browser 亲走 + 独立 Wi…
+     ✔ r9 P1 设计文档（DESIGN-r9-P1，Sonnet 传递…
+     ✔ P1 实施（Sonnet：后端+前端+build）
+      … +1 completed
+
+─────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────
+  🤖 Fable 5 | 💰 $210.70 | 🧠 363.1K(36%) | fast✗ | e…
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← fo…
+                    359255 tokens · ◎ /goal active (7h)
+                                                  Debug
+
+
+
+
