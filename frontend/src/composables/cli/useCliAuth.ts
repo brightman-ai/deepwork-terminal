@@ -78,6 +78,13 @@ export function useCliAuth() {
     const target = typeof input === 'string' ? apiUrl(input) : input
     const resp = await fetch(target, { ...init, headers })
     if (resp.status === 401) {
+      // Clear stale code so parallel in-flight requests don't keep charging the throttle
+      // with a wrong token while the user is re-authenticating.
+      authCode.value = ''
+      localStorage.removeItem(AUTH_STORAGE_KEY)
+      showAuthDialog.value = true
+    }
+    if (resp.status === 429) {
       showAuthDialog.value = true
     }
     return resp

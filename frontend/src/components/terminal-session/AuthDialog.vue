@@ -10,6 +10,8 @@
         placeholder="auth code"
         maxlength="64"
         autocomplete="off"
+        autocapitalize="characters"
+        style="text-transform: uppercase"
         @keyup.enter="submit"
       />
       <p class="auth-tip">Not case-sensitive — the dash is optional.</p>
@@ -54,7 +56,7 @@ watch(() => props.visible, async (v) => {
 })
 
 async function submit() {
-  const trimmed = code.value.trim()
+  const trimmed = code.value.trim().toUpperCase()
   if (!trimmed) {
     error.value = 'Please enter an auth code.'
     return

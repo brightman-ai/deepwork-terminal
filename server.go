@@ -292,24 +292,30 @@ func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
 		// normalized form (case-fold + strip hyphens/space, no entropy lost), shared
 		// verbatim with deepwork-pro's WebUI middleware so the two boundaries agree.
 		if !authgate.CodeMatches(token, s.authCode()) {
-			// Global failure throttle: the default code is short (~39-bit) and a public tunnel
-			// collapses all source IPs to localhost, so a single shared failure budget is what
-			// actually bounds a brute-force. ONLY failures are charged — the success path below is
-			// never delayed, so an honest login stays instant even mid-attack. See authThrottle.
-			delay := s.authThrottle.Penalty()
-			if delay > 0 {
-				// Park this failed attempt to slow a guessing flood, but bail if the client hangs
-				// up so we don't accumulate stuck goroutines. Then signal Retry-After + 429.
-				select {
-				case <-time.After(delay):
-				case <-r.Context().Done():
+			// Only charge the throttle for non-empty wrong codes — those are actual brute-force
+			// guesses. An empty token means "not logged in yet" (browser startup, first visit);
+			// penalising it exhausts the free burst before the user ever sees the auth dialog,
+			// causing spurious 429s on regular API calls right after login.
+			if token != "" {
+				// Global failure throttle: the default code is short (~39-bit) and a public tunnel
+				// collapses all source IPs to localhost, so a single shared failure budget is what
+				// actually bounds a brute-force. ONLY failures are charged — the success path below is
+				// never delayed, so an honest login stays instant even mid-attack. See authThrottle.
+				delay := s.authThrottle.Penalty()
+				if delay > 0 {
+					// Park this failed attempt to slow a guessing flood, but bail if the client hangs
+					// up so we don't accumulate stuck goroutines. Then signal Retry-After + 429.
+					select {
+					case <-time.After(delay):
+					case <-r.Context().Done():
+						return
+					}
+					w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(delay.Seconds()))))
+					writeJSON(w, http.StatusTooManyRequests, map[string]string{
+						"error": "too many attempts",
+					})
 					return
 				}
-				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(delay.Seconds()))))
-				writeJSON(w, http.StatusTooManyRequests, map[string]string{
-					"error": "too many attempts",
-				})
-				return
 			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "unauthorized",
