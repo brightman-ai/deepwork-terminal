@@ -21,7 +21,9 @@ type TmuxPane struct {
 	PanePID        int
 	PaneCWD        string // pane's current working directory
 	PaneID         string // stable tmux pane id ("%N") — survives index reuse / window reorder
+	WindowID       string // stable tmux window id ("@N") — survives window index reuse / reorder
 	Active         bool   // window is the active window in the session
+	PaneActive     bool   // this pane is the active pane WITHIN its window (target of a bare session:window capture)
 	LastActivityAt int64  // unix timestamp of last pane activity (from tmux)
 }
 
@@ -155,6 +157,33 @@ func (tp *TmuxProber) CapturePane(ctx context.Context, sessionWindow string, pan
 	return raw, nil
 }
 
+// CaptureWindowTail captures a WINDOW's active-pane live tail for the Agent Overview: the last
+// `lines` lines of REAL output after `tool`'s persistent bottom chrome (input box / status /
+// token counter, etc.) has been stripped. Unlike CapturePane it takes no pane index — tmux
+// resolves a bare "session:window" target to that window's active pane, which is exactly what
+// the overview card represents. Works on NON-attached / background windows too (no switch).
+//
+// It captures the whole VISIBLE screen (no -S), not just N lines: an agent's chrome is ~12
+// lines pinned to the bottom, so the content worth showing sits above it and would be lost if we
+// grabbed only the last N raw lines first. Stripping (per `tool`) then capping keeps the pushed
+// payload — and the diff that decides whether to push at all — as small as the const promises.
+func (tp *TmuxProber) CaptureWindowTail(ctx context.Context, sessionWindow string, tool AgentTool, lines int) ([]string, error) {
+	out, err := tmuxCommandContext(ctx,
+		"capture-pane", "-t", sessionWindow, "-p",
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("tmux capture-pane %s: %w", sessionWindow, err)
+	}
+	raw := strings.Split(string(out), "\n")
+	// Strip the agent's bottom chrome by tool (bare shell / unknown → left as-is), then keep the
+	// last N content lines. stripAgentChrome already trims trailing blank padding.
+	content := stripAgentChrome(raw, tool)
+	if len(content) > lines {
+		content = content[len(content)-lines:]
+	}
+	return content, nil
+}
+
 // DetectAgentsInPanes returns a map of pane PID → AgentTool for panes with AI tools.
 func (tp *TmuxProber) DetectAgentsInPanes(ctx context.Context, panes []TmuxPane) map[int]AgentTool {
 	result := make(map[int]AgentTool)
@@ -187,9 +216,9 @@ func parseTmuxPanes(out string) ([]TmuxPane, error) {
 		if len(fields) < 6 {
 			continue
 		}
-		var sessionName, sessionWindow, windowName, paneCWD, paneID string
+		var sessionName, sessionWindow, windowName, paneCWD, paneID, windowID string
 		var windowIdx, paneIdx, panePID int
-		var active bool
+		var active, paneActive bool
 		var err1, err2, err3 error
 		var lastActivity int64
 
@@ -210,6 +239,12 @@ func parseTmuxPanes(out string) ([]TmuxPane, error) {
 			}
 			if len(fields) >= 9 {
 				paneID = fields[8]
+			}
+			if len(fields) >= 10 {
+				windowID = fields[9]
+			}
+			if len(fields) >= 11 {
+				paneActive = fields[10] == "1"
 			}
 		} else {
 			sessionWindow = fields[0]
@@ -241,7 +276,9 @@ func parseTmuxPanes(out string) ([]TmuxPane, error) {
 			PanePID:        panePID,
 			PaneCWD:        paneCWD,
 			PaneID:         paneID,
+			WindowID:       windowID,
 			Active:         active,
+			PaneActive:     paneActive,
 			LastActivityAt: lastActivity,
 		})
 	}
@@ -258,7 +295,9 @@ func tmuxPaneFormat() string {
 		"#{window_active}",
 		"#{pane_current_path}",
 		"#{pane_last_activity}",
-		"#{pane_id}", // stable per-pane id ("%N") — survives index reuse/window reorder
+		"#{pane_id}",     // stable per-pane id ("%N") — survives index reuse/window reorder
+		"#{window_id}",   // stable per-window id ("@N") — the Agent Overview keys seen-state on it
+		"#{pane_active}", // this pane is active WITHIN its window — the pane a bare session:window tail targets
 	}
 	return strings.Join(fields, tmuxFieldSep)
 }
