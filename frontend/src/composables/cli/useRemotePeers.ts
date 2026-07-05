@@ -13,7 +13,7 @@
 import { ref } from 'vue'
 import type { WorkbenchTab } from '@terminal/types/workbench'
 import { useServerStore } from '@terminal/composables/cli/useServerStore'
-import { peerApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { normalizeUrl, probePeer } from '@terminal/composables/cli/peerProbe'
 
 const PEERS_KEY = 'remotePeers'
 const LOCAL_AUTH_KEY = 'cli_auth_code'
@@ -49,11 +49,6 @@ let hydrated = false
 
 function genPeerId(): string {
   return `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-}
-
-/** Strip a trailing slash so base + path never doubles up. */
-function normalizeUrl(u: string): string {
-  return u.trim().replace(/\/+$/, '')
 }
 
 /** http→ws, https→wss (keeps host/port). */
@@ -175,37 +170,6 @@ export function useRemotePeers() {
 
   function mkErr(peer: RemotePeer, error: string): TabConnection {
     return { isRemote: true, httpBase: '', wsBase: '', authToken: '', machineLabel: `${peer.name}(不可达)`, peer, error }
-  }
-
-  /**
-   * Auth-probe a peer before wiring a tab to it: distinguishes a wrong code (401) from an
-   * unreachable address / mixed-content block (network error) so the UI gives a clear
-   * message instead of a silent reconnect storm. Hits the SAME REST the session-lifecycle
-   * uses, so a green probe means create-session will work.
-   */
-  async function probePeer(httpBase: string, code: string): Promise<{ ok: boolean; error?: string }> {
-    // Hard timeout: a reachable peer answers in <1s; an UNREACHABLE one (offline host / wrong
-    // address / network can't route) would otherwise leave the browser fetch pending for the OS
-    // TCP timeout (~90s) with zero UI feedback — exactly the silent hang RT-4 forbids. Abort at
-    // 6s and surface a clear "unreachable" error instead.
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), 6000)
-    try {
-      const resp = await fetch(normalizeUrl(httpBase) + peerApi('/sessions'), {
-        headers: { 'X-CLI-Auth': code },
-        signal: ctrl.signal,
-      })
-      if (resp.status === 401) return { ok: false, error: '认证码错误' }
-      if (!resp.ok) return { ok: false, error: `远程返回 HTTP ${resp.status}` }
-      return { ok: true }
-    } catch (e) {
-      if ((e as Error)?.name === 'AbortError') {
-        return { ok: false, error: '连接超时：地址不可达（检查地址 / 网络 / 对端是否在线）' }
-      }
-      return { ok: false, error: '连不上：地址不可达，或 HTTPS 页面连 HTTP 地址被浏览器拦截' }
-    } finally {
-      clearTimeout(timer)
-    }
   }
 
   return {
