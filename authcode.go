@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/brightman-ai/deepwork-terminal/authgate"
+	"github.com/brightman-ai/kit/authgate"
 )
 
 // The auth code is mutable at runtime (handleRotateAuthCode) and authWrap reads it
@@ -53,7 +53,7 @@ func (s *Server) handleRotateAuthCode(w http.ResponseWriter, r *http.Request) {
 	}
 	code := strings.TrimSpace(body.Code)
 	if code == "" {
-		code = generateAuthCode()
+		code = authgate.Generate()
 	} else if authgate.NormalizeCode(code) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "code must contain letters or digits"})
 		return

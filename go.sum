@@ -1,7 +1,7 @@
 github.com/SherClockHolmes/webpush-go v1.4.0 h1:ocnzNKWN23T9nvHi6IfyrQjkIc0oJWv1B1pULsf9i3s=
 github.com/SherClockHolmes/webpush-go v1.4.0/go.mod h1:XSq8pKX11vNV8MJEMwjrlTkxhAj1zKfxmyhdV7Pd6UA=
-github.com/brightman-ai/kit v0.6.0 h1:A7tRzs/RjGtRHgJzk6Lb+BpCLaT1WGKn5JKsYsDa+IQ=
-github.com/brightman-ai/kit v0.6.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
+github.com/brightman-ai/kit v0.8.0 h1:3bOEkZHKj0zeitQjtoYYMblXO1C8bQB2n+wl7kkAtPg=
+github.com/brightman-ai/kit v0.8.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=

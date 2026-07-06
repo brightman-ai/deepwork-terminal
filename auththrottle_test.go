@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brightman-ai/deepwork-terminal/authgate"
+	"github.com/brightman-ai/kit/authgate"
 )
 
 // TestAuthWrap_Throttle exercises the real authWrap chokepoint wired to authgate.Throttle: the

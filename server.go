@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brightman-ai/deepwork-terminal/authgate"
+	"github.com/brightman-ai/kit/authgate"
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
 	"github.com/brightman-ai/deepwork-terminal/notify"
 	tunnelkit "github.com/brightman-ai/kit/tunnel"
@@ -52,7 +52,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	}
 	// Always generate auth code if not provided.
 	if s.config.AuthCode == "" {
-		s.config.AuthCode = generateAuthCode()
+		s.config.AuthCode = authgate.Generate()
 	}
 	s.tunnel = tunnelkit.New(s.config.DataDir)
 	s.authThrottle = authgate.NewThrottle()
