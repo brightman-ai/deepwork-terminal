@@ -43,6 +43,7 @@
           @send-key="onSendKey"
           @open-notify="openInstallGuide"
           @toggle-overview="toggleOverview"
+          @select-window="onOverviewSelect"
         />
         <AgentStatusBadge
           v-else-if="tmuxReady && (agentState || notifications.length > 0)"
@@ -699,6 +700,14 @@ const isWKWebView = navigator.userAgent.includes('AppleWebKit') &&
 
 function onKeydownDirect(e: KeyboardEvent) {
   if (!props.active) return
+  // ESC closes the Agent Overview (back to the pane you were on) instead of leaking to the PTY —
+  // ONLY while it's open, so a normal ESC (vim / TUIs) is untouched when the overview is closed.
+  if (overviewOpen.value && e.key === 'Escape') {
+    overviewOpen.value = false
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
   keyCastr.feed(e)
   reportCliInputDiagnostic('document.keydown', {
     surface: 'workbench',

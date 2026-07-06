@@ -126,6 +126,7 @@ const emit = defineEmits<{
   (e: 'sendKey', key: string): void
   (e: 'open-notify'): void
   (e: 'toggle-overview'): void
+  (e: 'select-window', index: number): void
 }>()
 
 // Compact roll-up: only non-zero, urgency-ordered (idle omitted — not actionable at a glance).
@@ -184,10 +185,6 @@ function dotClass(w: TmuxWindowState): string {
   return ''
 }
 
-function selectWindow(index: number): void {
-  emit('sendKey', tmux.selectWindowSeq(index)) // this-client-scoped, valid for any index
-}
-
 function newWindow(): void {
   // tmux: prefix + c = new-window
   emit('sendKey', tmux.prefixSeq('c'))
@@ -230,7 +227,10 @@ function onWinHover(w: TmuxWindowState, e: MouseEvent): void {
   showTip(w, e.currentTarget as HTMLElement)
 }
 function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
-  selectWindow(w.index) // PRIMARY — switch, always, first
+  // Route through the surface (select-window): switch to it AND close the overview if it's open,
+  // so a pane-bar tap while the overview is up behaves like tapping its card — straight into that
+  // pane's live terminal. When the overview is closed it's just a plain window switch.
+  emit('select-window', w.index) // PRIMARY — switch, always, first
   if (touched) {
     showTip(w, e.currentTarget as HTMLElement) // touch: flash the tip, then auto-dismiss
     if (tipTimer) clearTimeout(tipTimer)
