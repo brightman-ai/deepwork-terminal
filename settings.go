@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -197,4 +198,32 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
 	s.tunnel.Stop()
 	writeJSON(w, http.StatusOK, map[string]any{"running": false})
+}
+
+// handleTunnelLogin runs `cloudflared tunnel login` and surfaces the Cloudflare auth URL via
+// /tunnel/status. Synchronous so a launch failure is returned to the UI, not just logged.
+func (s *Server) handleTunnelLogin(w http.ResponseWriter, r *http.Request) {
+	if err := s.tunnel.Login(context.Background()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.tunnel.Status())
+}
+
+// handleTunnelNamed brings up a persistent named tunnel bound to the posted hostname. Synchronous
+// so a failure (not logged in, DNS zone not on account, edge connect) reaches the UI verbatim.
+func (s *Server) handleTunnelNamed(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Hostname string `json:"hostname"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Hostname) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "hostname required"})
+		return
+	}
+	localAddr := fmt.Sprintf("http://localhost:%d", s.Port())
+	if _, err := s.tunnel.StartNamed(context.Background(), req.Hostname, localAddr); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.tunnel.Status())
 }
