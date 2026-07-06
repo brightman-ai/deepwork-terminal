@@ -144,9 +144,11 @@ func TestCodexDriver_AgentState(t *testing.T) {
 }
 
 // TestCodexDriver_TurnLifecycle asserts the driver derives Running during a turn
-// and Waiting once the turn completes. The Waiting result is the running→waiting
-// transition push_notifier fires the turn-end notification on — before this the
-// driver only ever emitted Running, so Codex sessions never notified.
+// and Idle once the turn completes (mirrors claude_driver's end_turn→Idle). The
+// running→Idle transition is what push_notifier fires the turn-end notification
+// on (it triggers on Idle OR Waiting) — before task_complete was handled the
+// driver only ever emitted Running, so Codex sessions never notified. Idle (not
+// Waiting) keeps a resting pane off the red "needs input" indicator.
 func TestCodexDriver_TurnLifecycle(t *testing.T) {
 	// Mid-turn: task_started + a response_item → Running.
 	midTurn := writeJSONL(t, []map[string]any{
@@ -162,7 +164,7 @@ func TestCodexDriver_TurnLifecycle(t *testing.T) {
 		t.Errorf("mid-turn status: got %q, want %q", got, StatusRunning)
 	}
 
-	// Turn complete: the full sequence ending in task_complete → Waiting.
+	// Turn complete: the full sequence ending in task_complete → Idle.
 	done := writeJSONL(t, []map[string]any{
 		makeCodexRow("session_meta", map[string]any{"model": "gpt-5.5"}),
 		makeCodexRow("event_msg", map[string]any{"type": "task_started"}),
@@ -173,8 +175,8 @@ func TestCodexDriver_TurnLifecycle(t *testing.T) {
 	if err := d2.Update(); err != nil {
 		t.Fatalf("Update error: %v", err)
 	}
-	if got := d2.State().Status; got != StatusWaiting {
-		t.Errorf("post-turn status: got %q, want %q (turn-end → notify trigger)", got, StatusWaiting)
+	if got := d2.State().Status; got != StatusIdle {
+		t.Errorf("post-turn status: got %q, want %q (turn-end → notify trigger, no red dot)", got, StatusIdle)
 	}
 }
 
