@@ -58,12 +58,15 @@ func (cd *CodexDriver) Update() error {
 				// A turn began.
 				cd.state.Status = StatusRunning
 			case "task_complete":
-				// Turn finished → the pane is now waiting for the user's next
-				// input. This running→waiting transition is exactly what
-				// push_notifier keys off to fire the turn-end web push; without
-				// handling task_complete the driver only ever emitted Running, so
-				// Codex sessions never notified. [contrast: claude_driver end_turn]
-				cd.state.Status = StatusWaiting
+				// Turn finished → Idle ("Turn completed, waiting for next prompt",
+				// per AgentStatus). One turn-complete semantic shared with
+				// claude_driver's end_turn→Idle; a genuine "needs human input"
+				// (approval/question) is detected separately by the tool-agnostic
+				// PTY analyzer, not inferred from a turn boundary. push_notifier
+				// still fires the turn-end web push on this running→Idle transition
+				// (it triggers on Idle OR Waiting), so notifications are preserved
+				// without pinning a permanent red "waiting" dot on a resting pane.
+				cd.state.Status = StatusIdle
 			case "token_count":
 				info, ok := payload["info"].(map[string]any)
 				if !ok {
