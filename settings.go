@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,36 +11,9 @@ import (
 	"sync"
 )
 
-// authCodeAlphabet is an unambiguous uppercase set (no 0/O, 1/I/L, U) so the printed code is easy
-// to read off the console and re-type without confusion. 30 chars.
-const authCodeAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
-
-func generateAuthCode() string {
-	// Human-friendly default: 8 chars grouped 4-4 with a hyphen (e.g. E3X1-M6T2). Easy to read and
-	// type for the common local/LAN case. crypto/rand + rejection sampling keeps each pick uniform.
-	//
-	// Tradeoff: ~39-bit entropy (30^8), far below the old 128-bit hex. The auth path has no rate
-	// limit, so this is only safe for local/LAN reach. Exposing this instance publicly (cloudflare
-	// tunnel) should pair with a strong operator-set -auth-code rather than this generated default.
-	const n = 8
-	// Reject bytes in the biased tail so modulo stays uniform over the alphabet.
-	limit := byte(256 - (256 % len(authCodeAlphabet)))
-	out := make([]byte, 0, n+1)
-	buf := make([]byte, 1)
-	for i := 0; i < n; i++ {
-		if i == 4 {
-			out = append(out, '-')
-		}
-		for {
-			rand.Read(buf) //nolint:errcheck
-			if buf[0] < limit {
-				out = append(out, authCodeAlphabet[int(buf[0])%len(authCodeAlphabet)])
-				break
-			}
-		}
-	}
-	return string(out)
-}
+// Auth-code generation/canonicalization/comparison now lives in the shared kit/authgate SSOT
+// (github.com/brightman-ai/kit/authgate) so the standalone terminal, standalone teamworkbench and
+// deepwork-pro all speak the same codes. Callers use authgate.Generate() directly.
 
 // workbench persistence — stores tab layout as JSON file
 var (
