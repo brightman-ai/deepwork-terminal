@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brightman-ai/kit/authgate"
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
 	"github.com/brightman-ai/deepwork-terminal/notify"
+	"github.com/brightman-ai/kit/authgate"
 	tunnelkit "github.com/brightman-ai/kit/tunnel"
 	"github.com/brightman-ai/kit/webserve"
 )
@@ -220,6 +220,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /system", wrap(s.handleSystem))
 	s.mux.HandleFunc("GET /tunnel/status", wrap(s.handleTunnelStatus))
 	s.mux.HandleFunc("POST /tunnel/start", wrap(s.handleTunnelStart))
+	s.mux.HandleFunc("POST /tunnel/login", wrap(s.handleTunnelLogin))
+	s.mux.HandleFunc("POST /tunnel/named", wrap(s.handleTunnelNamed))
 	s.mux.HandleFunc("POST /tunnel/stop", wrap(s.handleTunnelStop))
 	s.mux.HandleFunc("GET /workbench", wrap(s.handleGetWorkbench))
 	s.mux.HandleFunc("PUT /workbench", wrap(s.handleSaveWorkbench))

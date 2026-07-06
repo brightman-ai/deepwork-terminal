@@ -35,7 +35,7 @@
             :value="pendingAuthCode"
             class="rtd-input rtd-input--code"
             type="text"
-            placeholder="该远程的认证码 如 E3X1-M6T2"
+            placeholder="该远程的认证码 如 ABCD-1234"
             data-testid="remote-auth-input"
             @input="pendingAuthCode = formatAuthCode(($event.target as HTMLInputElement).value)"
             @keyup.enter="submitPendingAuth"
@@ -48,7 +48,7 @@
           <input v-model="f.name" class="rtd-input" placeholder="名称（如 stwork）" data-testid="remote-add-name" />
           <input v-model="f.tailscaleUrl" class="rtd-input" placeholder="tailscale/局域 http 地址  http://stwork:8087" data-testid="remote-add-tailscale" />
           <input v-model="f.cloudflareUrl" class="rtd-input" placeholder="cloudflare https 地址（可选）  https://xxx.trycloudflare.com" data-testid="remote-add-cloudflare" />
-          <input :value="f.code" class="rtd-input rtd-input--code" type="text" placeholder="认证码 如 E3X1-M6T2（存本机浏览器）" data-testid="remote-add-code" @input="f.code = formatAuthCode(($event.target as HTMLInputElement).value)" />
+          <input :value="f.code" class="rtd-input rtd-input--code" type="text" placeholder="认证码 如 ABCD-1234（存本机浏览器）" data-testid="remote-add-code" @input="f.code = formatAuthCode(($event.target as HTMLInputElement).value)" />
           <div class="rtd-form-actions">
             <button class="rtd-btn" type="button" @click="mode = 'list'; editingId = null">取消</button>
             <button class="rtd-btn rtd-btn--primary" type="button" :disabled="busy" data-testid="remote-add-submit" @click="submitAdd">
