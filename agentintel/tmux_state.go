@@ -29,6 +29,10 @@ type TmuxPaneState struct {
 	PaneID      string      `json:"paneId,omitempty"` // stable tmux pane id ("%N")
 	AgentTool   AgentTool   `json:"agentTool,omitempty"`
 	AgentStatus AgentStatus `json:"agentStatus,omitempty"`
+	// AwaitingUser: the agent completed a turn / is blocked and hasn't been responded
+	// to — drives the "needs-you" dot. Distinct from AgentStatus==idle, which also
+	// covers a fresh pane that never ran a turn (not awaiting).
+	AwaitingUser bool `json:"awaitingUser,omitempty"`
 }
 
 // TmuxWindowState is one window with its panes.
@@ -425,6 +429,11 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		if tool, ok := agents[p.PanePID]; ok {
 			ps.AgentTool = tool
 			ps.AgentStatus = s.paneStatus(ctx, p, tool)
+			// Needs-you: an explicit block (waiting) always counts; an idle pane counts
+			// only if the driver says a turn actually completed (not fresh-idle). Awaiting()
+			// reuses the driver Status() just updated, so no extra transcript read.
+			ps.AwaitingUser = ps.AgentStatus == StatusWaiting ||
+				(ps.AgentStatus == StatusIdle && s.paneMonitor.Awaiting(paneKey(p), p.PaneCWD, tool))
 			agentKeys[paneKey(p)] = true
 		}
 		winPanes[wk] = append(winPanes[wk], ps)

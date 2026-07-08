@@ -194,6 +194,11 @@ func (cd *ClaudeDriver) AgentState() AgentState {
 		Model:             s.Model,
 		Status:            s.Status,
 		WaitReason:        s.WaitReason,
+		// Needs-you: blocked (waiting) OR the turn ended and the agent spoke last
+		// (assistant after user = your move). A fresh idle (no turn yet, user≥assist)
+		// is NOT awaiting. Clears automatically when your next prompt makes user>assist.
+		AwaitingUser: s.Status == StatusWaiting ||
+			(s.Status == StatusIdle && s.LastAssistAt.After(s.LastUserAt)),
 		InputTokens:       s.Usage.InputTokens,
 		OutputTokens:      s.Usage.OutputTokens,
 		CacheReadTokens:   s.Usage.CacheReadTokens,

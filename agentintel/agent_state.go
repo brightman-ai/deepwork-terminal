@@ -41,6 +41,13 @@ type AgentState struct {
 	WaitReason WaitReason  `json:"waitReason,omitempty"`
 	Model      string      `json:"model,omitempty"`
 
+	// AwaitingUser: the agent completed a turn and has NOT been responded to yet —
+	// idle-after-a-turn or blocked (waiting), but not fresh-idle (never ran) and not
+	// running. Drives the "needs-you" pane-bar dot + notification; clears when the
+	// user's next input lands (the agent goes running again). Derived from transcript
+	// timestamps so it survives a page reload — no need to witness the live transition.
+	AwaitingUser bool `json:"awaitingUser,omitempty"`
+
 	// Token usage (from JSONL parsing)
 	InputTokens       int `json:"inputTokens"`
 	OutputTokens      int `json:"outputTokens"`

@@ -8,6 +8,7 @@ type CodexSessionState struct {
 	Model        string
 	CWD          string
 	Status       AgentStatus
+	Awaiting     bool // a turn completed (task_complete) and no new turn started since = needs-you
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
@@ -55,8 +56,9 @@ func (cd *CodexDriver) Update() error {
 			}
 			switch evType, _ := payload["type"].(string); evType {
 			case "task_started":
-				// A turn began.
+				// A turn began — you responded (or kicked it off), so no longer awaiting.
 				cd.state.Status = StatusRunning
+				cd.state.Awaiting = false
 			case "task_complete":
 				// Turn finished → Idle ("Turn completed, waiting for next prompt",
 				// per AgentStatus). One turn-complete semantic shared with
@@ -67,6 +69,7 @@ func (cd *CodexDriver) Update() error {
 				// (it triggers on Idle OR Waiting), so notifications are preserved
 				// without pinning a permanent red "waiting" dot on a resting pane.
 				cd.state.Status = StatusIdle
+				cd.state.Awaiting = true // turn done, your move → needs-you (soft)
 			case "token_count":
 				info, ok := payload["info"].(map[string]any)
 				if !ok {
@@ -85,6 +88,7 @@ func (cd *CodexDriver) Update() error {
 
 		case "response_item":
 			cd.state.Status = StatusRunning
+			cd.state.Awaiting = false
 		}
 
 		cd.state.UpdatedAt = time.Now()
@@ -102,6 +106,8 @@ func (cd *CodexDriver) AgentState() AgentState {
 		Tool:         ToolCodex,
 		Model:        s.Model,
 		Status:       s.Status,
+		AwaitingUser: s.Awaiting, // task_complete seen, no new turn → your move
+
 		InputTokens:  s.InputTokens,
 		OutputTokens: s.OutputTokens,
 		TotalTokens:  s.TotalTokens,
