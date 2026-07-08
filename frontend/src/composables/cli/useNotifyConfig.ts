@@ -1,6 +1,8 @@
 /**
  * useNotifyConfig — single SSOT view over the notify provider config API
- * (`/api/notify/config`). Both the full settings section
+ * (terminal route `/notify/config`, reached via cliApi() so the mount prefix is
+ * resolved per deployment — `/api/notify/…` standalone, `/api/cli/notify/…` under
+ * pro's embed. Hardcoding `/api/notify` 404'd on pro). Both the full settings section
  * (portals/settings/sections/NotificationsSection.vue) and the quick sheet
  * (components/terminal-session/NotifyQuickSheet.vue) read/mutate through this,
  * so toggling/testing in one surface is immediately reflected in the other.
@@ -12,6 +14,7 @@
  */
 import { ref } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export type NotifyKind = 'ilink' | 'webpush' | 'feishu' | 'dingtalk' | 'wecom' | 'slack'
 
@@ -124,7 +127,7 @@ export function useNotifyConfig() {
     loading.value = true
     error.value = ''
     try {
-      const r = await cliFetch('/api/notify/config')
+      const r = await cliFetch(cliApi('/notify/config'))
       if (r.ok) apply(await r.json())
       else error.value = `加载失败 (${r.status})`
     } catch {
@@ -138,7 +141,7 @@ export function useNotifyConfig() {
   async function setEnabled(kind: string, enabled: boolean): Promise<boolean> {
     error.value = ''
     try {
-      const r = await cliFetch('/api/notify/config', {
+      const r = await cliFetch(cliApi('/notify/config'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ providers: [{ kind, enabled }] }),
@@ -163,7 +166,7 @@ export function useNotifyConfig() {
     try {
       const body: { url: string; secret?: string } = { url }
       if (secret !== undefined) body.secret = secret
-      const r = await cliFetch(`/api/notify/providers/${kind}/settings`, {
+      const r = await cliFetch(cliApi(`/notify/providers/${kind}/settings`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -184,7 +187,7 @@ export function useNotifyConfig() {
    */
   async function test(kind: string): Promise<TestResult> {
     try {
-      const r = await cliFetch(`/api/notify/providers/${kind}/test`, { method: 'POST' })
+      const r = await cliFetch(cliApi(`/notify/providers/${kind}/test`), { method: 'POST' })
       if (r.status === 429) return 'cooldown'
       if (!r.ok) return 'error'
       const d = await r.json() as { result?: string }
