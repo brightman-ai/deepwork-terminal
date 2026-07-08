@@ -72,12 +72,11 @@ export function overviewColumns(activeCount: number): number {
 }
 
 export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: Ref<boolean>) {
-  // Client-local dismiss layer over the backend's durable "needs-you" (awaitingUser).
-  //   - AUTO-clear is backend-driven: when you respond, the agent runs and awaitingUser flips off.
-  //     There is NO "seen on view" — glancing at / switching to a pane never clears the dot.
-  //   - dismiss(w) is the explicit "handled, hide it" (tapping its overview card). It is re-armed
-  //     on the window's next run, so a NEW completion shows again instead of staying swallowed.
-  void overviewOpen // retained in the signature for callers; the seen-layer no longer needs it
+  // Client-local "seen" layer over the backend's durable "needs-you" (awaitingUser). A finished
+  // window keeps its dot until you've SEEN it — where "seen" = the window became ACTIVE (you
+  // switched to it). It keys on the pushed `active` flag, so a native tmux `ctrl+b N` switch clears
+  // it exactly like a pane-bar tap does — same outcome regardless of how you switch. A new turn
+  // (→ running = you responded) re-arms it so the NEXT completion shows again.
   const dismissed = ref<Record<string, boolean>>({})
   const prevRaw = ref<Record<string, string>>({})
 
@@ -89,9 +88,12 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
         const k = windowKey(w)
         live.add(k)
         const raw = windowRawStatus(w)
-        // A new turn started (→ running = you responded) re-arms the dot: forget the prior
-        // dismiss so the NEXT completion is surfaced, not silently swallowed.
+        // A new turn started (→ running = you responded) re-arms the dot for the next completion.
         if (raw === 'running' && prevRaw.value[k] !== 'running') delete dismissed.value[k]
+        // You're viewing a finished window (it's active; overview closed so the terminal is what
+        // you see) → seen, clear its dot. `active` comes from the topology push, so this fires for
+        // a ctrl+b switch too, not just a mouse tap on the bar/overview.
+        if (w.active && !overviewOpen.value && windowAwaiting(w)) dismissed.value[k] = true
         prevRaw.value[k] = raw
       }
       // Prune vanished windows — no leak; a reused id starts clean.
@@ -102,7 +104,8 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
     { immediate: true, deep: true },
   )
 
-  /** Explicit "handled — hide it" for a window; re-armed on its next run. Viewing does NOT clear. */
+  /** Explicit "handled — hide it" for a window (e.g. tapping its overview card); re-armed on its
+   *  next run. Switching to a window also clears it via the active-flag rule in the watcher. */
   function dismiss(w: TmuxWindowState): void {
     dismissed.value[windowKey(w)] = true
   }

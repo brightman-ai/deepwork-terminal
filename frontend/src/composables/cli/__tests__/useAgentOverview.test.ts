@@ -62,11 +62,23 @@ describe('needs-you state (backend awaitingUser + client dismiss)', () => {
     expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
   })
 
-  it('being the ACTIVE window does NOT clear it (glancing ≠ responding)', async () => {
-    const windows = ref([win(1, { status: 'idle', awaiting: true, active: true })])
-    const ov = useAgentOverview(windows, ref(false))
+  it('switching to a finished window clears it via the active flag (so ctrl+b N works, not just a tap)', async () => {
+    // Not active yet → the dot shows.
+    const windows = ref([win(1, { status: 'idle', awaiting: true, active: false })])
+    const ov = useAgentOverview(windows, ref(false)) // overview closed → active window = what you see
     await nextTick()
-    // Old behaviour auto-marked the active pane "seen" → idle; now only a response/dismiss clears.
+    expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
+
+    // You switch to it (any method: tap OR ctrl+b) → topology push marks it active → seen → cleared.
+    windows.value = [win(1, { status: 'idle', awaiting: true, active: true })]
+    await nextTick()
+    expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
+  })
+
+  it('while the overview is OPEN, the active window is NOT auto-seen (you are looking at the grid)', async () => {
+    const windows = ref([win(1, { status: 'idle', awaiting: true, active: true })])
+    const ov = useAgentOverview(windows, ref(true)) // overview open
+    await nextTick()
     expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
   })
 
