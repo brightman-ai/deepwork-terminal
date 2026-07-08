@@ -81,12 +81,12 @@ func NewServer(opts ...Option) (*Server, error) {
 	// web push / Feishu / DingTalk / WeCom) and is the single delivery-metrics owner.
 	// Built after ilink/push so its adapters can wrap them.
 	s.coordinator = newNotifyCoordinator(s)
-	// Resume the background notifier at startup whenever a delivery channel already
-	// exists — a surviving web-push subscription OR a persisted iLink (WeChat) login.
-	// Without the iLink arm, a restart left WeChat-only users with no notifier (it
-	// only (re)started on a fresh web-push subscribe), so turn-end pushes silently
-	// stopped after every restart. loggedIn() is documented as the notifier gate.
-	if s.push.count() > 0 || s.ilink.loggedIn() {
+	// Resume the background notifier at startup whenever ANY delivery channel already
+	// exists — a surviving web-push subscription, a persisted iLink (WeChat) login, or an
+	// enabled webhook provider (Feishu/DingTalk/WeCom). Missing any arm left that channel's
+	// users with no notifier after a restart (it only (re)started on a fresh web-push
+	// subscribe / iLink login), so turn-end pushes silently stopped every restart.
+	if s.push.count() > 0 || s.ilink.loggedIn() || s.coordinator.AnyEnabled(context.Background()) {
 		s.push.ensureNotifier()
 	}
 	s.mux = http.NewServeMux()

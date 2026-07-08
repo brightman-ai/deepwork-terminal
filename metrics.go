@@ -65,6 +65,10 @@ func (s *Server) handleNotifyConfigSave(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	// Enabling a channel (e.g. a WeChat/Feishu/DingTalk webhook) must bring the notifier up
+	// now — otherwise nothing polls for turn-ends until the next restart. Idempotent + a no-op
+	// when it's already running; harmless if the user just toggled everything off.
+	s.push.ensureNotifier()
 	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
 }
 
@@ -103,6 +107,8 @@ func (s *Server) handleNotifyProviderSettings(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Configuring a webhook is intent to use it → make sure the notifier is running.
+	s.push.ensureNotifier()
 	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
 }
 
