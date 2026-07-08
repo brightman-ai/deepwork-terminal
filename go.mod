@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
-	github.com/brightman-ai/kit v0.8.0
+	github.com/brightman-ai/kit v0.10.0
 	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.0
