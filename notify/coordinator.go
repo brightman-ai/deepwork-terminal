@@ -160,6 +160,23 @@ func (c *Coordinator) Config(ctx context.Context) (Config, error) {
 	return cfg.withDefaults(), err
 }
 
+// AnyEnabled reports whether at least one provider is toggled on — the gate for whether the
+// background notifier is worth running at all (there is a channel to deliver to). A load error
+// reads as "none" so a broken store can't spin the poller up pointlessly.
+func (c *Coordinator) AnyEnabled(ctx context.Context) bool {
+	cfg, err := c.store.Load(ctx)
+	if err != nil {
+		return false
+	}
+	cfg = cfg.withDefaults()
+	for _, kind := range c.order {
+		if cfg.Enabled(kind) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetEnabled flips one provider on/off and persists (the UI toggle path).
 func (c *Coordinator) SetEnabled(ctx context.Context, kind string, enabled bool) error {
 	cfg, _ := c.store.Load(ctx)
