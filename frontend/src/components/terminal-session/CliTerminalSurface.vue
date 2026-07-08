@@ -391,7 +391,7 @@ function toggleOverview(): void {
 // Pick a window from the overview: switch to it (PRIMARY — select-window, any index) + mark seen
 // + close back to the live terminal.
 function onOverviewSelect(index: number): void {
-  onSendKey(tmux.selectWindowSeq(index))
+  void tmux.selectWindow(index)
   const w = tmux.windows.value.find((win) => win.index === index)
   if (w) ovMarkViewed(w)
   overviewOpen.value = false

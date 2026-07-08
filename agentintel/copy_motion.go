@@ -80,6 +80,26 @@ func (s *TmuxStateService) RefreshClient(ctx context.Context, shellPID int) erro
 	return tmuxCommandContext(ctx, "refresh-client").Run()
 }
 
+// SelectWindow switches the session that shellPID's client is attached to onto window
+// `index`. Server-side, not a PTY keystroke: tmux binds prefix+0..9 to select-window, but
+// index ≥10 has no binding, so the keystroke route must open the command prompt
+// (prefix `:` + `select-window -t N` ⏎) — and the burst races the prompt open (same
+// fragility as CopyMotion/NewSession), leaking the literal `select-window -t N` into the
+// focused app. tmuxCommandContext targets the right socket; scoping `-t` to the client's
+// own session keeps a multi-session server from switching the wrong one.
+func (s *TmuxStateService) SelectWindow(ctx context.Context, shellPID, index int) error {
+	if index < 0 {
+		return fmt.Errorf("invalid window index %d", index)
+	}
+	// Default to the current session (":N"); prefer the client's actual session when
+	// resolvable so a server with multiple sessions moves the one the user is on.
+	target := fmt.Sprintf(":%d", index)
+	if session := s.prober.FindClientSession(ctx, shellPID); session != "" {
+		target = fmt.Sprintf("%s:%d", session, index)
+	}
+	return tmuxCommandContext(ctx, "select-window", "-t", target).Run()
+}
+
 // paneInMode reports whether the target pane is currently in a mode (copy-mode etc.).
 // A query failure reads as "not in mode" so the caller enters copy-mode defensively.
 func (s *TmuxStateService) paneInMode(ctx context.Context, target string) bool {

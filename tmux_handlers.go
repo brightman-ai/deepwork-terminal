@@ -76,6 +76,38 @@ func (s *Server) handleTmuxCopyMotion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// TmuxWindowSelector is an OPTIONAL provider capability: switch the requesting client onto a
+// window by index, server-side. The keystroke route leaks a `select-window -t N` burst into the
+// focused pane for index ≥10 (tmux binds prefix+digit only up to 9), so this drives it against
+// the socket instead. The default provider implements it; a host-injected provider may omit it,
+// in which case the endpoint 501s gracefully.
+type TmuxWindowSelector interface {
+	SelectWindow(ctx context.Context, shellPID, index int) error
+}
+
+// handleTmuxSelectWindow handles POST /tmux/select-window?session=<id>.
+// Body: { "index": <window index> }. Switches the caller's tmux client onto that window.
+func (s *Server) handleTmuxSelectWindow(w http.ResponseWriter, r *http.Request) {
+	selector, ok := s.tmuxProvider.(TmuxWindowSelector)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "select window unsupported"})
+		return
+	}
+	var body struct {
+		Index int `json:"index"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	shellPID := s.shellPIDForQuery(r.URL.Query().Get("session"))
+	if err := selector.SelectWindow(r.Context(), shellPID, body.Index); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // TmuxSessionMaker is an OPTIONAL provider capability: create a new tmux session and
 // switch the requesting client onto it (server-side, since keystroke-driven new-session
 // is unreliable and refuses to nest inside a client). Default provider implements it.
