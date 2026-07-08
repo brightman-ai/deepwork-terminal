@@ -49,6 +49,49 @@ func makeUserRow() map[string]any {
 	}
 }
 
+func makeAssistantTextRow(msgID, text string) map[string]any {
+	return map[string]any{
+		"type":      "assistant",
+		"timestamp": "2026-07-08T10:00:00Z",
+		"message": map[string]any{
+			"id": msgID, "model": "claude", "stop_reason": "end_turn",
+			"content": []any{map[string]any{"type": "text", "text": text}},
+		},
+	}
+}
+
+// A turn ending on a free-text question is escalated to waiting (red); one ending on a
+// statement stays idle (done/amber); replying clears it. Heuristic, best-effort (see
+// textEndsQuestion) — false positives accepted per product decision.
+func TestClaudeDriver_FreeTextQuestion(t *testing.T) {
+	q := makeAssistantTextRow("m1", "方案 A 或 B，各有取舍。你偏好哪种？")
+	d := NewClaudeDriver(writeJSONL(t, []map[string]any{q}), "s1")
+	if err := d.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := d.State().Status; got != StatusWaiting {
+		t.Errorf("free-text question → got %q, want %q", got, StatusWaiting)
+	}
+
+	s := makeAssistantTextRow("m2", "已完成并提交，无需你操作。")
+	d2 := NewClaudeDriver(writeJSONL(t, []map[string]any{s}), "s2")
+	if err := d2.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := d2.State().Status; got != StatusIdle {
+		t.Errorf("statement end → got %q, want %q", got, StatusIdle)
+	}
+
+	// You replied after the question → no longer waiting.
+	d3 := NewClaudeDriver(writeJSONL(t, []map[string]any{q, makeUserRow()}), "s3")
+	if err := d3.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := d3.State().Status; got == StatusWaiting {
+		t.Errorf("after reply → got waiting, want non-waiting")
+	}
+}
+
 func TestClaudeDriver_BasicParsing(t *testing.T) {
 	rows := []map[string]any{
 		makeUserRow(),

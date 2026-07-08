@@ -1,6 +1,7 @@
 package agentintel
 
 import (
+	"strings"
 	"time"
 )
 
@@ -14,7 +15,27 @@ type ClaudeSessionState struct {
 	LastAssistAt time.Time
 	StopReason   string
 	PendingTool  string // name of the unresolved tool_use (for elicitation detection); "" when none
+	LastMsgQuestion bool // the last assistant turn ended on a free-text question (heuristic)
 	UpdatedAt    time.Time
+}
+
+// textEndsQuestion is a best-effort "did the agent ASK the user something" heuristic for a
+// free-text turn end — the transcript can't otherwise tell a plain-language question from a
+// finished task (both are stop_reason=end_turn). It checks the LAST non-empty line, ignoring
+// trailing markdown/quote punctuation, for a '?' / '？'. False positives (a message that merely
+// ends on a rhetorical '?') are accepted: such a turn is still legitimately "awaiting you".
+func textEndsQuestion(s string) bool {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(strings.TrimSpace(lines[i]), " \t*_`\"'）)》」")
+		if line == "" {
+			continue
+		}
+		r := []rune(line)
+		last := r[len(r)-1]
+		return last == '?' || last == '？'
+	}
+	return false
 }
 
 // elicitationTools are tools whose pending (unresolved) tool_use means the agent is
@@ -62,7 +83,8 @@ func (cd *ClaudeDriver) Update() error {
 			cd.state.StopReason = ""
 			cd.state.Status = StatusRunning
 			cd.state.WaitReason = WaitNone
-			cd.state.PendingTool = "" // tool result arrived → no tool pending
+			cd.state.PendingTool = ""    // tool result arrived → no tool pending
+			cd.state.LastMsgQuestion = false // you replied → the prior question is answered
 			// Check for interrupted tool use result.
 			if msg, ok := row["message"].(map[string]any); ok {
 				if content, ok := msg["content"].([]any); ok {
@@ -109,6 +131,22 @@ func (cd *ClaudeDriver) Update() error {
 			} else {
 				cd.state.StopReason = ""
 			}
+			// Free-text-question heuristic: gather this turn's text blocks and record whether it
+			// ended on a question, so State() can escalate an end_turn to waiting (see textEndsQuestion).
+			var text strings.Builder
+			if content, ok := msg["content"].([]any); ok {
+				for _, item := range content {
+					if block, ok := item.(map[string]any); ok {
+						if bt, _ := block["type"].(string); bt == "text" {
+							if t, _ := block["text"].(string); t != "" {
+								text.WriteString(t)
+								text.WriteByte('\n')
+							}
+						}
+					}
+				}
+			}
+			cd.state.LastMsgQuestion = textEndsQuestion(text.String())
 			// Capture the pending tool name when this turn ends in a tool call, so
 			// State() can tell an interactive tool (AskUserQuestion — the agent is
 			// asking the user = waiting) from a working tool (Bash/Read — executing =
@@ -176,6 +214,12 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 		s.Status = StatusIdle
 		s.WaitReason = WaitNone
 	} else if cd.state.StopReason == "tool_use" && isElicitationTool(cd.state.PendingTool) {
+		s.Status = StatusWaiting
+		s.WaitReason = WaitQuestion
+	} else if cd.state.StopReason == "end_turn" && cd.state.LastMsgQuestion {
+		// Turn ended on a free-text question → escalate the amber "done" to red "waiting for
+		// your answer". Heuristic (see textEndsQuestion); cleared the moment you reply (the
+		// user row resets StopReason + LastMsgQuestion), so it can't stick past your response.
 		s.Status = StatusWaiting
 		s.WaitReason = WaitQuestion
 	} else if s.Status != StatusWaiting && !cd.state.LastUserAt.IsZero() && cd.state.LastUserAt.After(cd.state.LastAssistAt) {
