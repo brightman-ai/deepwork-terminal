@@ -118,7 +118,7 @@ const props = defineProps<{
    *  compact glance, the overview grid the full line). Omit → no roll-up shown. */
   rollup?: Record<EffectiveStatus, number>
   /** index→effectiveStatus from the shared useAgentOverview, so each window's dot is seen-aware
-   *  (incl. done-unseen teal) from the SAME source as the overview. Omit → falls back to raw. */
+   *  (incl. done-unseen amber) from the SAME source as the overview. Omit → falls back to raw. */
   statusByIndex?: Record<number, EffectiveStatus>
 }>()
 
@@ -175,7 +175,7 @@ function onBellClick(): void {
   emit('open-notify')
 }
 
-/** Seen-aware dot: waiting→red, running→green, done-unseen→teal, idle→none. Uses the shared
+/** Seen-aware dot: waiting→red, running→green, done-unseen→amber, idle→none. Uses the shared
  *  effectiveStatus (SSOT) when provided, else falls back to raw pane status. */
 function dotClass(w: TmuxWindowState): string {
   const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
@@ -306,7 +306,7 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
 }
 .tpb-dot--waiting { background: #ff5252; }   /* red — needs your input */
 .tpb-dot--running { background: #3fb950; }   /* green — agent actively running (incl. thinking) */
-.tpb-dot--done { background: #2dd4bf; }       /* teal — finished while you were elsewhere (unseen) */
+.tpb-dot--done { background: #e3b341; }       /* amber — finished, needs you (unseen); distinct from running-green + waiting-red */
 
 /* WS7 — contextual notify bell, pushed to the trailing edge. */
 .tpb-spacer { flex: 1; min-width: 6px; }
@@ -343,7 +343,7 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
 .tpb-seg { color: #6f5a90; }
 .tpb-seg.seg-waiting { color: #ff5252; }
 .tpb-seg.seg-running { color: #3fb950; }
-.tpb-seg.seg-done { color: #2dd4bf; }
+.tpb-seg.seg-done { color: #e3b341; }
 .tpb-overview {
   position: relative; flex-shrink: 0;
   display: inline-grid; place-items: center;

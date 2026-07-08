@@ -260,7 +260,7 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 .ao-rollup-sep { color: #3a2860; }
 .ao-rollup-seg.is-hot.s-waiting { color: #ff5252; }
 .ao-rollup-seg.is-hot.s-running { color: #3fb950; }
-.ao-rollup-seg.is-hot.s-done-unseen { color: #2dd4bf; }
+.ao-rollup-seg.is-hot.s-done-unseen { color: #e3b341; }
 
 /* ── PC：活跃大卡网格（每行 ≤3，宽度铺满） ───────────────────── */
 .ao-active {
@@ -307,7 +307,7 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 .ao-group-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .ao-group-head.s-waiting .ao-group-dot { background: #ff5252; }
 .ao-group-head.s-running .ao-group-dot { background: #3fb950; }
-.ao-group-head.s-done-unseen .ao-group-dot { background: #2dd4bf; }
+.ao-group-head.s-done-unseen .ao-group-dot { background: #e3b341; }
 .ao-group-head.s-idle .ao-group-dot { background: #7a6a9a; }
 .ao-group-count { margin-left: auto; color: #6f5a90; font-variant-numeric: tabular-nums; }
 
@@ -334,7 +334,7 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 /* 移动/基础：状态左侧色条 */
 .ao-card.s-waiting { border-left-color: #ff5252; }
 .ao-card.s-running { border-left-color: #3fb950; }
-.ao-card.s-done-unseen { border-left-color: #2dd4bf; }
+.ao-card.s-done-unseen { border-left-color: #e3b341; }
 .ao-card.s-idle { border-left-color: #4a3570; }
 
 /* ── PC 大卡：更大气 + 整圈状态边框高亮（重点展示） ───────────── */
@@ -411,7 +411,7 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 .ao-card--big .ao-card-badge { font-size: 0.66rem; padding: 2px 9px; }
 .ao-card-badge.s-waiting { color: #ff5252; background: rgba(255, 82, 82, 0.14); }
 .ao-card-badge.s-running { color: #3fb950; background: rgba(63, 185, 80, 0.14); }
-.ao-card-badge.s-done-unseen { color: #2dd4bf; background: rgba(45, 212, 191, 0.14); }
+.ao-card-badge.s-done-unseen { color: #e3b341; background: rgba(227, 179, 65, 0.16); }
 .ao-card-badge.s-idle { color: #9a8ab8; background: rgba(122, 106, 154, 0.16); }
 .ao-card-tool {
   flex-shrink: 0;
