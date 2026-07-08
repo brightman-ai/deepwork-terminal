@@ -174,6 +174,12 @@ func (n *pushNotifier) tick(ctx context.Context) {
 				}
 				prev := n.prev[id]
 				n.prev[id] = stt
+				// The user answered (idle/waiting → running): drop this pane's cooldown so the
+				// NEXT turn-end re-notifies even inside the 2-min window. A back-and-forth
+				// exchange should ping on every completion, not just the first.
+				if stt == agentintel.StatusRunning && (prev == agentintel.StatusIdle || prev == agentintel.StatusWaiting) {
+					delete(n.lastNotified, id)
+				}
 				// Trigger: the pane FINISHED working (running → idle/waiting). Excludes
 				// fresh-start idle and startup-existing state (prev must be running).
 				if prev == agentintel.StatusRunning && (stt == agentintel.StatusIdle || stt == agentintel.StatusWaiting) {

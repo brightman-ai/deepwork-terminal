@@ -125,6 +125,22 @@ func (m *PaneAgentMonitor) Status(key, cwd string, tool AgentTool) (AgentStatus,
 	return st, st != ""
 }
 
+// Awaiting reports whether the pane's agent finished a turn and is waiting on the
+// user (needs-you). Cheap: reuses the driver already updated by Status() this poll,
+// so call it right after Status() with no extra transcript read.
+func (m *PaneAgentMonitor) Awaiting(key, cwd string, tool AgentTool) bool {
+	if m == nil || tool == ToolNone || key == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pt := m.cache[key]
+	if pt == nil || pt.driver == nil {
+		return false
+	}
+	return pt.driver.AgentState().AwaitingUser
+}
+
 // entryLocked returns the pane's cache entry, (re)locating the transcript path
 // periodically (a path change drops the now-stale driver). m.mu MUST be held.
 func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool) *paneTranscript {

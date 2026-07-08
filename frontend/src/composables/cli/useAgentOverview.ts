@@ -31,6 +31,13 @@ export function windowRawStatus(w: TmuxWindowState): 'waiting' | 'running' | 'id
   return 'idle'
 }
 
+/** Backend "needs-you": any pane finished a turn / is blocked and hasn't been responded to.
+ *  This is the durable, reload-proof signal (transcript-derived) that replaces the old
+ *  "witness the running→idle transition" heuristic — a pane already done at page load counts. */
+export function windowAwaiting(w: TmuxWindowState): boolean {
+  return (w.panes ?? []).some((p) => p.awaitingUser)
+}
+
 /** The window's active-pane cwd (what the overview card shows). */
 export function windowCwd(w: TmuxWindowState): string {
   const panes = w.panes ?? []
@@ -65,58 +72,46 @@ export function overviewColumns(activeCount: number): number {
 }
 
 export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: Ref<boolean>) {
-  const becameIdleAt = ref<Record<string, number>>({})
-  const lastViewedAt = ref<Record<string, number>>({})
+  // Client-local dismiss layer over the backend's durable "needs-you" (awaitingUser).
+  //   - AUTO-clear is backend-driven: when you respond, the agent runs and awaitingUser flips off.
+  //     There is NO "seen on view" — glancing at / switching to a pane never clears the dot.
+  //   - dismiss(w) is the explicit "handled, hide it" (tapping its overview card). It is re-armed
+  //     on the window's next run, so a NEW completion shows again instead of staying swallowed.
+  void overviewOpen // retained in the signature for callers; the seen-layer no longer needs it
+  const dismissed = ref<Record<string, boolean>>({})
   const prevRaw = ref<Record<string, string>>({})
 
-  // Every tmux_state push: record idle transitions, keep the viewed window fresh, prune the dead.
   watch(
     windows,
     (wins) => {
-      const now = Date.now()
       const live = new Set<string>()
       for (const w of wins) {
         const k = windowKey(w)
         live.add(k)
         const raw = windowRawStatus(w)
-        // Transition into idle from an active state → a "finished" moment.
-        if (raw === 'idle' && (prevRaw.value[k] === 'running' || prevRaw.value[k] === 'waiting')) {
-          becameIdleAt.value[k] = now
-        }
+        // A new turn started (→ running = you responded) re-arms the dot: forget the prior
+        // dismiss so the NEXT completion is surfaced, not silently swallowed.
+        if (raw === 'running' && prevRaw.value[k] !== 'running') delete dismissed.value[k]
         prevRaw.value[k] = raw
-        // The active window, while the overview is closed, is what you're looking at → seen.
-        if (w.active && !overviewOpen.value) lastViewedAt.value[k] = now
       }
-      // Drop state for windows that vanished (closed) — no leak, reused id starts clean.
-      for (const map of [becameIdleAt.value, lastViewedAt.value, prevRaw.value]) {
+      // Prune vanished windows — no leak; a reused id starts clean.
+      for (const map of [dismissed.value, prevRaw.value]) {
         for (const k of Object.keys(map)) if (!live.has(k)) delete map[k]
       }
     },
     { immediate: true, deep: true },
   )
 
-  // Closing the overview → you're back on the active window, so mark it seen now. Without this a
-  // window that finished WHILE the overview was open, then closed via the toggle (not a card tap),
-  // could stay stuck as done-unseen until the next push happens to run the watcher above.
-  watch(overviewOpen, (open) => {
-    if (open) return
-    const active = windows.value.find((w) => w.active)
-    if (active) lastViewedAt.value[windowKey(active)] = Date.now()
-  })
-
-  /** Mark a window viewed now — called when the user switches to it (tap-to-switch). */
-  function markViewed(w: TmuxWindowState): void {
-    lastViewedAt.value[windowKey(w)] = Date.now()
+  /** Explicit "handled — hide it" for a window; re-armed on its next run. Viewing does NOT clear. */
+  function dismiss(w: TmuxWindowState): void {
+    dismissed.value[windowKey(w)] = true
   }
 
   function effectiveStatus(w: TmuxWindowState): EffectiveStatus {
     const raw = windowRawStatus(w)
-    if (raw !== 'idle') return raw
-    const k = windowKey(w)
-    const idleAt = becameIdleAt.value[k] ?? 0
-    const viewedAt = lastViewedAt.value[k] ?? 0
-    // Finished after you last looked, and you haven't looked since → unread.
-    return idleAt > 0 && idleAt > viewedAt ? 'done-unseen' : 'idle'
+    if (raw !== 'idle') return raw // waiting (red) / running (green) come straight from the backend
+    // Idle: "needs-you" (finished a turn, not yet responded) unless you've dismissed it.
+    return windowAwaiting(w) && !dismissed.value[windowKey(w)] ? 'done-unseen' : 'idle'
   }
 
   /** Windows grouped by effective status, groups ordered by urgency, windows by index within. */
@@ -151,5 +146,5 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
     return m
   })
 
-  return { effectiveStatus, groups, rollup, statusByIndex, markViewed }
+  return { effectiveStatus, groups, rollup, statusByIndex, dismiss }
 }

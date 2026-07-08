@@ -35,6 +35,10 @@ export interface TmuxPaneState {
   cwd?: string
   agentTool?: AgentTool
   agentStatus?: AgentStatusType
+  /** Backend "needs-you": the agent finished a turn / is blocked and hasn't been responded
+   *  to yet. Distinct from agentStatus==='idle' (which also covers a fresh, never-run pane).
+   *  Survives reload (derived from transcript timestamps) and clears when you next respond. */
+  awaitingUser?: boolean
 }
 export interface TmuxWindowState {
   index: number

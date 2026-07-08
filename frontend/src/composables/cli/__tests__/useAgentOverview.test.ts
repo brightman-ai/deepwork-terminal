@@ -15,9 +15,10 @@ type WinOpts = {
   tool?: string
   active?: boolean
   windowId?: string
+  awaiting?: boolean // backend "needs-you": finished a turn, not yet responded to
 }
 function win(index: number, opts: WinOpts = {}): TmuxWindowState {
-  const { status = 'idle', cwd = '', tool = '', active = false, windowId = `@${index}` } = opts
+  const { status = 'idle', cwd = '', tool = '', active = false, windowId = `@${index}`, awaiting = false } = opts
   return {
     index,
     name: `w${index}`,
@@ -30,6 +31,7 @@ function win(index: number, opts: WinOpts = {}): TmuxWindowState {
         cwd,
         agentTool: (tool || undefined) as never,
         agentStatus: (status === 'idle' ? undefined : status) as never,
+        awaitingUser: awaiting,
       } as never,
     ],
   }
@@ -45,39 +47,48 @@ describe('windowRawStatus / cwd / tool', () => {
   })
 })
 
-describe('seen state machine (AOV-5 done-unseen)', () => {
-  it('running→idle while unwatched → done-unseen; markViewed → idle', async () => {
+describe('needs-you state (backend awaitingUser + client dismiss)', () => {
+  it('finished (idle + awaitingUser) → done-unseen; dismiss → idle', async () => {
     const windows = ref([win(1, { status: 'running' })])
-    const overviewOpen = ref(true) // open → the active window is NOT auto-marked seen
-    const ov = useAgentOverview(windows, overviewOpen)
+    const ov = useAgentOverview(windows, ref(true))
     await nextTick()
     expect(ov.effectiveStatus(windows.value[0])).toBe('running')
 
-    windows.value = [win(1, { status: 'idle' })] // agent finished
+    windows.value = [win(1, { status: 'idle', awaiting: true })] // finished, not yet responded
     await nextTick()
     expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
 
-    ov.markViewed(windows.value[0]) // user opened it
+    ov.dismiss(windows.value[0]) // explicit "handled"
     expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
   })
 
-  it('the active window, while the overview is CLOSED, is continuously seen (never done-unseen)', async () => {
-    const windows = ref([win(1, { status: 'running', active: true })])
+  it('being the ACTIVE window does NOT clear it (glancing ≠ responding)', async () => {
+    const windows = ref([win(1, { status: 'idle', awaiting: true, active: true })])
     const ov = useAgentOverview(windows, ref(false))
     await nextTick()
-    windows.value = [win(1, { status: 'idle', active: true })]
+    // Old behaviour auto-marked the active pane "seen" → idle; now only a response/dismiss clears.
+    expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
+  })
+
+  it('a fresh idle window (never ran, no awaitingUser) is idle, not done-unseen', async () => {
+    const windows = ref([win(2, { status: 'idle', windowId: '@9' })])
+    const ov = useAgentOverview(windows, ref(true))
     await nextTick()
     expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
   })
 
-  it('a reused window index does NOT inherit stale done-unseen (keyed on windowId)', async () => {
-    const windows = ref([win(2, { status: 'running', windowId: '@5' })])
+  it('dismiss is re-armed on the next run → a NEW completion shows again', async () => {
+    const windows = ref([win(1, { status: 'idle', awaiting: true })])
     const ov = useAgentOverview(windows, ref(true))
     await nextTick()
-    // @5 closes; a brand-new window reuses index 2 but has a different id @9, and is idle.
-    windows.value = [win(2, { status: 'idle', windowId: '@9' })]
+    ov.dismiss(windows.value[0])
+    expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
+
+    windows.value = [win(1, { status: 'running' })] // you responded → re-arms
     await nextTick()
-    expect(ov.effectiveStatus(windows.value[0])).toBe('idle') // fresh window, not "finished"
+    windows.value = [win(1, { status: 'idle', awaiting: true })] // finished again
+    await nextTick()
+    expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
   })
 })
 

@@ -383,17 +383,18 @@ const {
   groups: ovGroups,
   rollup: ovRollup,
   statusByIndex: ovStatusByIndex,
-  markViewed: ovMarkViewed,
+  dismiss: ovDismiss,
 } = useAgentOverview(tmux.windows, overviewOpen)
 function toggleOverview(): void {
   overviewOpen.value = !overviewOpen.value
 }
-// Pick a window from the overview: switch to it (PRIMARY — select-window, any index) + mark seen
-// + close back to the live terminal.
+// Pick a window from the overview: switch to it (PRIMARY — select-window, any index) + dismiss its
+// needs-you dot (deliberate triage tap) + close back to the live terminal. Auto-clear on the next
+// response still happens via the backend; this just hides the dot for the one you're jumping to.
 function onOverviewSelect(index: number): void {
   void tmux.selectWindow(index)
   const w = tmux.windows.value.find((win) => win.index === index)
-  if (w) ovMarkViewed(w)
+  if (w) ovDismiss(w)
   overviewOpen.value = false
 }
 // Single sync point: any open/close (toggle OR card-tap) tells the server to gate tail capture.
