@@ -230,6 +230,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /tmux/state", wrap(s.handleTmuxState))
 	s.mux.HandleFunc("GET /tmux/prefix", wrap(s.handleTmuxPrefix))
 	s.mux.HandleFunc("POST /tmux/copy-motion", wrap(s.handleTmuxCopyMotion))
+	s.mux.HandleFunc("POST /tmux/select-window", wrap(s.handleTmuxSelectWindow))
 	s.mux.HandleFunc("POST /tmux/refresh", wrap(s.handleTmuxRefresh))
 	s.mux.HandleFunc("POST /tmux/new-session", wrap(s.handleTmuxNewSession))
 	s.mux.HandleFunc("POST /tmux/overview", wrap(s.handleTmuxOverview))

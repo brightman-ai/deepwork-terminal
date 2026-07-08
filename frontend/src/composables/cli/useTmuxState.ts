@@ -55,8 +55,9 @@ export interface TmuxStateStore {
   activeTool: ComputedRef<AgentTool>
   /** prefix + suffix as a string, e.g. prefixSeq('c') for new-window. */
   prefixSeq: (suffix: string) => string
-  /** Key sequence to select a window by index (this-client-scoped, valid for any index). */
-  selectWindowSeq: (index: number) => string
+  /** Switch this client onto window `index` via POST /tmux/select-window — driven server-side so
+   *  index ≥10 can't leak a `select-window -t N` burst into the focused pane. Best-effort. */
+  selectWindow: (index: number) => Promise<void>
   /** Run a semantic copy-mode scroll motion via POST /tmux/copy-motion — the server
    *  drives it as a direct `send-keys -X <motion>` against the tmux socket. We do NOT
    *  inject keystrokes: the prefix `[` + command-prompt route silently no-ops for these
@@ -154,13 +155,21 @@ function createStore(sessionId: () => string): TmuxStateStore {
     return bytesToString(prefixBytes.value) + suffix
   }
 
-  // Key sequence to select a window by index, scoped to THIS tmux client. tmux binds prefix+0..9
-  // to select-window (clean + instant); for index ≥10 that would send prefix+'1' then leak a '0'
-  // into the pane, so those route through the command prompt (prefix ':' select-window -t N ⏎),
-  // still this-client-scoped and valid for any index. SSOT for both the bar and the overview.
-  function selectWindowSeq(index: number): string {
-    if (index >= 0 && index <= 9) return prefixSeq(String(index))
-    return prefixSeq(':') + `select-window -t ${index}\r`
+  // Switch this client onto a window by index. Driven on the SERVER (POST /tmux/select-window),
+  // not the PTY: tmux binds prefix+0..9 to select-window, but index ≥10 has no binding, so the
+  // keystroke route must open the command prompt (prefix ':' select-window -t N ⏎) and the burst
+  // races the prompt open — leaking the literal `select-window -t N` into the focused app. The
+  // server drives it against the socket, scoped to this shell's session. SSOT for bar + overview.
+  async function selectWindow(index: number): Promise<void> {
+    const id = sessionId()
+    if (!id) return
+    try {
+      await cliFetch(cliApi(`/tmux/select-window?session=${encodeURIComponent(id)}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ index }),
+      })
+    } catch { /* best-effort — a transient failure just means no switch this tap */ }
   }
 
   async function runCopyMotion(motion: CopyMotion): Promise<void> {
@@ -228,7 +237,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
 
   return {
     state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
-    modeKeys, windows, activeCwd, activeTool, prefixSeq, selectWindowSeq, runCopyMotion, runRefreshClient, newSession, setOverviewActive, handleWSMessage, fetchSnapshot,
+    modeKeys, windows, activeCwd, activeTool, prefixSeq, selectWindow, runCopyMotion, runRefreshClient, newSession, setOverviewActive, handleWSMessage, fetchSnapshot,
   }
 }
 

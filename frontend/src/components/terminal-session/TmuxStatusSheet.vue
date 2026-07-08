@@ -112,10 +112,11 @@ const tmux = useTmuxState(() => props.sessionId)
 
 const prefixDisplay = tmux.prefixDisplay
 
-/** Tap a window chip → switch to it via the dynamic-prefix select-window (prefix + index),
- *  the same mechanism TmuxPaneBar/TmuxQuickBar use. Close the sheet for one-handed flow. */
+/** Tap a window chip → switch to it via the server-side select-window (POST /tmux/select-window),
+ *  the same SSOT TmuxPaneBar + overview use — robust for index ≥10, no leaked keystrokes. Close
+ *  the sheet for one-handed flow. */
 function selectWindow(w: TmuxWindowState): void {
-  emit('sendKey', tmux.prefixSeq(String(w.index)))
+  void tmux.selectWindow(w.index)
   emit('close')
 }
 const sessions = computed<TmuxSessionState[]>(() => tmux.state.value?.sessions ?? [])

@@ -48,6 +48,12 @@ func (p *defaultTmuxProvider) NewSession(ctx context.Context, shellPID int) (str
 	return p.svc.NewSession(ctx, shellPID)
 }
 
+// SelectWindow satisfies TmuxWindowSelector — switches the shellPID's client onto window
+// `index` server-side, so index ≥10 can't leak a `select-window -t N` burst into the pane.
+func (p *defaultTmuxProvider) SelectWindow(ctx context.Context, shellPID, index int) error {
+	return p.svc.SelectWindow(ctx, shellPID, index)
+}
+
 // SetOverviewActive satisfies TmuxOverviewToggler — gates per-window tail capture on whether a
 // client has the Agent Overview open.
 func (p *defaultTmuxProvider) SetOverviewActive(v bool) { p.svc.SetOverviewActive(v) }
