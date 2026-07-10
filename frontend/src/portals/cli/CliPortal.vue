@@ -21,10 +21,14 @@
       @rename-cancel="cancelRename"
       @toggle-group="toggleGroupCollapsed"
     >
-      <!-- No #status slot here: connection health + agent badge are owned by the per-surface
-           status row inside CliTerminalSurface (the SSOT both this host and pro embed). Rendering
-           them again in the tab bar produced a DUPLICATE heartbeat (the "125ms shown twice").
-           Settings lives in the @ce NavigationSidebar (draggable left-edge nav trigger). -->
+      <!-- Usage chip trails the tabs (contextual to the terminal session) — the SAME position
+           pro-embed uses (CliV2 mounts it right after its TopTabBar), so the chip sits identically
+           in both shells. It is the SAME shared @terminal/components/report/UsageChip.vue (one SSOT).
+           Connection health + agent badge live in the per-surface status row inside CliTerminalSurface
+           (not here) to avoid the old DUPLICATE heartbeat; the chip is a different concern (订阅额度 %). -->
+      <template #tab-trailing>
+        <UsageChip />
+      </template>
     </CliTabBar>
 
     <!-- The per-surface status row (tmux pane bar ↔ "终端 N <status>" strip) now lives
@@ -54,6 +58,7 @@ import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
 import { CliTabBar, CliTerminalView } from './adapters'
 import RemoteTermDialog from '@terminal/components/terminal-session/RemoteTermDialog.vue'
+import UsageChip from '@terminal/components/report/UsageChip.vue'
 
 const runtime = usePortalRuntime({
   portalId: 'cli',

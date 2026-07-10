@@ -35,6 +35,7 @@ type Server struct {
 	coordinator  *notify.Coordinator
 	uploads      *uploadIndex
 	authThrottle *authgate.Throttle
+	usage        *usageReporter
 	mu           sync.Mutex
 }
 
@@ -57,6 +58,9 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.tunnel = tunnelkit.New(s.config.DataDir)
 	s.authThrottle = authgate.NewThrottle()
 	s.uploads = newUploadIndex(s.config.DataDir)
+	// Usage/cost/quota reporter (kit/usage SSOT). Cheap to build — sources only
+	// resolve their roots here; no disk walk until a report is requested.
+	s.usage = newUsageReporter()
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Default in-process tmux provider so standalone gets tmux state without a host.
 	// An injected provider (WithTmuxProvider) wins over the default.
@@ -272,6 +276,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /notify/config", wrap(s.handleNotifyConfigSave))
 	s.mux.HandleFunc("PUT /notify/providers/{kind}/settings", wrap(s.handleNotifyProviderSettings))
 	s.mux.HandleFunc("POST /notify/providers/{kind}/test", wrap(s.handleNotifyProviderTest))
+	// Usage/cost/quota (kit/usage SSOT, shared shape with deepwork-pro). Served here
+	// so BOTH standalone (:18074, StripPrefix "/api") AND pro-embed (:8087, StripPrefix
+	// "/api/cli") render the same UsageChip from one backend — no per-shell fork.
+	s.mux.HandleFunc("GET /usage/quota", wrap(s.handleUsageQuota))
+	s.mux.HandleFunc("GET /usage/report", wrap(s.handleUsageReport))
 }
 
 // authWrap wraps a handler with auth checking.

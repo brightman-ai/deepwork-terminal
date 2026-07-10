@@ -84,27 +84,43 @@
       </div>
     </Teleport>
 
-    <!-- Spacer + right-side status (settings icon) -->
+    <!-- Usage chip TRAILS the tabs (it is contextual to the terminal session, so it belongs with
+         them — the same slot pro's CliV2 fills right after its TopTabBar). Keeping it here (not in
+         the far-right chrome cluster) makes the chip's placement identical in both shells. -->
+    <div v-if="$slots['tab-trailing']" class="cli-tab-bar__tab-trailing">
+      <slot name="tab-trailing" />
+    </div>
+
+    <!-- Spacer pushes the top-right chrome cluster hard against the right edge. -->
     <div class="cli-tab-bar__spacer" />
-    <!-- Build version — unobtrusive, right-aligned (pinned right by the spacer, doesn't scroll
-         with the tabs). Lets a user tell which release they're on without opening a terminal. -->
-    <span
-      v-if="versionLabel"
-      class="cli-tab-bar__version"
-      data-testid="cli-portal-version"
-      :title="'deepwork-terminal ' + fullVersionLabel"
-    >{{ versionLabel }}</span>
-    <!-- PWA-only refresh: a standalone PWA has no address bar / F5, so a wedged state can't be
-         reloaded. Force-fresh via /fresh (bypasses any stale cached index.html). -->
-    <button
-      v-if="isPWA"
-      class="cli-tab-bar__refresh"
-      type="button"
-      data-testid="cli-portal-refresh"
-      title="刷新（PWA 无 F5）"
-      @click="onRefresh"
-    ><RefreshCw :size="14" /></button>
-    <slot name="status" />
+    <!-- SSOT top-right chrome cluster. ONE flex row owns this corner so nothing here can overlap
+         another (the old viewport-fixed help fab used to float over — and swallow the taps of — the
+         usage chip). Order = least→most peripheral: version · usage chip · #dw-topbar-right outlet.
+         #dw-topbar-right mirrors pro's MainLayout outlet: ANY top-right widget (help, future chrome)
+         teleports into it and lands in-row, gapped — never a new fixed corner. -->
+    <div class="cli-tab-bar__chrome">
+      <!-- Build version — unobtrusive; lets a user tell which release they're on without a terminal. -->
+      <span
+        v-if="versionLabel"
+        class="cli-tab-bar__version"
+        data-testid="cli-portal-version"
+        :title="'deepwork-terminal ' + fullVersionLabel"
+      >{{ versionLabel }}</span>
+      <!-- PWA-only refresh: a standalone PWA has no address bar / F5, so a wedged state can't be
+           reloaded. Force-fresh via /fresh (bypasses any stale cached index.html). -->
+      <button
+        v-if="isPWA"
+        class="cli-tab-bar__refresh"
+        type="button"
+        data-testid="cli-portal-refresh"
+        title="刷新（PWA 无 F5）"
+        @click="onRefresh"
+      ><RefreshCw :size="14" /></button>
+      <!-- Host-provided status widget (standalone mounts the UsageChip here via CliPortal). -->
+      <slot name="status" />
+      <!-- Teleport outlet for viewport-agnostic top-right chrome (HelpCenter's inline "?", etc.). -->
+      <span id="dw-topbar-right" class="cli-tab-bar__outlet" data-testid="topbar-outlet-right" />
+    </div>
   </div>
 </template>
 
@@ -381,15 +397,40 @@ function tabNeedsInput(tabId: string): boolean {
 }
 .cli-tab-bar__tab--add:hover { color: rgba(255,255,255,0.8); }
 
+/* Usage chip slot — trails the tabs (contextual), spaced from the + button. */
+.cli-tab-bar__tab-trailing {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
 /* Spacer */
 .cli-tab-bar__spacer { flex: 1; min-width: 8px; }
+
+/* SSOT top-right chrome cluster — ONE flex row, evenly gapped, so version / usage chip / the
+   #dw-topbar-right outlet (help "?" etc.) sit side-by-side and can never overlap or steal each
+   other's taps. Replaces the era of independently viewport-fixed corner widgets. */
+.cli-tab-bar__chrome {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-right: 10px;
+}
+/* Outlet: an inline flex box (not a fixed corner) that hosts teleported top-right chrome, so
+   multiple widgets stack in-row with a shared gap instead of layering on top of each other. */
+.cli-tab-bar__outlet {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* Build version — muted, unobtrusive, pinned right (after the spacer). */
 .cli-tab-bar__version {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  padding: 0 10px;
   font-size: 0.62rem;
   letter-spacing: 0.3px;
   color: hsl(var(--muted-foreground));
