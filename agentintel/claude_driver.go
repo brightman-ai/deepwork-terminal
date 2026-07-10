@@ -233,16 +233,17 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 // AgentState converts to the unified AgentState model.
 func (cd *ClaudeDriver) AgentState() AgentState {
 	s := cd.State()
-	return AgentState{
+	// Needs-you: blocked (waiting) OR the turn ended and the agent spoke last
+	// (assistant after user = your move). A fresh idle (no turn yet, user≥assist)
+	// is NOT awaiting. Clears automatically when your next prompt makes user>assist.
+	awaiting := s.Status == StatusWaiting ||
+		(s.Status == StatusIdle && s.LastAssistAt.After(s.LastUserAt))
+	as := AgentState{
 		Tool:              ToolClaude,
 		Model:             s.Model,
 		Status:            s.Status,
 		WaitReason:        s.WaitReason,
-		// Needs-you: blocked (waiting) OR the turn ended and the agent spoke last
-		// (assistant after user = your move). A fresh idle (no turn yet, user≥assist)
-		// is NOT awaiting. Clears automatically when your next prompt makes user>assist.
-		AwaitingUser: s.Status == StatusWaiting ||
-			(s.Status == StatusIdle && s.LastAssistAt.After(s.LastUserAt)),
+		AwaitingUser:      awaiting,
 		InputTokens:       s.Usage.InputTokens,
 		OutputTokens:      s.Usage.OutputTokens,
 		CacheReadTokens:   s.Usage.CacheReadTokens,
@@ -250,6 +251,13 @@ func (cd *ClaudeDriver) AgentState() AgentState {
 		TotalTokens:       s.Usage.TotalTokens,
 		UpdatedAt:         s.UpdatedAt,
 	}
+	// The completion behind this awaiting = the last assistant turn's transcript time
+	// (a free-text question or a finished turn both end on an assistant message). Same
+	// source as `awaiting` itself → equally reload-proof; a new turn moves it forward.
+	if awaiting {
+		as.AwaitingSince = s.LastAssistAt
+	}
+	return as
 }
 
 // parseTime extracts a timestamp from a JSONL row.

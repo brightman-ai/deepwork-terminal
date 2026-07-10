@@ -92,6 +92,48 @@ func TestClaudeDriver_FreeTextQuestion(t *testing.T) {
 	}
 }
 
+// AwaitingSince carries the transcript time of the completion behind AwaitingUser, so the
+// frontend's needs-you "seen" layer is reload-proof: re-parsing the same transcript yields the
+// SAME value (not time.Now), and replying clears it to zero.
+func TestClaudeDriver_AwaitingSince(t *testing.T) {
+	s := makeAssistantTextRow("m1", "已完成并提交，无需你操作。") // finished turn (statement) → awaiting
+	want, _ := time.Parse(time.RFC3339Nano, "2026-07-08T10:00:00Z")
+
+	d := NewClaudeDriver(writeJSONL(t, []map[string]any{s}), "s1")
+	if err := d.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	as := d.AgentState()
+	if !as.AwaitingUser {
+		t.Fatalf("want AwaitingUser for a finished turn")
+	}
+	if !as.AwaitingSince.Equal(want) {
+		t.Errorf("AwaitingSince: got %v, want %v (last assistant transcript time)", as.AwaitingSince, want)
+	}
+
+	// Reload-proof: a fresh driver over the SAME transcript yields the SAME timestamp.
+	d2 := NewClaudeDriver(writeJSONL(t, []map[string]any{s}), "s2")
+	if err := d2.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !d2.AgentState().AwaitingSince.Equal(want) {
+		t.Errorf("AwaitingSince not reload-stable: %v != %v", d2.AgentState().AwaitingSince, want)
+	}
+
+	// You replied (user row after assistant) → not awaiting → zero AwaitingSince.
+	d3 := NewClaudeDriver(writeJSONL(t, []map[string]any{s, makeUserRow()}), "s3")
+	if err := d3.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	as3 := d3.AgentState()
+	if as3.AwaitingUser {
+		t.Fatalf("after reply: want not awaiting")
+	}
+	if !as3.AwaitingSince.IsZero() {
+		t.Errorf("not-awaiting AwaitingSince should be zero, got %v", as3.AwaitingSince)
+	}
+}
+
 func TestClaudeDriver_BasicParsing(t *testing.T) {
 	rows := []map[string]any{
 		makeUserRow(),

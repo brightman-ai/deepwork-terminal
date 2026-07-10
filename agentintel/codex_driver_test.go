@@ -180,6 +180,48 @@ func TestCodexDriver_TurnLifecycle(t *testing.T) {
 	}
 }
 
+// AwaitingSince for Codex is the task_complete row's TRANSCRIPT timestamp (not time.Now), so the
+// needs-you "seen" layer survives reload; a genuinely new turn clears awaiting so the next
+// completion's newer timestamp re-shows the dot.
+func TestCodexDriver_AwaitingSince(t *testing.T) {
+	tc := makeCodexRow("event_msg", map[string]any{"type": "task_complete"})
+	rows := []map[string]any{
+		makeCodexRow("session_meta", map[string]any{"model": "gpt-5.5"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_started"}),
+		tc,
+	}
+	d := NewCodexDriver(writeJSONL(t, rows))
+	if err := d.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	as := d.AgentState()
+	if !as.AwaitingUser {
+		t.Fatalf("want AwaitingUser after task_complete")
+	}
+	want, err := time.Parse(time.RFC3339Nano, tc["timestamp"].(string))
+	if err != nil {
+		t.Fatalf("parse want: %v", err)
+	}
+	if !as.AwaitingSince.Equal(want) {
+		t.Errorf("AwaitingSince: got %v, want %v (task_complete transcript time, not now())", as.AwaitingSince, want)
+	}
+
+	// A new turn starts → no longer awaiting (the dot re-arms on the next completion).
+	rows2 := []map[string]any{
+		makeCodexRow("session_meta", map[string]any{"model": "gpt-5.5"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_started"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_complete"}),
+		makeCodexRow("event_msg", map[string]any{"type": "task_started"}),
+	}
+	d2 := NewCodexDriver(writeJSONL(t, rows2))
+	if err := d2.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if d2.AgentState().AwaitingUser {
+		t.Fatalf("after new task_started: want not awaiting")
+	}
+}
+
 // TestCodexLatestSession_RecursiveWalk guards the fix for the notification bug:
 // Codex nests rollouts under sessions/YYYY/MM/DD/, so a flat ReadDir of the base
 // dir found zero .jsonl files → the pane's transcript was unlocatable → the pane

@@ -141,6 +141,23 @@ func (m *PaneAgentMonitor) Awaiting(key, cwd string, tool AgentTool) bool {
 	return pt.driver.AgentState().AwaitingUser
 }
 
+// AwaitingSince returns the transcript timestamp of the turn-completion behind the pane's
+// current needs-you state (zero when not awaiting or the driver isn't cached). Reuses the
+// driver already updated by Status() this poll — no extra transcript read. The frontend keys
+// its reload-proof "seen" layer on this. Call right after Status()/Awaiting().
+func (m *PaneAgentMonitor) AwaitingSince(key string) time.Time {
+	if m == nil || key == "" {
+		return time.Time{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pt := m.cache[key]
+	if pt == nil || pt.driver == nil {
+		return time.Time{}
+	}
+	return pt.driver.AgentState().AwaitingSince
+}
+
 // entryLocked returns the pane's cache entry, (re)locating the transcript path
 // periodically (a path change drops the now-stale driver). m.mu MUST be held.
 func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool) *paneTranscript {
