@@ -11,7 +11,9 @@ import { ref } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { createUploadProgressStore } from '@terminal/composables/cli/useUploadProgress'
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
+import { apiUrl } from '@ce/utils/runtimeBase'
 
 export interface PasteResult {
   type: 'text' | 'image' | 'file' | 'none'
@@ -31,6 +33,14 @@ export interface PasteUploadOptions {
   filename?: string
   source?: string
   trace?: TraceContext
+  /** Wired by the caller that knows how to redo the FULL upload→inject flow
+   * (useCliPasteResolver) — useClipboardPaste only owns the raw HTTP call, so it
+   * cannot build a meaningful retry on its own. Stored on the progress-store entry
+   * so the upload float's 重试 button can invoke it. */
+  retry?: () => void
+  /** Skip the 300ms delayed-reveal grace period. Used for retries the user just
+   * triggered, where instant feedback beats hiding a fast retry. */
+  revealImmediately?: boolean
 }
 
 const log = createLogger('cli-clipboard-paste')
@@ -44,11 +54,15 @@ function detectIsLocal(): boolean {
 export function useClipboardPaste(sessionId: () => string) {
   const uploading = ref(false)
   const lastError = ref('')
-  const { cliFetch } = useCliAuth()
+  const { getAuthCode, clearAuthCode, promptAuth } = useCliAuth()
   // Same per-session tmux store the drawer uses: activeCwd is the LIVE active-pane cwd.
   // We send it so the upload lands where the CLI actually is, not the session's launch dir.
   // Empty for a non-tmux terminal (no panes) → the server resolves the shell's live cwd.
   const tmux = useTmuxState(sessionId)
+  // Per-tab SSOT of in-flight uploads (see useUploadProgress.ts). One instance per
+  // useClipboardPaste() call — useCliPasteResolver creates exactly one per terminal
+  // surface, so uploads never leak across tabs.
+  const uploadProgress = createUploadProgressStore()
 
   /**
    * Process a paste event. Returns resolved PasteResult.
@@ -122,6 +136,16 @@ export function useClipboardPaste(sessionId: () => string) {
     const startedAt = performance.now()
     const uploadName = uploadFilename(blob, mime, options.filename)
     const uploadKind = mime.toLowerCase().startsWith('image/') ? 'image' : 'file'
+    // Register BEFORE the request starts so the 300ms delayed-reveal clock (or an
+    // immediate reveal for a user-triggered retry) starts at the true beginning of
+    // the upload. The retry wired here removes THIS entry then defers to the
+    // caller's retry (useCliPasteResolver knows how to redo upload→inject; this
+    // composable only owns the raw HTTP call) — so a retry never leaves a stale
+    // duplicate entry sitting next to the fresh one.
+    const entryId = uploadProgress.register(uploadName, blob.size, () => {
+      uploadProgress.remove(entryId)
+      options.retry?.()
+    }, options.revealImmediately)
     try {
       const formData = new FormData()
       formData.append('file', blob, uploadName)
@@ -129,29 +153,46 @@ export function useClipboardPaste(sessionId: () => string) {
       const cwd = tmux.activeCwd.value
       if (cwd) formData.append('cwd', cwd)
 
-      const resp = await cliFetch(cliApi(`/sessions/${sessionId()}/paste-upload`), {
-        method: 'POST',
-        body: formData,
-        headers: traceHeaders(options.trace),
+      // XHR, not fetch: only XMLHttpRequest exposes `upload.onprogress`, which is
+      // the ONLY way to get real sent/total bytes for the progress float. Same
+      // endpoint, response shape, and auth headers as cliFetch — duplicated by
+      // hand here since cliFetch itself wraps fetch() and can't drive an XHR.
+      const authValue = getAuthCode()
+      const headers = traceHeaders(options.trace)
+      if (authValue) {
+        headers['X-CLI-Auth'] = authValue
+        headers['X-Auth-Code'] = authValue
+      }
+      const url = apiUrl(cliApi(`/sessions/${sessionId()}/paste-upload`))
+      const { status, json } = await xhrUploadFormData(url, formData, headers, (sent, total) => {
+        uploadProgress.progress(entryId, sent, total || blob.size)
       })
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }))
-        lastError.value = (err as { error?: string }).error || `Upload failed: ${resp.status}`
+      // Mirror cliFetch's 401/429 handling (clear stale code + prompt / throttle
+      // notice) — XHR bypasses cliFetch entirely so this can't be shared, only
+      // reproduced exactly via the same public useCliAuth() actions.
+      if (status === 401) { clearAuthCode(); promptAuth() }
+      if (status === 429) { promptAuth() }
+
+      if (status < 200 || status >= 300) {
+        const err = (json as { error?: string } | null)?.error || `HTTP ${status}`
+        lastError.value = err
+        uploadProgress.fail(entryId, lastError.value)
         log.warn('cli.clipboard.upload_failed', {
           source: options.source || 'unknown',
           upload_kind: uploadKind,
           mime,
           filename: uploadName,
           size: blob.size,
-          status: resp.status,
+          status,
           error: lastError.value,
           elapsed_ms: Math.round(performance.now() - startedAt),
         }, options.trace)
         return { type: 'none', textForPTY: '', isLocal: local }
       }
 
-      const data = await resp.json() as { path: string; relPath: string; size: number; filename?: string; dedup?: boolean }
+      const data = json as { path: string; relPath: string; size: number; filename?: string; dedup?: boolean }
+      uploadProgress.complete(entryId)
       // Single chokepoint for "an upload landed on disk": let the resource drawer
       // (and any other listener) refresh its /uploads listing without coupling.
       if (typeof window !== 'undefined') {
@@ -181,6 +222,7 @@ export function useClipboardPaste(sessionId: () => string) {
       }
     } catch (err) {
       lastError.value = err instanceof Error ? err.message : 'Upload failed'
+      uploadProgress.fail(entryId, lastError.value)
       log.warn('cli.clipboard.upload_exception', {
         source: options.source || 'unknown',
         upload_kind: uploadKind,
@@ -202,7 +244,45 @@ export function useClipboardPaste(sessionId: () => string) {
     return uploadFile(blob, mime, { filename: `clipboard.${extFromMime(mime)}`, source: 'legacy-image' })
   }
 
-  return { processPaste, uploadFile, uploadImage, uploading, lastError }
+  return { processPaste, uploadFile, uploadImage, uploading, lastError, uploads: uploadProgress.entries }
+}
+
+interface XhrUploadResult {
+  status: number
+  json: unknown
+}
+
+/** POST a FormData body via XMLHttpRequest and resolve with {status, json}. The
+ * only reason this exists instead of fetch(): XHR is the sole browser API that
+ * exposes `upload.onprogress` (real bytes-sent), which fetch cannot report. */
+function xhrUploadFormData(
+  url: string,
+  formData: FormData,
+  headers: Record<string, string>,
+  onProgress: (sent: number, total: number) => void,
+): Promise<XhrUploadResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url, true)
+    for (const [key, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(key, value)
+    }
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total)
+    }
+    xhr.onload = () => {
+      let json: unknown = null
+      try {
+        json = xhr.responseText ? JSON.parse(xhr.responseText) : null
+      } catch {
+        json = null
+      }
+      resolve({ status: xhr.status, json })
+    }
+    xhr.onerror = () => reject(new Error('network error'))
+    xhr.ontimeout = () => reject(new Error('upload timed out'))
+    xhr.send(formData)
+  })
 }
 
 function uploadFilename(blob: Blob, mime: string, explicit?: string): string {

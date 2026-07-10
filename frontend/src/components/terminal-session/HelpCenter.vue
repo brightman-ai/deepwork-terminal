@@ -254,7 +254,16 @@ onUnmounted(() => window.removeEventListener('keydown', onFirstKey))
 
 <style scoped>
 .help-fab {
-  position: fixed; top: calc(env(safe-area-inset-top, 0px) + 8px); right: 10px; z-index: 2500;
+  position: fixed; top: calc(env(safe-area-inset-top, 0px) + 8px);
+  /* FIX 1 (design doc §7 signifier notes): --dw-drawer-width is the SSOT for the open
+     ResourceDrawer's current flush-docked panel width on a non-mobile viewport (split OR
+     desktop-overlay — see the [D-1] note in CliTerminalSurface.vue for why desktop-overlay is
+     included despite the design doc's literal "split only" wording); 0px when closed, on
+     mobile, or with no drawer host mounted. Shifting the fab left by exactly that width is a
+     GEOMETRY fix, not a z-index one — the fab now always sits clear of the drawer's own header
+     controls (🔓/⤢/收起) instead of overlapping (and on desktop, actually swallowing clicks
+     meant for) them. */
+  right: calc(var(--dw-drawer-width, 0px) + 10px); z-index: 2500;
   width: 30px; height: 30px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: rgba(30, 33, 40, 0.55); color: #cbd0d8; border: 1px solid #333842;

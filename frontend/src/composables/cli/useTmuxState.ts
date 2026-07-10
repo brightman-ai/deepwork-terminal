@@ -16,7 +16,7 @@
  * hardcode \x02.
  */
 import { ref, computed, type Ref, type ComputedRef } from 'vue'
-import type { TmuxState, TmuxWindowState, AgentTool } from '@terminal/types/terminal'
+import type { TmuxState, TmuxWindowState, TmuxPaneState, AgentTool } from '@terminal/types/terminal'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
@@ -24,6 +24,23 @@ const DEFAULT_PREFIX = new Uint8Array([0x02]) // C-b
 
 /** Semantic copy-mode motions the UI can request without knowing keystrokes. */
 export type CopyMotion = 'halfpage-up' | 'halfpage-down'
+
+// ─── Stable per-pane identity (drawer-per-pane, 20260710-124400) ────────────────────────────
+// `pane.index` is NOT stable — tmux recycles it when a pane closes (the next split reuses the
+// freed index), so keying per-pane UI state on it would silently inherit a closed pane's state
+// into whatever new pane happens to land on the same index. The stable identity is the pane's
+// OWN window ("@N", survives window reorder) plus tmux's own stable pane id ("%N", survives
+// index reuse) — both already carried on every TmuxWindowState/TmuxPaneState. Falls back to the
+// (unstable) index only for a pre-upgrade host that hasn't started sending windowId/paneId yet,
+// so callers degrade to "mostly works" instead of throwing.
+export function paneStateKey(
+  win: Pick<TmuxWindowState, 'windowId' | 'index'>,
+  pane: Pick<TmuxPaneState, 'paneId' | 'index'>,
+): string {
+  const w = win.windowId || `w${win.index}`
+  const p = pane.paneId || `p${pane.index}`
+  return `${w}:${p}`
+}
 
 export interface TmuxStateStore {
   state: Ref<TmuxState | null>

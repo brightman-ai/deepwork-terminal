@@ -3,6 +3,7 @@
     class="cli-terminal-surface"
     data-testid="cli-terminal-surface"
     :class="{ 'is-mobile': isMobile, 'is-desktop': !isMobile }"
+    :style="surfaceStyle"
   >
     <!-- 抢占横幅 -->
     <div v-if="wsStatus === 'preempted'" class="preempted-banner" data-testid="preempted-banner">
@@ -100,6 +101,12 @@
         </button>
         <InstallNotifyIcon @open="notifyQuickOpen = true" />
       </div>
+      <!-- Non-blocking paste-upload feedback: reads the SSOT upload-progress store owned
+           by useClipboardPaste (via pasteResolver.uploads). Delayed-reveal (300ms) means a
+           normal fast paste shows nothing at all — only a slow upload or an error surfaces
+           this pill, which is exactly the case that used to look "silent" and get retried
+           into 3-4 duplicate paths in the PTY. -->
+      <UploadProgressFloat :entries="pasteResolver.uploads.value" />
       <XtermTerminal
         ref="xtermRef"
         :active="active"
@@ -132,33 +139,68 @@
     </div>
 
     <!-- 底栏 (mobile only) -->
-    <div v-if="isMobile" class="bottom-bar">
-      <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
-      <TmuxQuickBar
-        :session-id="sessionId"
-        @send-key="onSendKey"
-        @open-sheet="tmuxSheetOpen = true"
-      />
-      <Toolbar
-        :session-id="sessionId"
-        :sticky-shift="stickyShift"
-        :sticky-ctrl="stickyCtrl"
-        :sticky-alt="stickyAlt"
-        :active-panel="activePanelLabel"
-        :keyboard-up="activeMode === 'keyboard'"
-        :keycast-on="keystrokeHudVisible"
-        @send-key="onSendKey"
-        @clipboard="onClipboard"
-        @toggle-numpad="onTogglePanel('numpad')"
-        @toggle-compose="onTogglePanel('compose')"
-        @toggle-shift="stickyShift = !stickyShift"
-        @toggle-ctrl="stickyCtrl = !stickyCtrl"
-        @toggle-alt="stickyAlt = !stickyAlt"
-        @toggle-hud="hudVisible = !hudVisible"
-        @toggle-keycast="keystrokeHudVisible = !keystrokeHudVisible"
-        @toggle-keyboard="onToggleKeyboard"
-        @attach="onAttachClick"
-      />
+    <div v-if="isMobile" ref="bottomBarRef" class="bottom-bar">
+      <!-- Layout toggle: A/B the classic multi-row bars vs the compact single-row bar on-device. -->
+      <button
+        class="assist-mode-toggle"
+        :title="assistBarMode === 'classic' ? '切换到紧凑单条布局' : '切换回经典多条布局'"
+        @click="assistBarMode = assistBarMode === 'classic' ? 'compact' : 'classic'"
+      >{{ assistBarMode === 'classic' ? '⇢ 紧凑布局' : '⇠ 经典布局' }}</button>
+
+      <template v-if="assistBarMode === 'classic'">
+        <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
+        <TmuxQuickBar
+          :session-id="sessionId"
+          @send-key="onSendKey"
+          @open-sheet="tmuxSheetOpen = true"
+        />
+        <Toolbar
+          :session-id="sessionId"
+          :sticky-shift="stickyShift"
+          :sticky-ctrl="stickyCtrl"
+          :sticky-alt="stickyAlt"
+          :active-panel="activePanelLabel"
+          :keyboard-up="activeMode === 'keyboard'"
+          :keycast-on="keystrokeHudVisible"
+          @send-key="onSendKey"
+          @clipboard="onClipboard"
+          @toggle-numpad="onTogglePanel('numpad')"
+          @toggle-compose="onTogglePanel('compose')"
+          @toggle-shift="stickyShift = !stickyShift"
+          @toggle-ctrl="stickyCtrl = !stickyCtrl"
+          @toggle-alt="stickyAlt = !stickyAlt"
+          @toggle-hud="hudVisible = !hudVisible"
+          @toggle-keycast="keystrokeHudVisible = !keystrokeHudVisible"
+          @toggle-keyboard="onToggleKeyboard"
+          @attach="onAttachClick"
+        />
+      </template>
+      <template v-else>
+        <!-- compact keeps the tmux row INTACT (its live-prefix / newSession logic is TmuxQuickBar's
+             SSOT — must not be duplicated); CompactAssistBar only collapses the general-key overload
+             that used to be the full Toolbar. So no tmux operation is lost in compact mode. -->
+        <TmuxQuickBar
+          :session-id="sessionId"
+          @send-key="onSendKey"
+          @open-sheet="tmuxSheetOpen = true"
+        />
+        <CompactAssistBar
+          :sticky-shift="stickyShift"
+          :sticky-ctrl="stickyCtrl"
+          :sticky-alt="stickyAlt"
+          :active-panel="activePanelLabel"
+          :keyboard-up="activeMode === 'keyboard'"
+          @send-key="onSendKey"
+          @clipboard="onClipboard"
+          @toggle-shift="stickyShift = !stickyShift"
+          @toggle-ctrl="stickyCtrl = !stickyCtrl"
+          @toggle-alt="stickyAlt = !stickyAlt"
+          @toggle-numpad="onTogglePanel('numpad')"
+          @toggle-compose="onTogglePanel('compose')"
+          @toggle-keyboard="onToggleKeyboard"
+          @attach="onAttachClick"
+        />
+      </template>
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
@@ -217,14 +259,31 @@
       @send-key="onSendKey"
     />
 
-    <!-- WS5: 收纳抽屉 — images / files / input history.
+    <!-- WS5 → drawer-per-pane: 收纳抽屉 — images / files / input history. ONE instance PER known
+         tmux pane (paneKnown), lazily grown as each pane becomes current — kept MOUNTED (v-show
+         inside ResourceDrawer itself) once created so a background pane's state (open-ness, tab,
+         opened doc, scroll, selection) survives untouched. `is-active` ANDs the tab-active flag
+         with "is this pane the current one" so S1 dedup holds (only the active tab's active
+         pane's handle/panel ever renders) — see ResourceDrawer.vue's own isActive gating.
          @inject       → re-uses the clipboard-paste inject chokepoint (file path → PTY).
          @compose-draft → opens the ComposeBar with text inserted for editing (重发). -->
     <ResourceDrawer
+      v-for="paneKey in paneKnown"
+      :key="paneKey"
+      :ref="(el) => setDrawerRef(paneKey, el)"
       :session-id="sessionId"
-      v-model:open="resourceDrawerOpen"
+      :is-active="active && paneKey === currentPaneKey"
+      :cwd="paneCwdFor(paneKey)"
+      :tool="paneToolFor(paneKey)"
+      :layout="drawerLayout"
+      :layout-mode="drawerLayoutMode"
+      :split-disabled="splitDisabled"
+      :compose-reserve="composeReserve"
+      :open="paneOpenMap[paneKey] ?? false"
+      @update:open="(v: boolean) => { paneOpenMap[paneKey] = v }"
       @inject="onDrawerInject"
       @compose-draft="onDrawerComposeDraft"
+      @update:layout-mode="drawerLayoutMode = $event"
     />
 
     <!-- WS7: platform-aware install + notification guide (shared by both entries). -->
@@ -278,8 +337,16 @@
   </div>
 </template>
 
+<script lang="ts">
+// Module scope (shared across every CliTerminalSurface instance — one per tab, all kept
+// mounted via v-show): arbitrates which tab currently "owns" the global --dw-drawer-width
+// CSS var (see the FIX-1 block below). Declared in a plain (non-setup) script block because
+// `<script setup>` bindings are re-created PER INSTANCE — this needs real module-level state.
+let drawerWidthCssVarOwner: string | null = null
+</script>
+
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { Terminal } from 'xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -288,6 +355,7 @@ import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.v
 import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.vue'
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
+import CompactAssistBar from '@terminal/components/terminal-session/CompactAssistBar.vue'
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
@@ -300,6 +368,7 @@ import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickS
 import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
+import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -312,14 +381,14 @@ import { useCliPasteResolver } from '@terminal/composables/cli/useCliPasteResolv
 import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import { useTuiAdvisory } from '@terminal/composables/cli/useTuiAdvisory'
-import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
+import { useTmuxState, paneStateKey } from '@terminal/composables/cli/useTmuxState'
 import { useAgentOverview } from '@terminal/composables/cli/useAgentOverview'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
 import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
-import type { AgentState } from '@terminal/types/terminal'
+import type { AgentState, AgentTool, TmuxWindowState, TmuxPaneState } from '@terminal/types/terminal'
 
 // ─── Props & Emits ────────────────────────────────────────────────────────────
 
@@ -414,6 +483,7 @@ const xtermRef = ref<InstanceType<typeof XtermTerminal>>()
 const mobileOverlayRef = ref<InstanceType<typeof MobileOverlay>>()
 const terminalBodyRef = ref<HTMLDivElement>()
 const attachInputRef = ref<HTMLInputElement>()
+const bottomBarRef = ref<HTMLDivElement>()
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -446,10 +516,299 @@ async function onTuiSwitch({ persist }: { persist: boolean }): Promise<void> {
   }
 }
 
-// WS5: resource drawer open state, persisted across reloads.
-const RESOURCE_DRAWER_KEY = 'dw.resourceDrawer.open'
-const resourceDrawerOpen = ref(localStorage.getItem(RESOURCE_DRAWER_KEY) === '1')
-watch(resourceDrawerOpen, (v) => localStorage.setItem(RESOURCE_DRAWER_KEY, v ? '1' : '0'))
+// ─── WS5 → drawer-per-pane (20260710-124400): one ResourceDrawer instance PER TMUX PANE ───────
+// (design doc: docs/.tg/work/20260710-124400-drawer-per-pane-term/request.md). Was: ONE drawer per
+// TAB, content following `tmux.activeCwd` in place (switching the main pane just refreshed the
+// same instance's cwd). Now: each tmux pane gets its OWN drawer instance + full interactive state
+// (open/closed, top/sub tab, opened doc, scroll position, text selection) — switching panes SWAPS
+// to that pane's instance wholesale rather than refreshing one shared instance. Human-decided
+// (2026-07-10): restore exactly as left (open stays open + same content; closed stays closed); a
+// never-visited pane defaults CLOSED; session-memory only — NO localStorage (unlike the old
+// RESOURCE_DRAWER_KEY persistence this replaces, deliberately dropped: there is no single global
+// boolean to persist once "open" is per-pane).
+//
+// Stable identity: windowId("@N") + tmux's own stable pane_id("%N") via paneStateKey() — NEVER
+// pane.index, which tmux recycles once a pane closes (see useTmuxState.paneStateKey). A plain
+// (non-tmux) shell has no pane concept at all, so it gets one fixed pseudo-key — this preserves
+// the exact pre-refactor single-drawer behaviour for the common non-tmux case.
+const noTmuxPaneKey = `session:${props.sessionId}`
+
+// paneKnown: paneKeys with a MOUNTED drawer instance. Lazily grown — a pane's instance is created
+// the first time it becomes the CURRENT pane (not for every pane tmux happens to report), so a
+// session with many panes only ever pays for the ones actually visited. It has to be the CURRENT
+// pane (not "first opened") because the closed-state HANDLE (the small edge tab that invites
+// opening) lives inside ResourceDrawer itself — an instance must exist for the handle to render at
+// all, and it must be created before the user can tap it open the first time. Starts EMPTY (not
+// pre-seeded with noTmuxPaneKey) — the `watch(currentPaneKey, ..., {immediate:true})` below mounts
+// whichever key resolves first, so a tmux-attached tab never carries a permanently-unused pseudo
+// instance alongside its real per-pane ones.
+const paneKnown = ref<string[]>([])
+// open/closed per paneKey — in-memory only (see note above), defaults to CLOSED for any key the
+// moment it first appears (never-visited pane → full xterm).
+const paneOpenMap = reactive<Record<string, boolean>>({})
+
+// currentPaneKey: the pane the user is actually focused on right now — tmux's active WINDOW's
+// active PANE (a window with split panes reports exactly one as `active`; switching windows is
+// just switching to a different pane by this same definition, so both window-tabs and in-window
+// pane-splits drive the SAME drawer swap). Falls back to the fixed pseudo-key while detached/
+// unknown, matching the pre-refactor single-drawer fallback.
+const currentPaneKey = computed<string>(() => {
+  if (!tmux.attached.value) return noTmuxPaneKey
+  const ws = tmux.windows.value
+  if (ws.length === 0) return noTmuxPaneKey
+  const win = ws.find(w => w.active) ?? ws[0]
+  const panes = win.panes ?? []
+  if (panes.length === 0) return noTmuxPaneKey
+  const pane = panes.find(p => p.active) ?? panes[0]
+  return paneStateKey(win, pane)
+})
+
+// Ensure the current pane always has a mounted (possibly still-closed) instance, so its handle is
+// always reachable. Registered BEFORE the selection watcher below so paneOpenMap is guaranteed
+// populated by the time restoreSelectionFor reads it on the same currentPaneKey change.
+watch(currentPaneKey, (key) => {
+  if (!paneKnown.value.includes(key)) paneKnown.value.push(key)
+  if (!(key in paneOpenMap)) paneOpenMap[key] = false
+}, { immediate: true })
+
+// Convenience two-way binding onto "is the CURRENT pane's drawer open" — the only pane whose
+// open-ness ever affects this surface's own layout (squeeze/composeReserve/etc).
+const currentPaneOpen = computed<boolean>({
+  get: () => paneOpenMap[currentPaneKey.value] ?? false,
+  set: (v) => { paneOpenMap[currentPaneKey.value] = v },
+})
+
+// Live lookup: find a known paneKey's underlying window+pane in the CURRENT tmux snapshot (it may
+// no longer be the active one — a background pane's drawer still tracks ITS OWN pane's live cwd,
+// not whatever the terminal happens to be showing).
+function findPane(key: string): { win: TmuxWindowState; pane: TmuxPaneState } | undefined {
+  for (const w of tmux.windows.value) {
+    for (const p of w.panes) {
+      if (paneStateKey(w, p) === key) return { win: w, pane: p }
+    }
+  }
+  return undefined
+}
+function paneCwdFor(key: string): string {
+  if (key === noTmuxPaneKey) return tmux.activeCwd.value
+  return findPane(key)?.pane.cwd ?? ''
+}
+function paneToolFor(key: string): AgentTool {
+  if (key === noTmuxPaneKey) return tmux.activeTool.value
+  return findPane(key)?.pane.agentTool ?? ''
+}
+
+// Cleanup (MUST 4): once a paneKey drops out of the live tmux snapshot (pane closed/killed), drop
+// its mounted instance + open flag + saved selection range — no leaked state for a pane that no
+// longer exists. The pseudo (non-tmux) key is a real pane only while genuinely detached — it's
+// pruned same as any other stale key once tmux attaches (unless it's still the current key or the
+// user left it open), so a tmux-attached tab never carries the one-tick pseudo instance mounted
+// during the split-second before the first tmux snapshot arrives (attached defaults to false until
+// then, so currentPaneKey's very first — immediate — resolution is always the pseudo key).
+const validPaneKeys = computed<Set<string>>(() => {
+  const set = new Set<string>()
+  if (!tmux.attached.value) set.add(noTmuxPaneKey)
+  for (const w of tmux.windows.value) {
+    for (const p of w.panes) set.add(paneStateKey(w, p))
+  }
+  // Never prune the key currently in view or one the user left open — both must survive until the
+  // user actually navigates away / closes it, even if attached flipped in the very same tick.
+  set.add(currentPaneKey.value)
+  if (paneOpenMap[noTmuxPaneKey]) set.add(noTmuxPaneKey)
+  return set
+})
+watch(validPaneKeys, (valid) => {
+  const stale = paneKnown.value.filter(k => !valid.has(k))
+  if (stale.length === 0) return
+  paneKnown.value = paneKnown.value.filter(k => valid.has(k))
+  for (const k of stale) {
+    delete paneOpenMap[k]
+    delete drawerInstanceRefs[k]
+    selectionRangeMap.delete(k)
+  }
+})
+
+// Per-instance component refs (drag-resized panel width + panel DOM root for selection
+// containment checks below) — a plain (non-reactive) map is fine: each property READ inside a
+// computed/watch still tracks the underlying exposed refs reactively regardless of the map itself.
+const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement } | null> = {}
+function setDrawerRef(key: string, el: unknown): void {
+  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement }
+  else delete drawerInstanceRefs[key]
+}
+
+// ── Selection keep-alive across pane switches ───────────────────────────────────────────────
+// There is only ONE global window.getSelection(); v-show keeps every visited pane's drawer DOM
+// mounted (scroll position + opened doc survive for free), but the Selection itself does NOT
+// survive its anchor subtree going display:none in every browser — so we explicitly clone the
+// Range into a per-paneKey map on the way OUT and re-apply it on the way back IN. No serialization
+// needed (session-memory only + DOM never unmounts, so the range's node references stay valid).
+const selectionRangeMap = new Map<string, Range>()
+function saveSelectionFor(key: string): void {
+  const rootEl = drawerInstanceRefs[key]?.panelRootEl
+  if (!rootEl) return
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return
+  const range = sel.getRangeAt(0)
+  if (rootEl.contains(range.commonAncestorContainer)) {
+    selectionRangeMap.set(key, range.cloneRange())
+  }
+}
+function restoreSelectionFor(key: string): void {
+  const range = selectionRangeMap.get(key)
+  if (!range || !paneOpenMap[key]) return // nothing visible to select into
+  const sel = window.getSelection()
+  if (!sel) return
+  try {
+    sel.removeAllRanges()
+    sel.addRange(range)
+  } catch { /* the range's nodes may have gone away (content refetched) — best-effort restore */ }
+}
+watch(currentPaneKey, (newKey, oldKey) => {
+  if (oldKey && oldKey !== newKey) saveSelectionFor(oldKey)
+  if (newKey) nextTick(() => restoreSelectionFor(newKey))
+})
+
+// ─── Right-drawer dual-mode layout — THE SSOT (design doc: 20260710-094132-right-drawer-model-
+// term/design.md §7) ────────────────────────────────────────────────────────────────────────
+// drawerLayout is the ONE computed that decides how the drawer coexists with the terminal;
+// every width/height the drawer touches (terminal-column squeeze, compose column width, the
+// drawer's own scrim/panel reach) derives from it — nothing else hardcodes a full-width/
+// full-height assumption. 'split' (≥900px AND open): the drawer docks as a column and the whole
+// terminal column (xterm + status row + bottom-bar/compose) is squeezed by exactly the panel's
+// own width — geometrically side-by-side, zero overlap. 'overlay' (narrow, or width<900 even on
+// desktop, or simply closed): the drawer floats; ResourceDrawer keeps compose reachable there via
+// composeReserve below (a geometry reservation, not a z-index fight).
+//
+// drawerLayoutMode (discoverability fix, design doc §7 signifier notes): the viewport auto-detect
+// above is still the DEFAULT ('auto'), but the drawer header's 双栏⇄浮层 toggle can override it —
+// 'split' or 'overlay' then wins outright over the width check, persisted so the override survives
+// reloads. A forced 'split' still respects the viewport floor: below the breakpoint the terminal
+// has no room for ~80 columns, so it silently degrades to 'overlay' rather than becoming unusable
+// (the header toggle also disables 双栏 there via splitDisabled, so this is a defensive floor, not
+// the primary guard). Whenever the drawer is CLOSED the layout always reads 'overlay' regardless of
+// mode — nothing to squeeze for, so a stored 'split' preference can never leave the terminal
+// squeezed with no visible panel.
+const DRAWER_SPLIT_BREAKPOINT = 900
+const LAYOUT_MODE_KEY = 'dw.drawerLayoutMode'
+type DrawerLayoutMode = 'auto' | 'split' | 'overlay'
+function loadLayoutMode(): DrawerLayoutMode {
+  const v = localStorage.getItem(LAYOUT_MODE_KEY)
+  return v === 'split' || v === 'overlay' ? v : 'auto'
+}
+const drawerLayoutMode = ref<DrawerLayoutMode>(loadLayoutMode())
+watch(drawerLayoutMode, (v) => localStorage.setItem(LAYOUT_MODE_KEY, v))
+
+const viewportWidth = ref(window.innerWidth)
+function onSurfaceViewportResize(): void { viewportWidth.value = window.innerWidth }
+// Handed to the drawer header so it can grey out 双栏 with a "需更宽窗口" title instead of
+// letting the user pick a mode that would immediately degrade back to overlay.
+const splitDisabled = computed(() => viewportWidth.value < DRAWER_SPLIT_BREAKPOINT)
+const drawerLayout = computed<'split' | 'overlay'>(() => {
+  if (!currentPaneOpen.value) return 'overlay'
+  const canSplit = viewportWidth.value >= DRAWER_SPLIT_BREAKPOINT
+  if (drawerLayoutMode.value === 'overlay') return 'overlay'
+  if (drawerLayoutMode.value === 'split') return canSplit ? 'split' : 'overlay'
+  return canSplit ? 'split' : 'overlay' // 'auto'
+})
+
+// How many px the OPEN drawer currently occupies (its own drag-resized/fullscreen width — owned
+// and exposed by ResourceDrawer itself, the single owner of that state). Looked up on the CURRENT
+// pane's instance specifically — that's the only one ever visible/squeezing. 0 whenever we're not
+// actually squeezing (closed, or narrow/overlay) — no separate "is it squeezing" boolean needed.
+const drawerPanelWidthPx = computed(() => drawerInstanceRefs[currentPaneKey.value]?.effectivePanelWidthPx ?? 0)
+const drawerSqueezePx = computed(() => (drawerLayout.value === 'split' ? drawerPanelWidthPx.value : 0))
+
+// ─── FIX 1: publish the drawer's live docked width as ONE global CSS var so viewport-fixed chrome
+// living OUTSIDE this surface (currently just HelpCenter's "?" fab) can shift clear of the panel
+// geometrically — no z-index war.
+//
+// [D-1 deviation from the literal design-doc wording] The design note reads "...width in px when
+// open in SPLIT layout, else 0px" — but testing FIX 2's new 双栏/浮层 override surfaced a REAL
+// click-target bug that formula misses: on a non-mobile viewport the panel is flush-docked to the
+// right edge in BOTH 'split' AND 'overlay' (`.rd-scrim.is-desktop` and `.rd-scrim.is-split` share
+// the same right-anchored chrome — see ResourceDrawer.vue) — only the xterm-squeeze differs. In
+// desktop-overlay the fab's z-index (2500) sits ABOVE the drawer's (300), so with the var pinned
+// to 0 there the fab doesn't just look overlapped, it SWALLOWS the click meant for the drawer's own
+// 收起 button — and desktop's scrim is `pointer-events:none` (no click-outside-to-close escape
+// hatch the way mobile's real scrim backdrop has), so that button is the ONLY way to close the
+// drawer. That dead-end was reachable before this task too (a desktop *window* narrower than
+// 900px already auto-resolved to overlay), but FIX 2's manual override now reaches it from a full
+// WIDE viewport as well, which is why it surfaced during this task's own verification. Fix: the var
+// tracks "is the panel flush-docked on a non-mobile viewport" (split OR desktop-overlay), not
+// "is it split" — mobile is deliberately EXCLUDED (its real scrim already closes on an outside tap,
+// and shifting a fixed circular fab across near-full phone width would be impractical anyway), so
+// mobile behavior is untouched. See implementation-notes.md [D-1] for the full note.
+const drawerDockedWidthPx = computed(() =>
+  !isMobile.value && currentPaneOpen.value ? drawerPanelWidthPx.value : 0
+)
+// Only the currently-ACTIVE tab's width counts (inactive tabs are still mounted via v-show, but
+// they must not fight over the var); drawerWidthCssVarOwner (module scope, see the plain <script>
+// block above) arbitrates so a tab only clears the var back to 0px if it is still the one that
+// last set it — correct regardless of which surface's watcher fires first during a tab switch.
+const myDrawerWidthPx = computed(() => (props.active ? drawerDockedWidthPx.value : 0))
+watch(myDrawerWidthPx, (px) => {
+  if (px > 0) {
+    document.documentElement.style.setProperty('--dw-drawer-width', `${px}px`)
+    drawerWidthCssVarOwner = props.sessionId
+  } else if (drawerWidthCssVarOwner === props.sessionId) {
+    document.documentElement.style.setProperty('--dw-drawer-width', '0px')
+    drawerWidthCssVarOwner = null
+  }
+}, { immediate: true })
+
+// The squeeze applies to the WHOLE surface (not just .terminal-body): the bottom-bar/compose row
+// is a sibling of .terminal-body under this same root, and squeezing the root in one place is what
+// makes "compose spans only the terminal column" true for free — no separate width binding on the
+// bottom-bar to keep in sync (one geometry point, not two that could drift).
+const surfaceStyle = computed(() =>
+  drawerSqueezePx.value > 0 ? { width: `max(0px, calc(100% - ${drawerSqueezePx.value}px))` } : {}
+)
+
+// composeReserve: live px height of OUR OWN bottom toolbar (measured, never guessed), handed to
+// ResourceDrawer so its overlay-mode scrim/panel can stop above it. Only meaningful when there IS
+// a bottom toolbar to protect (isMobile) AND the drawer is actually overlaying (not split, where
+// the squeeze already guarantees non-overlap on a different axis).
+const bottomBarHeight = ref(0)
+let bottomBarObserver: ResizeObserver | null = null
+watch(bottomBarRef, (el) => {
+  bottomBarObserver?.disconnect()
+  bottomBarObserver = null
+  if (el && 'ResizeObserver' in window) {
+    bottomBarObserver = new ResizeObserver((entries) => {
+      bottomBarHeight.value = entries[0]?.contentRect.height ?? 0
+    })
+    bottomBarObserver.observe(el)
+  } else {
+    bottomBarHeight.value = 0
+  }
+}, { immediate: true })
+const composeReserve = computed(() =>
+  isMobile.value && drawerLayout.value === 'overlay' ? bottomBarHeight.value : 0
+)
+
+// Debounced reflow: a split-mode squeeze change (open/close, or a live drag-resize of the panel)
+// changes the terminal's actual pixel width, so it needs the SAME robust-resize path every other
+// reflow uses (fit + sendResize), followed by the established ghosting guard (tmux refresh-client)
+// — see scheduleGhostRefresh below. Debounced so a continuous drag settles into ONE reflow, not one
+// per pixel (the "拖宽一次性 debounce reflow" requirement).
+let drawerReflowTimer: ReturnType<typeof setTimeout> | null = null
+watch(drawerSqueezePx, () => {
+  if (drawerReflowTimer) clearTimeout(drawerReflowTimer)
+  drawerReflowTimer = setTimeout(() => {
+    drawerReflowTimer = null
+    nextTick(() => {
+      robustFitAndResize()
+      scheduleGhostRefresh()
+    })
+  }, 180)
+})
+
+// Assist-bar layout: 'classic' (tmux row + full Toolbar) vs 'compact' (single scroll row + drawer).
+// Device-local preference so the user can A/B the two on-device before deciding which to keep.
+const ASSIST_BAR_KEY = 'assistBarMode'
+const assistBarMode = ref<'classic' | 'compact'>(localStorage.getItem(ASSIST_BAR_KEY) === 'compact' ? 'compact' : 'classic')
+watch(assistBarMode, (v) => localStorage.setItem(ASSIST_BAR_KEY, v))
 const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'compose'>('idle')
 // Draft pushed into the ComposeBar by the drawer's 重发 action. A fresh object-less
 // value would not re-trigger ComposeBar's watcher for an identical re-send, so we
@@ -793,6 +1152,7 @@ onMounted(() => {
   window.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
   window.visualViewport?.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
   window.visualViewport?.addEventListener('resize', lockKeyboardViewportScroll)
+  window.addEventListener('resize', onSurfaceViewportResize)
   // Connect immediately if active
   if (props.active) connectGuarded()
 })
@@ -800,6 +1160,14 @@ onMounted(() => {
 onUnmounted(() => {
   if (viewportScrollLockRaf) window.cancelAnimationFrame(viewportScrollLockRaf)
   if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
+  if (drawerReflowTimer) clearTimeout(drawerReflowTimer)
+  bottomBarObserver?.disconnect()
+  // FIX 1: release the global CSS var if this tab still owned it (e.g. its tab was closed
+  // while active) so a stale non-zero width never survives the surface that set it.
+  if (drawerWidthCssVarOwner === props.sessionId) {
+    document.documentElement.style.setProperty('--dw-drawer-width', '0px')
+    drawerWidthCssVarOwner = null
+  }
   terminalBodyRef.value?.removeEventListener('touchmove', onTerminalBodyTouchMove)
   document.removeEventListener('keydown', onKeydownDirect, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
@@ -807,6 +1175,7 @@ onUnmounted(() => {
   window.removeEventListener('scroll', lockKeyboardViewportScroll)
   window.visualViewport?.removeEventListener('scroll', lockKeyboardViewportScroll)
   window.visualViewport?.removeEventListener('resize', lockKeyboardViewportScroll)
+  window.removeEventListener('resize', onSurfaceViewportResize)
 })
 
 // ─── Terminal callbacks ───────────────────────────────────────────────────────
@@ -1489,6 +1858,21 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   flex-shrink: 0;
   background: #1a1a2e;
   z-index: 102;
+}
+.assist-mode-toggle {
+  display: block;
+  width: fit-content;
+  margin: 2px 8px 0 auto;
+  padding: 2px 10px;
+  font-size: 0.68rem;
+  color: #8080a8;
+  background: transparent;
+  border: 1px solid #2a2a45;
+  border-radius: 6px;
+  touch-action: manipulation;
+}
+.assist-mode-toggle:active {
+  background: #23233f;
 }
 
 /* Bottom safe-area padding — standalone PWA ONLY.
