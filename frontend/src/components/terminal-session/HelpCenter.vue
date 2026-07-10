@@ -11,7 +11,8 @@
  *
  * A first-visit pulse draws the eye to the "?" once, then never nags again.
  */
-import { onMounted, onUnmounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed, watch, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { HelpCircle, X, ClipboardCopy, Play, Check, Sparkles } from 'lucide-vue-next'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
@@ -19,22 +20,35 @@ import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const { cliFetch } = useCliAuth()
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   /**
-   * Inline mode (pro embed, DESKTOP): render the "?" trigger INTO the host's
-   * #dw-topbar-right outlet instead of a viewport-fixed fab. The fixed fab (position:fixed,
-   * top-right) overlaps pro's 工作台 collapse/lock controls in split view. The host passes
-   * inline only on desktop (the outlet is desktop-only); mobile keeps the fixed fab (no
-   * split-view overlap on phones). Standalone terminal leaves this false → fixed fab.
+   * Explicit override for WHERE the "?" trigger renders:
+   *  - true    → always inline (teleport into the #dw-topbar-right outlet)
+   *  - false   → always the viewport-fixed fab
+   *  - omitted → AUTO: inline whenever a #dw-topbar-right outlet exists (the SSOT top-right
+   *              chrome cluster — CliTabBar standalone / MainLayout pro), else the fixed fab.
+   * The outlet is the single source of truth: a shell that owns the corner gets the inline "?"
+   * in-cluster (never overlapping the usage chip); an outlet-less route falls back to the fab.
+   * pro passes it explicitly (:inline="!isMobile") to pin its exact desktop/mobile split.
    */
   inline?: boolean
-}>(), { inline: false })
+}>()
 
-// Teleport gate: a target absent on the first render frame silently no-ops and never
-// retries, so only mount the inline teleport AFTER onMounted (by which point the host
-// shell — the parent that owns #dw-topbar-right — is already mounted, so it's present).
+// Outlet presence drives inline-vs-fab. Re-checked only on navigation (the sole time the outlet
+// mounts/unmounts) — never on the hot xterm DOM-render path, so it costs nothing at rest.
+const route = useRoute()
+const outletPresent = ref(false)
+function refreshOutlet() {
+  void nextTick(() => { outletPresent.value = !!document.getElementById('dw-topbar-right') })
+}
+watch(() => route.path, refreshOutlet)
+
+// Teleport gate: a target absent on the first render frame silently no-ops and never retries, so
+// only go inline AFTER onMounted (by which point the shell owning #dw-topbar-right is mounted).
 const ready = ref(false)
-const inlineFab = computed(() => ready.value && props.inline)
+const inlineFab = computed(() =>
+  ready.value && (props.inline !== undefined ? props.inline : outletPresent.value),
+)
 
 const open = ref(false)
 const os = ref('')
@@ -153,6 +167,7 @@ async function runTmux() {
 onMounted(() => {
   void load()
   ready.value = true
+  refreshOutlet() // first-frame outlet probe (route watcher covers later navigations)
   if (pulse.value) window.addEventListener('keydown', onFirstKey, { once: true })
 })
 onUnmounted(() => window.removeEventListener('keydown', onFirstKey))

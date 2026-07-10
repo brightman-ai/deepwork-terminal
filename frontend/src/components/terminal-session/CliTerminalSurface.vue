@@ -140,67 +140,32 @@
 
     <!-- 底栏 (mobile only) -->
     <div v-if="isMobile" ref="bottomBarRef" class="bottom-bar">
-      <!-- Layout toggle: A/B the classic multi-row bars vs the compact single-row bar on-device. -->
-      <button
-        class="assist-mode-toggle"
-        :title="assistBarMode === 'classic' ? '切换到紧凑单条布局' : '切换回经典多条布局'"
-        @click="assistBarMode = assistBarMode === 'classic' ? 'compact' : 'classic'"
-      >{{ assistBarMode === 'classic' ? '⇢ 紧凑布局' : '⇠ 经典布局' }}</button>
-
-      <template v-if="assistBarMode === 'classic'">
-        <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
-        <TmuxQuickBar
-          :session-id="sessionId"
-          @send-key="onSendKey"
-          @open-sheet="tmuxSheetOpen = true"
-        />
-        <Toolbar
-          :session-id="sessionId"
-          :sticky-shift="stickyShift"
-          :sticky-ctrl="stickyCtrl"
-          :sticky-alt="stickyAlt"
-          :active-panel="activePanelLabel"
-          :keyboard-up="activeMode === 'keyboard'"
-          :keycast-on="keystrokeHudVisible"
-          @send-key="onSendKey"
-          @clipboard="onClipboard"
-          @toggle-numpad="onTogglePanel('numpad')"
-          @toggle-compose="onTogglePanel('compose')"
-          @toggle-shift="stickyShift = !stickyShift"
-          @toggle-ctrl="stickyCtrl = !stickyCtrl"
-          @toggle-alt="stickyAlt = !stickyAlt"
-          @toggle-hud="hudVisible = !hudVisible"
-          @toggle-keycast="keystrokeHudVisible = !keystrokeHudVisible"
-          @toggle-keyboard="onToggleKeyboard"
-          @attach="onAttachClick"
-        />
-      </template>
-      <template v-else>
-        <!-- compact keeps the tmux row INTACT (its live-prefix / newSession logic is TmuxQuickBar's
-             SSOT — must not be duplicated); CompactAssistBar only collapses the general-key overload
-             that used to be the full Toolbar. So no tmux operation is lost in compact mode. -->
-        <TmuxQuickBar
-          :session-id="sessionId"
-          @send-key="onSendKey"
-          @open-sheet="tmuxSheetOpen = true"
-        />
-        <CompactAssistBar
-          :sticky-shift="stickyShift"
-          :sticky-ctrl="stickyCtrl"
-          :sticky-alt="stickyAlt"
-          :active-panel="activePanelLabel"
-          :keyboard-up="activeMode === 'keyboard'"
-          @send-key="onSendKey"
-          @clipboard="onClipboard"
-          @toggle-shift="stickyShift = !stickyShift"
-          @toggle-ctrl="stickyCtrl = !stickyCtrl"
-          @toggle-alt="stickyAlt = !stickyAlt"
-          @toggle-numpad="onTogglePanel('numpad')"
-          @toggle-compose="onTogglePanel('compose')"
-          @toggle-keyboard="onToggleKeyboard"
-          @attach="onAttachClick"
-        />
-      </template>
+      <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
+      <TmuxQuickBar
+        :session-id="sessionId"
+        @send-key="onSendKey"
+        @open-sheet="tmuxSheetOpen = true"
+      />
+      <Toolbar
+        :session-id="sessionId"
+        :sticky-shift="stickyShift"
+        :sticky-ctrl="stickyCtrl"
+        :sticky-alt="stickyAlt"
+        :active-panel="activePanelLabel"
+        :keyboard-up="activeMode === 'keyboard'"
+        :keycast-on="keystrokeHudVisible"
+        @send-key="onSendKey"
+        @clipboard="onClipboard"
+        @toggle-numpad="onTogglePanel('numpad')"
+        @toggle-compose="onTogglePanel('compose')"
+        @toggle-shift="stickyShift = !stickyShift"
+        @toggle-ctrl="stickyCtrl = !stickyCtrl"
+        @toggle-alt="stickyAlt = !stickyAlt"
+        @toggle-hud="hudVisible = !hudVisible"
+        @toggle-keycast="keystrokeHudVisible = !keystrokeHudVisible"
+        @toggle-keyboard="onToggleKeyboard"
+        @attach="onAttachClick"
+      />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
@@ -355,7 +320,6 @@ import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.v
 import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.vue'
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
-import CompactAssistBar from '@terminal/components/terminal-session/CompactAssistBar.vue'
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
@@ -804,11 +768,6 @@ watch(drawerSqueezePx, () => {
   }, 180)
 })
 
-// Assist-bar layout: 'classic' (tmux row + full Toolbar) vs 'compact' (single scroll row + drawer).
-// Device-local preference so the user can A/B the two on-device before deciding which to keep.
-const ASSIST_BAR_KEY = 'assistBarMode'
-const assistBarMode = ref<'classic' | 'compact'>(localStorage.getItem(ASSIST_BAR_KEY) === 'compact' ? 'compact' : 'classic')
-watch(assistBarMode, (v) => localStorage.setItem(ASSIST_BAR_KEY, v))
 const activeMode = ref<'idle' | 'keyboard' | 'numpad' | 'compose'>('idle')
 // Draft pushed into the ComposeBar by the drawer's 重发 action. A fresh object-less
 // value would not re-trigger ComposeBar's watcher for an identical re-send, so we
@@ -1859,22 +1818,6 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   background: #1a1a2e;
   z-index: 102;
 }
-.assist-mode-toggle {
-  display: block;
-  width: fit-content;
-  margin: 2px 8px 0 auto;
-  padding: 2px 10px;
-  font-size: 0.68rem;
-  color: #8080a8;
-  background: transparent;
-  border: 1px solid #2a2a45;
-  border-radius: 6px;
-  touch-action: manipulation;
-}
-.assist-mode-toggle:active {
-  background: #23233f;
-}
-
 /* Bottom safe-area padding — standalone PWA ONLY.
    --dw-app-viewport-height is window.visualViewport.height (main.ts), the runtime
    VISIBLE area. In a browser tab (mobile Safari) the visual viewport already ends
