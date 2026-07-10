@@ -8,7 +8,8 @@ type CodexSessionState struct {
 	Model        string
 	CWD          string
 	Status       AgentStatus
-	Awaiting     bool // a turn completed (task_complete) and no new turn started since = needs-you
+	Awaiting     bool      // a turn completed (task_complete) and no new turn started since = needs-you
+	LastTurnAt   time.Time // transcript time of the last task_complete — the reload-proof "completed at" behind Awaiting
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
@@ -70,6 +71,9 @@ func (cd *CodexDriver) Update() error {
 				// without pinning a permanent red "waiting" dot on a resting pane.
 				cd.state.Status = StatusIdle
 				cd.state.Awaiting = true // turn done, your move → needs-you (soft)
+				// Record the transcript time of THIS completion (not time.Now) so the
+				// needs-you "seen" key is reload-proof and advances on the next turn.
+				cd.state.LastTurnAt = parseTime(row)
 			case "token_count":
 				info, ok := payload["info"].(map[string]any)
 				if !ok {
@@ -102,7 +106,7 @@ func (cd *CodexDriver) State() CodexSessionState { return cd.state }
 // AgentState converts to the unified AgentState model.
 func (cd *CodexDriver) AgentState() AgentState {
 	s := cd.state
-	return AgentState{
+	as := AgentState{
 		Tool:         ToolCodex,
 		Model:        s.Model,
 		Status:       s.Status,
@@ -113,4 +117,8 @@ func (cd *CodexDriver) AgentState() AgentState {
 		TotalTokens:  s.TotalTokens,
 		UpdatedAt:    s.UpdatedAt,
 	}
+	if s.Awaiting {
+		as.AwaitingSince = s.LastTurnAt
+	}
+	return as
 }

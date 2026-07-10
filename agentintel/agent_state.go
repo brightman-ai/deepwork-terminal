@@ -48,6 +48,15 @@ type AgentState struct {
 	// timestamps so it survives a page reload — no need to witness the live transition.
 	AwaitingUser bool `json:"awaitingUser,omitempty"`
 
+	// AwaitingSince is the transcript timestamp of the turn-completion that put the agent
+	// into the current AwaitingUser state (last assistant turn for Claude, last task_complete
+	// for Codex). It is DERIVED FROM THE TRANSCRIPT, so — exactly like AwaitingUser — it
+	// survives a page reload: the same completion always yields the same value, and a NEW turn
+	// yields a new one. The frontend keys its per-window "seen" layer on this so a dismissed
+	// dot stays dismissed across F5 yet re-appears when the pane completes another turn.
+	// Zero when not awaiting. [needs-you dot persistence]
+	AwaitingSince time.Time `json:"awaitingSince,omitempty"`
+
 	// Token usage (from JSONL parsing)
 	InputTokens       int `json:"inputTokens"`
 	OutputTokens      int `json:"outputTokens"`
