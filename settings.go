@@ -85,11 +85,11 @@ var (
 
 func (s *Server) handleGetStore(w http.ResponseWriter, r *http.Request) {
 	storeMu.Lock()
+	if storeData == nil {
+		storeData = s.loadStoreFromDisk() // hydrate the in-memory cache from disk once (e.g. post-restart)
+	}
 	data := storeData
 	storeMu.Unlock()
-	if data == nil {
-		data = s.loadStoreFromDisk()
-	}
 	if data == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte("{}")) //nolint:errcheck
@@ -106,10 +106,42 @@ func (s *Server) handleSaveStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	storeMu.Lock()
-	storeData = raw
+	base := storeData
+	if base == nil {
+		// After a restart the cache is empty — merge onto the ON-DISK store so a partial PUT
+		// (a client that hasn't GET-hydrated, or whose local data is incomplete) can't clobber
+		// keys it doesn't know about.
+		base = s.loadStoreFromDisk()
+	}
+	merged := mergeStoreJSON(base, raw)
+	storeData = merged
 	storeMu.Unlock()
-	s.saveStoreToDisk(raw)
+	s.saveStoreToDisk(merged)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// mergeStoreJSON returns base with patch's top-level keys added/overwritten; keys present ONLY in
+// base are PRESERVED. This makes PUT /store a per-key merge instead of a whole-object replace, so a
+// client that (after a restart or a failed GET) holds only some keys can never wipe the others —
+// the root of the "remotePeers and history take turns vanishing" data loss. Degrades to a plain
+// replace if either side isn't a JSON object, so it never fails a save.
+func mergeStoreJSON(base, patch json.RawMessage) json.RawMessage {
+	var p map[string]json.RawMessage
+	if err := json.Unmarshal(patch, &p); err != nil {
+		return patch // not a JSON object — keep the old replace behaviour rather than fail the save
+	}
+	b := map[string]json.RawMessage{}
+	if len(base) > 0 {
+		_ = json.Unmarshal(base, &b) // best-effort; a corrupt/absent base just starts empty
+	}
+	for k, v := range p {
+		b[k] = v
+	}
+	out, err := json.Marshal(b)
+	if err != nil {
+		return patch
+	}
+	return out
 }
 
 func (s *Server) storePath() string {

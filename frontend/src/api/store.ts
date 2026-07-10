@@ -13,7 +13,9 @@ function getCliFetch() {
 export async function fetchStore(): Promise<Record<string, unknown>> {
   const cliFetch = getCliFetch()
   const resp = await cliFetch(cliApi('/store'))
-  if (!resp.ok) return {}
+  // A non-OK GET is NOT an empty store — throw so the caller stays un-hydrated and refuses to
+  // persist (a `{}` here would let the next set() wipe the server's real data). [store overwrite]
+  if (!resp.ok) throw new Error(`fetch store: HTTP ${resp.status}`)
   return resp.json() as Promise<Record<string, unknown>>
 }
 
