@@ -11,7 +11,13 @@
       <button class="cb-tool" @click="moveCursor('home')" title="行首">Home</button>
       <button class="cb-tool" @click="moveCursor('end')" title="行尾">End</button>
       <div class="cb-tool-divider" />
-      <button class="cb-tool cb-tool--danger" @click="clearAll" title="清空全部">Del</button>
+      <button class="cb-tool cb-tool--copy" @click="copyAll" title="复制全部" data-testid="compose-copy-all">
+        <Check v-if="copyFeedback" width="13" height="13" />
+        <Copy v-else width="13" height="13" />
+      </button>
+      <button class="cb-tool cb-tool--danger" @click="clearAll" title="清空全部" data-testid="compose-clear-all">
+        <Trash2 width="13" height="13" />
+      </button>
       <button class="cb-tool cb-tool--snip" :class="{ 'cb-tool--active': showSnippets }" @click="toggleSnippets" title="快捷短语">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/>
@@ -40,6 +46,18 @@
         </div>
       </div>
     </div>
+
+    <!-- Undo-clear bar: one-shot affordance after 清空全部. Non-modal, own row (never
+         overlaps the textarea or send button), auto-dismisses so it never lingers and
+         blocks input. Once dismissed (timeout OR tapped) the cleared text is gone for good. -->
+    <Transition name="cb-fade">
+      <div v-if="showUndo" class="undo-bar" data-testid="compose-undo-clear-bar">
+        <span class="undo-msg">已清空全部</span>
+        <button class="undo-btn" type="button" @click="undoClear" data-testid="compose-undo-clear">
+          <RotateCcw width="12" height="12" /> 撤销
+        </button>
+      </div>
+    </Transition>
 
     <!-- History panel (auto-saved send history, separate from snippets) -->
     <div v-if="showHistory" class="history-panel">
@@ -82,6 +100,7 @@
  * Snippets stored in localStorage for quick-recall.
  */
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 import { focusWithoutViewportScroll, resetViewportScroll } from '@terminal/composables/cli/useVisualKeyboardInset'
 import {
   attachCliInputDiagnostics,
@@ -89,6 +108,7 @@ import {
   summarizeText,
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useServerStore } from '@terminal/composables/cli/useServerStore'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const DRAFT_KEY = 'cli-compose-draft'
 const HISTORY_MAX = 15
@@ -114,6 +134,20 @@ const showHistory = ref(false)
 const snippets = ref<string[]>([])
 const history = ref<string[]>([])
 let cleanupInputDiagnostics: (() => void) | null = null
+
+// --- Copy-all feedback (icon flips to a checkmark briefly) ---
+const copyFeedback = ref(false)
+let copyFeedbackTimer: ReturnType<typeof setTimeout> | null = null
+
+// --- Undo-clear: 清空全部 is destructive on multi-line drafts (the exact complaint this
+// ships to fix — "很难清除" cuts both ways once it's gone), so the wiped text is kept around
+// for a short window as a one-shot restore, not a confirm-before-clear dialog (that trades
+// one friction for another). clearedBackup holds the pre-clear text; showUndo drives the pill;
+// the timer auto-dismisses so the pill never lingers and blocks the input.
+const clearedBackup = ref<string | null>(null)
+const showUndo = ref(false)
+let undoTimer: ReturnType<typeof setTimeout> | null = null
+const UNDO_VISIBLE_MS = 6000
 
 // --- Draft persistence ---
 function saveDraft() {
@@ -212,14 +246,19 @@ function toggleHistory() {
 }
 
 // --- Auto-resize + input handler ---
-// Grow with content up to ~50vh (half the screen — leaves room for the mobile
-// keyboard), then scroll internally. Measuring scrollHeight after resetting to
-// 'auto' lets the box shrink back when text is cleared, with no layout jank.
+// Grow with content up to MAX_INPUT_LINES, then scroll internally. Capping at a few lines
+// (not ~50vh) is the core of the mobile input fix: a long paste can no longer swallow the
+// screen or push the caret line behind the keyboard. Native caret-follow keeps the caret
+// visible as the box scrolls. Resetting to 'auto' first lets the box shrink back when cleared.
+const MAX_INPUT_LINES = 5
 function autoResize() {
   const ta = textareaRef.value
   if (!ta) return
-  const cap = Math.max(120, Math.round(window.innerHeight * 0.5))
   ta.style.height = 'auto'
+  const cs = getComputedStyle(ta)
+  const lineHeight = parseFloat(cs.lineHeight) || 21
+  const vPad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + 2 // padding + 1px borders
+  const cap = lineHeight * MAX_INPUT_LINES + vPad
   ta.style.height = Math.min(ta.scrollHeight, cap) + 'px'
 }
 function onInput(e: Event) {
@@ -257,12 +296,64 @@ function send() {
   nextTick(autoResize)
 }
 
-// --- Clear all ---
+// --- Copy all: writes the FULL current draft to the OS clipboard (same SSOT idiom as
+// every other 复制 affordance in the terminal — copyTextToClipboard handles the
+// insecure-HTTP / iOS execCommand fallback). Briefly flips the icon to a checkmark so a
+// tap gets visible confirmation without a toast stealing space from the compact toolbar.
+async function copyAll() {
+  const ok = await copyTextToClipboard(text.value)
+  reportCliInputDiagnostic('compose.copy-all', { ok, len: text.value.length })
+  if (!ok) return
+  copyFeedback.value = true
+  if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
+  copyFeedbackTimer = setTimeout(() => { copyFeedback.value = false }, 1400)
+}
+
+// --- Clear all (undoable) ---
+// Wipes the draft but keeps the pre-clear text in `clearedBackup` for UNDO_VISIBLE_MS so an
+// accidental tap on a long multi-line draft isn't unrecoverable. An empty textarea has
+// nothing worth restoring, so clearing it shows no undo pill (matches the "clear an
+// already-empty box" fixture — a no-op, not a false affordance).
 function clearAll() {
+  const prev = text.value
   text.value = ''
   try { localStorage.removeItem(DRAFT_KEY) } catch {}
   nextTick(() => {
     autoResize()
+    focusWithoutViewportScroll(textareaRef.value)
+  })
+  if (undoTimer) { clearTimeout(undoTimer); undoTimer = null }
+  if (!prev) {
+    showUndo.value = false
+    clearedBackup.value = null
+    return
+  }
+  clearedBackup.value = prev
+  showUndo.value = true
+  undoTimer = setTimeout(() => {
+    showUndo.value = false
+    clearedBackup.value = null
+    undoTimer = null
+  }, UNDO_VISIBLE_MS)
+}
+
+// --- Undo the last clear: restores the FULL pre-clear text (not appended — a straight
+// replace, since the textarea is guaranteed empty right after clearAll). One-shot: once used
+// (or once the pill times out) clearedBackup is gone, so a second tap does nothing.
+function undoClear() {
+  if (clearedBackup.value == null) return
+  text.value = clearedBackup.value
+  saveDraft()
+  clearedBackup.value = null
+  showUndo.value = false
+  if (undoTimer) { clearTimeout(undoTimer); undoTimer = null }
+  nextTick(() => {
+    autoResize()
+    const ta = textareaRef.value
+    if (ta) {
+      const end = ta.value.length
+      try { ta.setSelectionRange(end, end) } catch {}
+    }
     focusWithoutViewportScroll(textareaRef.value)
   })
 }
@@ -328,6 +419,8 @@ onUnmounted(() => {
   saveDraft()
   cleanupInputDiagnostics?.()
   cleanupInputDiagnostics = null
+  if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
+  if (undoTimer) clearTimeout(undoTimer)
   // Reset scroll on unmount to prevent residual gap
   resetViewportScroll()
 })
@@ -421,6 +514,13 @@ onUnmounted(() => {
 }
 .cb-tool--danger:active { background: #3a1818; }
 
+.cb-tool--copy {
+  color: #80e0b0;
+  border-color: #2a5a44;
+  background: #0e2418;
+}
+.cb-tool--copy:active { background: #163a28; }
+
 .cb-tool--snip {
   color: #80c8ff;
   border-color: #2a4a6a;
@@ -503,6 +603,41 @@ onUnmounted(() => {
   padding: 0 4px;
 }
 .snippet-del:active { color: #ff6060; }
+
+/* Undo-clear bar: its OWN row (never overlaps the textarea/send button below it), compact,
+   non-modal — a one-shot pill you can tap or let time out. */
+.undo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  background: #241a10;
+  border-bottom: 1px solid #5a3a20;
+}
+.undo-msg {
+  font-size: 0.72rem;
+  color: #d0a878;
+}
+.undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  background: #4a3018;
+  color: #ffc880;
+  border: 1px solid #7a5028;
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.undo-btn:active { background: #5a3c20; }
+
+.cb-fade-enter-active, .cb-fade-leave-active { transition: opacity 0.15s ease; }
+.cb-fade-enter-from, .cb-fade-leave-to { opacity: 0; }
 
 /* History panel (auto-saved, visually distinct from snippets) */
 .history-panel {
@@ -590,9 +725,10 @@ onUnmounted(() => {
   outline: none;
   line-height: 1.4;
   min-height: 38px;
-  /* Height cap is applied by autoResize() in JS (≈50vh) so the box can grow with
-     content yet still leave room for the mobile keyboard; overflow scrolls past it. */
-  max-height: 50vh;
+  /* Height cap (~5 lines) is applied precisely by autoResize() in JS; this CSS bound is a
+     fallback so the box can never swallow the screen even before JS runs. Overflow scrolls,
+     with the native caret-follow keeping the caret visible. */
+  max-height: calc(1.4em * 5 + 18px);
   overflow-y: auto;
   transition: border-color 0.15s;
 }

@@ -33,12 +33,20 @@ export interface TmuxPaneState {
   title?: string
   /** pane_current_path — the live working directory of this pane. */
   cwd?: string
+  /** tmux's stable "%N" pane id — survives index reuse/reorder (a closed pane's index gets
+   *  recycled by the next split), unlike `index`. The per-pane resource-drawer state is keyed on
+   *  windowId+paneId, NOT index, so a closed-then-reopened pane never inherits stale drawer state. */
+  paneId?: string
   agentTool?: AgentTool
   agentStatus?: AgentStatusType
   /** Backend "needs-you": the agent finished a turn / is blocked and hasn't been responded
    *  to yet. Distinct from agentStatus==='idle' (which also covers a fresh, never-run pane).
    *  Survives reload (derived from transcript timestamps) and clears when you next respond. */
   awaitingUser?: boolean
+  /** Transcript time of the completion behind `awaitingUser` (reload-proof). The Agent
+   *  Overview's per-window "seen" layer dismisses against this: the same value across F5 keeps a
+   *  cleared dot cleared; a new turn's newer value re-shows it. Absent/zero = undated wait. */
+  awaitingSince?: string
 }
 export interface TmuxWindowState {
   index: number

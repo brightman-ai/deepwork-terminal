@@ -11,19 +11,21 @@
          Vertically draggable (useEdgeDrag) so it can be moved off covered text; a
          short tap still opens the drawer, a drag repositions + persists. -->
     <button
-      v-if="!open"
+      v-if="!open && isActive"
       ref="handleEl"
       class="rd-handle"
-      :class="{ 'is-mobile': isMobile }"
+      :class="{ 'is-mobile': isMobile, 'is-peek': handlePeek }"
       :style="handleStyle"
       type="button"
-      title="收纳抽屉（可上下拖动）"
+      title="工作台 · 点击展开，可上下拖动"
       data-testid="resource-drawer-handle"
-      @click="$emit('update:open', true)"
+      @click="onHandleClick"
+      @mouseenter="handleHovering = true"
+      @mouseleave="handleHovering = false"
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18" />
-      </svg>
+      <span class="rd-handle-grip" aria-hidden="true"></span>
+      <ChevronLeft class="rd-handle-chevron" :size="14" />
+      <span class="rd-handle-label" :class="{ 'is-visible': handlePeek || handleHovering }">工作台</span>
     </button>
 
     <!-- v-show (not v-if): minimizing the drawer keeps the whole panel — FilesPanel + its
@@ -31,13 +33,18 @@
          the user was reading/copying. Vue's <Transition> drives the slide on the v-show toggle. -->
     <Transition name="rd-fade">
       <div
-        v-show="open"
+        v-show="open && isActive"
         class="rd-scrim"
-        :class="{ 'is-mobile': isMobile, 'is-desktop': !isMobile }"
+        :class="{
+          'is-split': layout === 'split',
+          'is-mobile': isMobile && layout !== 'split',
+          'is-desktop': !isMobile && layout !== 'split',
+        }"
+        :style="scrimStyle"
         data-testid="resource-drawer"
         @click.self="$emit('update:open', false)"
       >
-        <div class="rd-panel" :style="panelStyle" @mousedown="onPanelMousedown">
+        <div ref="panelRootEl" class="rd-panel" :style="panelStyle" @mousedown="onPanelMousedown">
           <!-- Left-edge resize handle (desktop primarily): drag left to widen the
                panel; width persists to localStorage. Mobile keeps the max-width guard. -->
           <div
@@ -67,6 +74,37 @@
                 @click="topTab = t.key"
               >{{ t.label }}</button>
             </div>
+            <!-- Layout mode toggle (discoverability fix, design doc §7 signifier notes): 双栏⇄浮层.
+                 A signifier (highlights whichever mode is ACTUALLY in effect right now — `layout`,
+                 the host's resolved value, not just the stored preference) that doubles as the
+                 override control: clicking either segment sets an explicit drawerLayoutMode that
+                 wins over the host's viewport auto-detect. 双栏 is greyed on a narrow viewport
+                 (splitDisabled) since the terminal has no room for it there. -->
+            <div
+              class="rd-layout-toggle"
+              role="group"
+              aria-label="布局模式"
+              :title="`当前：${layoutMode === 'auto' ? '自动' : layoutMode === 'split' ? '双栏' : '浮层'}`"
+              data-testid="rd-layout-toggle"
+            >
+              <button
+                type="button"
+                class="rd-layout-btn"
+                :class="{ 'is-active': layout === 'split' }"
+                :disabled="splitDisabled"
+                :title="splitDisabled ? '需更宽窗口' : '双栏：终端让出空间，二者并排显示'"
+                data-testid="rd-layout-split"
+                @click="$emit('update:layout-mode', 'split')"
+              >双栏</button>
+              <button
+                type="button"
+                class="rd-layout-btn"
+                :class="{ 'is-active': layout === 'overlay' }"
+                title="浮层：终端保持全宽，抽屉悬浮其上"
+                data-testid="rd-layout-overlay"
+                @click="$emit('update:layout-mode', 'overlay')"
+              >浮层</button>
+            </div>
             <!-- Pane lock: FOLLOW (default) ↔ LOCK onto the current pane so a main-area pane
                  switch no longer disturbs the drawer (read/copy across panes). -->
             <button
@@ -92,9 +130,11 @@
                 <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" /><line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />
               </svg>
             </button>
-            <!-- Collapse-to-right: this MINIMIZES (v-show) — it never destroys panel state. -->
+            <!-- Collapse-to-right: this MINIMIZES (v-show) — it never destroys panel state. A
+                 single › (not the old double-chevron ») mirrors the closed handle's single ‹,
+                 so the two affordances read as one symmetric "slide the panel" idiom. -->
             <button class="rd-close" title="收起" data-testid="resource-drawer-close" @click="$emit('update:open', false)">
-              <ChevronsRight class="rd-close-ico" />
+              <ChevronRight class="rd-close-ico" />
             </button>
           </div>
 
@@ -246,7 +286,7 @@
     <!-- Lightbox: larger image preview with pinch-zoom + pan (mobile) / click-to-close (desktop). -->
     <Transition name="rd-fade">
       <div
-        v-if="lightbox"
+        v-if="lightbox && isActive"
         class="rd-lightbox"
         data-testid="resource-drawer-lightbox"
         @click="onLightboxBackdrop"
@@ -276,7 +316,7 @@
 
     <!-- Inline text preview: scrollable monospaced panel (replaces window.open). -->
     <Transition name="rd-fade">
-      <div v-if="textPreview" class="rd-lightbox rd-textview" data-testid="resource-drawer-textview" @click="textPreview = null">
+      <div v-if="textPreview && isActive" class="rd-lightbox rd-textview" data-testid="resource-drawer-textview" @click="textPreview = null">
         <pre class="rd-textview-body mono" @click.stop>{{ textPreview.content }}</pre>
         <div class="rd-lightbox-bar mono" @click.stop>
           <span class="rd-lightbox-name">{{ textPreview.item.name }}</span>
@@ -292,7 +332,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { ChevronsRight, Lock, LockOpen } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Lock, LockOpen } from 'lucide-vue-next'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -307,7 +347,56 @@ import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchB
 
 // sessionId is the RESEND TARGET (the live terminal the inject path targets) — it is
 // no longer used to fetch resources, which are now global/cross-session.
-const props = defineProps<{ sessionId: string; open: boolean }>()
+// isActive: whether the OWNING tab is the currently active one (CliTerminalView is the
+// SSOT for which tab is active). One ResourceDrawer instance is mounted PER TAB (inside
+// each CliTerminalSurface) so its content/lock/tab-position stays per-pane — but the whole
+// thing lives in a `<Teleport to="body">`, which escapes the parent surface's v-show. Left
+// unguarded, EVERY tab's handle (and, if left open, its panel) would render in <body> at
+// once — the "N tabs → N handles" bug (CHG: drawer-cwd-clearall). isActive gates just the
+// on-screen rendering (handle / panel / lightbox / text preview); it does NOT unmount the
+// component, so a background tab's drawer state (scroll position, lock, open-ness) survives
+// the switch — consistent with CliTerminalSurface's own v-show keep-alive. Defaults true so
+// a drawer mounted without this prop (e.g. a future non-tabbed host) still works standalone.
+//
+// layout / composeReserve (right-drawer dual-mode, design doc §7): the HOST (CliTerminalSurface)
+// owns the single `drawerLayout` SSOT computed(viewport, open) → 'split' | 'overlay' — this
+// component just RENDERS whichever mode it's told. 'split' (≥900px, host has already reserved a
+// matching-width gutter in the terminal column): the scrim goes fully transparent/click-through
+// and the panel is a plain docked column — no bottom reservation needed, the squeeze already keeps
+// everything non-overlapping. 'overlay' (narrow, or width<900 desktop): the existing floating
+// sheet/column look; on a real mobile sheet (isMobile) the host also measures its own bottom
+// toolbar (the compose band) and hands us its live pixel height as `composeReserve` — the scrim
+// and panel stop there (not `inset:0`), so they can NEVER geometrically cover the compose band
+// (a geometry guarantee, not a z-index one). composeReserve is 0 whenever there's nothing to
+// protect (desktop overlay has no bottom toolbar; split already handles it via width).
+// layoutMode / splitDisabled (discoverability fix, design doc §7 signifier notes): layoutMode is
+// the user's STORED override preference ('auto' | 'split' | 'overlay'), owned/persisted by the
+// host — this component only renders the toggle and emits update:layout-mode on a click; it never
+// writes localStorage itself (one writer, the host, matching how `layout` itself is host-owned).
+// splitDisabled tells the toggle to grey out 双栏 on a viewport too narrow to usefully squeeze.
+// cwd / tool (drawer-per-pane, 20260710-124400): the HOST now resolves the OWNING pane's live
+// cwd/agentTool (by stable paneKey, not "whichever pane is globally active") and hands it down —
+// this instance never has to know which pane it belongs to. Left undefined, this component falls
+// back to the session's globally-active pane (tmux.activeCwd/activeTool below) — the OLD
+// single-drawer-per-tab behaviour — so a caller that doesn't pass them (or the pre-refactor
+// standalone usage) is unaffected.
+const props = withDefaults(defineProps<{
+  sessionId: string
+  open: boolean
+  isActive?: boolean
+  cwd?: string
+  tool?: AgentTool
+  layout?: 'split' | 'overlay'
+  layoutMode?: 'auto' | 'split' | 'overlay'
+  splitDisabled?: boolean
+  composeReserve?: number
+}>(), {
+  isActive: true,
+  layout: 'overlay',
+  layoutMode: 'auto',
+  splitDisabled: false,
+  composeReserve: 0,
+})
 const emit = defineEmits<{
   (e: 'update:open', v: boolean): void
   // inject: re-use an uploaded image/file — host routes the path to the SAME
@@ -315,6 +404,8 @@ const emit = defineEmits<{
   (e: 'inject', path: string): void
   // compose-draft: open the ComposeBar with this text inserted for editing (重发).
   (e: 'compose-draft', text: string): void
+  // update:layout-mode: user toggled 双栏/浮层 in the header — host persists + re-derives `layout`.
+  (e: 'update:layout-mode', mode: 'auto' | 'split' | 'overlay'): void
 }>()
 
 const { isMobile } = useDeviceDetection()
@@ -322,6 +413,27 @@ const { isMobile } = useDeviceDetection()
 // The summon handle is vertically draggable along the right edge so it can be moved
 // off whatever terminal text it overlaps; offset persists per-handle.
 const { el: handleEl, style: handleStyle } = useEdgeDrag({ storageKey: 'dw.rdHandle.top' })
+
+// ── Handle signifier (FIX 3, design doc §7 signifier notes) ────────────────────────────
+// The closed handle used to be an unlabeled square ("神秘小方块"): a chevron (‹, "pull to
+// open") + a faint vertical grip (dots, "also draggable") are now permanent, always-on
+// signifiers (see .rd-handle-chevron / .rd-handle-grip below). On TOP of those, a "工作台"
+// label peeks out ONCE automatically before the user has ever opened the drawer (mirrors
+// HelpCenter's SEEN_KEY pattern) — after that first reveal it only shows on :hover (desktop;
+// touch has no hover, so mobile only ever gets the one-time auto-peek + the permanent icons).
+const HANDLE_SEEN_KEY = 'dw.rdHandle.seen'
+const handleHovering = ref(false)
+const handlePeek = ref(localStorage.getItem(HANDLE_SEEN_KEY) !== '1')
+let handlePeekTimer: ReturnType<typeof setTimeout> | null = null
+function dismissHandlePeek(): void {
+  if (!handlePeek.value) return
+  handlePeek.value = false
+  localStorage.setItem(HANDLE_SEEN_KEY, '1')
+}
+function onHandleClick(): void {
+  dismissHandlePeek()
+  emit('update:open', true)
+}
 
 // ── Pane lock / follow (CHG: drawer-workbench) ──────────────────────────────────────
 // Default = FOLLOW: the drawer's effective cwd/tool track the LIVE active tmux pane, so
@@ -335,13 +447,19 @@ const tmux = useTmuxState(() => props.sessionId)
 const locked = ref(false)
 const lockedCwd = ref('')
 const lockedTool = ref<AgentTool>('')
-const effectiveCwd = computed(() => (locked.value ? lockedCwd.value : tmux.activeCwd.value))
-const effectiveTool = computed<AgentTool>(() => (locked.value ? lockedTool.value : tmux.activeTool.value))
+// followedCwd/Tool: what this instance shows while UNLOCKED. props.cwd/tool (the OWNING pane's
+// live values, host-resolved by stable paneKey) win when supplied; `undefined` (no host-side pane
+// resolution — e.g. a bare/standalone mount) falls back to the session's globally-active pane, the
+// pre-refactor behaviour.
+const followedCwd = computed(() => (props.cwd !== undefined ? props.cwd : tmux.activeCwd.value))
+const followedTool = computed<AgentTool>(() => (props.tool !== undefined ? props.tool : tmux.activeTool.value))
+const effectiveCwd = computed(() => (locked.value ? lockedCwd.value : followedCwd.value))
+const effectiveTool = computed<AgentTool>(() => (locked.value ? lockedTool.value : followedTool.value))
 function toggleLock(): void {
   if (!locked.value) {
-    // Freeze onto whatever the drawer is currently showing (the live active pane).
-    lockedCwd.value = tmux.activeCwd.value
-    lockedTool.value = tmux.activeTool.value
+    // Freeze onto whatever this instance is currently showing (its owning pane's live cwd).
+    lockedCwd.value = followedCwd.value
+    lockedTool.value = followedTool.value
   }
   locked.value = !locked.value
 }
@@ -403,6 +521,34 @@ const panelWidth = ref<number>(loadWidth())
 const isFull = ref(false)
 const panelStyle = computed(() => ({ width: isFull.value ? '100vw' : `${panelWidth.value}px` }))
 function toggleFull(): void { isFull.value = !isFull.value }
+
+// ── Dual-mode layout geometry (design doc §7) ───────────────────────────────────────
+// scrimStyle: the geometric guarantee behind the CORE promise ("compose 输入栏永远可见可点").
+// In 'overlay' mode on a real mobile sheet, composeReserve (host-measured live px height of its
+// bottom toolbar) shortens the scrim/panel so their box ends ABOVE the compose band instead of
+// at inset:0 — an inline style always wins over the class's `inset:0` shorthand. 'split' mode and
+// desktop-overlay need no reservation: split already reserves space via the host's own squeeze
+// (a different axis — width, not height); desktop-overlay has no bottom toolbar to protect.
+const scrimStyle = computed(() => {
+  if (props.layout !== 'split' && isMobile.value && props.composeReserve > 0) {
+    return { bottom: `${props.composeReserve}px` }
+  }
+  return {}
+})
+
+// effectivePanelWidthPx: how many px THIS panel currently occupies (drag-resized width, or the
+// full viewport while 全屏). The host reads this (via defineExpose below) to size its 'split'
+// squeeze gutter — one number, one direction of truth: the panel's own width state stays owned
+// here (incl. its localStorage persistence); the host never duplicates or guesses it.
+const winWidth = ref(window.innerWidth)
+function onWinResize(): void { winWidth.value = window.innerWidth }
+const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : panelWidth.value))
+// panelRootEl (drawer-per-pane, 20260710-124400): the host needs THIS instance's panel root DOM
+// node to tell whether a live text Selection sits inside it before switching panes away (there is
+// only ONE global window.getSelection() — the host clones the range into a per-pane map on the way
+// out and re-applies it on the way back in; see CliTerminalSurface's saveSelectionFor/restore).
+const panelRootEl = ref<HTMLElement>()
+defineExpose({ effectivePanelWidthPx, panelRootEl })
 
 let resizing = false
 let resizeStartX = 0
@@ -655,10 +801,16 @@ watch(activeTab, () => { sessionFilter.value = ''; expandedInput.value = null })
 
 onMounted(() => {
   window.addEventListener('dw:upload-success', onUploadSuccess)
+  window.addEventListener('resize', onWinResize)
+  // First-ever mount with the handle never opened: auto-peek the "工作台" label briefly,
+  // then fall back to hover-only (see dismissHandlePeek / HANDLE_SEEN_KEY above).
+  if (handlePeek.value) handlePeekTimer = setTimeout(dismissHandlePeek, 2600)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('dw:upload-success', onUploadSuccess)
+  window.removeEventListener('resize', onWinResize)
   if (toastTimer) clearTimeout(toastTimer)
+  if (handlePeekTimer) clearTimeout(handlePeekTimer)
   onResizeEnd() // detach any in-flight resize listeners
 })
 
@@ -773,7 +925,8 @@ function glyphClass(name: string): string {
 <style scoped>
 .mono { font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', monospace; }
 
-/* Edge handle — slim tab clinging to the right viewport edge. */
+/* Edge handle — slim tab clinging to the right viewport edge. Stacks a faint drag-grip
+   above an inward chevron (FIX 3 signifiers: grip = "draggable", ‹ = "pull to open"). */
 .rd-handle {
   position: fixed;
   top: 50%;
@@ -781,8 +934,10 @@ function glyphClass(name: string): string {
   transform: translateY(-50%);
   z-index: 290;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   width: 26px;
   height: 54px;
   padding: 0;
@@ -798,6 +953,47 @@ function glyphClass(name: string): string {
 .rd-handle:active { background: #1f1533; }
 .rd-handle.is-mobile { width: 30px; height: 62px; }
 
+/* Faint vertical grip (draggable affordance) — deliberately quiet (low opacity dashes),
+   sits above the chevron so the two signifiers don't compete for attention. */
+.rd-handle-grip {
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(192, 128, 255, 0.45) 0px,
+    rgba(192, 128, 255, 0.45) 3px,
+    transparent 3px,
+    transparent 6px
+  );
+}
+.rd-handle-chevron { flex-shrink: 0; opacity: 0.9; }
+
+/* "工作台" peek label — a first-open coach-mark (handlePeek) or a plain :hover reveal
+   afterwards. Anchored OFF the handle's left edge so it never nudges the handle itself. */
+.rd-handle-label {
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%) translateX(6px);
+  white-space: nowrap;
+  background: rgba(20, 14, 32, 0.95);
+  border: 1px solid #3a2860;
+  color: #e0d4f0;
+  font-size: 0.68rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.rd-handle-label.is-visible {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
 /* Scrim + panel — mirrors TmuxStatusSheet's overlay idiom, anchored to the right. */
 .rd-scrim {
   position: fixed;
@@ -811,6 +1007,12 @@ function glyphClass(name: string): string {
 /* Desktop: a collapsible column; the scrim is click-through except the panel itself. */
 .rd-scrim.is-desktop { background: transparent; pointer-events: none; }
 .rd-scrim.is-desktop .rd-panel { pointer-events: auto; }
+/* Split (≥900px, host squeezed the terminal column by the panel's own width — see
+   CliTerminalSurface's drawerLayout SSOT): a plain docked column, fully click-through outside
+   the panel (same idiom as is-desktop) and no bottom reservation — the squeeze already keeps
+   the compose band non-overlapped on a DIFFERENT axis (width, not height). */
+.rd-scrim.is-split { background: transparent; pointer-events: none; }
+.rd-scrim.is-split .rd-panel { pointer-events: auto; }
 
 .rd-panel {
   position: relative; /* anchors the left-edge resize handle */
@@ -829,8 +1031,9 @@ function glyphClass(name: string): string {
   padding-top: env(safe-area-inset-top, 0px);
 }
 /* Width comes from the inline :style (panelStyle, persisted + drag-resized). The
-   desktop/mobile rules below only set height + the mobile viewport guard. */
+   desktop/mobile/split rules below only set height + the mobile viewport guard. */
 .is-desktop .rd-panel { height: 100%; }
+.is-split .rd-panel { height: 100%; }
 .is-mobile .rd-panel {
   max-width: calc(100vw - 24px);
   height: 100%;
@@ -902,15 +1105,26 @@ function glyphClass(name: string): string {
   font-weight: 600; color: #c080ff; font-size: 0.8rem; letter-spacing: 0.4px;
   flex-shrink: 0;
 }
-.rd-tabs { display: flex; gap: 3px; flex: 1; justify-content: center; }
+/* min-width:0 is required for a flex child to shrink BELOW its content's intrinsic width;
+   without it, once the header (title + tabs + layout-toggle + lock/full/close) no longer fits
+   a narrow panel, the OTHER header controls get squeezed/pushed off instead of this one, which
+   is the only child meant to give. overflow-x:auto (with the tab text pinned nowrap below) turns
+   that squeeze into a horizontal scroll instead of vertical CJK text-wrapping — title/toggle/
+   lock/full/close (all flex-shrink:0) stay fully visible and clickable regardless of panel width. */
+.rd-tabs {
+  display: flex; gap: 3px; flex: 1 1 auto; min-width: 0; justify-content: center;
+  overflow-x: auto; scrollbar-width: none;
+}
+.rd-tabs::-webkit-scrollbar { display: none; }
 .rd-tab {
-  display: inline-flex; align-items: center; gap: 4px;
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
   padding: 3px 9px;
   background: #1c1430;
   border: 1px solid #2e2050;
   border-radius: 999px;
   color: #9a86ba;
   font-size: 0.7rem;
+  white-space: nowrap;
   cursor: pointer;
 }
 .rd-tab.is-active { background: #4a2a7a; border-color: #7a4ab0; color: #f0e0ff; }
@@ -931,6 +1145,22 @@ function glyphClass(name: string): string {
 }
 .rd-close-ico { width: 17px; height: 17px; }
 .rd-close:active { color: #c080ff; }
+
+/* ── Layout mode toggle (discoverability fix, design doc §7 signifier notes) ───────────
+   A 2-segment pill next to the lock/full/close cluster: signifier (highlights whichever
+   mode is ACTUALLY resolved right now) + override control (click sets an explicit mode). */
+.rd-layout-toggle {
+  display: flex; align-items: center; flex-shrink: 0;
+  background: #1c1430; border: 1px solid #2e2050; border-radius: 999px;
+  padding: 2px; gap: 2px;
+}
+.rd-layout-btn {
+  border: none; background: transparent; color: #8a76aa;
+  font-size: 0.62rem; padding: 3px 8px; border-radius: 999px; cursor: pointer;
+  white-space: nowrap; line-height: 1.3;
+}
+.rd-layout-btn.is-active { background: #4a2a7a; color: #f0e0ff; }
+.rd-layout-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* ── Pane lock toggle (CHG: drawer-workbench) ──────────────────────────────────────
    Mirrors the .rd-full / .rd-close header buttons. When LOCKED it turns accent-green so the

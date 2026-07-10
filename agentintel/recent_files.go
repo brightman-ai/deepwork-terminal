@@ -3,8 +3,9 @@ package agentintel
 import (
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
+
+	"github.com/brightman-ai/kit/transcript"
 )
 
 // RecentFilesCap bounds how many recently-touched files we surface. The drawer's
@@ -23,23 +24,10 @@ const (
 	codexProbeCap       = 40      // max Codex rollout heads probed when matching cwd
 )
 
-// editToolNames is the SSOT signal for "claude/codex 生成或修改的文件": tool_use
-// blocks whose name is a structured file-edit tool carrying input.file_path. Bash
-// is excluded on purpose (input.command 非结构化路径，易误判), per CHG-016 D2.
-var editToolNames = map[string]bool{
-	"Write":        true,
-	"Edit":         true,
-	"MultiEdit":    true,
-	"NotebookEdit": true,
-}
-
-// imageExts is the set of raster image extensions the drawer previews inline.
-// Mirrors imageContentType() in files.go — keep in step.
-var imageExts = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true,
-	".gif": true, ".webp": true, ".bmp": true,
-	".ico": true, ".avif": true,
-}
+// The edit-tool allowlist + image-ext rule that used to live here (editToolNames /
+// imageExts) is now the cross-repo SSOT in github.com/brightman-ai/kit/transcript
+// (TouchedPath) — shared with pro's share/owner touched view so the rule can't drift.
+// The kit set is the UNION (adds .svg; keeps .avif), a strict superset of the old.
 
 // RecentFile is one file an agent wrote/edited, attributed from a transcript
 // tool_use row. tsMs is the row timestamp (newest occurrence wins on dedup). Size
@@ -175,19 +163,18 @@ func claudeEditRowsFromFile(path, wantCWD string) []RecentFile {
 			if !ok {
 				continue
 			}
-			fp, _ := input["file_path"].(string)
-			if fp == "" {
+			// Edit-tool allowlist = the kit/transcript domain-rule SSOT (Write/Edit/
+			// MultiEdit/NotebookEdit via file_path; Read only for images; Bash excluded).
+			// The tail-window scan stays here for perf; only the RULE is shared so it can
+			// never drift from pro's share/owner touched view.
+			fp, ok := transcript.TouchedPath(name, input)
+			if !ok {
 				continue
 			}
 			tool := name
-			if editToolNames[name] {
-				// Write/Edit/MultiEdit/NotebookEdit — always include.
-			} else if name == "Read" && imageExts[strings.ToLower(filepath.Ext(fp))] {
-				// Read of an image file: agent just produced/inspected this image
-				// (e.g. simctl screenshot → Read). Surface it in the 图片 tab.
+			if name == "Read" {
+				// counted by the rule ⇒ it was an image Read → the 图片 tab.
 				tool = "read-image"
-			} else {
-				continue
 			}
 			out = append(out, RecentFile{
 				Path: fp,

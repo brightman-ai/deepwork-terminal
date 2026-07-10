@@ -272,11 +272,8 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     const paths: string[] = []
     for (const file of uploadFiles) {
       const mime = file.type || 'application/octet-stream'
-      const result = await clipboardPaste.uploadFile(file, mime, {
-        filename: file.name || uploadFallbackName(mime),
-        source,
-        trace,
-      })
+      const filename = file.name || uploadFallbackName(mime)
+      const result = await runUploadWithRetry(file, mime, filename, source, trace)
       if (result.savedPath) {
         paths.push(result.textForPTY)
         metrics.uploadFiles++
@@ -300,6 +297,45 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
 
     injectPaths(paths, source, trace)
     return true
+  }
+
+  /**
+   * Upload ONE file with a retry closure wired to the SAME upload→inject chokepoint
+   * the first attempt uses. useClipboardPaste only owns the raw HTTP call and can't
+   * build a meaningful retry by itself (it doesn't know about injection), so the
+   * retry is assembled HERE and handed down via PasteUploadOptions.retry — the
+   * upload float's 重试 button ultimately calls this.
+   *
+   * The first attempt shares the batch's `trace` (so its log lines correlate with
+   * the paste event that started it). A retry happens later, out of band from the
+   * batch call (which has likely already returned by the time the user notices the
+   * error and taps retry), so it gets its own fresh trace and — on success —
+   * injects its OWN single path immediately rather than joining `paths` above.
+   */
+  async function runUploadWithRetry(
+    file: File,
+    mime: string,
+    filename: string,
+    source: PasteSource,
+    trace: TraceContext,
+  ): Promise<import('./useClipboardPaste').PasteResult> {
+    const attempt = (attemptTrace: TraceContext, revealImmediately: boolean): Promise<import('./useClipboardPaste').PasteResult> =>
+      clipboardPaste.uploadFile(file, mime, {
+        filename,
+        source,
+        trace: attemptTrace,
+        revealImmediately,
+        retry: () => {
+          void (async () => {
+            const retryTrace = createTrace('terminal/clipboard')
+            const result = await attempt(retryTrace, true)
+            if (result.savedPath) {
+              injectPaths([result.textForPTY], source, retryTrace)
+            }
+          })()
+        },
+      })
+    return attempt(trace, false)
   }
 
   async function dedupeFilesForUpload(files: File[], source: PasteSource, trace: TraceContext): Promise<File[]> {
@@ -487,6 +523,9 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     uploadFilesFromInput,
     injectKnownPaths,
     metrics,
+    // SSOT for the upload-progress float — see useUploadProgress.ts. Read-only from
+    // the caller's perspective; every mutation happens inside useClipboardPaste.
+    uploads: clipboardPaste.uploads,
   }
 }
 

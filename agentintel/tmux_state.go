@@ -33,6 +33,10 @@ type TmuxPaneState struct {
 	// to — drives the "needs-you" dot. Distinct from AgentStatus==idle, which also
 	// covers a fresh pane that never ran a turn (not awaiting).
 	AwaitingUser bool `json:"awaitingUser,omitempty"`
+	// AwaitingSince: transcript time of the completion behind AwaitingUser (zero when not
+	// awaiting). Reload-proof (transcript-derived) → the frontend keys its per-window "seen"
+	// dismissal on it so a cleared dot stays cleared across F5 yet re-appears on a new turn.
+	AwaitingSince time.Time `json:"awaitingSince,omitempty"`
 }
 
 // TmuxWindowState is one window with its panes.
@@ -420,8 +424,18 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		}
 
 		ps := TmuxPaneState{
-			Index:  p.PaneIndex,
-			Active: p.Active,
+			Index: p.PaneIndex,
+			// Active = "this pane is focused WITHIN its window" (tmux #{pane_active}), NOT
+			// "this pane's window is the active window" (that's p.Active / TmuxWindowState.Active,
+			// the same value for every pane in the window). Pre-existing mix-up: every consumer
+			// (activeCwd/activeTool, useAgentOverview.windowCwd, and now the per-pane resource
+			// drawer's currentPaneKey) does `panes.find(p => p.active)` expecting the ONE truly
+			// focused pane in a split — wiring p.Active here made every pane in the active window
+			// report active:true, so `.find()` silently landed on whichever pane sorts first
+			// instead of the tmux-focused one. Harmless with one pane per window (the common case,
+			// which is why this went unnoticed); wrong the moment a window has a split. p.PaneActive
+			// (#{pane_active}) is the correct per-pane signal — already captured, just unused here.
+			Active: p.PaneActive,
 			PID:    p.PanePID,
 			CWD:    p.PaneCWD,
 			PaneID: p.PaneID,
@@ -434,6 +448,11 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			// reuses the driver Status() just updated, so no extra transcript read.
 			ps.AwaitingUser = ps.AgentStatus == StatusWaiting ||
 				(ps.AgentStatus == StatusIdle && s.paneMonitor.Awaiting(paneKey(p), p.PaneCWD, tool))
+			// Carry the reload-proof "completed at" so the frontend's seen-layer can tell
+			// THIS completion from the next one (reuses the driver just updated above).
+			if ps.AwaitingUser {
+				ps.AwaitingSince = s.paneMonitor.AwaitingSince(paneKey(p))
+			}
 			agentKeys[paneKey(p)] = true
 		}
 		winPanes[wk] = append(winPanes[wk], ps)

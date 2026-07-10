@@ -135,10 +135,26 @@ async function loadTree(rel: string): Promise<void> {
   }
 }
 
-// Breadcrumb segments of the current rel path (root + each dir), each clickable.
+// basename of an absolute path ('' / '/' → '/'). Used so the breadcrumb's root segment
+// reads as the actual anchored directory (e.g. "deepwork-terminal"), not a generic label.
+function baseName(path: string): string {
+  const trimmed = (path || '').replace(/\/+$/, '')
+  const i = trimmed.lastIndexOf('/')
+  return trimmed.slice(i + 1) || '/'
+}
+
+// Breadcrumb segments of the current rel path (root + each dir), each clickable. The root
+// segment (rel:'') labels the ANCHORED cwd itself (its basename, e.g. "deepwork-terminal")
+// rather than a generic "根目录" — the tree is always rooted at the active pane's real cwd
+// (see effectiveCwd → activeCwd → backend PaneCWD), never the filesystem root, so a fixed
+// "根目录" label read as "this is showing /" even when treeCwd correctly resolved to the
+// project dir (CHG: drawer-cwd-clearall S2 — the resolution chain was already correct; only
+// this label was misleading). Falls back to '根目录' only while treeCwd is still unknown
+// (first paint, before the initial /files/tree response lands).
 const crumbs = computed(() => {
   const segs = treeRel.value ? treeRel.value.split('/').filter(Boolean) : []
-  const out: { label: string; rel: string }[] = [{ label: '根目录', rel: '' }]
+  const rootLabel = treeCwd.value ? baseName(treeCwd.value) : '根目录'
+  const out: { label: string; rel: string }[] = [{ label: rootLabel, rel: '' }]
   let acc = ''
   for (const s of segs) {
     acc = acc ? `${acc}/${s}` : s
