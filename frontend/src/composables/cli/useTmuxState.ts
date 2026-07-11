@@ -211,6 +211,12 @@ function createStore(sessionId: () => string): TmuxStateStore {
   async function runRefreshClient(): Promise<void> {
     const id = sessionId()
     if (!id) return
+    // A tmux redraw only means something for a shell INSIDE a tmux client. A plain
+    // (non-tmux) shell has no client to refresh — the server returns 501 "refresh
+    // unsupported". CliTerminalSurface calls this on every alt-screen render, so
+    // without this gate a non-tmux session floods the server log with per-render
+    // 501s. Gate on attached: tmux users still get the ghosting resync unchanged.
+    if (!attached.value) return
     try {
       await cliFetch(cliApi(`/tmux/refresh?session=${encodeURIComponent(id)}`), { method: 'POST' })
     } catch { /* best-effort resync */ }
