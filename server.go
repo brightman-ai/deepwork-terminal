@@ -129,15 +129,18 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// CORS on the API so another deepwork-terminal instance's page (mesh remote terminal) can
 	// reach this one's REST cross-origin. Standalone only — when EMBEDDED the host owns headers.
 	root.Handle("/api/", corsMiddleware(http.StripPrefix("/api", s.mux)))
-	// /fresh — a bookmarkable cache-buster: redirect to "/" with a unique query so the
-	// browser can't reuse a stale cached index.html and loads the current build. A manual
-	// escape hatch alongside the no-cache index.html + the in-app auto-reloader; the user's
-	// existing query (e.g. ?auth=) is preserved.
-	root.HandleFunc("/fresh", func(w http.ResponseWriter, r *http.Request) {
+	// /fresh (or /refresh — both accepted, whichever the user types) — a bookmarkable
+	// cache-buster: redirect to "/" with a unique query so the browser can't reuse a
+	// stale cached index.html and loads the current build. A manual escape hatch
+	// alongside the no-cache index.html + the in-app auto-reloader; the user's existing
+	// query (e.g. ?auth=) is preserved.
+	freshRedirect := func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		q.Set("t", strconv.FormatInt(time.Now().UnixNano(), 10))
 		http.Redirect(w, r, "/?"+q.Encode(), http.StatusFound)
-	})
+	}
+	root.HandleFunc("/fresh", freshRedirect)
+	root.HandleFunc("/refresh", freshRedirect)
 	root.Handle("/", spa.Handler())
 
 	// Production security headers on every standalone response (API + SPA). The terminal
