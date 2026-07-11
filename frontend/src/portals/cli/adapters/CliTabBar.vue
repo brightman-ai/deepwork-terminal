@@ -91,6 +91,18 @@
       <slot name="tab-trailing" />
     </div>
 
+    <!-- Auto-update pill — appears ONLY when a newer build is live (zero footprint otherwise).
+         Trails the usage chip; one tap clears client caches + hard-reloads onto the new build.
+         This is the fix for "the tab keeps showing an old build after a redeploy". -->
+    <button
+      v-if="updateAvailable"
+      class="cli-tab-bar__update"
+      type="button"
+      data-testid="cli-portal-update"
+      title="有新版本 — 点此清缓存并重新加载"
+      @click="applyUpdate"
+    ><RefreshCw :size="13" /><span>有更新</span></button>
+
     <!-- Spacer pushes the top-right chrome cluster hard against the right edge. -->
     <div class="cli-tab-bar__spacer" />
     <!-- SSOT top-right chrome cluster. ONE flex row owns this corner so nothing here can overlap
@@ -114,7 +126,7 @@
         type="button"
         data-testid="cli-portal-refresh"
         title="刷新（PWA 无 F5）"
-        @click="onRefresh"
+        @click="applyUpdate"
       ><RefreshCw :size="14" /></button>
       <!-- Host-provided status widget (standalone mounts the UsageChip here via CliPortal). -->
       <slot name="status" />
@@ -130,6 +142,11 @@ import { RefreshCw, Monitor, Server } from 'lucide-vue-next'
 import type { WorkbenchGroup } from '@terminal/types/workbench'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
+
+// Auto-update detection: surfaces the "有更新" pill when a newer build is deployed, and
+// owns the shared clear-and-reload used by the pill + PWA refresh button + HelpCenter.
+const { updateAvailable, applyUpdate } = useAppUpdate()
 
 interface TabRuntime {
   agentState: { status?: string } | null
@@ -207,29 +224,8 @@ const isPWA = computed(
     (window.matchMedia?.('(display-mode: standalone)').matches === true ||
       (window.navigator as { standalone?: boolean }).standalone === true),
 )
-async function onRefresh(): Promise<void> {
-  // Belt-and-suspenders force-fresh for a wedged PWA:
-  //   1. Drop any Cache Storage — a LEGACY caching service worker (an older build) may have
-  //      precached the app shell and would otherwise keep shadowing the new build.
-  //   2. Push every registered SW to update (update(), not unregister — keeps the push
-  //      subscription alive).
-  //   3. Navigate to /fresh, which the server 302-redirects to /?t=<unixnano> — a unique URL
-  //      no cache can satisfy, so the no-cache index.html (+ its new hashed assets) is always
-  //      fetched live. The current query (auth) is preserved.
-  try {
-    if (window.caches) {
-      const keys = await caches.keys()
-      await Promise.all(keys.map((k) => caches.delete(k)))
-    }
-    if (navigator.serviceWorker?.getRegistrations) {
-      const regs = await navigator.serviceWorker.getRegistrations()
-      for (const r of regs) { void r.update() }
-    }
-  } catch {
-    /* best-effort — never block the reload on a cache-clear failure */
-  }
-  window.location.replace('/fresh' + window.location.search)
-}
+// The force-fresh clear-and-reload lives in useAppUpdate.applyAppUpdate() now (SSOT for the
+// PWA refresh button, the auto-update pill, and HelpCenter's manual entry).
 
 function tabDotClass(tabId: string): string {
   const rt = props.tabRuntimes[tabId]
@@ -262,6 +258,32 @@ function tabNeedsInput(tabId: string): boolean {
 }
 .cli-tab-bar__refresh:hover { color: hsl(var(--foreground)); }
 .cli-tab-bar__refresh:active { transform: scale(0.92); }
+
+/* Auto-update pill — rare, so it should catch the eye when it appears (soft slide-in). */
+.cli-tab-bar__update {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 999px;
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  animation: cli-update-in 0.24s ease;
+}
+.cli-tab-bar__update:hover { background: hsl(var(--accent) / 0.8); }
+.cli-tab-bar__update:active { transform: scale(0.96); }
+@keyframes cli-update-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
 
 .cli-tab-bar {
   display: flex;
