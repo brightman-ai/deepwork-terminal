@@ -55,6 +55,7 @@ type ClaudeDriver struct {
 	reader    *JSONLReader
 	usage     *UsageAccumulator
 	state     ClaudeSessionState
+	agentTree claudeAgentTree // subagent ("Agent" tool) spawn tree — see claude_agent_tree.go
 }
 
 // NewClaudeDriver creates a driver for the given JSONL path. sessionID is used as
@@ -65,12 +66,13 @@ func NewClaudeDriver(jsonlPath, sessionID string) *ClaudeDriver {
 		reader:    NewJSONLReader(jsonlPath),
 		usage:     NewUsageAccumulator(),
 		state:     ClaudeSessionState{Status: StatusIdle},
+		agentTree: newClaudeAgentTree(jsonlPath),
 	}
 }
 
 // Update reads new JSONL lines and updates state.
 func (cd *ClaudeDriver) Update() error {
-	return cd.reader.ReadNewFunc(func(row map[string]any) bool {
+	err := cd.reader.ReadNewFunc(func(row map[string]any) bool {
 		rowType, _ := row["type"].(string)
 		now := time.Now()
 
@@ -192,8 +194,28 @@ func (cd *ClaudeDriver) Update() error {
 		}
 
 		cd.state.UpdatedAt = now
+		cd.agentTree.scanRow(row, "", 0)
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	cd.advanceAgentReaders()
+	return nil
+}
+
+// AgentTree returns the current snapshot of the subagent ("Agent" tool) spawn
+// tree parsed from this session's transcript — and, recursively, from each
+// spawned agent's own transcript file (see claude_agent_tree.go for the
+// schema this is based on). The result is a flat slice; reconstruct the tree
+// via ParentID. Order is spawn-discovery order (stable across calls). Empty
+// when no Agent tool has been used in this session.
+func (cd *ClaudeDriver) AgentTree() []AgentNode {
+	out := make([]AgentNode, 0, len(cd.agentTree.order))
+	for _, id := range cd.agentTree.order {
+		out = append(out, *cd.agentTree.nodes[id])
+	}
+	return out
 }
 
 // State returns the current derived state.
