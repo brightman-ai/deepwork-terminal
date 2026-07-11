@@ -36,6 +36,10 @@ func (s *Server) handleGetWorkbench(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// Explicit 200: same gin-NoRoute-404 embed trap as handleGetStore — a bare Write
+	// would ship the workbench body with a 404 status under deepwork-pro, silently
+	// dropping the saved per-pane workbench layout on 8087.
+	w.WriteHeader(http.StatusOK)
 	w.Write(data) //nolint:errcheck
 }
 
@@ -92,10 +96,19 @@ func (s *Server) handleGetStore(w http.ResponseWriter, r *http.Request) {
 	storeMu.Unlock()
 	if data == nil {
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}")) //nolint:errcheck
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// Explicit 200 is REQUIRED, not cosmetic: when embedded in deepwork-pro this
+	// handler is reached via gin's NoRoute forward, and gin's serveError pre-sets the
+	// response status to 404 before running the forwarded handler. A bare w.Write
+	// (no WriteHeader) then flushes with that 404 — so the client got the store BODY
+	// but a 404 STATUS, and fetchStore() discarded it as a failed load → remotePeers
+	// came back empty → every remote tab showed "该远程配置已被删除". Standalone hid this
+	// (its mux defaults to 200). See handleSaveStore, which already sets 204.
+	w.WriteHeader(http.StatusOK)
 	w.Write(data) //nolint:errcheck
 }
 
