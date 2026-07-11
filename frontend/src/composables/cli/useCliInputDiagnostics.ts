@@ -288,7 +288,11 @@ export function useCliTerminalInputTelemetry(options: CliTerminalInputTelemetryO
     }
 
     if (!sawSubmit && !sawControl && shouldLogTextFrame(text, data)) {
-      log.info('cli.input.text_frame', {
+      // debug, not info: this fires per keystroke frame. At info it shipped to the
+      // server telemetry log (minRemoteLevel=INFO) and flooded it (160MB / ~2 lines
+      // per keypress). debug stays in the browser console for live input debugging
+      // but is not persisted server-side. Raise minRemoteLevel/log level to capture.
+      log.debug('cli.input.text_frame', {
         surface: options.surface,
         session_id: options.sessionId?.(),
         route,
@@ -349,7 +353,8 @@ export function useCliTerminalInputTelemetry(options: CliTerminalInputTelemetryO
     outputLogsLeft--
     outputLastLogAt = Date.now()
     outputOccurrences = windowOccurrences
-    log.info('cli.output.after_submit', {
+    // debug, not info — per-output-chunk diagnostic; see cli.input.text_frame note.
+    log.debug('cli.output.after_submit', {
       surface: options.surface,
       session_id: options.sessionId?.(),
       route,
@@ -376,7 +381,8 @@ export function useCliTerminalInputTelemetry(options: CliTerminalInputTelemetryO
   }
 
   function emitControl(route: string, data: Uint8Array, code: number): void {
-    log.info('cli.input.control_frame', {
+    // debug, not info — per control-key frame; see cli.input.text_frame note.
+    log.debug('cli.input.control_frame', {
       surface: options.surface,
       session_id: options.sessionId?.(),
       route,
