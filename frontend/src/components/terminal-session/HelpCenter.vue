@@ -13,9 +13,10 @@
  */
 import { onMounted, onUnmounted, ref, computed, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import { HelpCircle, X, ClipboardCopy, Play, Check, Sparkles } from 'lucide-vue-next'
+import { HelpCircle, X, ClipboardCopy, Play, Check, Sparkles, RefreshCw } from 'lucide-vue-next'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { applyAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const { cliFetch } = useCliAuth()
@@ -259,6 +260,15 @@ onUnmounted(() => window.removeEventListener('keydown', onFirstKey))
           <a class="help-link" href="https://github.com/brightman-ai/deepwork-terminal/blob/main/README_CN.md" target="_blank" rel="noopener">
             deepwork-terminal 使用文档（README_CN） →
           </a>
+        </section>
+
+        <!-- 4) Troubleshooting — force refresh onto the latest build -->
+        <section class="help-sec">
+          <h3>页面异常 / 看到旧版本？</h3>
+          <button class="help-btn primary" data-testid="help-force-refresh" @click="applyAppUpdate">
+            <RefreshCw :size="13" /> 强制刷新（清缓存重载）
+          </button>
+          <p class="help-note">清客户端缓存 + 唯一 URL 重新加载到最新版本 —— 普通 F5 有时清不掉旧构建。</p>
         </section>
 
         <p v-if="toast" class="help-toast">{{ toast }}</p>
