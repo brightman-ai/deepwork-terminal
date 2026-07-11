@@ -154,30 +154,32 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 	hashHex := hex.EncodeToString(hash[:8])
 
 	// Dedup check.
-	if existing := findDuplicateClipboard(hourDir, hashHex); existing != "" {
+	if existing := findDuplicateClipboard(hourDir, hashHex, data); existing != "" {
 		terminalClipboardUploadsTotal.Inc()
 		terminalClipboardUploadBytes.Add(uint64(len(data)))
 		terminalClipboardUploadDuration.Observe(time.Since(start).Seconds())
 		return existing, nil
 	}
 
-	// Build filename.
+	// Build filename. Preserve the original name for any real copied file (image or
+	// not); only a nameless bitmap falls through to the synthetic hash name. Mirrors
+	// handleClipboardPasteUpload in clipboard_paste.go (shared isGenericClipboardName).
 	var saveName string
-	if isImageExt(ext) {
+	origName := sanitizeClipboardFilename(filename)
+	switch {
+	case !isGenericClipboardName(origName):
+		saveName = uniqueClipboardFilename(hourDir, origName, hashHex)
+	case isImageExt(ext):
 		seq := nextClipboardSeq(id)
 		if ext == "" {
 			ext = ".bin"
 		}
 		saveName = fmt.Sprintf("%s%03d-%s%s", now.Format("1504"), seq, hashHex, ext)
-	} else {
-		saveName = sanitizeClipboardFilename(filename)
-		if saveName == "" || saveName == "blob" {
-			if ext == "" {
-				ext = ".bin"
-			}
-			saveName = "upload" + ext
+	default:
+		if ext == "" {
+			ext = ".bin"
 		}
-		saveName = uniqueClipboardFilename(hourDir, saveName, hashHex)
+		saveName = uniqueClipboardFilename(hourDir, "upload"+ext, hashHex)
 	}
 
 	savePath := filepath.Join(hourDir, saveName)

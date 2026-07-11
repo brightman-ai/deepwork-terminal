@@ -78,12 +78,28 @@ export function useClipboardPaste(sessionId: () => string) {
 
     const isLocal = detectIsLocal()
 
+    // Read text/uri-list eagerly — synchronously, BEFORE any await — so the image
+    // branch below can recover a copied file's original name from it without touching
+    // a possibly-neutered DataTransferItemList after the first await. Some platforms
+    // only expose the real filename via the file:// URI, not on the image blob.
+    let uriListPromise: Promise<string> | null = null
+    for (const item of items) {
+      if (item.type === 'text/uri-list') { uriListPromise = getItemAsString(item); break }
+    }
+
     // Priority 1: Check for image
     for (const item of items) {
       if (item.type.startsWith('image/')) {
         const blob = item.getAsFile()
         if (!blob) continue
-        return await uploadImage(blob, item.type, isLocal)
+        // Preserve the ORIGINAL filename when the user copied an image FILE. The File
+        // carries it on most platforms; else recover the basename from the file:// URI.
+        // A true nameless bitmap (screenshot) has neither → the clipboard.<ext>
+        // placeholder tells the server to synthesize a hash name. Previously this
+        // path always sent "clipboard.png", so "foo.png" was lost before upload.
+        const uriName = uriListPromise ? basenameFromUri(await uriListPromise) : undefined
+        const filename = firstRealName([(blob as File).name, uriName]) || `clipboard.${extFromMime(item.type)}`
+        return await uploadFile(blob, item.type, { filename, source: 'paste-image' })
       }
     }
 
@@ -241,7 +257,10 @@ export function useClipboardPaste(sessionId: () => string) {
   /** Upload image blob to server, return path for PTY injection. Exposed for direct use. */
   async function uploadImage(blob: Blob, mime: string, isLocal?: boolean): Promise<PasteResult> {
     void isLocal
-    return uploadFile(blob, mime, { filename: `clipboard.${extFromMime(mime)}`, source: 'legacy-image' })
+    // Keep the image's real filename when it has one (a copied file); fall back to
+    // the clipboard.<ext> placeholder only for a nameless bitmap.
+    const filename = firstRealName([(blob as File).name]) || `clipboard.${extFromMime(mime)}`
+    return uploadFile(blob, mime, { filename, source: 'legacy-image' })
   }
 
   return { processPaste, uploadFile, uploadImage, uploading, lastError, uploads: uploadProgress.entries }
@@ -289,6 +308,31 @@ function uploadFilename(blob: Blob, mime: string, explicit?: string): string {
   const fileName = explicit || ((blob as File).name || '')
   if (fileName && fileName !== 'blob') return fileName
   return `clipboard.${extFromMime(mime)}`
+}
+
+/** First candidate that looks like a real user filename — not empty, not the "blob"
+ * placeholder, not a browser-generated nameless-bitmap name ("image.png") or our own
+ * "clipboard.<ext>". Mirrors the server's isGenericClipboardName so both ends agree
+ * on which names get preserved vs synthesized. */
+function firstRealName(candidates: (string | undefined)[]): string | undefined {
+  for (const c of candidates) {
+    const n = (c || '').trim()
+    if (!n) continue
+    const lower = n.toLowerCase()
+    if (lower === 'blob') continue
+    const stem = lower.replace(/\.[^.]*$/, '')
+    if (stem === 'image' || stem === 'clipboard') continue
+    return n
+  }
+  return undefined
+}
+
+/** Basename of the first file:// path in a text/uri-list payload, if any. */
+function basenameFromUri(uriText: string): string | undefined {
+  const paths = extractFilePaths(uriText)
+  if (paths.length === 0) return undefined
+  const base = paths[0].split('/').pop()?.split('\\').pop()
+  return base || undefined
 }
 
 /** Extract file paths from text/uri-list (one URI per line, skip comments) */

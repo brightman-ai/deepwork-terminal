@@ -138,7 +138,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// Hash dedup: if identical to the most recent file, return existing path
 	hash := sha256.Sum256(data)
 	hashHex := hex.EncodeToString(hash[:8]) // short hash for comparison
-	if existing := findDuplicateClipboard(sessionDir, hashHex); existing != "" {
+	if existing := findDuplicateClipboard(sessionDir, hashHex, data); existing != "" {
 		// Resolve the dedup path against the SAME base as the fresh-save branch below
 		// (the live active-pane `cwd`), NOT the session's static launch dir. A PC paste
 		// uploads the same bytes twice — once saved, once deduped — and if the two
@@ -173,18 +173,22 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Filename: images get seq+hash, files keep original name
+	// Filename policy: preserve the ORIGINAL name whenever the user copied a real
+	// file (image OR other) — the name carries meaning the agent and the human read
+	// back off the injected @path. Only a NAMELESS bitmap (screenshot / "Copy Image",
+	// whose name arrives as a browser placeholder like "image.png"/"clipboard.png")
+	// falls through to the synthetic {HHmm}{seq}-{hash} name, since there is no
+	// original to keep. Previously ALL images got the hash name, losing "foo.png".
 	var filename string
-	if isImage {
+	origName := sanitizeClipboardFilename(header.Filename)
+	switch {
+	case !isGenericClipboardName(origName):
+		filename = uniqueClipboardFilename(sessionDir, origName, hashHex)
+	case isImage:
 		seq := nextClipboardSeq(id)
 		filename = fmt.Sprintf("%s%03d-%s%s", now.Format("1504"), seq, hashHex, ext)
-	} else {
-		// Preserve original filename for uploaded files
-		origName := sanitizeClipboardFilename(header.Filename)
-		if origName == "" || origName == "blob" {
-			origName = "upload" + ext
-		}
-		filename = uniqueClipboardFilename(sessionDir, origName, hashHex)
+	default:
+		filename = uniqueClipboardFilename(sessionDir, "upload"+ext, hashHex)
 	}
 	savePath := filepath.Join(sessionDir, filename)
 
@@ -333,6 +337,22 @@ func sanitizeClipboardFilename(name string) string {
 	return name
 }
 
+// isGenericClipboardName reports whether a pasted filename is a browser-generated
+// placeholder for a NAMELESS clipboard bitmap (a screenshot or "Copy Image") rather
+// than a real file the user copied. A real name is preserved as-is; a generic one
+// lets an image fall through to the synthetic {time}{seq}-{hash} name. Recognized
+// placeholders: empty, "blob", and any "image.*" / "clipboard.*" (Chrome pastes raw
+// bitmaps as "image.png"; our own web client sends "clipboard.<ext>"). "screenshot.png"
+// et al. are treated as REAL names — a user may legitimately copy such a file.
+func isGenericClipboardName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" || lower == "blob" {
+		return true
+	}
+	stem := strings.TrimSuffix(lower, filepath.Ext(lower))
+	return stem == "image" || stem == "clipboard"
+}
+
 func uniqueClipboardFilename(dir, name, hashHex string) string {
 	if name == "" {
 		return ""
@@ -356,17 +376,42 @@ func nextClipboardSeq(sessionID string) int64 {
 	return counter.Add(1)
 }
 
-// findDuplicateClipboard checks if a file with the same hash already exists in the directory.
-// Filename format includes hash: {HHmm}{seq}-{hash8}.{ext}
-func findDuplicateClipboard(dir string, hashHex string) string {
+// findDuplicateClipboard checks if a file with the same content already exists in
+// the directory, returning its path (or "" if none). Content-based, NOT purely
+// filename-based: a synthetic image name embeds the hash ({HHmm}{seq}-{hash8}.{ext})
+// so a filename match is the fast path, but a PRESERVED original name ("foo.png")
+// does not — so we fall back to comparing by size then full content hash. Without
+// this, a single PC paste (which uploads the same bytes twice) would fail to dedup a
+// named file and inject two @references for one image.
+func findDuplicateClipboard(dir string, hashHex string, data []byte) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
 	// Check most recent files first (reverse order)
 	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].IsDir() {
+			continue
+		}
 		name := entries[i].Name()
+		if strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		// Fast path: synthetic names carry the hash in the filename.
 		if strings.Contains(name, "-"+hashHex+".") {
+			return filepath.Join(dir, name)
+		}
+		// Content path (preserved original names): size pre-filter, then hash.
+		info, err := entries[i].Info()
+		if err != nil || info.Size() != int64(len(data)) {
+			continue
+		}
+		existing, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		h := sha256.Sum256(existing)
+		if hex.EncodeToString(h[:8]) == hashHex {
 			return filepath.Join(dir, name)
 		}
 	}
