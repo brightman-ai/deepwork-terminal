@@ -59,5 +59,9 @@ export function useServerStore() {
     }, 500)
   }
 
-  return { load, get, set }
+  // isHydrated reports whether a load() actually succeeded (vs failed/never-run).
+  // Consumers must distinguish "store loaded and this key is genuinely absent" from
+  // "store never loaded" — e.g. useRemotePeers must not render a tab's peer as DELETED
+  // just because a failed GET left the registry empty.
+  return { load, get, set, isHydrated: () => hydrated }
 }

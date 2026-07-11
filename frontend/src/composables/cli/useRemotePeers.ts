@@ -69,6 +69,12 @@ export function useRemotePeers() {
 
   async function loadPeers(): Promise<void> {
     await store.load()
+    // If the store didn't actually load (e.g. GET /store failed), do NOT mark the peer
+    // registry hydrated or overwrite it with an empty list — that made every remote tab
+    // resolve to "该远程配置已被删除" until reload. Stay un-hydrated so a later loadPeers()
+    // retries once the store is reachable. (Root cause was a 404-status GET; this is the
+    // defense so any future store failure degrades to "connecting", not "deleted".)
+    if (!store.isHydrated()) return
     const raw = store.get<RemotePeer[]>(PEERS_KEY, [])
     peers.value = Array.isArray(raw) ? raw : []
     hydrated = true
@@ -136,6 +142,14 @@ export function useRemotePeers() {
     }
     const peer = getPeer(tab.remotePeerId)
     if (!peer) {
+      // Distinguish "registry not loaded yet" from "peer genuinely deleted". Before a
+      // successful hydrate the peer is simply UNKNOWN — showing "已被删除" then (and
+      // connecting nowhere) is the false alarm the user hit on F5. Report a benign
+      // pending state: no error banner, empty authToken so callers skip connecting.
+      // surfaceTabs is reactive on peers.value, so it re-resolves once peers load.
+      if (!hydrated) {
+        return { isRemote: true, httpBase: '', wsBase: '', authToken: '', machineLabel: '远程(连接中…)', error: '' }
+      }
       return { isRemote: true, httpBase: '', wsBase: '', authToken: '', machineLabel: '远程(已失效)', error: '该远程配置已被删除' }
     }
     const isHttps = typeof location !== 'undefined' && location.protocol === 'https:'
