@@ -156,12 +156,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// can't enumerate peer hosts ahead of time, so connect-src allows the needed schemes. Tradeoff:
 	// looser XSS-exfiltration defense — acceptable for a tool that already grants full shell access;
 	// every other directive stays strict. (Built inline to keep the change in this repo, not kit.)
-	// script-src adds 'wasm-unsafe-eval' so the markdown reader's graphviz/dot renderer
-	// (@hpcc-js/wasm) can instantiate its WebAssembly module; Chrome blocks WASM compile under a
-	// bare 'self'. It grants WASM instantiation only, NOT JS eval()/new Function() — a much
-	// narrower relaxation. (mermaid is pure JS and needs none of this.) NOTE: the EMBEDDED host
-	// (pro, :8087) owns its own CSP header — it must add the same token for graphviz to render there.
-	const meshCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+	const meshCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:; " +
 		"worker-src 'self'; manifest-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; " +
 		"frame-ancestors 'self'; form-action 'self'"
@@ -288,9 +283,6 @@ func (s *Server) registerRoutes() {
 	// so BOTH standalone (:18074, StripPrefix "/api") AND pro-embed (:8087, StripPrefix
 	// "/api/cli") render the same UsageChip from one backend — no per-shell fork.
 	s.mux.HandleFunc("GET /usage/quota", wrap(s.handleUsageQuota))
-	// POST, not GET: this one has a side effect (a real provider request), and only the user
-	// pressing 刷新 may trigger it — never a poll.
-	s.mux.HandleFunc("POST /usage/quota/refresh", wrap(s.handleUsageQuotaRefresh))
 	s.mux.HandleFunc("GET /usage/report", wrap(s.handleUsageReport))
 }
 
