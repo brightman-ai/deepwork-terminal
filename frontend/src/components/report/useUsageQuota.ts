@@ -113,6 +113,14 @@ export function useUsageQuota() {
         method: 'POST',
         headers: { Accept: 'application/json' },
       })
+      // A host that predates the probe endpoint simply has nothing to ask with. Fall back to
+      // re-reading what the runtimes wrote — the same thing the poll does — rather than
+      // reporting a failure the user can do nothing about.
+      if (res.status === 404 || res.status === 405) {
+        await load()
+        probeNote.value = '此服务端不支持实时查询，显示的是运行时最后一次上报的读数'
+        return
+      }
       if (!res.ok) { error.value = `刷新失败 (${res.status})`; return }
       const d = (await res.json()) as { quotas?: RuntimeQuota[]; probe?: ProbeResult[] }
       apply(d)
