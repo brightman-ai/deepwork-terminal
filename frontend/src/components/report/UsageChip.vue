@@ -37,12 +37,6 @@ const { quotas, subscriptions, apiRuntimes, hasSubscription, hasApi, tightest, l
 
 const open = ref(false)
 const wrapRef = ref<HTMLElement | null>(null)
-// A ticking clock so every "更新于 …" recomputes on its own. Ages were rendered from a number
-// the BACKEND computed at fetch time and then frozen, so a tab left open for ten minutes kept
-// insisting the reading was taken 「刚刚」. The age is now derived from the reading's absolute
-// timestamp against a clock that actually moves.
-const now = ref(Date.now())
-let clock: ReturnType<typeof setInterval> | undefined
 // Fixed viewport coords for the teleported popover (see toggle). Left-anchored to the chip and
 // clamped clear of the left nav rail + right edge, so it never hides under either.
 const popPos = ref({ top: 0, left: 0 })
@@ -147,40 +141,48 @@ const pillTitle = computed(() =>
 )
 
 // ── formatting ───────────────────────────────────────────────────────────────────────────
-// The reset time is shown as a WALL CLOCK, not a countdown ("23:08 重置", not "2h 后重置").
-// A countdown forces the reader to do arithmetic against a number that is itself rounded,
-// and it reads as an estimate; the runtime gives us an exact instant, so we show the instant.
-function fmtReset(iso?: string): string {
-  if (!iso) return ''
-  const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return ''
-  const now = new Date()
-  if (at.getTime() < now.getTime() - 120_000) return '已重置' // reading predates its own reset
+// EVERY time in this popover is an absolute wall clock. Never a countdown, never an age.
+//
+// A relative time ("27 分钟前", "2h 后重置") is a value that DECAYS: the moment it is painted
+// it starts drifting from the truth, and keeping it honest costs a periodic re-render forever.
+// We already shipped that bug once — the age was computed by the backend at fetch time and then
+// frozen, so a tab left open kept insisting the reading was taken 「刚刚」. An instant cannot
+// rot: "22:07" is as true an hour later as it was when painted, and it needs no clock at all.
+//
+// clockLabel renders one instant relative to today's date, so the common case stays short.
+function clockLabel(at: Date, now: Date): string {
   const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
   const days = Math.round(
     (new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() -
       new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86_400_000,
   )
-  if (days <= 0) return `${hhmm} 重置`
+  if (days === 0) return hhmm
   if (days === 1) return `明天 ${hhmm}`
+  if (days === -1) return `昨天 ${hhmm}`
   return `${at.getMonth() + 1}/${at.getDate()} ${hhmm}`
 }
-// Age is measured from the reading's own absolute timestamp against a moving clock — NOT from
-// the age the backend computed at fetch time (which freezes the moment the response lands, so a
-// tab open for ten minutes keeps claiming 「刚刚」 forever).
-function fmtAgeAt(iso?: string): string {
+
+// When a quota window resets.
+function fmtReset(iso?: string): string {
   if (!iso) return ''
-  const t = new Date(iso).getTime()
-  if (Number.isNaN(t)) return ''
-  const sec = Math.max(0, Math.round((now.value - t) / 1000))
-  if (sec < 90) return '刚刚'
-  if (sec < 3600) return `${Math.round(sec / 60)} 分钟前`
-  if (sec < 86400) return `${Math.round(sec / 3600)} 小时前`
-  return `${Math.round(sec / 86400)} 天前`
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return ''
+  const nowDate = new Date()
+  if (at.getTime() < nowDate.getTime() - 120_000) return '已重置' // reading predates its own reset
+  const label = clockLabel(at, nowDate)
+  return label.length <= 5 ? `${label} 重置` : label // "23:08 重置" / "明天 02:20"
 }
-// How long ago THIS CLIENT last got an answer — a separate fact from when the runtime last
-// reported, and the one that was silently lying before.
-const fetchedAgo = computed(() => (fetchedAt.value ? fmtAgeAt(new Date(fetchedAt.value).toISOString()) : ''))
+
+// When a reading was taken / when this client last got an answer. Both are instants, so both
+// are shown as instants.
+function fmtAt(iso?: string): string {
+  if (!iso) return ''
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return ''
+  return clockLabel(at, new Date())
+}
+// When THIS CLIENT last got an answer — a separate fact from when the runtime last reported.
+const fetchedAtLabel = computed(() => (fetchedAt.value ? fmtAt(new Date(fetchedAt.value).toISOString()) : ''))
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
   if (q.health?.ok) return ''
@@ -217,7 +219,6 @@ function prefetchAll(): void {
 // number you were staring at could be a minute (or, in a throttled background tab, many
 // minutes) out of date. If you are looking at it, we go and ask.
 function refresh(): void {
-  now.value = Date.now()
   void load()
   prefetchAll()
 }
@@ -253,7 +254,6 @@ function toggle() {
 // 60s poll simply does not run while you are away. Re-ask on the way back in.
 function onVisible(): void {
   if (document.visibilityState !== 'visible') return
-  now.value = Date.now()
   void load()
   if (open.value) prefetchAll()
 }
@@ -264,14 +264,14 @@ onMounted(() => {
   void load()
   // The pill can show today's API spend, so an API-only user needs the report before opening.
   void rep24h.load('24h')
-  timer = setInterval(() => void load(), 60000) // background poll; the real freshness comes from the events above
-  clock = setInterval(() => (now.value = Date.now()), 30000) // keeps every 「更新于 …」 honest
+  // The ONLY periodic work left. Every rendered time is an absolute instant, so nothing decays
+  // between polls and no second timer is needed to keep the text honest.
+  timer = setInterval(() => void load(), 60000)
   document.addEventListener('visibilitychange', onVisible)
   window.addEventListener('focus', onVisible)
 })
 onUnmounted(() => {
   clearInterval(timer)
-  clearInterval(clock)
   document.removeEventListener('visibilitychange', onVisible)
   window.removeEventListener('focus', onVisible)
 })
@@ -314,7 +314,7 @@ onUnmounted(() => {
 
             <!-- No reading at all: say so plainly. Never a fabricated 0%/100% bar. -->
             <div v-if="!q.windows?.length" class="uchip-dim uchip-note">{{ q.note || '暂无额度数据' }}</div>
-            <div v-if="q.snapshot" class="uchip-dim uchip-note">额度更新于 {{ fmtAgeAt(q.snapshot.captured_at) }}</div>
+            <div v-if="q.snapshot" class="uchip-dim uchip-note">额度更新于 {{ fmtAt(q.snapshot.captured_at) }}</div>
           </div>
           <div v-if="!subscriptions.length" class="uchip-dim uchip-empty">未检出官方订阅账号</div>
           <div class="uchip-sep" />
@@ -369,7 +369,7 @@ onUnmounted(() => {
         <div v-else class="uchip-dim uchip-loading">{{ activeReport?.reason || '用量数据不可用' }}</div>
 
         <div class="uchip-refresh">
-          <span class="uchip-dim">{{ fetchedAgo ? `拉取于 ${fetchedAgo}` : '' }}</span>
+          <span class="uchip-dim">{{ fetchedAtLabel ? `拉取于 ${fetchedAtLabel}` : '' }}</span>
           <button type="button" :disabled="loading" @click="refresh">{{ loading ? '刷新中…' : '⟳ 刷新' }}</button>
         </div>
       </div>
