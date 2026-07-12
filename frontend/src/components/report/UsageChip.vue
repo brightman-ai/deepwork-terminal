@@ -33,7 +33,10 @@ import Spark from './Spark.vue'
 defineProps<{ showDetail?: boolean }>()
 const emit = defineEmits<{ (e: 'detail'): void }>()
 
-const { quotas, subscriptions, apiRuntimes, hasSubscription, hasApi, tightest, loaded, loading, fetchedAt, load } = useUsageQuota()
+const {
+  quotas, subscriptions, apiRuntimes, hasSubscription, hasApi, tightest,
+  loaded, loading, fetchedAt, probeNote, load, probe,
+} = useUsageQuota()
 
 const open = ref(false)
 const wrapRef = ref<HTMLElement | null>(null)
@@ -183,6 +186,15 @@ function fmtAt(iso?: string): string {
 }
 // When THIS CLIENT last got an answer — a separate fact from when the runtime last reported.
 const fetchedAtLabel = computed(() => (fetchedAt.value ? fmtAt(new Date(fetchedAt.value).toISOString()) : ''))
+// Where a reading came from. Only worth naming when it changes what the user should EXPECT:
+// a rollout reading moves only when the runtime writes one (so refreshing may well change
+// nothing), whereas a probe is us having gone and asked. The hook is claude's only channel,
+// so naming it would be noise.
+function sourceLabel(source?: string): string {
+  if (source === 'probe') return '实时查询'
+  if (source === 'rollout') return '由 Codex 上报'
+  return ''
+}
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
   if (q.health?.ok) return ''
@@ -214,12 +226,19 @@ function prefetchAll(): void {
   void rep30d.load('30d')
 }
 
-// refresh pulls EVERYTHING the popover shows. The quota used to be refreshed only by the 60s
-// background timer — so opening the popover showed you whatever that timer last saw, and the
-// number you were staring at could be a minute (or, in a throttled background tab, many
-// minutes) out of date. If you are looking at it, we go and ask.
-function refresh(): void {
+// Opening the popover re-reads what the runtimes have written. Cheap, no provider request.
+function reload(): void {
   void load()
+  prefetchAll()
+}
+
+// The ⟳ button goes further: it ASKS the provider. Re-reading the disk cannot always help —
+// codex only records the limit family of the model it is currently running, so while a session
+// works on a per-model plan the ACCOUNT limit stops being written, and its newest reading can
+// be hours old no matter how often you poll. That is why 刷新 used to move nothing.
+// One real provider request, only ever on this click.
+function refresh(): void {
+  void probe()
   prefetchAll()
 }
 
@@ -231,7 +250,7 @@ function gotoFullReport(): void {
 function toggle() {
   open.value = !open.value
   if (!open.value) return
-  refresh()
+  reload()
   // Position the (teleported, fixed) popover under the chip. Anchor its LEFT to the chip, then
   // clamp: clear of the left nav rail on desktop, and clear of the right edge everywhere — an
   // absolute+right:0 popover gets trapped in the topbar's stacking context and covered by the
@@ -305,16 +324,30 @@ onUnmounted(() => {
               <span v-if="q.snapshot?.stale" class="uchip-badge stale">数据已过期</span>
             </div>
 
-            <div v-for="w in q.windows" :key="w.kind" class="uchip-win" :class="{ dim: q.snapshot?.stale }">
+            <!-- An expired window's number is not stale — it is WRONG (the counter rolled over
+                 since we read it). So we do not paint it: no bar, no percentage. Saying「已重置 ·
+                 等待新数据」is the whole truth we have. -->
+            <div v-for="w in q.windows" :key="w.kind" class="uchip-win">
               <span class="uchip-win-k">{{ kindLabel(w.kind) }}</span>
-              <span class="uchip-bar"><span class="uchip-bar-fill" :style="{ width: w.remaining_percent + '%' }" :class="'lvl-' + (w.remaining_percent < 15 ? 'crit' : w.remaining_percent < 40 ? 'warn' : 'ok')" /></span>
-              <span class="uchip-win-p">{{ Math.round(w.remaining_percent) }}%</span>
-              <span class="uchip-win-r">{{ fmtReset(w.reset_at) }}</span>
+              <template v-if="w.expired">
+                <span class="uchip-win-void">已重置 · 等待新数据</span>
+              </template>
+              <template v-else>
+                <span class="uchip-bar"><span class="uchip-bar-fill" :style="{ width: w.remaining_percent + '%' }" :class="'lvl-' + (w.remaining_percent < 15 ? 'crit' : w.remaining_percent < 40 ? 'warn' : 'ok')" /></span>
+                <span class="uchip-win-p">{{ Math.round(w.remaining_percent) }}%</span>
+                <span class="uchip-win-r">{{ fmtReset(w.reset_at) }}</span>
+              </template>
             </div>
 
             <!-- No reading at all: say so plainly. Never a fabricated 0%/100% bar. -->
             <div v-if="!q.windows?.length" class="uchip-dim uchip-note">{{ q.note || '暂无额度数据' }}</div>
-            <div v-if="q.snapshot" class="uchip-dim uchip-note">额度更新于 {{ fmtAt(q.snapshot.captured_at) }}</div>
+            <!-- Provenance, not decoration: a 'rollout' reading only moves when the runtime
+                 chooses to write one, so saying where the number came from is what explains
+                 「我点了刷新，数字没变」. -->
+            <div v-if="q.snapshot" class="uchip-dim uchip-note">
+              额度更新于 {{ fmtAt(q.snapshot.captured_at) }}
+              <span v-if="sourceLabel(q.snapshot.source)" class="uchip-src">· {{ sourceLabel(q.snapshot.source) }}</span>
+            </div>
           </div>
           <div v-if="!subscriptions.length" class="uchip-dim uchip-empty">未检出官方订阅账号</div>
           <div class="uchip-sep" />
@@ -368,9 +401,15 @@ onUnmounted(() => {
         </template>
         <div v-else class="uchip-dim uchip-loading">{{ activeReport?.reason || '用量数据不可用' }}</div>
 
+        <div v-if="probeNote" class="uchip-probenote">{{ probeNote }}</div>
         <div class="uchip-refresh">
           <span class="uchip-dim">{{ fetchedAtLabel ? `拉取于 ${fetchedAtLabel}` : '' }}</span>
-          <button type="button" :disabled="loading" @click="refresh">{{ loading ? '刷新中…' : '⟳ 刷新' }}</button>
+          <button
+            type="button"
+            :disabled="loading"
+            title="向 Codex 实时查询账号额度（一次真实请求）。Claude 的额度只能由它自己上报，无法主动查询。"
+            @click="refresh"
+          >{{ loading ? '查询中…' : '⟳ 刷新' }}</button>
         </div>
       </div>
     </template>
@@ -426,8 +465,8 @@ onUnmounted(() => {
 .uchip-badge.unknown { color: #9aa0aa; background: rgba(154,160,170,0.12); }
 
 .uchip-win { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #c9cdd5; margin: 2px 0; }
-.uchip-win.dim { opacity: 0.55; } /* stale values stay visible but stop looking authoritative */
 .uchip-win-k { width: 40px; flex-shrink: 0; color: #8b909a; }
+.uchip-src { color: #6f757f; }
 .uchip-bar { flex: 1; height: 5px; border-radius: 3px; background: #262a32; overflow: hidden; }
 .uchip-bar-fill { display: block; height: 100%; border-radius: 3px; }
 .uchip-bar-fill.lvl-ok { background: #22c55e; }
@@ -435,6 +474,9 @@ onUnmounted(() => {
 .uchip-bar-fill.lvl-crit { background: #ef4444; }
 .uchip-win-p { width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
 .uchip-win-r { width: 84px; text-align: right; color: #7f858f; font-size: 10px; white-space: nowrap; }
+/* An expired window shows no quantity at all — a bar would be a claim we cannot make. */
+.uchip-win-void { flex: 1; color: #7f858f; font-size: 10.5px; }
+.uchip-probenote { margin-top: 8px; font-size: 10px; color: #f59e0b; }
 
 .uchip-note { font-size: 10.5px; margin-top: 3px; }
 .uchip-empty { font-size: 11px; padding: 6px 0; }
