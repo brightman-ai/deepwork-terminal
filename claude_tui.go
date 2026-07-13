@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/brightman-ai/kit/transcript"
 )
 
 // handleClaudeTuiClassic persists Claude Code's `tui` setting to "classic" in the user's
@@ -19,12 +21,14 @@ import (
 // Every existing settings key is preserved verbatim (json.RawMessage round-trip); only `tui` is
 // overridden. Keys may be re-ordered (Go marshals maps sorted) but values are byte-identical.
 func (s *Server) handleClaudeTuiClassic(w http.ResponseWriter, r *http.Request) {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	// Root resolution is kit/transcript's job (it honours CLAUDE_CONFIG_DIR) — writing to a
+	// ~/.claude we picked ourselves would edit a settings file the user's CLI never reads.
+	home := transcript.ClaudeHome()
+	if home == "" {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot resolve home dir"})
 		return
 	}
-	path := filepath.Join(home, ".claude", "settings.json")
+	path := filepath.Join(home, "settings.json")
 
 	settings := map[string]json.RawMessage{}
 	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
