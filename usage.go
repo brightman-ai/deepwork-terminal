@@ -68,11 +68,33 @@ func (u *usageReporter) store(window usage.WindowKind, report usage.UsageReport)
 	u.cache[window] = usageReportEntry{report: report, builtAt: time.Now()}
 }
 
-// handleUsageQuota → GET /api/usage/quota. Subscription 5h/7d remaining% per
-// detected runtime (claude/codex). Honest degradation when a runtime is absent
-// or its rate-limit drop file has not been written yet (available=false).
+// handleUsageQuota → GET /api/usage/quota. Per-runtime account presence, billing mode,
+// last-known 5h/7d windows and CLI health. Read-only: it reports what the runtimes have
+// already written to disk, and never reaches out to a provider.
 func (s *Server) handleUsageQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"quotas": usage.QueryAllQuotas()})
+}
+
+// handleUsageQuotaRefresh → POST /api/usage/quota/refresh. The USER-INITIATED refresh: it
+// asks each runtime that CAN be asked for its current quota, instead of re-reading a file
+// that may have nothing new in it.
+//
+// This exists because re-reading the disk cannot always help. Codex records only the
+// rate-limit family of the model it is currently running, so while a session works on a
+// per-model plan the ACCOUNT limit stops being written entirely — its newest reading on
+// disk can be hours stale and no amount of polling will improve it. Pressing 刷新 must
+// actually go and ask.
+//
+// WHICH runtimes can be asked is the domain's business, not this handler's: kit/usage owns
+// the provider registry, and this layer only relays what each one did. A probe failure is not
+// an error for the caller — the response still carries the (offline) quotas, so the UI
+// degrades to the last-known reading rather than showing nothing.
+func (s *Server) handleUsageQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	probe := usage.ProbeAll(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"quotas": usage.QueryAllQuotas(),
+		"probe":  probe,
+	})
 }
 
 // handleUsageReport → GET /api/usage/report?window=24h|7d|14d|30d. Per-provider
