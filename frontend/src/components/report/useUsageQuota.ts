@@ -27,10 +27,11 @@ export interface QuotaWindow {
   used_percent: number
   remaining_percent: number
   reset_at?: string
-  // The window's reset has PASSED since this reading was taken: the counter has rolled over,
-  // so used/remaining are not merely old — they are wrong, and must not be painted as a
-  // quantity. Per-window, because a 5h window can roll while the 7d one stays valid.
+  // The window's reset had passed by the time we looked: the counter rolled over.
   expired?: boolean
+  // The value was DERIVED, not observed: the window rolled and nothing has reported since, so
+  // nothing was used. Shown as such — never passed off as a reading.
+  inferred?: boolean
 }
 export interface SnapshotMeta {
   captured_at?: string
@@ -58,6 +59,10 @@ export interface RuntimeQuota {
   evidence?: string[] // 'credentials' | 'snapshot' | 'sessions'
   billing?: Billing
   plan?: string
+  // Which set of limits the windows belong to. A codex account's active family can change
+  // ("codex" = 5h + 7d → "premium" = one 7-day window), and when it does a bar disappears.
+  // Naming the family is how the user tells "the provider reshaped my plan" from "this broke".
+  family?: string
   windows?: QuotaWindow[]
   snapshot?: SnapshotMeta // absent ⟹ no reading has ever been captured
   health: RuntimeHealth
@@ -149,16 +154,16 @@ export function useUsageQuota() {
   const hasApi = computed(() => apiRuntimes.value.length > 0)
 
   // The single most-constraining window — the number that says "am I about to hit a wall".
-  // Drawn ONLY from readings we can stand behind: an expired window's used% is not old, it is
-  // WRONG, and putting it on the always-visible pill would be exactly the "expired data
-  // presented as live" the spec forbids. Nothing left ⟹ null ⟹ the pill says 「—」 and sends
-  // you to the popover, which explains why.
+  //
+  // An expired window is INCLUDED: the backend rolled it forward and derived its usage (the
+  // window reset and nothing has reported since, so nothing was used). That derived 100% is
+  // the honest current state, and dropping it would blank the pill for a runtime whose quota
+  // is in fact wide open.
   const tightest = computed<{ runtime: string; window: QuotaWindow } | null>(() => {
     let best: { runtime: string; window: QuotaWindow } | null = null
     for (const q of quotas.value) {
       if (q.snapshot?.stale) continue
       for (const w of q.windows ?? []) {
-        if (w.expired) continue
         if (best === null || w.remaining_percent < best.window.remaining_percent) {
           best = { runtime: q.runtime, window: w }
         }

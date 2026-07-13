@@ -195,6 +195,13 @@ function sourceLabel(source?: string): string {
   if (source === 'rollout') return '由 Codex 上报'
   return ''
 }
+// Spell out what the active family means, since its whole job is to explain a missing bar.
+function familyHint(q: RuntimeQuota): string {
+  const kinds = (q.windows ?? []).map((w) => kindLabel(w.kind)).join(' + ')
+  return kinds
+    ? `当前生效额度组：${q.family}（${kinds}）。provider 可切换额度组，不同组的窗口不同。`
+    : `当前生效额度组：${q.family}`
+}
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
   if (q.health?.ok) return ''
@@ -320,23 +327,24 @@ onUnmounted(() => {
             <div class="uchip-rt-head">
               <span>{{ runtimeLabel(q.runtime) }}</span>
               <span v-if="q.plan" class="uchip-plan">{{ q.plan }}</span>
+              <!-- Which limit family is active. When the provider reshapes an account (5h+7d →
+                   a single 7-day window), a bar disappears — and without this the user has no
+                   way to tell that apart from the app breaking. -->
+              <span v-if="q.family" class="uchip-plan uchip-family" :title="familyHint(q)">{{ q.family }}</span>
               <span v-if="healthLabel(q)" class="uchip-badge warn" :title="q.health?.reason">{{ healthLabel(q) }}</span>
               <span v-if="q.snapshot?.stale" class="uchip-badge stale">数据已过期</span>
             </div>
 
-            <!-- An expired window's number is not stale — it is WRONG (the counter rolled over
-                 since we read it). So we do not paint it: no bar, no percentage. Saying「已重置 ·
-                 等待新数据」is the whole truth we have. -->
-            <div v-for="w in q.windows" :key="w.kind" class="uchip-win">
+            <!-- key by INDEX: two windows of one kind is a data contradiction, and keying by
+                 kind let the second one silently vanish instead of showing up as wrong. -->
+            <div v-for="(w, i) in q.windows" :key="i" class="uchip-win">
               <span class="uchip-win-k">{{ kindLabel(w.kind) }}</span>
-              <template v-if="w.expired">
-                <span class="uchip-win-void">已重置 · 等待新数据</span>
-              </template>
-              <template v-else>
-                <span class="uchip-bar"><span class="uchip-bar-fill" :style="{ width: w.remaining_percent + '%' }" :class="'lvl-' + (w.remaining_percent < 15 ? 'crit' : w.remaining_percent < 40 ? 'warn' : 'ok')" /></span>
-                <span class="uchip-win-p">{{ Math.round(w.remaining_percent) }}%</span>
-                <span class="uchip-win-r">{{ fmtReset(w.reset_at) }}</span>
-              </template>
+              <span class="uchip-bar"><span class="uchip-bar-fill" :style="{ width: w.remaining_percent + '%' }" :class="'lvl-' + (w.remaining_percent < 15 ? 'crit' : w.remaining_percent < 40 ? 'warn' : 'ok')" /></span>
+              <span class="uchip-win-p">{{ Math.round(w.remaining_percent) }}%</span>
+              <!-- An inferred value is labelled, never passed off as a reading: the window
+                   rolled and nothing has reported since, so nothing was used. -->
+              <span v-if="w.inferred" class="uchip-win-r uchip-inferred" title="窗口已重置，且此后运行时未上报任何用量 ⟹ 未使用。此值为推断，非实测。">已重置 · 推断</span>
+              <span v-else class="uchip-win-r">{{ fmtReset(w.reset_at) }}</span>
             </div>
 
             <!-- No reading at all: say so plainly. Never a fabricated 0%/100% bar. -->
@@ -475,7 +483,8 @@ onUnmounted(() => {
 .uchip-win-p { width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
 .uchip-win-r { width: 84px; text-align: right; color: #7f858f; font-size: 10px; white-space: nowrap; }
 /* An expired window shows no quantity at all — a bar would be a claim we cannot make. */
-.uchip-win-void { flex: 1; color: #7f858f; font-size: 10.5px; }
+.uchip-inferred { color: #6f757f; font-style: italic; }
+.uchip-family { color: #7aa2f7; opacity: 0.85; cursor: help; }
 .uchip-probenote { margin-top: 8px; font-size: 10px; color: #f59e0b; }
 
 .uchip-note { font-size: 10.5px; margin-top: 3px; }
