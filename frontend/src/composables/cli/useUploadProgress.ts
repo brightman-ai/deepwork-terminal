@@ -40,7 +40,8 @@ export interface UploadProgressStore {
   register: (name: string, size: number, retry?: () => void, revealImmediately?: boolean) => string
   progress: (id: string, sent: number, total: number) => void
   complete: (id: string) => void
-  fail: (id: string, message: string) => void
+  /** `retryable: false` drops the entry's retry action — see fail(). */
+  fail: (id: string, message: string, retryable?: boolean) => void
   remove: (id: string) => void
 }
 
@@ -105,11 +106,17 @@ export function createUploadProgressStore(): UploadProgressStore {
     }
   }
 
-  function fail(id: string, message: string): void {
+  function fail(id: string, message: string, retryable = true): void {
     const e = byId.get(id)
     if (!e) return
     e.status = 'error'
     e.error = message
+    // A DETERMINISTIC rejection (the server judged these exact bytes: too large, malformed)
+    // loses its retry action. Offering 重试 there is a lie the user pays for — a .drawio
+    // refused by the old MIME allowlist showed the button, and pressing it re-uploaded the
+    // whole file just to be refused identically 7 seconds later. Only genuinely transient
+    // failures (5xx, network) keep it.
+    if (!retryable) e.retry = undefined
     // Errors always surface, even inside the 300ms grace window — this IS the
     // feedback that stops the user from blindly retrying into the PTY.
     e.revealed = true

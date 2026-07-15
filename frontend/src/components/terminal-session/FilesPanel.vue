@@ -286,6 +286,31 @@ function closePreview(): void {
 }
 onUnmounted(revokePreviewUrl)
 
+// previewErrorText turns a failed /files/raw into a human reason (the ask: "allow it to fail,
+// but say WHY"). The 403 case is the common one — a path outside the workbench-anchored root
+// (e.g. ~/.claude/projects/…/memory/x.md while the drawer is anchored to a project) — which the
+// bare "预览失败" never explained. Falls back to the backend's error string, then the status.
+function previewErrorText(r: RawResult): string {
+  if (r.kind !== 'error') return '预览失败'
+  switch (r.status) {
+    case 403: return '此文件在工作台锚定目录之外，无法预览（切到该文件所在项目，或在目录树中打开）'
+    case 404: return '文件不存在或已被移动'
+    case 400: return '这是一个目录，无法作为文件预览'
+  }
+  if (r.reason) return `预览失败：${r.reason}`
+  return r.status ? `预览失败（HTTP ${r.status}）` : '预览失败（网络错误，请重试）'
+}
+
+// onDocNavigate — the reader followed an in-doc link ([[wikilink]] or a relative .md path,
+// resolved to an absolute path by FilePreview). Open it in the SAME preview overlay so reading
+// flows doc-to-doc without leaving the drawer. filesRaw takes the absolute path as its rel arg;
+// safeResolve accepts an in-cwd absolute path as-is, and a failure now explains itself (403 →
+// "outside the workbench root"), so a cross-project link degrades to a clear reason, not a dead tap.
+function onDocNavigate(absPath: string): void {
+  const name = absPath.split('/').pop() || absPath
+  void previewRel(name, absPath, absPath)
+}
+
 // ── inject / compose bubbling ──
 function injectPath(path: string): void {
   if (!path) { toast('无法插入：缺少路径'); return }
@@ -641,7 +666,7 @@ defineExpose({ loadRecent, loadTree })
         </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
@@ -663,7 +688,18 @@ defineExpose({ loadRecent, loadTree })
               <button class="px-2 py-1 rounded text-[0.62rem] text-green-500 border border-border hover:bg-muted/50" type="button" @click="injectPath(preview.absPath)">插入路径到对话</button>
             </div>
           </div>
-          <div v-else class="flex items-center justify-center h-full text-xs text-muted-foreground italic">预览失败</div>
+          <div v-else class="flex flex-col items-center justify-center gap-2 h-full px-5 text-center">
+            <FileText class="size-7 text-muted-foreground/50" />
+            <p class="text-xs text-muted-foreground leading-snug">{{ previewErrorText(preview.result) }}</p>
+            <p class="text-[0.6rem] text-muted-foreground/60 break-all select-all" :title="preview.absPath">{{ preview.absPath }}</p>
+            <button
+              class="mt-1 px-2 py-1 rounded text-[0.62rem] text-green-500 border border-border hover:bg-muted/50"
+              type="button"
+              @click="copyText(preview.absPath, 'perr')"
+            >
+              <Check v-if="copiedKey === 'perr'" class="inline size-3 text-green-500" /> 复制路径
+            </button>
+          </div>
         </div>
       </div>
     </Transition>

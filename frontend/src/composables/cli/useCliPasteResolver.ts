@@ -13,6 +13,10 @@ type PasteSource =
 
 export interface CliPasteResolverOptions {
   sessionId: () => string
+  httpBase?: () => string | undefined
+  authToken?: () => string | undefined
+  isRemote?: () => boolean
+  activeCwd?: () => string | undefined
   surface: string
   isActive?: () => boolean
   sendBinary: (data: Uint8Array) => void
@@ -100,7 +104,13 @@ const metrics: ClipboardMetrics = {
 }
 
 export function useCliPasteResolver(options: CliPasteResolverOptions) {
-  const clipboardPaste = useClipboardPaste(options.sessionId)
+  const clipboardPaste = useClipboardPaste({
+    sessionId: options.sessionId,
+    httpBase: options.httpBase,
+    authToken: options.authToken,
+    isRemote: options.isRemote,
+    activeCwd: options.activeCwd,
+  })
   const { cliFetch } = useCliAuth()
   let lastPasteAt = 0
   let lastFingerprint = ''

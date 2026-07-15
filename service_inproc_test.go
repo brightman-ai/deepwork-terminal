@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,4 +139,34 @@ func TestInProcessService_TailOutputNotFound(t *testing.T) {
 	_, err := svc.TailOutput(ctx, "ghost-id", 10)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestInProcessService_PasteUpload_CWDResolution gives PasteUpload's cwd resolution its first
+// coverage. The batch-2 fix made the in-proc bypass mirror workbenchCWD's fallback ORDER
+// (override → live /proc → static creation cwd) instead of jumping straight to the frozen
+// creation dir. This pins the two branches the pipe-mock harness can exercise deterministically:
+// an explicit override is honoured, and an empty override resolves through the chain — here
+// landing on the creation cwd, since a mock session has no live shell process (ShellPID 0 →
+// liveShellCWD ""), which is the correct terminal fallback.
+func TestInProcessService_PasteUpload_CWDResolution(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	created := t.TempDir()
+	info, err := svc.Create(ctx, CreateOptions{Name: "paste-cwd", CWD: created})
+	require.NoError(t, err)
+
+	// Explicit override wins: the file lands under the override dir, not the creation dir.
+	override := t.TempDir()
+	p1, err := svc.PasteUpload(ctx, info.ID, "shot.png", strings.NewReader("hello-override"), override)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(p1, filepath.Join(override, "tmp")+string(os.PathSeparator)),
+		"override cwd should anchor the paste: got %q", p1)
+
+	// Empty override → fallback chain. With no live shell (pipe mock), it resolves to the
+	// creation cwd — the correct terminal fallback — and never errors.
+	p2, err := svc.PasteUpload(ctx, info.ID, "note.txt", strings.NewReader("hello-fallback"), "")
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(p2, filepath.Join(created, "tmp")+string(os.PathSeparator)),
+		"empty override should fall back to the resolved session cwd: got %q", p2)
 }

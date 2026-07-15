@@ -85,7 +85,7 @@ type gitDiffResponse struct {
 // tree's changed files + each file's unified diff. Soft-fails to a graceful empty state:
 // no cwd → {noCwd}, not a repo → {notGit}, clean tree → empty Files — never a 5xx.
 func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusOK, gitDiffResponse{Files: []gitDiffFile{}, NoCwd: true})
 		return

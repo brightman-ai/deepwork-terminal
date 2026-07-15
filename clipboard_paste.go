@@ -3,6 +3,7 @@ package terminal
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,11 +45,29 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Limit upload size
+	// Size is a REAL boundary (unlike MIME — see isAllowedClipboardMIME's removal below),
+	// so it gets its own status code. 413 lets the client say "文件超过 10MB" without
+	// string-matching an English error, and tells it the failure is DETERMINISTIC:
+	// retrying the same bytes will fail identically.
 	r.Body = http.MaxBytesReader(w, r.Body, clipboardMaxUploadSize)
 
 	if err := r.ParseMultipartForm(clipboardMaxUploadSize); err != nil {
 		terminalClipboardUploadErrors.Inc()
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			terminalLogger.Warn(logCtx, "cli clipboard upload rejected",
+				"reason", "too_large",
+				"session_id", id,
+				"limit_bytes", clipboardMaxUploadSize,
+				"elapsed_ms", time.Since(start).Milliseconds())
+			// limit_mb travels WITH the error so the client can say "文件超过 10 MB 上限"
+			// without hardcoding 10 — the number stays single-sourced at clipboardMaxUploadSize.
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+				"error":    fmt.Sprintf("file exceeds the %d MB limit", clipboardMaxUploadSize>>20),
+				"limit_mb": clipboardMaxUploadSize >> 20,
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid multipart form: " + err.Error()})
 		return
 	}
@@ -66,21 +85,27 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	}
 	defer file.Close()
 
-	// Validate MIME type
+	// MIME is DESCRIPTIVE here, never a gate.
+	//
+	// There used to be an allowlist. It rejected nothing and cost us real files: it
+	// already permitted "application/octet-stream" — the MIME a browser sends for any
+	// binary it does not recognize — so every unknown format walked straight through,
+	// while a .drawio (application/vnd.jgraph.mxfile) was refused PRECISELY BECAUSE the
+	// browser recognized it. Reverse selection: the better-specified the format, the more
+	// likely it was blocked. It also had to be kept in sync with a second, extension-based
+	// allowlist in the frontend's <input accept>, and the two drifted.
+	//
+	// MIME cannot be a security boundary here anyway: deepwork does ZERO parsing and never
+	// executes what it stores. The file lands 0600 in the session sandbox (tmp/files/) and
+	// the agent reads it from the injected path. The boundaries that DO hold are enforced
+	// above and below — size (MaxBytesReader), path containment (sanitizeClipboardFilename),
+	// and the sandbox dir. Do not reintroduce a type gate; add a real boundary instead.
+	//
+	// What MIME still decides: which sub-dir the file lands in (clip/ vs files/) and, for a
+	// NAMELESS blob only, the fallback extension.
 	mime := r.FormValue("mime")
 	if mime == "" {
 		mime = header.Header.Get("Content-Type")
-	}
-	if !isAllowedClipboardMIME(mime) {
-		terminalClipboardUploadErrors.Inc()
-		terminalLogger.Warn(logCtx, "cli clipboard upload rejected",
-			"reason", "unsupported_mime",
-			"session_id", id,
-			"mime", mime,
-			"filename", header.Filename,
-			"elapsed_ms", time.Since(start).Milliseconds())
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported MIME type: " + mime})
-		return
 	}
 
 	ext := extFromMIME(mime)
@@ -95,7 +120,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// not the session's static launch dir. For a non-tmux terminal (no client cwd),
 	// workbenchCWD probes the shell's live cwd; it only falls back to the launch dir as a
 	// last resort. This is the fix for "图片传飞" (uploads saved under home, not the agent cwd).
-	cwd, _ := s.workbenchCWD(id, r.FormValue("cwd"))
+	cwd, _ := s.workbenchCWD(r.Context(), id, r.FormValue("cwd"))
 	if cwd == "" {
 		cwd = sess.WorkingDir()
 	}
@@ -255,37 +280,10 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-func isAllowedClipboardMIME(mime string) bool {
-	lower := strings.ToLower(mime)
-	// Allow images, documents, code, and common text formats
-	for _, prefix := range []string{"image/", "text/", "application/pdf", "application/json"} {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	// Allow common binary formats by extension check in MIME
-	for _, allowed := range []string{
-		"application/octet-stream", "application/zip", "application/gzip",
-		"application/x-yaml", "application/toml", "application/xml",
-		// Office documents — the deepwork side does ZERO text extraction; these
-		// land in the session sandbox (tmp/files/) and the agent reads them via
-		// the injected path. Allowing the MIME is purely "let the file reach disk".
-		"application/msword",
-		"application/vnd.ms-excel",
-		"application/vnd.ms-powerpoint",
-	} {
-		if lower == allowed {
-			return true
-		}
-	}
-	// Modern OOXML office formats (wordprocessingml / spreadsheetml /
-	// presentationml) all share the openxmlformats-officedocument namespace.
-	if strings.HasPrefix(lower, "application/vnd.openxmlformats-officedocument.") {
-		return true
-	}
-	return false
-}
-
+// extFromMIME maps a MIME to a fallback extension. Used ONLY when the upload carries no
+// usable original filename (a clipboard bitmap); a real name is always preserved as-is,
+// so an unmapped type (.drawio, .excalidraw, …) keeps its own extension and never needs
+// an entry here. ".bin" is the honest answer for "nameless blob of unknown type".
 func extFromMIME(mime string) string {
 	switch strings.ToLower(mime) {
 	case "image/png":
@@ -326,9 +324,14 @@ func clipboardKindLabel(isImage bool) string {
 	return "file"
 }
 
+// sanitizeClipboardFilename reduces a client-supplied name to a single path segment that
+// can only ever land INSIDE the session sandbox. With the MIME allowlist gone this is one
+// of the boundaries actually holding the line, so it rejects the traversal segments too:
+// filepath.Base("..") is "..", and joining that onto the sandbox dir escapes it (the write
+// would land beside tmp/clip rather than in it). "" makes the caller synthesize a name.
 func sanitizeClipboardFilename(name string) string {
 	name = strings.TrimSpace(filepath.Base(name))
-	if name == "." || name == string(filepath.Separator) {
+	if name == "." || name == ".." || name == string(filepath.Separator) {
 		return ""
 	}
 	name = strings.ReplaceAll(name, "\x00", "")

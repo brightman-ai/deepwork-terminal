@@ -109,10 +109,9 @@ func (s *InProcessService) Input(_ context.Context, id string, data []byte) erro
 }
 
 // PasteUpload implements TerminalSessionService.
-// Saves content to a temp directory under the session's CWD (or sessionCWD if
-// non-empty) and returns the absolute path of the saved file.
-// The logic mirrors clipboard_paste.go but operates on io.Reader rather than
-// gin.Context so that it can be called without an HTTP layer.
+// Saves content to a temp directory under the resolved session cwd and returns the
+// absolute path of the saved file. The logic mirrors clipboard_paste.go but operates
+// on io.Reader rather than gin.Context so that it can be called without an HTTP layer.
 func (s *InProcessService) PasteUpload(_ context.Context, id string, filename string, content io.Reader, sessionCWD string) (string, error) {
 	start := time.Now()
 	sess, err := s.manager.Get(id)
@@ -121,9 +120,23 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 		return "", err
 	}
 
+	// cwd resolution mirrors Server.workbenchCWD's fallback ORDER so this in-proc (Wails
+	// desktop) paste lands in the SAME directory the HTTP paste-upload would: an explicit
+	// override wins, else the shell's LIVE /proc cwd (which follows `cd`), else the static
+	// creation cwd as a last resort. Batch-1 fixed the HTTP path; this closes the same
+	// "falls back to the frozen launch dir" bug on the in-proc bypass.
+	// NOTE: unlike workbenchCWD, InProcessService holds only a SessionManager (no Server /
+	// tmuxProvider), so it can't consult the tmux active-pane authority — liveShellCWD is
+	// the closest equivalent it can reach. For a non-tmux shell the shell IS the pane, so
+	// /proc is exact; for a tmux session it's tmux's own cwd, still strictly better than the
+	// frozen WorkingDir it replaces.
 	cwd := sessionCWD
 	if cwd == "" {
-		cwd = sess.WorkingDir()
+		if live := liveShellCWD(sess); live != "" {
+			cwd = live
+		} else {
+			cwd = sess.WorkingDir()
+		}
 	}
 	if cwd == "" {
 		terminalClipboardUploadErrors.Inc()

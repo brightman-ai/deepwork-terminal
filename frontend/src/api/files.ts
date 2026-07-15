@@ -86,7 +86,10 @@ export type RawResult =
   | { kind: 'image'; url: string }
   | { kind: 'binary'; size: number }
   | { kind: 'tooLarge'; size: number }
-  | { kind: 'error' }
+  // error carries WHY: the HTTP status + the backend's `error` string, so the preview can
+  // explain the failure ("outside the workbench root" / "not found" / …) instead of a bare
+  // "预览失败". status is absent only for a client-side network/exception failure.
+  | { kind: 'error'; status?: number; reason?: string }
 
 // withScope builds the session + (optional) live-cwd query prefix. `cwd` is the active
 // tmux pane's working directory; supplying it makes the server anchor to that pane so the
@@ -220,7 +223,14 @@ export async function filesRaw(sessionId: string, relPath: string, cwd?: string)
     let path = withScope('/files/raw', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
     const resp = await cliFetch(cliApi(path))
-    if (!resp.ok) return { kind: 'error' }
+    if (!resp.ok) {
+      // Surface the reason: the raw handler answers a failure with { "error": "<why>" }
+      // (403 path not allowed / 404 not found / 400 is a directory). Carry both the status
+      // and that string up so the preview can render a human explanation.
+      let reason = ''
+      try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }
+      return { kind: 'error', status: resp.status, reason }
+    }
     const ct = resp.headers.get('Content-Type') || ''
     if (ct.startsWith('image/')) {
       // Wrap the authed bytes in an object URL so <img> can render them without re-fetching.

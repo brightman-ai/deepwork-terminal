@@ -64,7 +64,7 @@ func (s *Server) handleSessionOverview(w http.ResponseWriter, r *http.Request) {
 	// Without (2) a non-tmux session that cd'd into a project resolved the stale creation
 	// dir and the overview (and Files panel) came up empty.
 	cwd := baseCWD
-	if lc, ok := s.workbenchCWD(id, r.URL.Query().Get("cwd")); ok && lc != "" {
+	if lc, ok := s.workbenchCWD(r.Context(), id, r.URL.Query().Get("cwd")); ok && lc != "" {
 		cwd = lc
 	} else if live := liveCWD(sess.ShellPID()); live != "" {
 		cwd = live
