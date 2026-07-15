@@ -102,6 +102,24 @@ func (s *Server) handleUsageQuotaRefresh(w http.ResponseWriter, r *http.Request)
 // re-walk ~/.claude/projects/** and ~/.codex/sessions/** every time.
 func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
 	window := parseUsageWindow(r.URL.Query().Get("window"))
+	// New servers share the exact ModelRequestUsage materialized facts with the
+	// Agent report. This is the authoritative path for tier/effective-date/cache
+	// TTL/local-calendar pricing. The fallback keeps older isolated handler tests
+	// and embedders with only a legacy usageReporter compatible.
+	if s.agentUsage != nil {
+		timezone := r.URL.Query().Get("timezone")
+		if timezone == "" {
+			timezone = "Asia/Shanghai"
+		}
+		if _, err := time.LoadLocation(timezone); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timezone"})
+			return
+		}
+		dataset := s.agentUsage.Dataset(r.Context(), string(window))
+		report := usage.BuildRequestReport(window, timezone, time.Now(), dataset.RequestFacts)
+		writeJSON(w, http.StatusOK, report)
+		return
+	}
 
 	report, ok := s.usage.cached(window)
 	if !ok {

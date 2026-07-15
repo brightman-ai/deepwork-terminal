@@ -9,14 +9,18 @@ import (
 
 // newUsageTestServer builds a Server with only the usage reporter wired — enough
 // to exercise the usage handlers directly (no auth, no full NewServer).
-func newUsageTestServer() *Server {
+func newUsageTestServer(t *testing.T) *Server {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", home+"/.codex")
+	t.Setenv("DW_CLAUDE_PROJECTS", home+"/.claude/projects")
 	return &Server{usage: newUsageReporter()}
 }
 
 // GET /usage/report default window → 200, window=7d, 7 daily rows (row count is a
 // deterministic contract regardless of how much local usage data exists).
 func TestHandleUsageReportDefault(t *testing.T) {
-	s := newUsageTestServer()
+	s := newUsageTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/usage/report", nil)
 	w := httptest.NewRecorder()
 	s.handleUsageReport(w, req)
@@ -41,7 +45,7 @@ func TestHandleUsageReportDefault(t *testing.T) {
 
 // GET /usage/report?window=30d → window echoed, 30 rows.
 func TestHandleUsageReport30d(t *testing.T) {
-	s := newUsageTestServer()
+	s := newUsageTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/usage/report?window=30d", nil)
 	w := httptest.NewRecorder()
 	s.handleUsageReport(w, req)
@@ -67,7 +71,7 @@ func TestHandleUsageReport30d(t *testing.T) {
 // The short-TTL cache must serve the second identical request from memory (same
 // window) — a second call returns the cached report without a rebuild.
 func TestHandleUsageReportCached(t *testing.T) {
-	s := newUsageTestServer()
+	s := newUsageTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/usage/report?window=7d", nil)
 	w1 := httptest.NewRecorder()
 	s.handleUsageReport(w1, req)
@@ -79,7 +83,7 @@ func TestHandleUsageReportCached(t *testing.T) {
 // GET /usage/quota → 200 with a quotas array (possibly empty when no CLI is
 // installed; the contract is a well-formed array, never a 500).
 func TestHandleUsageQuota(t *testing.T) {
-	s := newUsageTestServer()
+	s := newUsageTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/usage/quota", nil)
 	w := httptest.NewRecorder()
 	s.handleUsageQuota(w, req)

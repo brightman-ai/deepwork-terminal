@@ -31,3 +31,9 @@ export function fmtCost(cost?: number | null, currency?: string, approx = false)
   const v = cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2)
   return `${approx ? '≈' : ''}${sym}${v}`
 }
+
+/** Official subscription-credit projection; null remains explicit unknown. */
+export function fmtCredits(credits?: number | null): string {
+  if (credits === undefined || credits === null) return '—'
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(credits)
+}
