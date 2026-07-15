@@ -7,16 +7,16 @@ import (
 
 // ClaudeSessionState tracks the state derived from Claude JSONL parsing.
 type ClaudeSessionState struct {
-	Model        string
-	Status       AgentStatus
-	WaitReason   WaitReason
-	Usage        UsageTotals
-	LastUserAt   time.Time
-	LastAssistAt time.Time
-	StopReason   string
-	PendingTool  string // name of the unresolved tool_use (for elicitation detection); "" when none
-	LastMsgQuestion bool // the last assistant turn ended on a free-text question (heuristic)
-	UpdatedAt    time.Time
+	Model           string
+	Status          AgentStatus
+	WaitReason      WaitReason
+	Usage           UsageTotals
+	LastUserAt      time.Time
+	LastAssistAt    time.Time
+	StopReason      string
+	PendingTool     string // name of the unresolved tool_use (for elicitation detection); "" when none
+	LastMsgQuestion bool   // the last assistant turn ended on a free-text question (heuristic)
+	UpdatedAt       time.Time
 }
 
 // textEndsQuestion is a best-effort "did the agent ASK the user something" heuristic for a
@@ -85,7 +85,7 @@ func (cd *ClaudeDriver) Update() error {
 			cd.state.StopReason = ""
 			cd.state.Status = StatusRunning
 			cd.state.WaitReason = WaitNone
-			cd.state.PendingTool = ""    // tool result arrived → no tool pending
+			cd.state.PendingTool = ""        // tool result arrived → no tool pending
 			cd.state.LastMsgQuestion = false // you replied → the prior question is answered
 			// Check for interrupted tool use result.
 			if msg, ok := row["message"].(map[string]any); ok {
@@ -213,7 +213,19 @@ func (cd *ClaudeDriver) Update() error {
 func (cd *ClaudeDriver) AgentTree() []AgentNode {
 	out := make([]AgentNode, 0, len(cd.agentTree.order))
 	for _, id := range cd.agentTree.order {
-		out = append(out, *cd.agentTree.nodes[id])
+		node := *cd.agentTree.nodes[id]
+		for _, attempt := range cd.agentTree.attempts[id] {
+			node.Attempts = append(node.Attempts, AgentAttempt{Sequence: attempt.sequence, StartedAt: attempt.startedAt, EndedAt: attempt.endedAt, Status: attempt.status})
+		}
+		node.Runtime = "claude"
+		node.SourceRef = cd.agentTree.sessionDir
+		if node.Diagnostic == "" {
+			node.Diagnostic = "complete"
+		}
+		if node.ActiveSince.IsZero() {
+			node.ActiveSince = node.StartedAt
+		}
+		out = append(out, node)
 	}
 	return out
 }
@@ -245,6 +257,17 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 		s.Status = StatusWaiting
 		s.WaitReason = WaitQuestion
 	} else if s.Status != StatusWaiting && !cd.state.LastUserAt.IsZero() && cd.state.LastUserAt.After(cd.state.LastAssistAt) {
+		s.Status = StatusRunning
+		s.WaitReason = WaitNone
+	}
+	// A finished main turn is NOT idle if it left background subagents still running: the agent
+	// AS A WHOLE is still working (run_in_background Agents outlive the turn that spawned them),
+	// so the pane must read as running — not a needs-you idle. Scoped to Idle only: a genuine
+	// question / elicitation Waiting still blocks on the user regardless of subagents. anyRunning()
+	// reflects the live subagent tree (spawns minus their <task-notification> completions), which
+	// Update() refreshed just before State() was called. This also clears AwaitingUser (a Running
+	// status is neither Waiting nor Idle), so no false needs-you dot while subagents churn.
+	if s.Status == StatusIdle && cd.agentTree.anyRunning() {
 		s.Status = StatusRunning
 		s.WaitReason = WaitNone
 	}

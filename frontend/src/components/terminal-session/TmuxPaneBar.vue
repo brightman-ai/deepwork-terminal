@@ -37,6 +37,7 @@
       :key="w.index"
       class="tpb-win"
       :class="{ 'is-active': w.active }"
+      :aria-label="`窗口 ${w.index}：${windowAgentSignals(w).join(' · ') || winStatusLabel(w)}`"
       :data-testid="`tmux-win-${w.index}`"
       @click="onWinClick(w, $event)"
       @mouseenter="onWinHover(w, $event)"
@@ -107,7 +108,7 @@ import { computed, ref, watch } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
-import { windowCwd, windowRawStatus, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { windowAgentSignals, windowCwd, windowRawStatus, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
 const props = defineProps<{
   sessionId: string
@@ -209,7 +210,10 @@ let tipTimer: ReturnType<typeof setTimeout> | null = null
 
 const tipWindow = computed(() => windows.value.find(w => w.index === tipWin.value) ?? null)
 const tipCwd = computed(() => (tipWindow.value ? windowCwd(tipWindow.value) : ''))
-const tipStatus = computed(() => (tipWindow.value ? winStatusLabel(tipWindow.value) : ''))
+const tipStatus = computed(() => {
+  if (!tipWindow.value) return ''
+  return windowAgentSignals(tipWindow.value).join(' · ') || winStatusLabel(tipWindow.value)
+})
 
 function showTip(w: TmuxWindowState, el: HTMLElement): void {
   if (!windowCwd(w)) return // no cwd yet → don't pop an empty tip

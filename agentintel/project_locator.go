@@ -1,8 +1,17 @@
 package agentintel
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/brightman-ai/kit/transcript"
 )
@@ -65,7 +74,7 @@ func (pl *ProjectLocator) CodexSessionFiles() []string {
 	return transcript.NewestFiles(pl.CodexSessionDir(), "", transcript.JSONLSuffix, 0)
 }
 
-// CodexLatestSession finds the most recent Codex rollout JSONL.
+// CodexLatestSession finds the most recent ROOT Codex rollout for projectPath.
 //
 // It MUST use the recursive walk (CodexSessionFiles): a flat os.ReadDir of the base dir
 // finds only the year DIRECTORIES and zero .jsonl files — which made this always return
@@ -73,12 +82,154 @@ func (pl *ProjectLocator) CodexSessionFiles() []string {
 // PaneAgentMonitor.Active fell back to "assume busy" and the pane read as perpetually
 // Running → the running→waiting transition that fires the turn-end push never happened →
 // Codex sessions never notified.
-// (projectPath is not used yet — Codex rollouts aren't keyed by cwd; newest wins. Per-cwd
-// matching would parse each rollout's session_meta.cwd, a future refinement.)
 func (pl *ProjectLocator) CodexLatestSession(projectPath string) (string, error) {
-	files := pl.CodexSessionFiles() // recursive, newest-first
-	if len(files) == 0 {
+	wantCWD := canonicalPath(projectPath)
+	for _, path := range pl.CodexSessionFiles() {
+		meta, ok := readCodexRootSessionMeta(path)
+		if !ok {
+			continue
+		}
+		if wantCWD == "" || canonicalPath(meta.CWD) == wantCWD {
+			return path, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
+
+// CodexSessionForProcess resolves the pane's hard runtime identity. Codex keeps
+// its root rollout open for the life of the interactive process; reading that
+// file descriptor set avoids cwd/latest-file ambiguity across concurrent panes.
+func (pl *ProjectLocator) CodexSessionForProcess(processPID int, projectPath string) (string, error) {
+	if processPID <= 0 {
 		return "", os.ErrNotExist
 	}
-	return files[0], nil
+	return selectCodexRootRollout(openProcessFiles(processPID), projectPath)
+}
+
+type codexRootMeta struct {
+	ID  string
+	CWD string
+}
+
+func readCodexRootSessionMeta(path string) (codexRootMeta, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return codexRootMeta{}, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	if !sc.Scan() {
+		return codexRootMeta{}, false
+	}
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID     string          `json:"id"`
+			CWD    string          `json:"cwd"`
+			Source json.RawMessage `json:"source"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(sc.Bytes(), &row) != nil || row.Type != "session_meta" || row.Payload.ID == "" {
+		return codexRootMeta{}, false
+	}
+	// Subagents have an object-valued source.subagent.thread_spawn. Root sources
+	// are scalar values such as "cli". Unknown objects are not assumed to be roots.
+	source := strings.TrimSpace(string(row.Payload.Source))
+	if strings.HasPrefix(source, "{") {
+		return codexRootMeta{}, false
+	}
+	return codexRootMeta{ID: row.Payload.ID, CWD: row.Payload.CWD}, true
+}
+
+func selectCodexRootRollout(paths []string, projectPath string) (string, error) {
+	wantRoot := canonicalPath(transcript.CodexSessionsRoot())
+	wantCWD := canonicalPath(projectPath)
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	var candidates []candidate
+	for _, path := range paths {
+		clean := canonicalPath(path)
+		if filepath.Ext(clean) != transcript.JSONLSuffix || !pathWithin(clean, wantRoot) {
+			continue
+		}
+		meta, ok := readCodexRootSessionMeta(clean)
+		if !ok || (wantCWD != "" && canonicalPath(meta.CWD) != wantCWD) {
+			continue
+		}
+		info, _ := os.Stat(clean)
+		var mod time.Time
+		if info != nil {
+			mod = info.ModTime()
+		}
+		candidates = append(candidates, candidate{path: clean, mod: mod})
+	}
+	if len(candidates) == 0 {
+		return "", os.ErrNotExist
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].mod.After(candidates[j].mod) })
+	return candidates[0].path, nil
+}
+
+func openProcessFiles(pid int) []string {
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(path string) {
+		path = strings.TrimSuffix(strings.TrimSpace(path), " (deleted)")
+		if path == "" || filepath.Ext(path) != transcript.JSONLSuffix {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	if entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd")); err == nil {
+		for _, entry := range entries {
+			if target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", entry.Name())); err == nil {
+				add(target)
+			}
+		}
+	}
+	if len(paths) > 0 {
+		return paths
+	}
+	// macOS/BSD fallback. -Fn emits one filename per n-prefixed line and no
+	// user-controlled formatting. A short timeout keeps topology polling bounded.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-Fn", "-p", fmt.Sprint(pid)).Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "n/") {
+				add(strings.TrimPrefix(line, "n"))
+			}
+		}
+	}
+	return paths
+}
+
+func canonicalPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
+}
+
+func pathWithin(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

@@ -80,9 +80,9 @@ import (
 //     (which tool_use produced which agentId, in which file) is
 //     recursive/hierarchical.
 //
-//  4. Completion/failure signal — the most surprising part: it is delivered
-//     ONLY to the ROOT session's transcript, never inside a subagent's own
-//     file (confirmed: zero <task-notification> occurrences in any sampled
+//  4. Completion/failure has two durable adapter signals. The explicit
+//     <task-notification> is delivered ONLY to the ROOT session's transcript,
+//     never inside a subagent's own file (confirmed: zero occurrences in sampled
 //     subagent transcript, including one that itself spawned children and
 //     was clearly still waiting on them at snapshot time — it had literally
 //     issued a throwaway "echo/date" Bash call captioned "Trivial
@@ -108,7 +108,9 @@ import (
 //     carries a final authoritative token count, but it is only available
 //     at completion — TokensDown below is instead live-accumulated from the
 //     agent's own transcript so the number is present and updates the same
-//     way whether the agent is running or done.)
+//     way whether the agent is running or done.) A subagent's own final
+//     assistant row also carries stop_reason=end_turn and is a completion
+//     fallback when Claude does not mirror a notification to the root.
 //
 //  5. GOTCHA — task-notification is NOT exclusive to Agent spawns: a
 //     backgrounded Bash command (run_in_background on the Bash tool) is
@@ -123,44 +125,74 @@ import (
 //     {"to":"<agentId>", ...}) resumes it, and it can complete (or fail)
 //     again later under a NEW tool-use-id (a resume's notification
 //     <tool-use-id> is the SendMessage call's own id, not the original
-//     spawn's — so status MUST be correlated by <task-id> only, never by
-//     tool-use-id). Evidence: one sampled agentId failed (API disconnect),
+//     spawn's). Evidence: one sampled agentId failed (API disconnect),
 //     was resumed via SendMessage, then completed ~40 minutes later. A
-//     matching SendMessage flips a done/error node back to running.
+//     matching SendMessage opens a new causal attempt and flips a done/error
+//     node back to running. Terminal facts correlate by BOTH stable agent ID
+//     and attempt tool-use ID; task-id alone is unsafe across resumes.
 //
 // Net: multi-level nesting IS fully recoverable from on-disk JSONL — just
 // not via an inline isSidechain chain. It requires walking a side file per
 // agent (discovered from the parent's own tool_use/tool_result pair), all of
 // which live flat under one <sessionDir>/subagents/ directory regardless of
-// depth, plus reading completion signals ONLY from the root file.
+// depth, plus correlating root notifications and child end_turn fallback facts.
 
-// AgentNodeStatus is the 3-state lifecycle of one spawned subagent.
+// anyRunning reports whether ANY spawned subagent is still running (spawned, no
+// completion/failure notification yet). This is what lets the driver keep a pane READING as
+// "running" after the main turn's end_turn while background subagents (run_in_background) are
+// still working — otherwise the finished main turn alone would flip it to a needs-you idle.
+func (t *claudeAgentTree) anyRunning() bool {
+	for _, n := range t.nodes {
+		if n.Status == AgentRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// AgentNodeStatus is the honest lifecycle of one spawned subagent.
 type AgentNodeStatus string
 
 const (
 	AgentRunning AgentNodeStatus = "running"
 	AgentDone    AgentNodeStatus = "done"
 	AgentError   AgentNodeStatus = "error"
+	AgentUnknown AgentNodeStatus = "unknown"
 )
 
-// AgentNode is one node in the subagent spawn tree recovered from a Claude
-// Code JSONL transcript. It is a flat (ParentID-linked) representation of an
-// unlimited-depth tree — see the schema notes above for how depth/parentage
-// is discovered.
+// AgentNode is the runtime-neutral subagent-run contract consumed by terminal
+// and workspace UIs. Runtime adapters (Claude/Codex) own schema parsing and
+// project onto this flat ParentID-linked tree; consumers never inspect vendor
+// JSONL fields.
 type AgentNode struct {
-	ID           string // agentId assigned by the harness at spawn time
-	ParentID     string // spawning agent's ID; "" when spawned directly by the root session
-	Depth        int    // 1 = direct child of the root session; increments per nesting level
+	ID       string // agentId assigned by the harness at spawn time
+	ParentID string // spawning agent's ID; "" when spawned directly by the root session
+	Depth    int    // 1 = direct child of the root session; increments per nesting level
 
 	SubagentType string // input.subagent_type, verbatim — never rewritten
 	Description  string // input.description, verbatim — never rewritten/truncated
 
 	Status AgentNodeStatus
 
-	StartedAt time.Time // timestamp of the spawning tool_use row
-	EndedAt   time.Time // timestamp of the completion/failure notification; zero while running
+	StartedAt   time.Time // timestamp of the spawning tool_use row
+	ActiveSince time.Time // start of the current activation; advances on SendMessage resume
+	EndedAt     time.Time // timestamp of the completion/failure notification; zero while running
 
 	TokensDown int // output tokens accumulated from the agent's own transcript (live, best-effort; 0 until its file has been read at least once)
+
+	Runtime    string         // claude | codex — adapter identity, never inferred by the UI
+	SourceRef  string         // transcript/thread reference for diagnostics (not presentation)
+	Diagnostic string         // complete | partial | parse-error
+	Attempts   []AgentAttempt // spawn + every resume; empty means submitted but never started
+}
+
+// AgentAttempt is one causal activation of a stable AgentInstance. Resume adds
+// an attempt; it never invents another agent identity.
+type AgentAttempt struct {
+	Sequence  int
+	StartedAt time.Time
+	EndedAt   time.Time
+	Status    AgentNodeStatus
 }
 
 // agentSpawnPending is a seen-but-not-yet-resolved "Agent" tool_use: we know
@@ -172,15 +204,50 @@ type agentSpawnPending struct {
 	startedAt    time.Time
 }
 
+// claudeAgentAttempt is adapter-private causal state. One durable Agent ID may
+// have many activations: the initial Agent tool_use and every later SendMessage
+// each establish a new attempt identified by that tool_use ID. The ID never
+// leaks to the runtime-neutral AgentNode contract; it exists solely so a late or
+// duplicated terminal notification for attempt A cannot kill resumed attempt B.
+type claudeAgentAttempt struct {
+	agentID   string
+	toolUseID string
+	sequence  int
+	startedAt time.Time
+
+	status       AgentNodeStatus
+	endedAt      time.Time
+	transitionAt time.Time
+	phase        claudeLifecyclePhase
+
+	terminalAccepted bool
+	terminalStatus   AgentNodeStatus
+}
+
+type claudeLifecyclePhase uint8
+
+const (
+	// Same-timestamp order is explicit, not replay-order accidental. Attempt
+	// identity already prevents an old attempt's terminal from killing a new
+	// resume. Within one matching attempt, an explicit terminal can legitimately
+	// close an instant resume at the same coarse timestamp.
+	claudePhaseSpawn claudeLifecyclePhase = iota
+	claudePhaseActivity
+	claudePhaseResume
+	claudePhaseTerminal
+)
+
 // claudeAgentTree is the incremental subagent-tree parsing state for one
 // ClaudeDriver. It is a value (not a pointer) embedded in ClaudeDriver;
 // newClaudeAgentTree must be used to get one with its maps initialized.
 type claudeAgentTree struct {
 	sessionDir string // root jsonl path with its extension stripped — see schema note 3
 
-	order   []string // agent IDs, in discovery order (stable AgentTree() output)
-	nodes   map[string]*AgentNode
-	pending map[string]agentSpawnPending // by tool_use id, awaiting the resolving tool_result
+	order            []string // agent IDs, in discovery order (stable AgentTree() output)
+	nodes            map[string]*AgentNode
+	pending          map[string]agentSpawnPending     // by tool_use id, awaiting the resolving tool_result
+	attempts         map[string][]*claudeAgentAttempt // by stable agent ID, causal order
+	attemptByToolUse map[string]*claudeAgentAttempt   // agent ID + tool_use ID → attempt
 
 	readers map[string]*JSONLReader      // by agent ID — that agent's OWN transcript, incremental (offset-cached)
 	usage   map[string]*UsageAccumulator // by agent ID — dedup'd token totals from that transcript
@@ -189,18 +256,178 @@ type claudeAgentTree struct {
 func newClaudeAgentTree(jsonlPath string) claudeAgentTree {
 	dir := strings.TrimSuffix(jsonlPath, filepath.Ext(jsonlPath))
 	return claudeAgentTree{
-		sessionDir: dir,
-		nodes:      make(map[string]*AgentNode),
-		pending:    make(map[string]agentSpawnPending),
-		readers:    make(map[string]*JSONLReader),
-		usage:      make(map[string]*UsageAccumulator),
+		sessionDir:       dir,
+		nodes:            make(map[string]*AgentNode),
+		pending:          make(map[string]agentSpawnPending),
+		attempts:         make(map[string][]*claudeAgentAttempt),
+		attemptByToolUse: make(map[string]*claudeAgentAttempt),
+		readers:          make(map[string]*JSONLReader),
+		usage:            make(map[string]*UsageAccumulator),
 	}
 }
 
 var (
 	taskNotificationTagRe = regexp.MustCompile(`<task-id>([^<]*)</task-id>`)
+	taskToolUseTagRe      = regexp.MustCompile(`<tool-use-id>([^<]*)</tool-use-id>`)
 	taskStatusTagRe       = regexp.MustCompile(`<status>([^<]*)</status>`)
 )
+
+func agentAttemptKey(agentID, toolUseID string) string { return agentID + "\x00" + toolUseID }
+
+func (t *claudeAgentTree) markNodePartial(agentID string) {
+	if node := t.nodes[agentID]; node != nil {
+		node.Diagnostic = "partial"
+	}
+}
+
+func (t *claudeAgentTree) beginAttempt(agentID, toolUseID string, at time.Time, phase claudeLifecyclePhase) *claudeAgentAttempt {
+	if agentID == "" {
+		return nil
+	}
+	if toolUseID != "" {
+		if existing := t.attemptByToolUse[agentAttemptKey(agentID, toolUseID)]; existing != nil {
+			return existing
+		}
+	}
+	attempt := &claudeAgentAttempt{
+		agentID: agentID, toolUseID: toolUseID,
+		sequence:  len(t.attempts[agentID]) + 1,
+		startedAt: at, status: AgentRunning,
+		transitionAt: at, phase: phase,
+	}
+	t.attempts[agentID] = append(t.attempts[agentID], attempt)
+	if toolUseID != "" {
+		t.attemptByToolUse[agentAttemptKey(agentID, toolUseID)] = attempt
+	} else {
+		// An implicit attempt means child activity proved a continuation but the
+		// corresponding root SendMessage was absent/truncated. Preserve liveness,
+		// but expose the evidence gap instead of pretending the source is complete.
+		t.markNodePartial(agentID)
+	}
+	t.syncNodeFromAttempt(attempt)
+	return attempt
+}
+
+func (t *claudeAgentTree) latestAttempt(agentID string) *claudeAgentAttempt {
+	items := t.attempts[agentID]
+	if len(items) == 0 {
+		return nil
+	}
+	return items[len(items)-1]
+}
+
+func (t *claudeAgentTree) syncNodeFromAttempt(attempt *claudeAgentAttempt) {
+	if attempt == nil || t.latestAttempt(attempt.agentID) != attempt {
+		return // historical attempts never rewrite the current Agent projection
+	}
+	node := t.nodes[attempt.agentID]
+	if node == nil {
+		return
+	}
+	node.Status = attempt.status
+	node.ActiveSince = attempt.startedAt
+	if node.ActiveSince.IsZero() {
+		node.ActiveSince = node.StartedAt
+	}
+	node.EndedAt = attempt.endedAt
+}
+
+func (t *claudeAgentTree) applyAttemptTransition(attempt *claudeAgentAttempt, status AgentNodeStatus, at time.Time, phase claudeLifecyclePhase) bool {
+	if attempt == nil {
+		return false
+	}
+	if at.IsZero() {
+		// Explicit terminal correlation still tells us WHAT ended even when its
+		// timestamp is missing; child-stream events without time are unordered and
+		// must not be allowed to win by file replay order.
+		if phase != claudePhaseTerminal {
+			t.markNodePartial(attempt.agentID)
+			return false
+		}
+		t.markNodePartial(attempt.agentID)
+	} else if !attempt.transitionAt.IsZero() {
+		if at.Before(attempt.transitionAt) || (at.Equal(attempt.transitionAt) && phase <= attempt.phase) {
+			if phase == claudePhaseTerminal {
+				t.markNodePartial(attempt.agentID)
+			}
+			return false
+		}
+	}
+	attempt.status = status
+	attempt.transitionAt = at
+	attempt.phase = phase
+	if status == AgentRunning {
+		attempt.endedAt = time.Time{}
+	} else {
+		attempt.endedAt = at
+	}
+	t.syncNodeFromAttempt(attempt)
+	return true
+}
+
+func (t *claudeAgentTree) terminalAttempt(attempt *claudeAgentAttempt, status AgentNodeStatus, at time.Time) {
+	if attempt == nil {
+		return
+	}
+	if attempt.terminalAccepted {
+		if attempt.terminalStatus == status {
+			return // queue + injected-user duplicate, or later redelivery
+		}
+		// Conflicting terminal facts are not safely orderable. Keep the first
+		// terminal timestamp stable and surface uncertainty instead of guessing.
+		attempt.status = AgentUnknown
+		t.markNodePartial(attempt.agentID)
+		t.syncNodeFromAttempt(attempt)
+		return
+	}
+	if t.applyAttemptTransition(attempt, status, at, claudePhaseTerminal) {
+		attempt.terminalAccepted = true
+		attempt.terminalStatus = status
+	}
+}
+
+// attemptForChildEvent maps a child-stream row onto the attempt whose root
+// boundary precedes it. Root is replayed before child files, so all explicit
+// boundaries are already known on a cold load. Equal time at a resume boundary
+// is deliberately unordered: the old attempt's final row and the new attempt's
+// first row cannot be distinguished by cross-file call order.
+func (t *claudeAgentTree) attemptForChildEvent(agentID string, at time.Time) *claudeAgentAttempt {
+	if at.IsZero() {
+		t.markNodePartial(agentID)
+		return nil
+	}
+	var chosen *claudeAgentAttempt
+	for _, attempt := range t.attempts[agentID] {
+		if attempt.startedAt.IsZero() {
+			t.markNodePartial(agentID)
+			continue
+		}
+		if at.Before(attempt.startedAt) {
+			break
+		}
+		if at.Equal(attempt.startedAt) && attempt.phase == claudePhaseResume {
+			t.markNodePartial(agentID)
+			return nil
+		}
+		chosen = attempt
+	}
+	return chosen
+}
+
+func (t *claudeAgentTree) applyChildActivity(agentID string, at time.Time) *claudeAgentAttempt {
+	attempt := t.attemptForChildEvent(agentID, at)
+	if attempt == nil {
+		return nil
+	}
+	if attempt.status != AgentRunning && !at.IsZero() && (attempt.endedAt.IsZero() || at.After(attempt.endedAt)) {
+		// Activity after a terminal fact proves another activation even if the root
+		// resume row is absent. Create an honest partial implicit attempt so later
+		// child end_turn can close it without mutating the old attempt.
+		attempt = t.beginAttempt(agentID, "", at, claudePhaseActivity)
+	}
+	t.applyAttemptTransition(attempt, AgentRunning, at, claudePhaseActivity)
+	return attempt
+}
 
 // scanRow inspects one JSONL row for agent-tree-relevant content: spawns,
 // resolutions, resumes, and completion notifications. ownerID/ownerDepth
@@ -208,10 +435,25 @@ var (
 // session's own file; an agent's ID / that agent's Depth when called from
 // advanceAgentReaders while reading a subagent's own transcript).
 func (t *claudeAgentTree) scanRow(row map[string]any, ownerID string, ownerDepth int) {
+	at := parseTime(row)
+	var ownerAttempt *claudeAgentAttempt
+	if ownerID != "" {
+		if agentRowEndsTurn(row) {
+			// A terminal row by itself does not prove a new activation. Root
+			// notification and child end_turn are duplicate completion channels and
+			// can differ slightly in timestamp; reopening here would manufacture a
+			// phantom attempt and re-trigger afterglow. Earlier user/tool/activity
+			// rows still open an implicit partial attempt when resume evidence is real.
+			ownerAttempt = t.attemptForChildEvent(ownerID, at)
+		} else {
+			ownerAttempt = t.applyChildActivity(ownerID, at)
+		}
+	}
 	rowType, _ := row["type"].(string)
 	switch rowType {
 	case "assistant":
 		t.scanAssistantRow(row)
+		t.applyAgentTurnEnd(row, ownerAttempt, at)
 	case "user":
 		t.scanUserRow(row, ownerID, ownerDepth)
 	case "queue-operation":
@@ -221,6 +463,36 @@ func (t *claudeAgentTree) scanRow(row map[string]any, ownerID string, ownerDepth
 			t.applyTaskNotification(s, parseTime(row))
 		}
 	}
+}
+
+func agentRowEndsTurn(row map[string]any) bool {
+	if rowType, _ := row["type"].(string); rowType != "assistant" {
+		return false
+	}
+	msg, _ := row["message"].(map[string]any)
+	stopReason, _ := msg["stop_reason"].(string)
+	return stopReason == "end_turn"
+}
+
+// applyAgentTurnEnd consumes the subagent transcript's own terminal fact. Claude
+// Code does not always mirror a finished async Agent back into the root transcript
+// as <task-notification>; the child's final assistant row is nevertheless durable
+// and carries stop_reason=end_turn. Treat that adapter-owned event as completion so
+// a missed parent notification cannot leave a phantom AgentRunning forever.
+//
+// Root rows have ownerID="" and are deliberately ignored: a root end_turn does not
+// end background children. SendMessage remains the explicit resume event and clears
+// EndedAt before newly appended child rows are consumed.
+func (t *claudeAgentTree) applyAgentTurnEnd(row map[string]any, attempt *claudeAgentAttempt, at time.Time) {
+	if attempt == nil {
+		return
+	}
+	msg, _ := row["message"].(map[string]any)
+	stopReason, _ := msg["stop_reason"].(string)
+	if stopReason != "end_turn" {
+		return
+	}
+	t.terminalAttempt(attempt, AgentDone, at)
 }
 
 // scanAssistantRow handles two tool_use kinds: "Agent" (a new spawn, parked
@@ -255,9 +527,12 @@ func (t *claudeAgentTree) scanAssistantRow(row map[string]any) {
 			}
 		case "SendMessage":
 			to, _ := input["to"].(string)
-			if node, ok := t.nodes[to]; ok && node.Status != AgentRunning {
-				node.Status = AgentRunning
-				node.EndedAt = time.Time{}
+			if node := t.nodes[to]; node != nil {
+				if id == "" {
+					t.markNodePartial(to)
+					continue
+				}
+				t.beginAttempt(to, id, parseTime(row), claudePhaseResume)
 			}
 		}
 	}
@@ -292,6 +567,7 @@ func (t *claudeAgentTree) scanUserRow(row map[string]any, ownerID string, ownerD
 	tur, _ := row["toolUseResult"].(map[string]any)
 	agentID, _ := tur["agentId"].(string)
 	turStatus, _ := tur["status"].(string)
+	terminal, failed := claudeAgentTerminalStatus(turStatus)
 
 	content, _ := msg["content"].([]any)
 	for _, it := range content {
@@ -303,8 +579,26 @@ func (t *claudeAgentTree) scanUserRow(row map[string]any, ownerID string, ownerD
 		if toolUseID == "" {
 			continue
 		}
+
+		// Claude Code <=2.1 can close an existing Agent in this tool_result.
+		// Correlate by BOTH stable agent ID and attempt tool-use ID; agent ID alone
+		// would let a late result for attempt A terminate resumed attempt B.
+		if terminal && agentID != "" {
+			if attempt := t.attemptByToolUse[agentAttemptKey(agentID, toolUseID)]; attempt != nil {
+				status := AgentDone
+				if failed {
+					status = AgentError
+				}
+				t.terminalAttempt(attempt, status, parseTime(row))
+				return
+			}
+		}
+
 		pending, ok := t.pending[toolUseID]
 		if !ok {
+			if terminal && agentID != "" && t.nodes[agentID] != nil {
+				t.markNodePartial(agentID) // terminal fact exists, causal attempt does not
+			}
 			continue // some other tool's result (Bash/Read/…) — not an Agent resolve
 		}
 
@@ -322,9 +616,18 @@ func (t *claudeAgentTree) scanUserRow(row map[string]any, ownerID string, ownerD
 				Description:  pending.description,
 				Status:       AgentRunning,
 				StartedAt:    pending.startedAt,
+				ActiveSince:  pending.startedAt,
 			}
 			t.nodes[agentID] = node
 			t.order = append(t.order, agentID)
+			attempt := t.beginAttempt(agentID, toolUseID, pending.startedAt, claudePhaseSpawn)
+			if terminal {
+				status := AgentDone
+				if failed {
+					status = AgentError
+				}
+				t.terminalAttempt(attempt, status, parseTime(row))
+			}
 			return
 		}
 
@@ -347,13 +650,26 @@ func (t *claudeAgentTree) scanUserRow(row map[string]any, ownerID string, ownerD
 			Depth:        ownerDepth + 1,
 			SubagentType: pending.subagentType,
 			Description:  pending.description,
-			Status:       AgentError,
+			Status:       AgentRunning,
 			StartedAt:    pending.startedAt,
-			EndedAt:      parseTime(row),
+			ActiveSince:  pending.startedAt,
 		}
 		t.nodes[toolUseID] = node
 		t.order = append(t.order, toolUseID)
+		attempt := t.beginAttempt(toolUseID, toolUseID, pending.startedAt, claudePhaseSpawn)
+		t.terminalAttempt(attempt, AgentError, parseTime(row))
 		return
+	}
+}
+
+func claudeAgentTerminalStatus(status string) (terminal, failed bool) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "done", "success", "succeeded":
+		return true, false
+	case "failed", "error", "cancelled", "canceled", "interrupted", "rejected":
+		return true, true
+	default:
+		return false, false
 	}
 }
 
@@ -380,15 +696,26 @@ func (t *claudeAgentTree) applyTaskNotification(text string, at time.Time) {
 	if statusMatch == nil {
 		return
 	}
+	toolUseMatch := taskToolUseTagRe.FindStringSubmatch(text)
+	if toolUseMatch == nil || strings.TrimSpace(toolUseMatch[1]) == "" {
+		t.markNodePartial(node.ID)
+		return
+	}
+	attempt := t.attemptByToolUse[agentAttemptKey(node.ID, strings.TrimSpace(toolUseMatch[1]))]
+	if attempt == nil {
+		// Do not guess "latest": a delayed completion for an older activation is
+		// allowed to arrive after a SendMessage resume of the same stable agent.
+		t.markNodePartial(node.ID)
+		return
+	}
 	switch statusMatch[1] {
 	case "completed":
-		node.Status = AgentDone
+		t.terminalAttempt(attempt, AgentDone, at)
 	case "failed":
-		node.Status = AgentError
+		t.terminalAttempt(attempt, AgentError, at)
 	default:
 		return // unrecognized status — leave the node untouched rather than guess
 	}
-	node.EndedAt = at
 }
 
 // advanceAgentReaders incrementally reads every known agent's OWN transcript

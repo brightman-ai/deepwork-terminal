@@ -68,6 +68,56 @@ func makeAgentResolveRow(ts, toolUseID, agentID string) map[string]any {
 	}
 }
 
+// makeEndTurnRow is a plain finished main turn (assistant, stop_reason=end_turn) — the state
+// that, alone, would flip a pane to a needs-you idle.
+func makeEndTurnRow(ts string) map[string]any {
+	return map[string]any{
+		"type":      "assistant",
+		"timestamp": ts,
+		"message": map[string]any{
+			"id":          "msg-endturn-" + ts,
+			"model":       "claude-sonnet-5",
+			"content":     []any{map[string]any{"type": "text", "text": "done for now."}},
+			"stop_reason": "end_turn",
+		},
+	}
+}
+
+// TestClaudeStatus_MainIdleButSubagentRunning pins the fix: after the MAIN turn ends, a pane with a
+// still-running background subagent must read RUNNING (not a needs-you idle); once every subagent
+// has completed, the finished main turn is a genuine idle+awaiting again.
+func TestClaudeStatus_MainIdleButSubagentRunning(t *testing.T) {
+	base := []map[string]any{
+		makeAgentSpawnRow("2026-07-12T00:00:00.000Z", "toolu_1", "Explore", "scan"),
+		makeAgentResolveRow("2026-07-12T00:00:01.000Z", "toolu_1", "agent_abc"),
+		makeEndTurnRow("2026-07-12T00:00:02.000Z"),
+	}
+	d := NewClaudeDriver(writeJSONL(t, base), "sess-sub")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.State().Status; got != StatusRunning {
+		t.Errorf("main end_turn + running subagent: got %q, want %q", got, StatusRunning)
+	}
+	if d.AgentState().AwaitingUser {
+		t.Errorf("must NOT show needs-you while a subagent is still running")
+	}
+
+	// Subagent completes (root-file <task-notification>, channel a) → nothing running → the
+	// finished main turn is now a real idle+awaiting.
+	done := append(base, makeTaskNotificationQueueOpRow("2026-07-12T00:00:05.000Z", "agent_abc", "toolu_1", "completed", "done"))
+	d2 := NewClaudeDriver(writeJSONL(t, done), "sess-sub2")
+	if err := d2.Update(); err != nil {
+		t.Fatal(err)
+	}
+	if got := d2.State().Status; got != StatusIdle {
+		t.Errorf("main end_turn + all subagents done: got %q, want %q", got, StatusIdle)
+	}
+	if !d2.AgentState().AwaitingUser {
+		t.Errorf("all subagents done + assistant spoke last → needs-you")
+	}
+}
+
 func taskNotificationBody(taskID, toolUseID, status, summary string) string {
 	return "<task-notification>\n<task-id>" + taskID + "</task-id>\n<tool-use-id>" + toolUseID +
 		"</tool-use-id>\n<output-file>/tmp/x/tasks/" + taskID + ".output</output-file>\n<status>" + status +
@@ -451,6 +501,122 @@ func TestAgentTree_CompletedAndFailedStatus(t *testing.T) {
 	}
 }
 
+// Some Claude Code async runs omit the parent <task-notification>. The child
+// transcript's own end_turn is the terminal SSOT and must close the node; otherwise
+// a completed agent survives forever as "running" after a reload.
+func TestAgentTree_ChildEndTurnCompletesWithoutParentNotification(t *testing.T) {
+	rootRows := []map[string]any{
+		makeAgentSpawnRow("2026-07-12T01:00:00Z", "toolu_child_end", "general-purpose", "Independent witness"),
+		makeAgentResolveRow("2026-07-12T01:00:01Z", "toolu_child_end", "aChildEnd"),
+		makeEndTurnRow("2026-07-12T01:00:02Z"),
+	}
+	path := writeJSONL(t, rootRows)
+	writeAgentTranscript(t, sessionDirFor(path), "aChildEnd", []map[string]any{
+		makeAgentUsageRow("2026-07-12T01:02:00Z", "aChildEnd", "m-child", 42),
+		makeEndTurnRow("2026-07-12T01:02:01Z"),
+	})
+
+	d := NewClaudeDriver(path, "sess-child-end")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aChildEnd")
+	if n == nil || n.Status != AgentDone || n.EndedAt.IsZero() {
+		t.Fatalf("child end_turn must close the node without parent notification: %+v", n)
+	}
+	if got := d.State().Status; got != StatusIdle {
+		t.Fatalf("root end_turn + terminal child: got %q, want idle", got)
+	}
+}
+
+// Older/synchronous Claude Code Agent runs terminate in the resolving root
+// tool_result itself (toolUseResult.status + agentId), not in a later
+// <task-notification>. Pin the real session-208 schema so completed historical
+// agents cannot resurrect as permanently running after reload.
+func TestAgentTree_SynchronousToolResultCompletesExistingAgent(t *testing.T) {
+	rows := append(
+		[]map[string]any{
+			makeAgentSpawnRow("2026-06-10T19:20:00Z", "toolu_sync", "general-purpose", "old schema task"),
+			makeAgentResolveRow("2026-06-10T19:20:01Z", "toolu_sync", "aSync"),
+		},
+		map[string]any{
+			"type":      "user",
+			"timestamp": "2026-06-10T19:30:00Z",
+			"message": map[string]any{
+				"role": "user",
+				"content": []any{map[string]any{
+					"type": "tool_result", "tool_use_id": "toolu_sync", "content": "final answer",
+				}},
+			},
+			"toolUseResult": map[string]any{
+				"status": "completed", "agentId": "aSync",
+			},
+		},
+	)
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-sync")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aSync")
+	if n == nil || n.Status != AgentDone || n.EndedAt.IsZero() {
+		t.Fatalf("sync terminal tool_result must complete existing node: %+v", n)
+	}
+}
+
+func TestAgentTree_SynchronousFailedToolResultErrorsExistingAgent(t *testing.T) {
+	rows := append(
+		[]map[string]any{
+			makeAgentSpawnRow("2026-06-10T19:21:00Z", "toolu_fail_sync", "Explore", "old failed task"),
+			makeAgentResolveRow("2026-06-10T19:21:01Z", "toolu_fail_sync", "aFailSync"),
+		},
+		map[string]any{
+			"type":      "user",
+			"timestamp": "2026-06-10T19:31:00Z",
+			"message": map[string]any{
+				"role": "user",
+				"content": []any{map[string]any{
+					"type": "tool_result", "tool_use_id": "toolu_fail_sync", "is_error": true,
+				}},
+			},
+			"toolUseResult": map[string]any{
+				"status": "failed", "agentId": "aFailSync",
+			},
+		},
+	)
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-fail-sync")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aFailSync")
+	if n == nil || n.Status != AgentError || n.EndedAt.IsZero() {
+		t.Fatalf("sync failed tool_result must error existing node: %+v", n)
+	}
+}
+
+// Claude Code 2.1.170 foreground Agent emits no async launch row: the first
+// matching tool_result both assigns agentId and reports completed. Session 208
+// contains exactly this shape.
+func TestAgentTree_FirstResolveMayAlreadyBeTerminal(t *testing.T) {
+	rows := []map[string]any{
+		makeAgentSpawnRow("2026-06-10T19:19:42Z", "toolu_direct", "general-purpose", "Bug fix: workspace portal 404"),
+		{
+			"type": "user", "timestamp": "2026-06-10T19:25:18Z",
+			"message": map[string]any{"role": "user", "content": []any{map[string]any{
+				"type": "tool_result", "tool_use_id": "toolu_direct", "content": "final answer",
+			}}},
+			"toolUseResult": map[string]any{"status": "completed", "agentId": "aDirect"},
+		},
+	}
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-direct")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aDirect")
+	if n == nil || n.Status != AgentDone || n.EndedAt.IsZero() {
+		t.Fatalf("first terminal resolve must create a done node: %+v", n)
+	}
+}
+
 // A task-notification whose <task-id> does not match any agent WE resolved
 // from an "Agent" spawn must be ignored — real transcripts use the identical
 // envelope for backgrounded Bash commands (schema note 5). It must not
@@ -477,9 +643,10 @@ func TestAgentTree_UnknownTaskIDIgnored(t *testing.T) {
 	}
 }
 
-// A SendMessage to an already-done/failed agent resumes it (schema note 6);
-// the resuming notification's <tool-use-id> is the SendMessage call's own
-// id, never the original spawn's — status must be tracked by task-id alone.
+// A SendMessage to an already-done/failed agent resumes the same durable
+// identity under a new causal attempt (schema note 6). The resumed completion
+// must match the SendMessage tool-use ID; task-id alone is insufficient because
+// late notifications for older attempts are legal.
 func TestAgentTree_SendMessageResumesCompletedAgent(t *testing.T) {
 	rows := []map[string]any{
 		makeAgentSpawnRow("2026-07-12T01:00:00Z", "toolu_1", "general-purpose", "Flaky agent"),
@@ -518,6 +685,164 @@ func TestAgentTree_SendMessageResumesCompletedAgent(t *testing.T) {
 	n = findNode(d.AgentTree(), "aFlaky")
 	if n.Status != AgentDone {
 		t.Errorf("after resumed completion: got %q, want done", n.Status)
+	}
+}
+
+// Cold replay reads the complete root stream before any child stream. The old
+// reducer therefore applied the 12:00 resume first, then let the child's older
+// 11:58 end_turn overwrite it back to done. Pin the real cross-stream ordering:
+// the newer attempt remains running and its visible duration starts at resume.
+func TestAgentTree_ColdReplayResumeDominatesOlderChildEndTurn(t *testing.T) {
+	rootRows := []map[string]any{
+		makeAgentSpawnRow("2026-07-13T11:50:00Z", "toolu_spawn", "general-purpose", "Import fidelity"),
+		makeAgentResolveRow("2026-07-13T11:50:01Z", "toolu_spawn", "aResume"),
+		makeTaskNotificationQueueOpRow("2026-07-13T11:58:37.100Z", "aResume", "toolu_spawn", "completed", "first activation done"),
+		makeSendMessageRow("2026-07-13T12:00:03.548Z", "toolu_resume", "aResume"),
+	}
+	path := writeJSONL(t, rootRows)
+	writeAgentTranscript(t, sessionDirFor(path), "aResume", []map[string]any{
+		makeAgentUsageRow("2026-07-13T11:58:30Z", "aResume", "m-old", 10),
+		makeEndTurnRow("2026-07-13T11:58:37.028Z"),
+		{"type": "user", "timestamp": "2026-07-13T12:00:03.648Z", "message": map[string]any{"role": "user", "content": []any{}}},
+		makeAgentUsageRow("2026-07-13T12:06:19.005Z", "aResume", "m-new", 20),
+	})
+
+	d := NewClaudeDriver(path, "sess-cold-resume")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aResume")
+	if n == nil || n.Status != AgentRunning || !n.EndedAt.IsZero() {
+		t.Fatalf("older child end_turn must not close resumed attempt: %+v", n)
+	}
+	wantActive := time.Date(2026, 7, 13, 12, 0, 3, 548_000_000, time.UTC)
+	if !n.ActiveSince.Equal(wantActive) {
+		t.Fatalf("active duration must restart at SendMessage: got %s want %s", n.ActiveSince, wantActive)
+	}
+}
+
+// Claude delivers the same terminal notification through queue-operation and
+// injected-user channels, and can redeliver it much later. The first accepted
+// terminal time is the execution fact; delivery retries cannot manufacture a
+// new afterglow or extend elapsed duration.
+func TestAgentTree_DuplicateTerminalDoesNotMoveEndedAt(t *testing.T) {
+	rows := []map[string]any{
+		makeAgentSpawnRow("2026-07-13T12:00:00Z", "toolu_dup", "general-purpose", "Dedup"),
+		makeAgentResolveRow("2026-07-13T12:00:01Z", "toolu_dup", "aDup"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:23:27.879Z", "aDup", "toolu_dup", "completed", "done"),
+		makeTaskNotificationUserRow("2026-07-13T12:23:27.900Z", "aDup", "toolu_dup", "completed", "done"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:56:08.133Z", "aDup", "toolu_dup", "completed", "redelivery"),
+	}
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-dup-terminal")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aDup")
+	wantEnded := time.Date(2026, 7, 13, 12, 23, 27, 879_000_000, time.UTC)
+	if n == nil || n.Status != AgentDone || !n.EndedAt.Equal(wantEnded) {
+		t.Fatalf("duplicate delivery changed terminal fact: %+v want ended_at=%s", n, wantEnded)
+	}
+}
+
+// Root notification and child end_turn are two completion channels for one
+// attempt. Even if their clocks/order make child end_turn appear slightly later,
+// it must dedupe against the original attempt rather than inventing a resume and
+// moving EndedAt (which would also re-trigger the UI afterglow).
+func TestAgentTree_LaterChildEndTurnDoesNotInventResume(t *testing.T) {
+	rootRows := []map[string]any{
+		makeAgentSpawnRow("2026-07-13T12:00:00Z", "toolu_finish", "general-purpose", "Finish once"),
+		makeAgentResolveRow("2026-07-13T12:00:01Z", "toolu_finish", "aFinish"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:10:00Z", "aFinish", "toolu_finish", "completed", "done"),
+	}
+	path := writeJSONL(t, rootRows)
+	writeAgentTranscript(t, sessionDirFor(path), "aFinish", []map[string]any{
+		makeEndTurnRow("2026-07-13T12:10:00.500Z"),
+	})
+	d := NewClaudeDriver(path, "sess-finish-dedupe")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aFinish")
+	wantStarted := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	wantEnded := time.Date(2026, 7, 13, 12, 10, 0, 0, time.UTC)
+	if n == nil || n.Status != AgentDone || !n.ActiveSince.Equal(wantStarted) || !n.EndedAt.Equal(wantEnded) {
+		t.Fatalf("duplicate child terminal invented an activation: %+v", n)
+	}
+}
+
+// A cold driver and an incrementally advanced driver must converge on the same
+// current attempt. This pins replay-order independence across root and child files.
+func TestAgentTree_ColdAndIncrementalLifecycleConverge(t *testing.T) {
+	initialRoot := []map[string]any{
+		makeAgentSpawnRow("2026-07-13T12:00:00Z", "toolu_first", "general-purpose", "Converge"),
+		makeAgentResolveRow("2026-07-13T12:00:01Z", "toolu_first", "aConverge"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:01:00Z", "aConverge", "toolu_first", "completed", "first done"),
+	}
+	path := writeJSONL(t, initialRoot)
+	sessionDir := sessionDirFor(path)
+	writeAgentTranscript(t, sessionDir, "aConverge", []map[string]any{makeEndTurnRow("2026-07-13T12:00:59Z")})
+
+	incremental := NewClaudeDriver(path, "sess-incremental")
+	if err := incremental.Update(); err != nil {
+		t.Fatal(err)
+	}
+	appendJSONL(t, path, []map[string]any{makeSendMessageRow("2026-07-13T12:02:00Z", "toolu_second", "aConverge")})
+	appendAgentTranscript(t, sessionDir, "aConverge", []map[string]any{
+		makeAgentUsageRow("2026-07-13T12:02:01Z", "aConverge", "m-second", 12),
+		makeEndTurnRow("2026-07-13T12:03:00Z"),
+	})
+	if err := incremental.Update(); err != nil {
+		t.Fatal(err)
+	}
+
+	cold := NewClaudeDriver(path, "sess-cold")
+	if err := cold.Update(); err != nil {
+		t.Fatal(err)
+	}
+	a := findNode(incremental.AgentTree(), "aConverge")
+	b := findNode(cold.AgentTree(), "aConverge")
+	if a == nil || b == nil || a.Status != b.Status || !a.ActiveSince.Equal(b.ActiveSince) || !a.EndedAt.Equal(b.EndedAt) {
+		t.Fatalf("cold/incremental lifecycle diverged: incremental=%+v cold=%+v", a, b)
+	}
+}
+
+// A delayed terminal for attempt A may arrive after attempt B was opened.
+// Correlation by stable agent ID alone would kill B; tool-use attempt identity
+// makes the late A delivery an idempotent historical event.
+func TestAgentTree_LateOldAttemptTerminalCannotKillResume(t *testing.T) {
+	rows := []map[string]any{
+		makeAgentSpawnRow("2026-07-13T12:00:00Z", "toolu_A", "general-purpose", "Resume race"),
+		makeAgentResolveRow("2026-07-13T12:00:01Z", "toolu_A", "aRace"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:01:00Z", "aRace", "toolu_A", "completed", "A done"),
+		makeSendMessageRow("2026-07-13T12:02:00Z", "toolu_B", "aRace"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:30:00Z", "aRace", "toolu_A", "completed", "late A duplicate"),
+	}
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-late-old")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aRace")
+	if n == nil || n.Status != AgentRunning || !n.EndedAt.IsZero() {
+		t.Fatalf("late attempt A terminal killed attempt B: %+v", n)
+	}
+}
+
+func TestAgentTree_InstantResumeCompletionClosesMatchingAttempt(t *testing.T) {
+	rows := []map[string]any{
+		makeAgentSpawnRow("2026-07-13T12:00:00Z", "toolu_initial", "general-purpose", "Instant resume"),
+		makeAgentResolveRow("2026-07-13T12:00:01Z", "toolu_initial", "aInstant"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:01:00Z", "aInstant", "toolu_initial", "completed", "initial done"),
+		makeSendMessageRow("2026-07-13T12:02:00Z", "toolu_instant", "aInstant"),
+		makeTaskNotificationQueueOpRow("2026-07-13T12:02:00Z", "aInstant", "toolu_instant", "completed", "instant done"),
+	}
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-instant-resume")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	n := findNode(d.AgentTree(), "aInstant")
+	want := time.Date(2026, 7, 13, 12, 2, 0, 0, time.UTC)
+	if n == nil || n.Status != AgentDone || !n.ActiveSince.Equal(want) || !n.EndedAt.Equal(want) {
+		t.Fatalf("matching instant terminal must close resumed attempt: %+v", n)
 	}
 }
 

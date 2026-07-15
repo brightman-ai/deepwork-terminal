@@ -19,20 +19,22 @@ type CodexSessionState struct {
 
 // CodexDriver parses a Codex CLI JSONL rollout file and derives session state.
 type CodexDriver struct {
-	reader *JSONLReader
-	state  CodexSessionState
+	reader    *JSONLReader
+	state     CodexSessionState
+	agentTree codexAgentTree
 }
 
 func NewCodexDriver(jsonlPath string) *CodexDriver {
 	return &CodexDriver{
-		reader: NewJSONLReader(jsonlPath),
-		state:  CodexSessionState{Status: StatusIdle},
+		reader:    NewJSONLReader(jsonlPath),
+		state:     CodexSessionState{Status: StatusIdle},
+		agentTree: newCodexAgentTree(jsonlPath),
 	}
 }
 
 // Update reads new JSONL lines and updates state.
 func (cd *CodexDriver) Update() error {
-	return cd.reader.ReadNewFunc(func(row map[string]any) bool {
+	err := cd.reader.ReadNewFunc(func(row map[string]any) bool {
 		rowType, _ := row["type"].(string)
 		payload, _ := row["payload"].(map[string]any)
 
@@ -47,9 +49,7 @@ func (cd *CodexDriver) Update() error {
 			if model, ok := payload["model"].(string); ok && model != "" {
 				cd.state.Model = model
 			}
-			if sid, ok := payload["session_id"].(string); ok && sid != "" {
-				cd.state.SessionID = sid
-			}
+			cd.state.SessionID = firstString(payload["session_id"], payload["id"], cd.state.SessionID)
 
 		case "event_msg":
 			if payload == nil {
@@ -84,10 +84,10 @@ func (cd *CodexDriver) Update() error {
 					break
 				}
 				// Codex values are already cumulative totals — take latest directly.
-				cd.state.InputTokens = intFromAny(usage["input"])
-				cd.state.OutputTokens = intFromAny(usage["output"])
-				cd.state.CachedTokens = intFromAny(usage["cached"])
-				cd.state.TotalTokens = intFromAny(usage["total"])
+				cd.state.InputTokens = intFromAny(firstNonNil(usage["input_tokens"], usage["input"]))
+				cd.state.OutputTokens = intFromAny(firstNonNil(usage["output_tokens"], usage["output"]))
+				cd.state.CachedTokens = intFromAny(firstNonNil(usage["cached_input_tokens"], usage["cached"]))
+				cd.state.TotalTokens = intFromAny(firstNonNil(usage["total_tokens"], usage["total"]))
 			}
 
 		case "response_item":
@@ -98,10 +98,20 @@ func (cd *CodexDriver) Update() error {
 		cd.state.UpdatedAt = time.Now()
 		return true
 	})
+	if err != nil {
+		return err
+	}
+	cd.agentTree.update(cd.state.SessionID, cd.state.Status == StatusRunning, cd.state.LastTurnAt)
+	return nil
 }
 
 // State returns the current derived state.
 func (cd *CodexDriver) State() CodexSessionState { return cd.state }
+
+// AgentTree returns Codex CLI subagents projected onto the same runtime-neutral
+// contract ClaudeDriver exposes. Parentage comes from child rollout metadata,
+// never from description matching.
+func (cd *CodexDriver) AgentTree() []AgentNode { return cd.agentTree.nodes() }
 
 // AgentState converts to the unified AgentState model.
 func (cd *CodexDriver) AgentState() AgentState {

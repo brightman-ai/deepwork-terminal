@@ -39,6 +39,7 @@
             <span class="ao-card-badge" :class="`s-${g.status}`">{{ statusLabel(g.status) }}</span>
             <span v-if="windowTool(w)" class="ao-card-tool">{{ windowTool(w) }}</span>
           </div>
+          <div v-if="agentSummary(w)" class="ao-card-agents">{{ agentSummary(w) }}</div>
           <div v-if="tailLines(w, 2).length" class="ao-card-tail">
             <div v-for="(line, li) in tailLines(w, 2)" :key="li" class="ao-card-tail-line">{{ line || ' ' }}</div>
           </div>
@@ -68,6 +69,7 @@
               <span class="ao-card-badge" :class="`s-${a.status}`">{{ statusLabel(a.status) }}</span>
               <span v-if="windowTool(a.w)" class="ao-card-tool">{{ windowTool(a.w) }}</span>
             </div>
+            <div v-if="agentSummary(a.w)" class="ao-card-agents">{{ agentSummary(a.w) }}</div>
             <div v-if="tailLines(a.w).length" class="ao-card-tail">
               <div v-for="(line, li) in tailLines(a.w)" :key="li" class="ao-card-tail-line">{{ line || ' ' }}</div>
             </div>
@@ -121,6 +123,7 @@
             <span class="ao-card-badge s-idle">空闲</span>
             <span v-if="windowTool(w)" class="ao-card-tool">{{ windowTool(w) }}</span>
           </div>
+          <div v-if="agentSummary(w)" class="ao-card-agents">{{ agentSummary(w) }}</div>
           <div v-if="tailLines(w, 8).length" class="ao-card-tail">
             <div v-for="(line, li) in tailLines(w, 8)" :key="li" class="ao-card-tail-line">{{ line || ' ' }}</div>
           </div>
@@ -137,6 +140,7 @@ import type { TmuxWindowState } from '@terminal/types/terminal'
 import {
   windowCwd,
   windowTool,
+  windowAgentSignals,
   overviewColumns,
   type EffectiveStatus,
   type OverviewGroup,
@@ -162,6 +166,12 @@ const STATUS_LABEL: Record<EffectiveStatus, string> = {
 }
 function statusLabel(s: EffectiveStatus): string {
   return STATUS_LABEL[s]
+}
+
+/** Only split windows need an attribution line; a single-pane card already has a tool badge. */
+function agentSummary(w: TmuxWindowState): string {
+  const signals = windowAgentSignals(w)
+  return signals.length > 1 ? signals.join(' · ') : ''
 }
 
 /** roll-up 段定义 —— 顺序即紧急度（idle 不进摘要行）。 */
@@ -425,6 +435,16 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   font-size: 0.6rem;
   font-weight: 600;
 }
+
+.ao-card-agents {
+  overflow: hidden;
+  color: #9a8ab8;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ao-card--big .ao-card-agents { font-size: 0.68rem; }
 
 .ao-card-tail {
   font-family: var(--dw-mono, ui-monospace, monospace);
