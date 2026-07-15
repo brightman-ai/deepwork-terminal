@@ -281,11 +281,15 @@
       @authenticated="onAuthenticated"
     />
 
-    <!-- 隐藏文件输入 (📎 附件按钮) -->
+    <!-- 隐藏文件输入 (📎 附件按钮).
+         NO `accept` filter, deliberately. It used to carry an extension allowlist that had to
+         mirror the server's MIME allowlist — two lists, two vocabularies (extension vs MIME),
+         guaranteed to drift. Both are gone: the server stores whatever it is given (it does no
+         parsing and never executes it), so greying a legitimate file out of the picker only
+         ever cost the user a file it would have happily accepted. -->
     <input
       ref="attachInputRef"
       type="file"
-      accept="image/*,.pdf,.txt,.md,.json,.csv,.log,.py,.go,.js,.ts,.sh,.yaml,.yml,.toml,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.zip"
       multiple
       style="display: none"
       @change="onAttachFileSelected"
@@ -362,6 +366,7 @@ const props = defineProps<{
   active: boolean
   /** Remote-tab connection (mesh). Empty/undefined → local same-origin terminal (unchanged).
    *  Resolved once per tab by useRemotePeers.resolveTabConnection (the single source). */
+  httpBase?: string
   wsBase?: string
   authToken?: string
   machineLabel?: string
@@ -831,6 +836,10 @@ function sendBinary(data: Uint8Array, route = 'direct'): void {
 
 const pasteResolver = useCliPasteResolver({
   sessionId: () => props.sessionId,
+  httpBase: () => props.httpBase,
+  authToken: () => props.authToken,
+  isRemote: () => !!props.isRemote,
+  activeCwd: () => tmux.activeCwd.value,
   surface: 'workbench',
   isActive: () => props.active,
   sendBinary: (data) => sendBinary(data, 'clipboard'),

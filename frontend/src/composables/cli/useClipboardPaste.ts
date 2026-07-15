@@ -9,9 +9,9 @@
  */
 import { ref } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
-import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
-import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { createUploadProgressStore } from '@terminal/composables/cli/useUploadProgress'
+import { classifyUploadFailure, type UploadErrorBody } from '@terminal/composables/cli/uploadFailure'
+import { pasteUploadHeaders, resolvePasteUploadTarget } from '@terminal/composables/cli/pasteUploadTarget'
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 import { apiUrl } from '@ce/utils/runtimeBase'
 
@@ -43,6 +43,14 @@ export interface PasteUploadOptions {
   revealImmediately?: boolean
 }
 
+export interface ClipboardPasteTarget {
+  sessionId: () => string
+  isRemote?: () => boolean
+  httpBase?: () => string | undefined
+  authToken?: () => string | undefined
+  activeCwd?: () => string | undefined
+}
+
 const log = createLogger('cli-clipboard-paste')
 
 /** Detect if the browser is accessing from the same machine as the server */
@@ -51,14 +59,14 @@ function detectIsLocal(): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1'
 }
 
-export function useClipboardPaste(sessionId: () => string) {
+export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() => string)) {
+  const target: ClipboardPasteTarget = typeof targetOrSessionId === 'function'
+    ? { sessionId: targetOrSessionId }
+    : targetOrSessionId
+  const sessionId = target.sessionId
   const uploading = ref(false)
   const lastError = ref('')
   const { getAuthCode, clearAuthCode, promptAuth } = useCliAuth()
-  // Same per-session tmux store the drawer uses: activeCwd is the LIVE active-pane cwd.
-  // We send it so the upload lands where the CLI actually is, not the session's launch dir.
-  // Empty for a non-tmux terminal (no panes) → the server resolves the shell's live cwd.
-  const tmux = useTmuxState(sessionId)
   // Per-tab SSOT of in-flight uploads (see useUploadProgress.ts). One instance per
   // useClipboardPaste() call — useCliPasteResolver creates exactly one per terminal
   // surface, so uploads never leak across tabs.
@@ -166,20 +174,28 @@ export function useClipboardPaste(sessionId: () => string) {
       const formData = new FormData()
       formData.append('file', blob, uploadName)
       formData.append('mime', mime)
-      const cwd = tmux.activeCwd.value
+      // Supplied by the terminal surface's live WS-backed tmux state. In particular,
+      // a remote tab must not instantiate/fetch a same-origin tmux store just to route cwd.
+      const cwd = target.activeCwd?.() || ''
       if (cwd) formData.append('cwd', cwd)
 
       // XHR, not fetch: only XMLHttpRequest exposes `upload.onprogress`, which is
       // the ONLY way to get real sent/total bytes for the progress float. Same
       // endpoint, response shape, and auth headers as cliFetch — duplicated by
       // hand here since cliFetch itself wraps fetch() and can't drive an XHR.
-      const authValue = getAuthCode()
-      const headers = traceHeaders(options.trace)
-      if (authValue) {
-        headers['X-CLI-Auth'] = authValue
-        headers['X-Auth-Code'] = authValue
-      }
-      const url = apiUrl(cliApi(`/sessions/${sessionId()}/paste-upload`))
+      const isRemote = !!target.isRemote?.()
+      const uploadTarget = resolvePasteUploadTarget({
+        sessionId: sessionId(),
+        isRemote,
+        httpBase: target.httpBase?.(),
+        localAuth: getAuthCode(),
+        remoteAuth: target.authToken?.(),
+      })
+      // Existing peers allow the RT-8 minimum CORS header set. Do not make a remote upload
+      // depend on a peer upgrade by adding this host's observability header to its preflight;
+      // client-side logs still carry the trace locally. Local same-origin requests keep it.
+      const headers = pasteUploadHeaders(uploadTarget, traceHeaders(options.trace))
+      const url = apiUrl(uploadTarget.url)
       const { status, json } = await xhrUploadFormData(url, formData, headers, (sent, total) => {
         uploadProgress.progress(entryId, sent, total || blob.size)
       })
@@ -187,13 +203,14 @@ export function useClipboardPaste(sessionId: () => string) {
       // Mirror cliFetch's 401/429 handling (clear stale code + prompt / throttle
       // notice) — XHR bypasses cliFetch entirely so this can't be shared, only
       // reproduced exactly via the same public useCliAuth() actions.
-      if (status === 401) { clearAuthCode(); promptAuth() }
-      if (status === 429) { promptAuth() }
+      if (!uploadTarget.isRemote && status === 401) { clearAuthCode(); promptAuth() }
+      if (!uploadTarget.isRemote && status === 429) { promptAuth() }
 
       if (status < 200 || status >= 300) {
-        const err = (json as { error?: string } | null)?.error || `HTTP ${status}`
-        lastError.value = err
-        uploadProgress.fail(entryId, lastError.value)
+        const body = json as UploadErrorBody | null
+        const { message, retryable } = classifyUploadFailure(status, body)
+        lastError.value = message
+        uploadProgress.fail(entryId, message, retryable)
         log.warn('cli.clipboard.upload_failed', {
           source: options.source || 'unknown',
           upload_kind: uploadKind,
@@ -201,7 +218,10 @@ export function useClipboardPaste(sessionId: () => string) {
           filename: uploadName,
           size: blob.size,
           status,
-          error: lastError.value,
+          // The server's own words, kept for diagnosis even though the user sees `message`.
+          error: body?.error || `HTTP ${status}`,
+          retryable,
+          target: uploadTarget.isRemote ? 'remote' : 'local',
           elapsed_ms: Math.round(performance.now() - startedAt),
         }, options.trace)
         return { type: 'none', textForPTY: '', isLocal: local }
@@ -211,7 +231,7 @@ export function useClipboardPaste(sessionId: () => string) {
       uploadProgress.complete(entryId)
       // Single chokepoint for "an upload landed on disk": let the resource drawer
       // (and any other listener) refresh its /uploads listing without coupling.
-      if (typeof window !== 'undefined') {
+      if (!uploadTarget.isRemote && typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('dw:upload-success', {
           detail: { sessionId: sessionId(), relPath: data.relPath, kind: uploadKind },
         }))
@@ -224,6 +244,7 @@ export function useClipboardPaste(sessionId: () => string) {
         size: data.size,
         rel_path: data.relPath || '',
         dedup: !!data.dedup,
+        target: uploadTarget.isRemote ? 'remote' : 'local',
         elapsed_ms: Math.round(performance.now() - startedAt),
       }, options.trace)
       return {
@@ -237,15 +258,18 @@ export function useClipboardPaste(sessionId: () => string) {
         dedup: !!data.dedup,
       }
     } catch (err) {
-      lastError.value = err instanceof Error ? err.message : 'Upload failed'
-      uploadProgress.fail(entryId, lastError.value)
+      // Transport died (offline, dropped connection) — genuinely transient, so this one
+      // KEEPS its retry. The raw message goes to the log, not to the user.
+      const raw = err instanceof Error ? err.message : 'upload failed'
+      lastError.value = '网络中断，上传未完成'
+      uploadProgress.fail(entryId, lastError.value, true)
       log.warn('cli.clipboard.upload_exception', {
         source: options.source || 'unknown',
         upload_kind: uploadKind,
         mime,
         filename: uploadName,
         size: blob.size,
-        error: lastError.value,
+        error: raw,
         elapsed_ms: Math.round(performance.now() - startedAt),
       }, options.trace)
       return { type: 'none', textForPTY: '', isLocal: local }

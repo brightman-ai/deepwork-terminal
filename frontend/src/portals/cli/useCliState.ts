@@ -93,6 +93,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
         id: t.id,
         name: t.name,
         sessionId: t.sessionId,
+        httpBase: conn.httpBase,
         wsBase: conn.wsBase,
         authToken: conn.authToken,
         machineLabel: conn.machineLabel,

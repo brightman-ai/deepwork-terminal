@@ -2,9 +2,12 @@ package terminal
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -204,7 +207,7 @@ func attachmentDisposition(name string) string {
 // been deleted and the历史信号 is still useful. A bad/absent session → 200 with an
 // empty list (the drawer just shows nothing), matching the soft-fail style of /inputs.
 func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusOK, recentFilesResponse{Items: []recentFileItem{}})
 		return
@@ -264,7 +267,7 @@ func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
 // cleaned, joined onto cwd, then symlink-resolved and verified to stay within the
 // cwd subtree — `..` escape / absolute / symlink-out all yield 403.
 func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -322,7 +325,7 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 // searchMaxScan entries so a giant tree can't hang the request. An empty/unknown cwd or an
 // empty query → 200 with an empty list (soft-fail, like the other /files/* handlers).
 func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
 		return
@@ -437,7 +440,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 // text/plain with a no-cache header (the file on disk is mutable — agents may rewrite
 // it between previews).
 func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -582,43 +585,111 @@ func isRecentFile(cwd, abs string) bool {
 	return false
 }
 
-// sessionCWD resolves a session id to its working directory. ok=false when the id
-// is empty or the session is unknown.
-func (s *Server) sessionCWD(sessionID string) (cwd string, ok bool) {
-	if sessionID == "" {
-		return "", false
+// workbenchCWD resolves the working directory for a workbench request (files / overview /
+// git-diff / paste). "The active pane's working dir" is a SINGLE fact with ONE authority: the
+// tmux state's pane_current_path — the same snapshot GET /tmux/state + the WS push already
+// serve — so the workbench anchors to exactly the pane the UI shows as active. Resolution:
+//
+//  1. explicit client cwd override (absolute, existing dir): a deliberate anchor — the per-pane
+//     drawer's owning-pane cwd, or a LOCK-mode frozen snapshot. Honoured as-is.
+//  2. tmux authority: the attached session's active-window active-pane CWD. THIS is the fix — a
+//     client that sends no cwd (activeCwd is still '' during detach / the first WS frame) now
+//     anchors correctly instead of falling through to the tmux launch dir. Read from the same
+//     TmuxState the display consumes, so the front/back views can't drift.
+//  3. non-tmux standalone: the shell's live /proc cwd (correct — the shell IS the pane, and it
+//     follows `cd`). For a tmux session step 2 always wins, so this is NEVER reached there —
+//     which is what removes the old "/home/ubuntu" (tmux launch dir) degradation that silently
+//     broke recent-files / overview / git-diff / paste-target alike.
+//  4. the session's creation cwd (last resort).
+//
+// Trust model is local single-user: the caller already holds the auth code + full shell access,
+// so honouring a real existing directory is no escalation; tree/raw still confine traversal
+// within the resolved root.
+func (s *Server) workbenchCWD(ctx context.Context, sessionID, cwdParam string) (string, bool) {
+	cwd, source, ok := s.resolveWorkbenchCWD(ctx, sessionID, cwdParam)
+	// One structured line makes "which dir did the workbench anchor to, and from which source"
+	// auditable — the absence of exactly this was why the /home/ubuntu degradation stayed
+	// invisible until an endpoint was hand-probed. Debug level: opt-in, never noisy.
+	if ok {
+		slog.Debug("workbench cwd resolved", "session", sessionID, "cwd", cwd, "source", source)
+	}
+	return cwd, ok
+}
+
+// resolveWorkbenchCWD is workbenchCWD's pure core: it returns the resolved dir plus the SOURCE
+// it came from ("override" | "tmux-active" | "proc" | "session"), split out so the source is
+// available for the log line above (and unit tests) without threading it through every caller.
+func (s *Server) resolveWorkbenchCWD(ctx context.Context, sessionID, cwdParam string) (cwd, source string, ok bool) {
+	if cwdParam != "" && filepath.IsAbs(cwdParam) {
+		if info, err := os.Stat(cwdParam); err == nil && info.IsDir() {
+			return cwdParam, "override", true
+		}
 	}
 	sess, err := s.mgr.Get(sessionID)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
-	return sess.CWD, true
+	if pc := s.activePaneCWD(ctx, sess.ShellPID()); pc != "" {
+		return pc, "tmux-active", true
+	}
+	if live := liveShellCWD(sess); live != "" {
+		return live, "proc", true
+	}
+	return sess.CWD, "session", true
 }
 
-// workbenchCWD resolves the working directory for a workbench request (files + overview).
-// It PREFERS an explicit `cwd` — the frontend supplies the LIVE active tmux pane's cwd so
-// the workbench follows pane/window switches — when that cwd is an absolute, existing
-// directory; otherwise it falls back to the session's creation cwd. Trust model is local
-// single-user: the caller already holds the auth code and full shell access, so honouring
-// a real existing directory is no escalation, and tree/raw still confine traversal within
-// the resolved root.
-func (s *Server) workbenchCWD(sessionID, cwdParam string) (string, bool) {
-	if cwdParam != "" && filepath.IsAbs(cwdParam) {
-		if info, err := os.Stat(cwdParam); err == nil && info.IsDir() {
-			return cwdParam, true
+// activePaneCWD returns the CWD of the active pane of the tmux session the given shell is
+// attached to — read from the SAME TmuxState snapshot GET /tmux/state + the WS push serve, so
+// the workbench anchors to exactly the pane the UI marks active (its pane_current_path, which
+// the frontend's useTmuxState.activeCwd mirrors). Returns "" when the shell isn't attached
+// inside tmux, no active pane carries a cwd, or the snapshot can't be read/parsed — callers
+// then fall back to the shell's own /proc cwd. Parses the full snapshot for just the one field
+// it needs; the provider already computes it on the ~1s WS budget.
+func (s *Server) activePaneCWD(ctx context.Context, shellPID int) string {
+	if shellPID <= 0 || s.tmuxProvider == nil {
+		return ""
+	}
+	raw, err := s.tmuxProvider.TmuxState(ctx, shellPID)
+	if err != nil {
+		return ""
+	}
+	var st struct {
+		AttachedSession string `json:"attachedSession"`
+		Sessions        []struct {
+			Name    string `json:"name"`
+			Windows []struct {
+				Active bool `json:"active"`
+				Panes  []struct {
+					Active bool   `json:"active"`
+					CWD    string `json:"cwd"`
+				} `json:"panes"`
+			} `json:"windows"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return ""
+	}
+	// Scope to the session THIS shell is attached to (mirrors the frontend, which scopes its
+	// windows by attachedSession). Not attached → no tmux anchor; caller falls back to /proc.
+	if st.AttachedSession == "" {
+		return ""
+	}
+	for _, sess := range st.Sessions {
+		if sess.Name != st.AttachedSession {
+			continue
+		}
+		for _, win := range sess.Windows {
+			if !win.Active {
+				continue
+			}
+			for _, pane := range win.Panes {
+				if pane.Active && pane.CWD != "" {
+					return pane.CWD
+				}
+			}
 		}
 	}
-	// No usable client cwd. For tmux the client always sends the active pane's cwd
-	// (pane_current_path); a non-tmux terminal has no such signal, so resolve the shell's
-	// LIVE cwd from /proc — uploads + browsing then follow `cd` instead of the static launch
-	// dir. Falls back to the session's creation cwd off-Linux or when the link can't be read.
-	if sess, err := s.mgr.Get(sessionID); err == nil {
-		if live := liveShellCWD(sess); live != "" {
-			return live, true
-		}
-		return sess.CWD, true
-	}
-	return "", false
+	return ""
 }
 
 // liveShellCWD returns the current working directory of the session's shell process via

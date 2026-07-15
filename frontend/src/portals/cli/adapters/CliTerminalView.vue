@@ -26,6 +26,7 @@
         :session-id="tab.sessionId!"
         :session-name="tab.name"
         :active="tab.id === activeTabId"
+        :http-base="tab.httpBase"
         :ws-base="tab.wsBase"
         :auth-token="tab.authToken"
         :machine-label="tab.machineLabel"
@@ -52,12 +53,14 @@ interface TabWithSession {
   name: string
   sessionId?: string
   // Remote-tab connection (mesh), resolved upstream by resolveTabConnection. Local tabs leave
-  // wsBase/authToken empty → CliTerminalSurface falls back to its same-origin behavior.
+  // httpBase/wsBase/authToken empty → CliTerminalSurface falls back to same-origin behavior.
+  httpBase?: string
   wsBase?: string
   authToken?: string
   machineLabel?: string
   isRemote?: boolean
   connError?: string
+  diagnose?: () => Promise<{ ok: boolean; error?: string }>
 }
 
 defineProps<{

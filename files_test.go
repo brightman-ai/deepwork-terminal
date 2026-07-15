@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -232,12 +233,12 @@ func TestWorkbenchCWD_Resolution(t *testing.T) {
 
 	// A valid absolute client cwd is preferred (the active-pane cwd the client sends).
 	other := t.TempDir()
-	got, ok := srv.workbenchCWD(sess.ID, other)
+	got, ok := srv.workbenchCWD(context.Background(), sess.ID, other)
 	assert.True(t, ok)
 	assert.Equal(t, other, got)
 
 	// No client cwd → resolves a real existing dir (live shell cwd on Linux, else session cwd).
-	got2, ok2 := srv.workbenchCWD(sess.ID, "")
+	got2, ok2 := srv.workbenchCWD(context.Background(), sess.ID, "")
 	assert.True(t, ok2)
 	require.NotEmpty(t, got2)
 	info, statErr := os.Stat(got2)
@@ -245,12 +246,56 @@ func TestWorkbenchCWD_Resolution(t *testing.T) {
 	assert.True(t, info.IsDir())
 
 	// A non-absolute client cwd is ignored (never used as-is).
-	got3, _ := srv.workbenchCWD(sess.ID, "relative/path")
+	got3, _ := srv.workbenchCWD(context.Background(), sess.ID, "relative/path")
 	assert.NotEqual(t, "relative/path", got3)
 
 	// Unknown session → not ok.
-	_, ok4 := srv.workbenchCWD("does-not-exist", "")
+	_, ok4 := srv.workbenchCWD(context.Background(), "does-not-exist", "")
 	assert.False(t, ok4)
+}
+
+// fakeTmuxProvider returns a canned TmuxState JSON so activePaneCWD's extraction (attached
+// session → active window → active pane → cwd) can be unit-tested without a live tmux server.
+type fakeTmuxProvider struct{ raw json.RawMessage }
+
+func (f *fakeTmuxProvider) TmuxState(_ context.Context, _ int) (json.RawMessage, error) {
+	return f.raw, nil
+}
+
+// activePaneCWD is the SSOT fix: the workbench anchors to the tmux-authority active pane's cwd
+// (the same field GET /tmux/state + the WS push serve) instead of the tmux launch dir. It must
+// pick the ACTIVE window's ACTIVE pane (split-safe), scope to the attached session, and yield
+// "" (→ /proc fallback) when the shell isn't attached.
+func TestActivePaneCWD(t *testing.T) {
+	_, _, srv := newDrawerTestServer(t)
+
+	// Active window is #2; within it the ACTIVE pane (not the first) carries /right. An earlier
+	// window also has an active pane (/wrong) — proving window.active gates before pane.active.
+	srv.tmuxProvider = &fakeTmuxProvider{raw: json.RawMessage(`{
+		"attachedSession":"s0",
+		"sessions":[{"name":"s0","windows":[
+			{"active":false,"panes":[{"active":true,"cwd":"/wrong"}]},
+			{"active":true,"panes":[{"active":false,"cwd":"/inactive"},{"active":true,"cwd":"/right"}]}
+		]}]
+	}`)}
+	assert.Equal(t, "/right", srv.activePaneCWD(context.Background(), 4242))
+
+	// Multi-session server: only the ATTACHED session's active pane counts.
+	srv.tmuxProvider = &fakeTmuxProvider{raw: json.RawMessage(`{
+		"attachedSession":"s1",
+		"sessions":[
+			{"name":"s0","windows":[{"active":true,"panes":[{"active":true,"cwd":"/other-session"}]}]},
+			{"name":"s1","windows":[{"active":true,"panes":[{"active":true,"cwd":"/mine"}]}]}
+		]
+	}`)}
+	assert.Equal(t, "/mine", srv.activePaneCWD(context.Background(), 4242))
+
+	// Not attached inside tmux → "" so the caller falls back to the shell's own /proc cwd.
+	srv.tmuxProvider = &fakeTmuxProvider{raw: json.RawMessage(`{"attachedSession":"","sessions":[]}`)}
+	assert.Equal(t, "", srv.activePaneCWD(context.Background(), 4242))
+
+	// Non-positive shell PID short-circuits (never valid).
+	assert.Equal(t, "", srv.activePaneCWD(context.Background(), 0))
 }
 
 // imageContentType maps known raster extensions and ignores text/non-image ones.
