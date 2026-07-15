@@ -36,6 +36,7 @@ type Server struct {
 	uploads      *uploadIndex
 	authThrottle *authgate.Throttle
 	usage        *usageReporter
+	agentUsage   *agentReporter
 	mu           sync.Mutex
 }
 
@@ -61,6 +62,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	// Usage/cost/quota reporter (kit/usage SSOT). Cheap to build — sources only
 	// resolve their roots here; no disk walk until a report is requested.
 	s.usage = newUsageReporter()
+	s.agentUsage = newAgentReporter(s.config.DataDir)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Default in-process tmux provider so standalone gets tmux state without a host.
 	// An injected provider (WithTmuxProvider) wins over the default.
@@ -292,6 +294,8 @@ func (s *Server) registerRoutes() {
 	// pressing 刷新 may trigger it — never a poll.
 	s.mux.HandleFunc("POST /usage/quota/refresh", wrap(s.handleUsageQuotaRefresh))
 	s.mux.HandleFunc("GET /usage/report", wrap(s.handleUsageReport))
+	s.mux.HandleFunc("GET /usage/agent-report", wrap(s.handleAgentReport))
+	s.mux.HandleFunc("GET /usage/agent-report/detail", wrap(s.handleAgentReportDetail))
 }
 
 // authWrap wraps a handler with auth checking.

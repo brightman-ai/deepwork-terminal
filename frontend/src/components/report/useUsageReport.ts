@@ -36,6 +36,8 @@ export interface UsageReportRow {
 export interface UsageProviderRow {
   provider: string
   runtime: string
+  billing_mode?: 'subscription' | 'api' | 'unknown'
+  billing_coverage?: 'complete' | 'partial' | 'missing'
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
@@ -73,7 +75,9 @@ export function useUsageReport() {
     loading.value = true
     error.value = ''
     try {
-      const res = await cliFetch(cliApi(`/usage/report?window=${window}`), {
+	  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+	  const params = new URLSearchParams({ window, timezone })
+	  const res = await cliFetch(cliApi(`/usage/report?${params}`), {
         headers: { Accept: 'application/json' },
       })
       if (!res.ok) {

@@ -18,6 +18,8 @@
 import { ref, computed } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { findTightestQuota } from './usageQuotaGroups'
+export { quotaGroupsFor, findTightestQuota } from './usageQuotaGroups'
 
 export type Billing = 'subscription' | 'api' | 'unknown'
 
@@ -43,6 +45,11 @@ export interface SnapshotMeta {
   stale: boolean
   stale_reason?: 'window_rolled' | 'too_old'
 }
+export interface QuotaGroup {
+  family?: string
+  windows?: QuotaWindow[]
+  snapshot?: SnapshotMeta
+}
 export interface ProbeResult {
   runtime: string
   status: 'ok' | 'failed' | 'not_supported'
@@ -59,12 +66,14 @@ export interface RuntimeQuota {
   evidence?: string[] // 'credentials' | 'snapshot' | 'sessions'
   billing?: Billing
   plan?: string
-  // Which set of limits the windows belong to. A codex account's active family can change
-  // ("codex" = 5h + 7d → "premium" = one 7-day window), and when it does a bar disappears.
-  // Naming the family is how the user tells "the provider reshaped my plan" from "this broke".
+  // Family for the top-level compatibility-projection windows. New consumers use quota_groups
+  // because independent Codex families can coexist and must not overwrite one another.
   family?: string
   windows?: QuotaWindow[]
   snapshot?: SnapshotMeta // absent ⟹ no reading has ever been captured
+  // Lossless view: each family owns its windows + provenance. Top-level fields above remain
+  // the newest compatibility projection for servers/consumers predating UB-16.
+  quota_groups?: QuotaGroup[]
   health: RuntimeHealth
   note?: string
 }
@@ -159,18 +168,7 @@ export function useUsageQuota() {
   // window reset and nothing has reported since, so nothing was used). That derived 100% is
   // the honest current state, and dropping it would blank the pill for a runtime whose quota
   // is in fact wide open.
-  const tightest = computed<{ runtime: string; window: QuotaWindow } | null>(() => {
-    let best: { runtime: string; window: QuotaWindow } | null = null
-    for (const q of quotas.value) {
-      if (q.snapshot?.stale) continue
-      for (const w of q.windows ?? []) {
-        if (best === null || w.remaining_percent < best.window.remaining_percent) {
-          best = { runtime: q.runtime, window: w }
-        }
-      }
-    }
-    return best
-  })
+  const tightest = computed(() => findTightestQuota(quotas.value))
 
   function billingFor(runtime: string): Billing | undefined {
     return quotas.value.find((q) => q.runtime === runtime)?.billing
