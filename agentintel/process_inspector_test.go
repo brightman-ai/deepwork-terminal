@@ -13,6 +13,9 @@ func TestToolFromCommand(t *testing.T) {
 		{"claude --dangerously-skip-permissions", ToolClaude},
 		{"/home/user/.nvm/bin/codex", ToolCodex},
 		{"codex run", ToolCodex},
+		{"/opt/codex-code-mode-host", ToolNone},
+		{"/tmp/codex-helper", ToolNone},
+		{"/tmp/claude-1001/project/worker", ToolNone},
 		{"/usr/bin/gemini", ToolGemini},
 		{"gemini --model pro", ToolGemini},
 		{"/usr/local/bin/opencode", ToolOpenCode},
@@ -28,6 +31,20 @@ func TestToolFromCommand(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("toolFromCommand(%q) = %q, want %q", tc.cmd, got, tc.want)
 		}
+	}
+}
+
+func TestDetectAgentInTreeIgnoresCodexHelperProcess(t *testing.T) {
+	procs := []ProcessInfo{
+		{PID: 100, PPID: 1, Command: "zsh"},
+		{PID: 200, PPID: 100, Command: "/home/user/.bun/bin/bun /home/user/.bun/bin/codex --yolo"},
+		{PID: 201, PPID: 200, Command: "/opt/openai/bin/codex --yolo"},
+		{PID: 202, PPID: 201, Command: "/opt/openai/bin/codex-code-mode-host"},
+	}
+
+	got := detectAgentInTree(procs, 100)
+	if got.Tool != ToolCodex || got.ProcessPID != 201 {
+		t.Fatalf("detected agent = %+v, want native Codex pid 201", got)
 	}
 }
 

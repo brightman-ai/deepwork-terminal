@@ -76,14 +76,14 @@ type TmuxSessionState struct {
 // cached, and the topology comes from a single batched tmux format query plus
 // one shared ps snapshot for per-pane agent detection.
 type TmuxState struct {
-	Installed     bool               `json:"installed"`
-	ServerRunning bool               `json:"serverRunning"`
-	Attached      bool               `json:"attached"`
+	Installed     bool `json:"installed"`
+	ServerRunning bool `json:"serverRunning"`
+	Attached      bool `json:"attached"`
 	// AttachedSession is the tmux session name this shellPID's client is attached
 	// to (empty when not attached). It scopes the pane bar to THIS session's
 	// windows rather than any session that merely has a client somewhere.
-	AttachedSession string             `json:"attachedSession"`
-	Prefix          TmuxPrefix         `json:"prefix"`
+	AttachedSession string     `json:"attachedSession"`
+	Prefix          TmuxPrefix `json:"prefix"`
 	// ModeKeys is the resolved global `mode-keys` option ("vi" | "emacs"). It tells the
 	// client which copy-mode key table is active, so a semantic copy-mode motion (e.g.
 	// halfpage-up) can be mapped to the correct keystroke for THIS server — the SSOT for
@@ -116,12 +116,12 @@ type TmuxStateService struct {
 	// Overview open (POST /tmux/overview). Off → the poll does zero extra capture-pane work.
 	overviewActive atomic.Bool
 
-	mu             sync.Mutex
-	installed      bool
-	installedAt    time.Time
-	prefix         TmuxPrefix
-	prefixAt       time.Time
-	prefixResolved bool
+	mu               sync.Mutex
+	installed        bool
+	installedAt      time.Time
+	prefix           TmuxPrefix
+	prefixAt         time.Time
+	prefixResolved   bool
 	modeKeys         string
 	modeKeysAt       time.Time
 	modeKeysResolved bool
@@ -369,7 +369,7 @@ func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool
 // agent detection against a single shared ps snapshot.
 func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, attached map[string]bool) []TmuxSessionState {
 	// agents: PID → tool, computed once over the shared ps snapshot.
-	agents := s.prober.DetectAgentsInPanes(ctx, panes)
+	agents := s.prober.DetectAgentProcessesInPanes(ctx, panes)
 	// agentKeys: the JSONL-monitor keys for panes still hosting an agent this pass — used to prune
 	// watchers for panes that went away.
 	agentKeys := make(map[string]bool)
@@ -384,7 +384,7 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 	winTool := make(map[winKey]AgentTool)
 	for _, p := range panes {
 		if p.PaneActive {
-			winTool[winKey{p.SessionName, p.WindowIndex}] = agents[p.PanePID]
+			winTool[winKey{p.SessionName, p.WindowIndex}] = agents[p.PanePID].Tool
 		}
 	}
 	sessionOrder := []string{}
@@ -440,9 +440,10 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			CWD:    p.PaneCWD,
 			PaneID: p.PaneID,
 		}
-		if tool, ok := agents[p.PanePID]; ok {
+		if agent, ok := agents[p.PanePID]; ok {
+			tool := agent.Tool
 			ps.AgentTool = tool
-			ps.AgentStatus = s.paneStatus(ctx, p, tool)
+			ps.AgentStatus = s.paneStatus(ctx, p, agent)
 			// Needs-you: an explicit block (waiting) always counts; an idle pane counts
 			// only if the driver says a turn actually completed (not fresh-idle). Awaiting()
 			// reuses the driver Status() just updated, so no extra transcript read.
@@ -494,7 +495,8 @@ func paneKey(p TmuxPane) string {
 //
 // This keeps the (slightly brittle, version-coupled) prompt scrape OFF the hot path: it runs only
 // for stopped panes, not every agent pane every poll — accurate where it matters, cheap otherwise.
-func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, tool AgentTool) AgentStatus {
+func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, agent DetectedAgent) AgentStatus {
+	tool := agent.Tool
 	// Accurate JSONL-derived status: a turn's end is recorded in the transcript
 	// (Claude end_turn / Codex task_complete → waiting/idle), a Bash/Read tool is
 	// executing = running. This fixes the mtime heuristic's blind spots — a just-
@@ -504,7 +506,7 @@ func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, tool Agen
 	// use the driver; a Running result is still confirmed against the pane for a
 	// terminal-only permission prompt.
 	if tool == ToolClaude || tool == ToolCodex {
-		if st, ok := s.paneMonitor.Status(paneKey(p), p.PaneCWD, tool); ok {
+		if st, ok := s.paneMonitor.Status(paneKey(p), p.PaneCWD, tool, agent.ProcessPID); ok {
 			switch st {
 			case StatusWaiting, StatusIdle:
 				return st
@@ -523,7 +525,7 @@ func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, tool Agen
 	}
 
 	// Codex, or Claude transcript not locatable yet: the mtime gate + terminal read.
-	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool) {
+	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) {
 		return StatusRunning
 	}
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)

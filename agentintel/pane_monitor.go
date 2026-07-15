@@ -29,9 +29,10 @@ type PaneAgentMonitor struct {
 }
 
 type paneTranscript struct {
-	path      string
-	locatedAt time.Time
-	driver    paneDriver // cached incremental status driver (rebuilt when path changes)
+	path       string
+	locatedAt  time.Time
+	processPID int
+	driver     paneDriver // cached incremental status driver (rebuilt when path changes)
 }
 
 // paneDriver is the minimal incremental-status surface (ClaudeDriver / CodexDriver):
@@ -65,12 +66,12 @@ func NewPaneAgentMonitor(locator *ProjectLocator) *PaneAgentMonitor {
 // Active reports whether the pane's transcript was written within transcriptActiveWindow — i.e. the
 // agent is currently producing output. Unknown transcript (not locatable yet) counts as active so a
 // freshly-seen agent pane is never wrongly read as a prompt before we know better.
-func (m *PaneAgentMonitor) Active(key, cwd string, tool AgentTool) bool {
+func (m *PaneAgentMonitor) Active(key, cwd string, tool AgentTool, processPID ...int) bool {
 	if m == nil || tool == ToolNone || key == "" {
 		return true
 	}
 	m.mu.Lock()
-	path := m.entryLocked(key, cwd, tool).path
+	path := m.entryLocked(key, cwd, tool, processPID...).path
 	m.mu.Unlock()
 	if path == "" {
 		return true // can't locate yet → assume busy, don't read the terminal as a prompt
@@ -102,13 +103,13 @@ func (m *PaneAgentMonitor) Prune(keep map[string]bool) {
 // user and a Bash/Read reads as executing=running, where a mtime/terminal heuristic
 // cannot tell them apart. ok is false when the transcript isn't locatable yet (the
 // caller then falls back to the terminal read).
-func (m *PaneAgentMonitor) Status(key, cwd string, tool AgentTool) (AgentStatus, bool) {
+func (m *PaneAgentMonitor) Status(key, cwd string, tool AgentTool, processPID ...int) (AgentStatus, bool) {
 	if m == nil || tool == ToolNone || key == "" {
 		return StatusNone, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pt := m.entryLocked(key, cwd, tool)
+	pt := m.entryLocked(key, cwd, tool, processPID...)
 	if pt.path == "" {
 		return StatusNone, false
 	}
@@ -160,12 +161,18 @@ func (m *PaneAgentMonitor) AwaitingSince(key string) time.Time {
 
 // entryLocked returns the pane's cache entry, (re)locating the transcript path
 // periodically (a path change drops the now-stale driver). m.mu MUST be held.
-func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool) *paneTranscript {
+func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, processPID ...int) *paneTranscript {
 	pt, ok := m.cache[key]
-	if ok && time.Since(pt.locatedAt) < pathRelocateAfter && pt.path != "" {
+	pid := 0
+	if len(processPID) > 0 {
+		pid = processPID[0]
+	} else if pt != nil {
+		pid = pt.processPID
+	}
+	if ok && pt.processPID == pid && time.Since(pt.locatedAt) < pathRelocateAfter && pt.path != "" {
 		return pt
 	}
-	resolved := m.locate(cwd, tool)
+	resolved := m.locate(cwd, tool, pid)
 	if pt == nil {
 		pt = &paneTranscript{}
 		m.cache[key] = pt
@@ -174,17 +181,26 @@ func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool) *paneTra
 		pt.path = resolved
 		pt.driver = nil // path changed → drop stale driver
 	}
+	pt.processPID = pid
 	pt.locatedAt = time.Now()
 	return pt
 }
 
-func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool) string {
+func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool, processPID int) string {
 	switch tool {
 	case ToolClaude:
 		if files, err := m.locator.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
 			return files[0]
 		}
 	case ToolCodex:
+		if processPID > 0 {
+			if p, err := m.locator.CodexSessionForProcess(processPID, cwd); err == nil {
+				return p
+			}
+			// A concrete process with no provable rollout must remain unknown. Falling
+			// back to the newest global file would contaminate another pane.
+			return ""
+		}
 		if p, err := m.locator.CodexLatestSession(cwd); err == nil {
 			return p
 		}

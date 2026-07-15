@@ -5,6 +5,7 @@ import {
   windowRawStatus,
   windowCwd,
   windowTool,
+  windowAgentSignals,
   windowAwaitingSince,
   overviewColumns,
 } from '@terminal/composables/cli/useAgentOverview'
@@ -15,7 +16,7 @@ import type { TmuxWindowState } from '@terminal/types/terminal'
 // how we simulate an F5 reload — a fresh composable re-hydrating from the same storage) and is
 // cleared between tests for isolation.
 const _store: Record<string, string> = {}
-;(globalThis as unknown as { localStorage: Storage }).localStorage = {
+const storageStub = {
   getItem: (k: string) => (k in _store ? _store[k] : null),
   setItem: (k: string, v: string) => {
     _store[k] = v
@@ -29,6 +30,7 @@ const _store: Record<string, string> = {}
   key: () => null,
   length: 0,
 } as Storage
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storageStub })
 
 beforeEach(() => localStorage.clear())
 
@@ -79,6 +81,18 @@ describe('windowRawStatus / cwd / tool / awaitingSince', () => {
     expect(windowAwaitingSince(win(1, { awaiting: true, since: T1 }))).toBe(T1)
     expect(windowAwaitingSince(win(1, { status: 'idle' }))).toBe('') // not awaiting
     expect(windowAwaitingSince(win(1, { awaiting: true, since: TZERO }))).toBe('') // undated
+  })
+  it('attributes a split window to its active runtime and explains every pane signal', () => {
+    const w = win(5, { tool: 'claude', status: 'waiting' })
+    w.panes[0].active = false
+    w.panes.push({
+      index: 1,
+      active: true,
+      agentTool: 'codex',
+      agentStatus: 'running',
+    } as never)
+    expect(windowTool(w)).toBe('codex')
+    expect(windowAgentSignals(w)).toEqual(['Claude 等待输入', 'Codex 运行中'])
   })
 })
 

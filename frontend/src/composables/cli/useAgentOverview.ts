@@ -54,7 +54,26 @@ export function windowCwd(w: TmuxWindowState): string {
 /** The window's active agent tool, if any (claude/codex badge). */
 export function windowTool(w: TmuxWindowState): string {
   const panes = w.panes ?? []
-  return (panes.find((p) => p.agentTool) ?? panes[0])?.agentTool ?? ''
+  const active = panes.find((p) => p.active)
+  return active?.agentTool ?? panes.find((p) => p.agentTool)?.agentTool ?? ''
+}
+
+/** Per-pane attribution for split windows. A window-level red dot can legitimately come
+ * from a background pane while its active pane is running; exposing the owner prevents the
+ * signal from looking like a stale, undismissable status. */
+export function windowAgentSignals(w: TmuxWindowState): string[] {
+  return (w.panes ?? [])
+    .filter((p) => p.agentTool)
+    .map((p) => {
+      const tool = p.agentTool === 'codex' ? 'Codex'
+        : p.agentTool === 'claude' ? 'Claude'
+          : p.agentTool
+      const status = p.agentStatus === 'waiting' ? '等待输入'
+        : p.agentStatus === 'running' ? '运行中'
+          : p.awaitingUser ? '已完成'
+            : '空闲'
+      return `${tool} ${status}`
+    })
 }
 
 /** Stable seen-state key: tmux window id (`@N`), falling back to index if a backend omits it. */

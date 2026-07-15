@@ -234,7 +234,7 @@ func TestCodexLatestSession_RecursiveWalk(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	rollout := filepath.Join(nested, "rollout-2026-07-02T08-23-50-abc.jsonl")
-	if err := os.WriteFile(rollout, []byte(`{"type":"session_meta"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(rollout, []byte(`{"type":"session_meta","payload":{"id":"abc","cwd":"/any/cwd","source":"cli"}}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write rollout: %v", err)
 	}
 

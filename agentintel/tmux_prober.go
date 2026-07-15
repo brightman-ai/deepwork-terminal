@@ -187,9 +187,19 @@ func (tp *TmuxProber) CaptureWindowTail(ctx context.Context, sessionWindow strin
 // DetectAgentsInPanes returns a map of pane PID → AgentTool for panes with AI tools.
 func (tp *TmuxProber) DetectAgentsInPanes(ctx context.Context, panes []TmuxPane) map[int]AgentTool {
 	result := make(map[int]AgentTool)
+	for panePID, agent := range tp.DetectAgentProcessesInPanes(ctx, panes) {
+		result[panePID] = agent.Tool
+	}
+	return result
+}
+
+// DetectAgentProcessesInPanes preserves the concrete runtime process identity
+// needed to bind each pane to its own transcript.
+func (tp *TmuxProber) DetectAgentProcessesInPanes(ctx context.Context, panes []TmuxPane) map[int]DetectedAgent {
+	result := make(map[int]DetectedAgent)
 	for _, pane := range panes {
-		if t := tp.inspector.DetectToolCtx(ctx, pane.PanePID); t != ToolNone {
-			result[pane.PanePID] = t
+		if agent := tp.inspector.DetectAgentCtx(ctx, pane.PanePID); agent.Tool != ToolNone {
+			result[pane.PanePID] = agent
 		}
 	}
 	return result

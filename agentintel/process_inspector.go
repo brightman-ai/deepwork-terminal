@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,13 @@ type ProcessInfo struct {
 	PPID    int
 	PGID    int
 	Command string
+}
+
+// DetectedAgent binds a runtime to the concrete descendant process that owns
+// it. Tool alone is insufficient: two panes can run the same tool in one cwd.
+type DetectedAgent struct {
+	Tool       AgentTool
+	ProcessPID int
 }
 
 // ProcessInspector detects AI CLI tools in the process tree.
@@ -45,14 +53,25 @@ func (pi *ProcessInspector) DetectTool(shellPID int) AgentTool {
 
 // DetectToolCtx is the context-aware variant of DetectTool.
 func (pi *ProcessInspector) DetectToolCtx(ctx context.Context, shellPID int) AgentTool {
+	return pi.DetectAgentCtx(ctx, shellPID).Tool
+}
+
+// DetectAgentCtx returns the deepest matching process, which is the native CLI
+// process rather than its shell/package-manager wrapper whenever both exist.
+func (pi *ProcessInspector) DetectAgentCtx(ctx context.Context, shellPID int) DetectedAgent {
 	procs := pi.processSnapshot(ctx)
+	return detectAgentInTree(procs, shellPID)
+}
+
+func detectAgentInTree(procs []ProcessInfo, shellPID int) DetectedAgent {
 	children := childTree(procs, shellPID)
 
-	// Walk deepest first (most specific child process wins).
-	var found AgentTool
+	// childTree is BFS (shallow→deep); overwriting therefore leaves the deepest
+	// exact runtime process (e.g. native codex after its bun launcher).
+	var found DetectedAgent
 	for _, p := range children {
 		if t := toolFromCommand(p.Command); t != ToolNone {
-			found = t
+			found = DetectedAgent{Tool: t, ProcessPID: p.PID}
 		}
 	}
 	return found
@@ -166,25 +185,16 @@ func toolFromCommand(cmd string) AgentTool {
 	return ToolNone
 }
 
-// matchesToolName checks if cmd contains the tool name as a standalone word.
-// Matches: "claude", "/usr/bin/claude", "claude --flag", "node /path/claude".
+// matchesToolName checks argv tokens, not substrings. A CLI launcher may be the
+// executable itself ("codex --flag") or an interpreter argument
+// ("bun /path/codex --flag"), but a helper such as codex-code-mode-host is a
+// different runtime identity and must never steal the pane binding.
 func matchesToolName(cmd, name string) bool {
-	// Exact match: command IS the tool name.
-	if cmd == name {
-		return true
-	}
-	// Path suffix: /claude or /claude-code
-	if strings.Contains(cmd, "/"+name) {
-		return true
-	}
-	// Starts with tool name + space (e.g., "claude --help")
-	if strings.HasPrefix(cmd, name+" ") {
-		return true
-	}
-	// Contains tool name surrounded by spaces (e.g., "node claude --flag")
-	if strings.Contains(cmd, " "+name+" ") || strings.HasSuffix(cmd, " "+name) {
-		return true
+	for _, token := range strings.Fields(cmd) {
+		base := strings.ToLower(filepath.Base(strings.Trim(token, "\"'")))
+		if base == name || base == name+".exe" {
+			return true
+		}
 	}
 	return false
 }
-
