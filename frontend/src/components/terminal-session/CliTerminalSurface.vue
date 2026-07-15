@@ -54,9 +54,9 @@
           data-testid="surface-agent-status"
         />
       </div>
-      <ConnectionStatus
+      <ConnectionChip
         class="ssr-health"
-        :status="wsStatus"
+        :state="wsStatus"
         :rtt="netStats.rtt ?? 0"
         :download-bps="netStats.downloadBps ?? 0"
         :upload-bps="netStats.uploadBps ?? 0"
@@ -65,6 +65,8 @@
         :uptime-sec="netStats.uptimeSec ?? 0"
         :target-label="machineLabel || '本机'"
         :diagnostic="connDiagnostic"
+        :labels="CLI_CONN_LABELS"
+        testid-prefix="cli-connection"
         data-testid="surface-connection-status"
       />
     </div>
@@ -327,7 +329,9 @@ import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
-import ConnectionStatus from '@terminal/components/terminal-session/ConnectionStatus.vue'
+// 连接健康 chip = @ce SSOT 组件 (与 workbench/pro 共享同一实现)。终端传英文文案 + cli
+// testid 前缀保持既有 UX/测试契约; WS 是持续流量, 内联吞吐保持默认开 (inlineThroughput=true)。
+import ConnectionChip from '@ce/components/connection/ConnectionChip.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
@@ -386,6 +390,15 @@ const emit = defineEmits<{
   (e: 'session-exit', exitCode: number): void
   (e: 'connection-change', status: WSConnectionStatus): void
 }>()
+
+// 终端英文文案 (仅非连接态内联显示; connected 无内联文本)。覆盖 @ce ConnectionChip 默认中文。
+// WSConnectionStatus 与 @ce ConnectionState 枚举同构 (connecting/connected/reconnecting/disconnected/preempted)。
+const CLI_CONN_LABELS: Partial<Record<WSConnectionStatus, string>> = {
+  connecting: 'Connecting...',
+  reconnecting: 'Reconnecting...',
+  disconnected: 'Disconnected',
+  preempted: 'Taken over',
+}
 
 // ─── Composables ─────────────────────────────────────────────────────────────
 
