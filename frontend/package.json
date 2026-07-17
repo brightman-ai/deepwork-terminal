@@ -16,6 +16,7 @@
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@hpcc-js/wasm": "^2.34.8",
     "@radix-icons/vue": "^1.0.0",
     "@vueuse/core": "^14.2.1",
     "@xterm/addon-fit": "^0.11.0",
@@ -24,8 +25,10 @@
     "axios": "^1.6.0",
     "dompurify": "^3.3.1",
     "highlight.js": "^11.11.1",
+    "katex": "^0.17.0",
     "lucide-vue-next": "^0.563.0",
     "marked": "^17.0.2",
+    "mermaid": "^11.16.0",
     "pinia": "^2.1.7",
     "qrcode": "^1.5.4",
     "radix-vue": "^1.9.17",
