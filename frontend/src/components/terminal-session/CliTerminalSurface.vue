@@ -218,10 +218,13 @@
       @upload-hud="hud.upload(sessionId)"
     />
 
-    <!-- WS8: tmux status sheet (mobile bottom-sheet / desktop popover). -->
+    <!-- WS8: tmux status sheet (mobile bottom-sheet / desktop popover). statusByIndex = the
+         SAME useAgentOverview instance TmuxPaneBar reads (one seen-aware status per window,
+         defined once below) — so this sheet's dots can never disagree with the bar's. -->
     <TmuxStatusSheet
       :session-id="sessionId"
       :open="tmuxSheetOpen"
+      :status-by-index="ovStatusByIndex"
       @close="tmuxSheetOpen = false"
       @send-key="onSendKey"
     />

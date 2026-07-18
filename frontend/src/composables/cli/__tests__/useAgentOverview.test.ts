@@ -8,6 +8,7 @@ import {
   windowAgentSignals,
   windowAwaitingSince,
   overviewColumns,
+  STATUS_COLOR,
 } from '@terminal/composables/cli/useAgentOverview'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 
@@ -227,5 +228,22 @@ describe('grouping + rollup', () => {
     expect(ov.rollup.value.waiting).toBe(1)
     expect(ov.rollup.value.running).toBe(1)
     expect(ov.rollup.value.idle).toBe(1)
+  })
+})
+
+// TmuxStatusSheet was found rendering its own hand-derived, drifted dot colors (no
+// done-unseen support, running mapped to grey instead of green) instead of this SSOT —
+// see the two-consumer wiring in CliTerminalSurface.vue. Pin the exact values every
+// dot-rendering consumer (TmuxPaneBar, TmuxStatusSheet, AgentOverview) must agree on,
+// so a future edit to only one of them fails here instead of silently drifting again.
+describe('STATUS_COLOR (single source every dot-rendering surface must agree on)', () => {
+  it('defines exactly the three non-idle statuses, no more, no less', () => {
+    expect(Object.keys(STATUS_COLOR).sort()).toEqual(['done-unseen', 'running', 'waiting'])
+  })
+
+  it('pins the canonical hex values (TmuxPaneBar.vue / TmuxStatusSheet.vue / AgentOverview.vue mirror these)', () => {
+    expect(STATUS_COLOR.waiting).toBe('#ff5252')
+    expect(STATUS_COLOR.running).toBe('#3fb950')
+    expect(STATUS_COLOR['done-unseen']).toBe('#e3b341')
   })
 })

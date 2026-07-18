@@ -142,6 +142,7 @@ import {
   windowTool,
   windowAgentSignals,
   overviewColumns,
+  STATUS_COLOR,
   type EffectiveStatus,
   type OverviewGroup,
 } from '@terminal/composables/cli/useAgentOverview'
@@ -223,6 +224,17 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 
 <style scoped>
 .agent-overview {
+  /* The ONE place these three colors enter CSS — bound live from STATUS_COLOR
+     (useAgentOverview.ts), the same constant TmuxStatusSheet.vue binds inline and
+     TmuxPaneBar.vue mirrors. Every s-waiting/s-running/s-done-unseen rule below reads
+     these vars (solid or color-mix()'d for a tint) instead of a hand-typed hex/rgba —
+     they cannot drift from each other or from the other two consumers again. This
+     replaced a real bug: .ao-card--big.s-done-unseen's border/glow was teal
+     (rgb(45,212,191)) while every other done-unseen indicator in this file was amber
+     — an rgba literal that had drifted from its own siblings. */
+  --status-waiting: v-bind('STATUS_COLOR.waiting');
+  --status-running: v-bind('STATUS_COLOR.running');
+  --status-done: v-bind("STATUS_COLOR['done-unseen']");
   padding: 12px;
   color: #d8c8ee;
   background: #16121f;
@@ -268,9 +280,9 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 }
 .ao-rollup-icon { font-size: 0.72em; line-height: 1; }
 .ao-rollup-sep { color: #3a2860; }
-.ao-rollup-seg.is-hot.s-waiting { color: #ff5252; }
-.ao-rollup-seg.is-hot.s-running { color: #3fb950; }
-.ao-rollup-seg.is-hot.s-done-unseen { color: #e3b341; }
+.ao-rollup-seg.is-hot.s-waiting { color: var(--status-waiting); }
+.ao-rollup-seg.is-hot.s-running { color: var(--status-running); }
+.ao-rollup-seg.is-hot.s-done-unseen { color: var(--status-done); }
 
 /* ── PC：活跃大卡网格（每行 ≤3，宽度铺满） ───────────────────── */
 .ao-active {
@@ -315,9 +327,9 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   color: #b08fd0;
 }
 .ao-group-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.ao-group-head.s-waiting .ao-group-dot { background: #ff5252; }
-.ao-group-head.s-running .ao-group-dot { background: #3fb950; }
-.ao-group-head.s-done-unseen .ao-group-dot { background: #e3b341; }
+.ao-group-head.s-waiting .ao-group-dot { background: var(--status-waiting); }
+.ao-group-head.s-running .ao-group-dot { background: var(--status-running); }
+.ao-group-head.s-done-unseen .ao-group-dot { background: var(--status-done); }
 .ao-group-head.s-idle .ao-group-dot { background: #7a6a9a; }
 .ao-group-count { margin-left: auto; color: #6f5a90; font-variant-numeric: tabular-nums; }
 
@@ -342,9 +354,9 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 .ao-card:hover { background: #2a1c44; border-color: #4a3570; }
 .ao-card:active { transform: translateY(1px) scale(0.99); background: #301f4e; }
 /* 移动/基础：状态左侧色条 */
-.ao-card.s-waiting { border-left-color: #ff5252; }
-.ao-card.s-running { border-left-color: #3fb950; }
-.ao-card.s-done-unseen { border-left-color: #e3b341; }
+.ao-card.s-waiting { border-left-color: var(--status-waiting); }
+.ao-card.s-running { border-left-color: var(--status-running); }
+.ao-card.s-done-unseen { border-left-color: var(--status-done); }
 .ao-card.s-idle { border-left-color: #4a3570; }
 
 /* ── PC 大卡：更大气 + 整圈状态边框高亮（重点展示） ───────────── */
@@ -356,16 +368,16 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   /* 卡高不在此写死：由 .ao-active grid-auto-rows 统一控（align-items:stretch 拉伸填满行）*/
 }
 .ao-card--big.s-waiting {
-  border-color: #ff5252;
-  box-shadow: 0 0 0 1px #ff5252, 0 8px 30px rgba(255, 82, 82, 0.16);
+  border-color: var(--status-waiting);
+  box-shadow: 0 0 0 1px var(--status-waiting), 0 8px 30px color-mix(in srgb, var(--status-waiting) 16%, transparent);
 }
 .ao-card--big.s-running {
-  border-color: rgba(63, 185, 80, 0.5);
-  box-shadow: 0 6px 22px rgba(63, 185, 80, 0.13);
+  border-color: color-mix(in srgb, var(--status-running) 50%, transparent);
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--status-running) 13%, transparent);
 }
 .ao-card--big.s-done-unseen {
-  border-color: rgba(45, 212, 191, 0.45);
-  box-shadow: 0 6px 20px rgba(45, 212, 191, 0.1);
+  border-color: color-mix(in srgb, var(--status-done) 45%, transparent);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--status-done) 10%, transparent);
 }
 .ao-card--big:hover { background: #271a3f; }
 .ao-card--big .ao-card-name { font-size: 0.98rem; }
@@ -419,9 +431,9 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   line-height: 1.5;
 }
 .ao-card--big .ao-card-badge { font-size: 0.66rem; padding: 2px 9px; }
-.ao-card-badge.s-waiting { color: #ff5252; background: rgba(255, 82, 82, 0.14); }
-.ao-card-badge.s-running { color: #3fb950; background: rgba(63, 185, 80, 0.14); }
-.ao-card-badge.s-done-unseen { color: #e3b341; background: rgba(227, 179, 65, 0.16); }
+.ao-card-badge.s-waiting { color: var(--status-waiting); background: color-mix(in srgb, var(--status-waiting) 14%, transparent); }
+.ao-card-badge.s-running { color: var(--status-running); background: color-mix(in srgb, var(--status-running) 14%, transparent); }
+.ao-card-badge.s-done-unseen { color: var(--status-done); background: color-mix(in srgb, var(--status-done) 16%, transparent); }
 .ao-card-badge.s-idle { color: #9a8ab8; background: rgba(122, 106, 154, 0.16); }
 .ao-card-tool {
   flex-shrink: 0;
