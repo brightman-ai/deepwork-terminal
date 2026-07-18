@@ -108,7 +108,7 @@ import { computed, ref, watch } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
-import { windowAgentSignals, windowCwd, windowRawStatus, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
 const props = defineProps<{
   sessionId: string
@@ -246,6 +246,13 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
 
 <style scoped>
 .tmux-pane-bar {
+  /* The ONE place these three colors enter this file's CSS — bound live from
+     STATUS_COLOR (useAgentOverview.ts), the same constant TmuxStatusSheet.vue and
+     AgentOverview.vue bind. Every waiting/running/done rule below reads these vars
+     instead of a hand-typed hex, so this bar can't drift from its two siblings again. */
+  --status-waiting: v-bind('STATUS_COLOR.waiting');
+  --status-running: v-bind('STATUS_COLOR.running');
+  --status-done: v-bind("STATUS_COLOR['done-unseen']");
   display: flex;
   align-items: center;
   gap: 4px;
@@ -308,9 +315,9 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   height: 5px;
   border-radius: 50%;
 }
-.tpb-dot--waiting { background: #ff5252; }   /* red — needs your input */
-.tpb-dot--running { background: #3fb950; }   /* green — agent actively running (incl. thinking) */
-.tpb-dot--done { background: #e3b341; }       /* amber — finished, needs you (unseen); distinct from running-green + waiting-red */
+.tpb-dot--waiting { background: var(--status-waiting); }   /* red — needs your input */
+.tpb-dot--running { background: var(--status-running); }   /* green — agent actively running (incl. thinking) */
+.tpb-dot--done { background: var(--status-done); }         /* amber — finished, needs you (unseen); distinct from running-green + waiting-red */
 
 /* WS7 — contextual notify bell, pushed to the trailing edge. */
 .tpb-spacer { flex: 1; min-width: 6px; }
@@ -345,9 +352,9 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
 /* Global roll-up (compact glance) merged INTO the leading Agent Overview capsule (方向 Y). */
 .tpb-caps-rollup { display: inline-flex; align-items: center; gap: 5px; font-size: 0.62rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tpb-seg { color: #6f5a90; }
-.tpb-seg.seg-waiting { color: #ff5252; }
-.tpb-seg.seg-running { color: #3fb950; }
-.tpb-seg.seg-done { color: #e3b341; }
+.tpb-seg.seg-waiting { color: var(--status-waiting); }
+.tpb-seg.seg-running { color: var(--status-running); }
+.tpb-seg.seg-done { color: var(--status-done); }
 .tpb-overview {
   position: relative; flex-shrink: 0;
   display: inline-grid; place-items: center;
@@ -370,7 +377,7 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
 .tpb-overview-badge {
   position: absolute; top: 3px; right: 3px;
   width: 6px; height: 6px; border-radius: 50%;
-  background: #ff5252; box-shadow: 0 0 0 2px #16121f;
+  background: var(--status-waiting); box-shadow: 0 0 0 2px #16121f;
 }
 
 .tpb-hint {

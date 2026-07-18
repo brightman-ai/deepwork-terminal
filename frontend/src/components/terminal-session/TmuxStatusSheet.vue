@@ -86,7 +86,7 @@
                   >
                     <span class="tss-win-idx mono">{{ w.index }}</span>
                     <span class="tss-win-name">{{ w.name }}</span>
-                    <span v-if="winDot(w)" class="tss-win-dot" :class="winDot(w)" />
+                    <span v-if="winDot(w)" class="tss-win-dot" :style="{ background: winDot(w) }" />
                   </button>
                 </div>
               </div>
@@ -103,8 +103,16 @@ import { computed } from 'vue'
 import type { TmuxSessionState, TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { windowRawStatus, STATUS_COLOR, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
-const props = defineProps<{ sessionId: string; open: boolean }>()
+const props = defineProps<{
+  sessionId: string
+  open: boolean
+  /** index→effectiveStatus from the shared useAgentOverview (same SSOT TmuxPaneBar uses), so a
+   *  window's dot here is seen-aware (incl. done-unseen amber) and never drifts from the bar's
+   *  dot for the same window. Omit → falls back to raw (waiting/running/idle, no done-unseen). */
+  statusByIndex?: Record<number, EffectiveStatus>
+}>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'sendKey', key: string): void }>()
 
 const { isMobile } = useDeviceDetection()
@@ -150,12 +158,12 @@ const agentRollup = computed(() => {
   return [...map.values()].sort((a, b) => (b.waiting - a.waiting) || (b.count - a.count))
 })
 
-/** Window status dot: any waiting pane → red; else any running → dim; else none. */
+/** Window status dot color — SAME seen-aware status (statusByIndex, incl. done-unseen) the pane
+ *  bar renders, so this list can never show a color the bar disagrees with. Falls back to the
+ *  raw 3-state read (no done-unseen) only when no overview is wired in. '' (idle) → no dot. */
 function winDot(w: TmuxWindowState): string {
-  const panes = w.panes ?? []
-  if (panes.some(p => p.agentStatus === 'waiting')) return 'wait'
-  if (panes.some(p => p.agentStatus === 'running')) return 'busy'
-  return ''
+  const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
+  return s === 'idle' ? '' : STATUS_COLOR[s]
 }
 </script>
 
@@ -171,6 +179,12 @@ function winDot(w: TmuxWindowState): string {
 .tss-scrim.is-desktop { align-items: flex-end; justify-content: flex-start; }
 
 .tss-panel {
+  /* Bound live from STATUS_COLOR (useAgentOverview.ts) — same constant TmuxPaneBar.vue and
+     AgentOverview.vue bind, and this file's own winDot() reads for the TOPOLOGY dots via
+     inline :style. .tss-chip-dot.busy below is deliberately NOT this var — it's a distinct,
+     intentionally muted "tool healthy" tone for the AGENTS rollup (a per-tool aggregate, not
+     a per-window EffectiveStatus), so it stays a literal, not a drifted copy. */
+  --status-waiting: v-bind('STATUS_COLOR.waiting');
   display: flex;
   flex-direction: column;
   background: #160f22;
@@ -278,8 +292,8 @@ function winDot(w: TmuxWindowState): string {
 }
 .tss-chip.is-waiting { background: #2a1018; border-color: #5a2030; }
 .tss-chip-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.tss-chip-dot.busy { background: #6a8a6a; }
-.tss-chip-dot.wait { background: #ff5252; animation: tss-pulse 1.3s infinite; }
+.tss-chip-dot.busy { background: #6a8a6a; } /* intentionally muted — see .tss-panel comment */
+.tss-chip-dot.wait { background: var(--status-waiting); animation: tss-pulse 1.3s infinite; }
 .tss-chip-name { color: #c8a0e8; font-weight: 600; }
 .tss-chip-count {
   color: #9a86ba; font-variant-numeric: tabular-nums;
@@ -327,9 +341,9 @@ function winDot(w: TmuxWindowState): string {
 .tss-win.is-active { background: #4a2a7a; border-color: #7a4ab0; color: #f0e0ff; }
 .tss-win-idx { font-weight: 700; font-size: 0.62rem; }
 .tss-win-name { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Color is bound inline from STATUS_COLOR (useAgentOverview — the shared SSOT with
+   TmuxPaneBar), not a class rule here, so this list can't drift to a different palette. */
 .tss-win-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
-.tss-win-dot.wait { background: #ff5252; }
-.tss-win-dot.busy { background: #6a6a7a; }
 
 .tss-empty { color: #5a4a78; font-style: italic; font-size: 0.7rem; padding: 4px 0; }
 

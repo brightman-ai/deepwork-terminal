@@ -23,6 +23,17 @@ import type { TmuxWindowState } from '@terminal/types/terminal'
 
 export type EffectiveStatus = 'waiting' | 'running' | 'done-unseen' | 'idle'
 
+/** The ONE status→color mapping for every surface that renders an EffectiveStatus dot
+ *  (pane bar / status sheet / overview grid). `idle` is deliberately absent — every
+ *  consumer renders no dot at all for idle, so there is no color to define for it.
+ *  Presentation metadata lives beside the value type it describes (DDD: the enum and
+ *  its canonical rendering are one concept, not one-per-consumer). */
+export const STATUS_COLOR: Record<Exclude<EffectiveStatus, 'idle'>, string> = {
+  waiting: '#ff5252', // red — needs your input
+  running: '#3fb950', // green — an agent is actively working
+  'done-unseen': '#e3b341', // amber — finished, unread (distinct from running-green / waiting-red)
+}
+
 /** Raw per-window status from its panes: any waiting → waiting; any running → running; else idle. */
 export function windowRawStatus(w: TmuxWindowState): 'waiting' | 'running' | 'idle' {
   const panes = w.panes ?? []
