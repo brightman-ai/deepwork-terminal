@@ -66,8 +66,10 @@
         :target-label="machineLabel || '本机'"
         :diagnostic="connDiagnostic"
         :labels="CLI_CONN_LABELS"
+        :refreshable="true"
         testid-prefix="cli-connection"
         data-testid="surface-connection-status"
+        @refresh="wsReconnect"
       />
     </div>
 
