@@ -236,6 +236,21 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     reconnectTimer = setTimeout(connect, delay)
   }
 
+  // A tab backgrounded (phone locked / switched away) long enough to exhaust maxAttempts
+  // (~3.5 min at the default 10) never retries again — scheduleReconnect() gives up for good,
+  // and nothing wakes it back up on its own. Coming back to a disconnected session should at
+  // least get ONE fresh attempt immediately, not wait out (or never resume) the dead backoff
+  // timer. Skips 'preempted' on purpose — that status means another device holds the session,
+  // and reconnect() would just fight it for the same slot.
+  function onVisible(): void {
+    if (document.hidden || status.value !== 'disconnected') return
+    reconnect()
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisible)
+    onUnmounted(() => document.removeEventListener('visibilitychange', onVisible))
+  }
+
   // Unified telemetry tick (~2s): samples bandwidth/traffic/uptime from byte counters that
   // already flow (zero added bytes), then sends ONE guarded RTT ping. The ping is skipped
   // within rttGuardMs of a keystroke so it never competes with input on WKWebView; when idle
