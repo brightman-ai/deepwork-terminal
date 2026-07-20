@@ -8,6 +8,8 @@
  *     bits (highlight.js, mermaid, graphviz-wasm, katex) lazy-rendered post-mount (markdownEnhance).
  *   · code     → highlight.js (lazy, curated language set).
  *   · plain    → monospace text.
+ *   · html     → code (source) by default, with a 渲染 toggle that swaps in the real page,
+ *     isolated in a sandboxed iframe (see renderSrc).
  *
  * Reader chrome (the point of this component, for long structured docs on a phone):
  *   · floating TOC outline + scroll-spy (jump to / know your section)
@@ -18,12 +20,18 @@
  *   · in-app doc-to-doc navigation: [[wikilinks]] + relative .md links open the target in-place.
  */
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
-import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus, Sun, Moon } from 'lucide-vue-next'
+import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus, Sun, Moon, Eye, Code2 } from 'lucide-vue-next'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { renderMarkdown } from '@terminal/utils/markdown'
 import { highlightCode, addCopyButtons, renderDiagrams, renderMath, loadHljs } from '@terminal/utils/markdownEnhance'
 
-const props = defineProps<{ name: string; text: string; path?: string }>()
+const props = defineProps<{
+  name: string
+  text: string
+  path?: string
+  /** /files/raw?…&render=1 URL for .html/.htm — enables the 源码/渲染 toggle when present. */
+  renderSrc?: string
+}>()
 const emit = defineEmits<{
   (e: 'navigate', absPath: string): void
   (e: 'toast', msg: string): void
@@ -51,6 +59,16 @@ const kind = computed<'markdown' | 'code' | 'plain'>(() => {
   if (['md', 'markdown', 'mdx'].includes(ext.value)) return 'markdown'
   return lang.value ? 'code' : 'plain'
 })
+
+// ── html: source ⇄ rendered ──────────────────────────────────────────────────────────
+// An agent's .html output is usually meant to be LOOKED at (a report, a chart), but it is
+// also untrusted content, so the default stays 源码 — an explicit tap opts into running it,
+// and even then it runs inside a sandboxed iframe with a server-side CSP (see files.go).
+// Switching files resets to source: the choice is per-document, never sticky across opens.
+const canRenderHtml = computed(() => ['html', 'htm'].includes(ext.value) && !!props.renderSrc)
+const htmlRendered = ref(false)
+watch(() => [props.name, props.renderSrc], () => { htmlRendered.value = false })
+const showHtmlFrame = computed(() => canRenderHtml.value && htmlRendered.value)
 
 // ── markdown pipeline ──────────────────────────────────────────────────────────────
 const rendered = computed(() => (kind.value === 'markdown' ? renderMarkdown(props.text) : { html: '', toc: [] }))
@@ -407,6 +425,18 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
 
     <!-- floating toolbar -->
     <div class="fp-toolbar">
+      <button
+        v-if="canRenderHtml"
+        class="fp-tb-btn"
+        :class="{ 'is-on': htmlRendered }"
+        type="button"
+        :title="htmlRendered ? '看源码' : '渲染这个页面（沙箱隔离运行）'"
+        data-testid="file-preview-html-render"
+        @click="htmlRendered = !htmlRendered"
+      >
+        <Code2 v-if="htmlRendered" class="size-3.5" />
+        <Eye v-else class="size-3.5" />
+      </button>
       <button v-if="toc.length" class="fp-tb-btn" :class="{ 'is-on': tocOpen }" type="button" title="目录" data-testid="file-preview-toc" @click="tocOpen = !tocOpen"><List class="size-3.5" /></button>
       <button class="fp-tb-btn" :class="{ 'is-on': findOpen }" type="button" title="文档内查找" data-testid="file-preview-find" @click="toggleFind"><Search class="size-3.5" /></button>
       <button class="fp-tb-btn" type="button" title="缩小字号" @click="bumpFont(-0.1)"><Minus class="size-3.5" /></button>
@@ -450,7 +480,19 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
     </Transition>
 
     <!-- content -->
-    <div v-if="kind === 'markdown'" ref="contentEl" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" :style="{ fontSize: `${0.78 * fontScale}rem` }" v-html="mdHtml" />
+    <!-- Rendered html. sandbox WITHOUT allow-same-origin is the isolation that makes running
+         untrusted markup safe — do not add allow-same-origin (with allow-scripts it lets the
+         page remove its own sandbox). The server's per-response CSP blocks network egress. -->
+    <iframe
+      v-if="showHtmlFrame"
+      :src="props.renderSrc"
+      class="fp-frame"
+      sandbox="allow-scripts"
+      referrerpolicy="no-referrer"
+      :title="props.name"
+      data-testid="file-preview-html-frame"
+    />
+    <div v-else-if="kind === 'markdown'" ref="contentEl" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" :style="{ fontSize: `${0.78 * fontScale}rem` }" v-html="mdHtml" />
     <pre v-else ref="contentEl" class="fp-code hljs" :class="wrap ? 'fp-wrap' : 'fp-nowrap'" :style="{ fontSize: `${0.72 * fontScale}rem` }"><code v-html="codeHtml" /></pre>
 
     <!-- back-to-top -->
@@ -675,6 +717,11 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
 
 .fp-fade-enter-active, .fp-fade-leave-active { transition: opacity 0.16s ease; }
 .fp-fade-enter-from, .fp-fade-leave-to { opacity: 0; }
+
+/* ── rendered html (sandboxed) ── */
+/* White backdrop: agent 产物 pages assume a normal document canvas, and the reader's dark
+   chrome showing through a transparent iframe reads as a broken page. */
+.fp-frame { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
 
 /* ── code (whole-file view) ── */
 .fp-code {

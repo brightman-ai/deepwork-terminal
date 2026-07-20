@@ -32,6 +32,18 @@ const rawPreviewMaxBytes = 10 << 20 // 10 MiB
 // deciding text-vs-binary.
 const binarySniffBytes = 8 << 10 // 8 KiB
 
+// htmlRenderCSP locks a rendered HTML preview (GET /files/raw?…&render=1) to its own
+// document: it may paint and run its own inline scripts, but it cannot call out, embed
+// anything, or re-target the app. Paired with the client's sandboxed iframe — see the
+// render branch in handleFilesRaw for why both halves are required.
+const htmlRenderCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-src 'none'; " +
+	"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+
+// isHTMLExt reports whether ext (lower-case, leading dot) is a file the render toggle may
+// serve as real HTML.
+func isHTMLExt(ext string) bool { return ext == ".html" || ext == ".htm" }
+
 // recentFileItem is one entry in GET /files/recent. It mirrors agentintel.RecentFile
 // plus the freshly-stat'd Size/Exists (vanished files are still listed, exists:false).
 type recentFileItem struct {
@@ -484,6 +496,45 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 
 	if info.Size() > rawPreviewMaxBytes {
 		writeJSON(w, http.StatusOK, map[string]any{"tooLarge": true, "size": info.Size()})
+		return
+	}
+
+	// Render mode: serve an .html/.htm file AS HTML so the drawer's 渲染 toggle can show the
+	// real page instead of its source. This is the ONLY path that ever emits text/html — the
+	// default preview keeps forcing text/plain. It is safe only because two things hold
+	// TOGETHER, and neither may be dropped without the other:
+	//   • the client embeds it in an iframe with sandbox="allow-scripts" and WITHOUT
+	//     allow-same-origin, so the page runs in an opaque origin and cannot reach app
+	//     storage / cookies / same-origin DOM;
+	//   • this per-response CSP pins the document to itself — no network egress
+	//     (connect-src 'none'), no nested frames, no plugins, no base-uri / form-action.
+	// Agent 产物 HTML legitimately carries inline <script> (a chart, a countdown), so scripts
+	// are allowed to RUN but have nowhere to run TO. Same shape as pro's artifact route
+	// (deepwork-pro internal/webui/od_routes.go). 'unsafe-inline' applies to THIS isolated
+	// response only, never to the app shell.
+	if r.URL.Query().Get("render") == "1" {
+		if !isHTMLExt(strings.ToLower(filepath.Ext(target))) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not an html file"})
+			return
+		}
+		rf, rerr := os.Open(target)
+		if rerr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		defer rf.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", htmlRenderCSP)
+		// The global X-Frame-Options: SAMEORIGIN must GO for this response: the preview frame is
+		// sandboxed without allow-same-origin, so its origin is opaque and the legacy XFO
+		// same-origin comparison fails — the frame renders as a blocked page (observed: the
+		// document loads but nothing paints and no script runs). frame-ancestors 'self' in the
+		// CSP above is the modern, sandbox-aware equivalent and still pins embedding to this app.
+		w.Header().Del("X-Frame-Options")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, rf)
 		return
 	}
 

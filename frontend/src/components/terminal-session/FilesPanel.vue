@@ -23,6 +23,7 @@ import {
   filesTree,
   filesSearch,
   filesRaw,
+  filesRawRenderUrl,
   filesDownload,
   type RecentFileItem,
   type TreeEntry,
@@ -285,6 +286,14 @@ function closePreview(): void {
   preview.value = null
 }
 onUnmounted(revokePreviewUrl)
+
+// An .html/.htm preview also gets a 渲染 URL, so FilePreview can offer the 源码/渲染 toggle.
+// Built from the SAME rel the preview fetched, so both views resolve to one file.
+const previewRenderSrc = computed(() => {
+  const p = preview.value
+  if (!p || p.result.kind !== 'text') return ''
+  return /\.html?$/i.test(p.name) ? filesRawRenderUrl(props.sessionId, p.rel, props.cwd) : ''
+})
 
 // previewErrorText turns a failed /files/raw into a human reason (the ask: "allow it to fail,
 // but say WHY"). The 403 case is the common one — a path outside the workbench-anchored root
@@ -666,7 +675,7 @@ defineExpose({ loadRecent, loadTree })
         </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :render-src="previewRenderSrc" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>

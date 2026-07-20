@@ -250,6 +250,28 @@ export async function filesRaw(sessionId: string, relPath: string, cwd?: string)
 }
 
 /**
+ * GET /files/raw?…&render=1 — the URL that serves an .html/.htm file as REAL html, for the
+ * preview's 渲染 toggle. Returns a plain URL string (not a fetch): the client hands it to an
+ * `<iframe sandbox="allow-scripts">` WITHOUT allow-same-origin, so the page runs in an opaque
+ * origin; the server pairs that with a per-response CSP that forbids network egress. Both
+ * halves are load-bearing — see the render branch in files.go.
+ *
+ * An iframe cannot carry the X-CLI-Auth header, so the auth code rides the query string
+ * (authWrap accepts ?auth=; under pro's WebUI middleware the session cookie authenticates
+ * this same-origin subresource and the param is simply ignored).
+ */
+export function filesRawRenderUrl(sessionId: string, relPath: string, cwd?: string): string {
+  if (!sessionId) return ''
+  const { getAuthCode } = useCliAuth()
+  let path = withScope('/files/raw', sessionId, cwd)
+  if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+  path += '&render=1'
+  const code = getAuthCode()
+  if (code) path += `&auth=${encodeURIComponent(code)}`
+  return cliApi(path)
+}
+
+/**
  * GET /files/raw?…&download=1 — fetch the FULL bytes of any file (text / image / binary /
  * oversized) and save them locally. Works for formats preview can't render. /files/raw needs
  * the X-CLI-Auth header, so a bare <a download> (unauthenticated GET) would 401 — we fetch

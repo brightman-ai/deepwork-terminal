@@ -222,6 +222,59 @@ func TestFilesRaw_Image(t *testing.T) {
 	assert.Equal(t, "image/png", rbig.Header.Get("Content-Type"))
 }
 
+// TC-FS-04c: /files/raw?render=1 serves .html as REAL html for the sandboxed-iframe preview,
+// under a locked-down per-response CSP — and refuses to do so for anything else. The default
+// (no render flag) must keep serving .html as text/plain so the app never executes it in-page.
+func TestFilesRaw_HTMLRender(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	page := "<!doctype html><body><script>document.title='ran'</script>hello</body>"
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "report.html"), []byte(page), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte("plain"), 0o644))
+
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "html", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "html")
+
+	// Default preview of a .html → text/plain (source view), never text/html.
+	rs, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, "report.html"), "")
+	require.NoError(t, err)
+	defer rs.Body.Close()
+	assert.True(t, strings.HasPrefix(rs.Header.Get("Content-Type"), "text/plain"))
+
+	// render=1 → text/html + the isolation CSP; body is the file verbatim.
+	rr, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s&render=1", sess.ID, "report.html"), "")
+	require.NoError(t, err)
+	defer rr.Body.Close()
+	assert.Equal(t, http.StatusOK, rr.StatusCode)
+	assert.True(t, strings.HasPrefix(rr.Header.Get("Content-Type"), "text/html"))
+	csp := rr.Header.Get("Content-Security-Policy")
+	// The two directives that make running untrusted inline scripts survivable: scripts may
+	// run, but the document can neither call out nor re-anchor itself.
+	assert.Contains(t, csp, "connect-src 'none'")
+	assert.Contains(t, csp, "default-src 'none'")
+	body, err := io.ReadAll(rr.Body)
+	require.NoError(t, err)
+	assert.Equal(t, page, string(body))
+
+	// render=1 on a non-html file → 400 (no way to smuggle arbitrary bytes into an html origin).
+	rt, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s&render=1", sess.ID, "notes.txt"), "")
+	require.NoError(t, err)
+	defer rt.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, rt.StatusCode)
+}
+
+// TC-FS-04d: the standalone CSP must keep frame-src 'self'. Under 'none' the html preview's
+// same-origin sandboxed iframe is blocked by the browser and paints a broken-document glyph —
+// a SILENT failure that looks like a server bug (cost a full debugging round once). The
+// framed response defends itself separately via htmlRenderCSP.
+func TestStandaloneCSP_AllowsSameOriginFrames(t *testing.T) {
+	assert.Contains(t, standaloneCSP, "frame-src 'self'")
+	assert.Contains(t, standaloneCSP, "frame-ancestors 'self'") // still not embeddable elsewhere
+	// The mesh exception (remote peers) is the other deliberately-loose directive.
+	assert.Contains(t, standaloneCSP, "connect-src 'self' http: https: ws: wss:")
+}
+
 // workbenchCWD prefers a valid client cwd (tmux active pane), else a live/static session
 // cwd (non-tmux). This is the SSOT both the files drawer and clipboard upload resolve through.
 func TestWorkbenchCWD_Resolution(t *testing.T) {
