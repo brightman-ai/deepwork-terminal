@@ -65,7 +65,10 @@ const codeHtml = ref('')
 watch(
   [() => props.text, () => props.name],
   async () => {
-    if (kind.value !== 'code') { codeHtml.value = ''; return }
+    // 'plain' shares the <pre> body with 'code' (only the highlighting differs), so it must
+    // still get the escaped text — clearing codeHtml here rendered EVERY non-highlighted,
+    // non-markdown file (.txt/.log/.csv/.srt, extension-less) as a blank page.
+    if (kind.value !== 'code') { codeHtml.value = escapeHtml(props.text); return }
     codeHtml.value = escapeHtml(props.text)
     const want = props.text
     try {
