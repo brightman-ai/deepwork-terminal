@@ -20,15 +20,13 @@ import (
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
 
-// rawPreviewMaxBytes caps how large a file /files/raw will stream as text. Larger
-// files return {tooLarge:true,size} metadata instead — the drawer's preview is for
-// glancing at agent产物 (md/code), not downloading blobs.
-const rawPreviewMaxBytes = 1 << 20 // 1 MiB
-
-// imagePreviewMaxBytes caps how large an image /files/raw streams inline. Images get a
-// larger budget than text (rawPreviewMaxBytes) because screenshots routinely exceed
-// 1 MiB; past this they return {tooLarge} like any other oversized file.
-const imagePreviewMaxBytes = 10 << 20 // 10 MiB
+// rawPreviewMaxBytes caps how large a file /files/raw streams for inline preview —
+// text and images alike. Past it, the response is {tooLarge:true,size} and the reader
+// falls back to 下载. Raised 1 MiB → 10 MiB for text: real agent 产物 (meeting
+// transcripts, long logs) routinely clear 1 MiB, and refusing to show them is worse
+// than a slow render. Images already had this budget (screenshots exceed 1 MiB), so the
+// two are now one number.
+const rawPreviewMaxBytes = 10 << 20 // 10 MiB
 
 // binarySniffBytes is how many leading bytes we inspect for a NUL byte when
 // deciding text-vs-binary.
@@ -433,7 +431,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 // handleFilesRaw handles GET /files/raw?session=<id>&path=<rel>.
 //
 // Same path safety as /files/tree. A directory → 400. An oversized file →
-// {tooLarge:true,size} (200) (1MiB for text, 10MiB for images). A raster image with a
+// {tooLarge:true,size} (200) (10 MiB, text and images alike). A raster image with a
 // known extension is streamed with its image/* Content-Type so the client renders it
 // inline (<img>). Any other binary (NUL byte in the first 8KiB, or a non-text
 // content-type) → {binary:true,size} (200). Otherwise the text bytes are streamed as
@@ -484,12 +482,7 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 
 	imgCT := imageContentType(strings.ToLower(filepath.Ext(target)))
 
-	// Images get a larger inline budget than text (screenshots often exceed 1 MiB).
-	sizeCap := int64(rawPreviewMaxBytes)
-	if imgCT != "" {
-		sizeCap = imagePreviewMaxBytes
-	}
-	if info.Size() > sizeCap {
+	if info.Size() > rawPreviewMaxBytes {
 		writeJSON(w, http.StatusOK, map[string]any{"tooLarge": true, "size": info.Size()})
 		return
 	}
