@@ -19,6 +19,15 @@ import (
 	"github.com/brightman-ai/kit/webserve"
 )
 
+// standaloneCSP is the security policy for the STANDALONE listener (API + SPA). Package-level
+// so a test can pin the two directives that are deliberately non-default and whose silent
+// failure modes cost real debugging time: connect-src (remote-peer mesh) and frame-src (the
+// html preview's sandboxed iframe). Rationale for each is at its use site in Run().
+const standaloneCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:; " +
+	"worker-src 'self'; manifest-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; " +
+	"frame-ancestors 'self'; form-action 'self'"
+
 // Server is a complete terminal session HTTP service.
 // Standalone: ListenAndServe() runs API + SPA.
 // Embedded: Handler() returns API routes for a host to mount.
@@ -145,8 +154,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	root.HandleFunc("/refresh", freshRedirect)
 	root.Handle("/", spa.Handler())
 
-	// Production security headers on every standalone response (API + SPA). The terminal
-	// frames nothing, so frame-src 'none'. HSTS stays OFF: this listener is reached over
+	// Production security headers on every standalone response (API + SPA).
+	// HSTS stays OFF: this listener is reached over
 	// plain HTTP on the LAN (e.g. http://stwork:8087), and HSTS would pin that host to
 	// HTTPS and brick HTTP access; the cloudflare tunnel owns HSTS for the public HTTPS
 	// domain. The CSP carries no upgrade-insecure-requests, so HTTP origins load fine and
@@ -158,17 +167,19 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// can't enumerate peer hosts ahead of time, so connect-src allows the needed schemes. Tradeoff:
 	// looser XSS-exfiltration defense — acceptable for a tool that already grants full shell access;
 	// every other directive stays strict. (Built inline to keep the change in this repo, not kit.)
+	// frame-src is 'self' (not 'none'): the 文件 preview renders an .html 产物 inside a
+	// SAME-ORIGIN sandboxed iframe (/files/raw?render=1). Under frame-src 'none' Chrome blocks
+	// that frame and paints a broken-document glyph — the failure is silent and looks like a
+	// server bug. pro passes 'self' for the same reason (webui.go SPACSP("'self'")); keeping
+	// 'none' here was the standalone-vs-pro drift. Framing stays same-origin-only, and the
+	// framed response carries its own locked-down CSP (files.go htmlRenderCSP).
 	// script-src adds 'wasm-unsafe-eval' so the markdown reader's graphviz/dot renderer
 	// (@hpcc-js/wasm) can instantiate its WebAssembly module; Chrome blocks WASM compile under a
 	// bare 'self'. It grants WASM instantiation only, NOT JS eval()/new Function() — a much
 	// narrower relaxation. (mermaid is pure JS and needs none of this.) NOTE: the EMBEDDED host
 	// (pro, :8087) owns its own CSP header — it must add the same token for graphviz to render there.
-	const meshCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
-		"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:; " +
-		"worker-src 'self'; manifest-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; " +
-		"frame-ancestors 'self'; form-action 'self'"
 	secured := webserve.Config{
-		CSP:          meshCSP,
+		CSP:          standaloneCSP,
 		FrameOptions: "SAMEORIGIN",
 		HSTS:         false,
 	}.Middleware(root)
