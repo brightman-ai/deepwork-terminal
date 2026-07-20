@@ -186,8 +186,8 @@ func TestFilesRaw_Image(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(cwd, "shot.png"), png, 0o644))
 	// A ".png" that's actually text → should preview as text, not a broken image.
 	require.NoError(t, os.WriteFile(filepath.Join(cwd, "fake.png"), []byte("not really an image"), 0o644))
-	// An image past the TEXT cap but within the IMAGE cap → still served inline.
-	bigImg := make([]byte, rawPreviewMaxBytes+1024)
+	// A multi-MiB screenshot (well past the ORIGINAL 1 MiB cap) → must still serve inline.
+	bigImg := make([]byte, 2<<20)
 	copy(bigImg, png) // keep the NUL-bearing header so it sniffs as binary
 	require.NoError(t, os.WriteFile(filepath.Join(cwd, "big.png"), bigImg, 0o644))
 
@@ -214,7 +214,7 @@ func TestFilesRaw_Image(t *testing.T) {
 	fn, _ := rf.Body.Read(fb)
 	assert.Contains(t, string(fb[:fn]), "not really an image")
 
-	// Image over the text cap but under the image cap → still served as image (not tooLarge).
+	// Multi-MiB image, under the 10 MiB preview budget → served as image (not tooLarge).
 	rbig, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, "big.png"), "")
 	require.NoError(t, err)
 	defer rbig.Body.Close()
