@@ -10,16 +10,18 @@ import { createUploadProgressStore } from '../useUploadProgress'
  * A retry button may only exist where a retry can actually succeed.
  */
 describe('classifyUploadFailure — retry is a promise, not decoration', () => {
-  test('413 is deterministic: no retry, and the limit is quoted from the server', () => {
+  test('413 is deterministic: no retry, limit quoted from the server, with a zip next-step', () => {
     const r = classifyUploadFailure(413, { error: 'file exceeds the 10 MB limit', limit_mb: 10 })
     expect(r.retryable).toBe(false)
-    expect(r.message).toBe('文件超过 10 MB 上限')
+    expect(r.message).toBe('文件超过 10 MB 上限，可压缩成 zip 再上传')
+    expect(r.message).toContain('zip') // actionable next step, not a dead end
   })
 
-  test('413 without limit_mb refuses to invent a number', () => {
+  test('413 without limit_mb refuses to invent a number (but still suggests zip)', () => {
     const r = classifyUploadFailure(413, null)
     expect(r.retryable).toBe(false)
     expect(r.message).not.toMatch(/\d/)
+    expect(r.message).toContain('zip')
   })
 
   test('other 4xx = the server judging THESE bytes → no retry; its words survive for diagnosis', () => {

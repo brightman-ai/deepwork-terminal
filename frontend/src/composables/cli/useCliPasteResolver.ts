@@ -536,6 +536,8 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     // SSOT for the upload-progress float — see useUploadProgress.ts. Read-only from
     // the caller's perspective; every mutation happens inside useClipboardPaste.
     uploads: clipboardPaste.uploads,
+    // The one mutation the float DOES trigger: dismiss an errored pill (→ store.remove).
+    dismissUpload: clipboardPaste.dismissUpload,
   }
 }
 

@@ -25,6 +25,18 @@
             data-testid="upload-progress-retry"
             @click="entries[0].retry?.()"
           >重试</button>
+          <!-- Every error is dismissable — a non-retryable failure (oversize, bad type) has NO
+               retry, so without this it was an unclosable pill (the reported bug). The left ✕ is
+               a status glyph; this right ✕ is the action, greyed to read differently. -->
+          <button
+            v-if="entries[0].status === 'error'"
+            type="button"
+            class="upf-dismiss"
+            title="关闭"
+            aria-label="关闭"
+            data-testid="upload-progress-dismiss"
+            @click="$emit('dismiss', entries[0].id)"
+          >✕</button>
         </div>
         <div v-if="entries[0].status === 'uploading'" class="upf-bar">
           <div class="upf-bar-fill" :style="{ width: pct(entries[0]) + '%' }" />
@@ -57,6 +69,14 @@
             data-testid="upload-progress-retry"
             @click="e.retry?.()"
           >重试</button>
+          <button
+            type="button"
+            class="upf-dismiss"
+            title="关闭"
+            aria-label="关闭"
+            data-testid="upload-progress-dismiss"
+            @click="$emit('dismiss', e.id)"
+          >✕</button>
         </div>
       </template>
     </div>
@@ -71,6 +91,10 @@ import type { UploadEntry } from '@terminal/composables/cli/useUploadProgress'
 const props = defineProps<{
   entries: UploadEntry[]
 }>()
+// dismiss removes ONE errored entry from the store (the float is a pure reader; the host wires
+// this to useUploadProgress.remove — the single deletion authority). Only errors are dismissable:
+// uploading is in-flight, done auto-dismisses.
+defineEmits<{ (e: 'dismiss', id: string): void }>()
 
 const { isMobile } = useDeviceDetection()
 
@@ -178,6 +202,23 @@ function rowClass(entry: UploadEntry): string {
   touch-action: manipulation;
 }
 .upf-retry:active { background: rgba(239, 83, 80, 0.15); }
+
+/* Dismiss (✕): the ACTION, distinct from the red status ✕ on the left — neutral grey, brightens
+   on hover. Generous hit target for touch (the pill is tiny and thumb-driven). */
+.upf-dismiss {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #8a8ab0;
+  font-size: 0.78rem;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.upf-dismiss:hover { color: #e6e6ee; }
+.upf-dismiss:active { background: rgba(255, 255, 255, 0.12); }
 
 .upf-error-msg {
   margin-top: 2px;
