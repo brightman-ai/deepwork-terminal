@@ -306,3 +306,25 @@ export async function filesDownload(
     return false
   }
 }
+
+/**
+ * POST /sessions/{id}/paste-upload with a `dir` field — upload a local file INTO a specific tree
+ * directory (the 目录树 "上传到当前目录" button). Reuses the paste-upload pipeline (size cap,
+ * filename sanitize, safeResolve path guard); the `dir` makes the file land in that REAL directory
+ * instead of the tmp/clipboard staging bucket (and skips its TTL cleanup). Returns true on success.
+ */
+export async function filesUploadToDir(sessionId: string, file: File, dir: string, cwd?: string): Promise<boolean> {
+  if (!sessionId) return false
+  const { cliFetch } = useCliAuth()
+  try {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    form.append('mime', file.type || 'application/octet-stream')
+    if (dir) form.append('dir', dir)
+    if (cwd) form.append('cwd', cwd)
+    const resp = await cliFetch(cliApi(`/sessions/${encodeURIComponent(sessionId)}/paste-upload`), { method: 'POST', body: form })
+    return resp.ok
+  } catch {
+    return false
+  }
+}

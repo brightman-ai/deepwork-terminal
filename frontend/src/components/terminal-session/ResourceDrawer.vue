@@ -14,7 +14,7 @@
       v-if="!open && isActive"
       ref="handleEl"
       class="rd-handle"
-      :class="{ 'is-mobile': isMobile, 'is-peek': handlePeek }"
+      :class="{ 'is-mobile': isMobile, 'is-peek': handlePeek, 'rd-dock-left': dockLeft }"
       :style="handleStyle"
       type="button"
       title="工作台 · 点击展开，可上下拖动"
@@ -24,7 +24,8 @@
       @mouseleave="handleHovering = false"
     >
       <span class="rd-handle-grip" aria-hidden="true"></span>
-      <ChevronLeft class="rd-handle-chevron" :size="14" />
+      <ChevronRight v-if="dockLeft" class="rd-handle-chevron" :size="14" />
+      <ChevronLeft v-else class="rd-handle-chevron" :size="14" />
       <span class="rd-handle-label" :class="{ 'is-visible': handlePeek || handleHovering }">工作台</span>
     </button>
 
@@ -39,6 +40,7 @@
           'is-split': layout === 'split',
           'is-mobile': isMobile && layout !== 'split',
           'is-desktop': !isMobile && layout !== 'split',
+          'rd-dock-left': dockLeft,
         }"
         :style="scrimStyle"
         data-testid="resource-drawer"
@@ -105,6 +107,17 @@
                 @click="$emit('update:layout-mode', 'overlay')"
               >浮层</button>
             </div>
+            <!-- Dock side: low-frequency, so it lives among the other chrome toggles (not a
+                 prominent control). The icon shows the side it will MOVE TO (affordance, not state). -->
+            <button
+              class="rd-lock"
+              :title="dockLeft ? '停靠到右侧' : '停靠到左侧'"
+              data-testid="rd-dock-toggle"
+              @click="toggleDock"
+            >
+              <PanelRight v-if="dockLeft" class="rd-lock-ico" />
+              <PanelLeft v-else class="rd-lock-ico" />
+            </button>
             <!-- Pane lock: FOLLOW (default) ↔ LOCK onto the current pane so a main-area pane
                  switch no longer disturbs the drawer (read/copy across panes). -->
             <button
@@ -134,12 +147,35 @@
                  single › (not the old double-chevron ») mirrors the closed handle's single ‹,
                  so the two affordances read as one symmetric "slide the panel" idiom. -->
             <button class="rd-close" title="收起" data-testid="resource-drawer-close" @click="$emit('update:open', false)">
-              <ChevronRight class="rd-close-ico" />
+              <ChevronLeft v-if="dockLeft" class="rd-close-ico" />
+              <ChevronRight v-else class="rd-close-ico" />
             </button>
           </div>
 
 
-          <!-- ════ TOP TAB 1 · 历史输入 (the original three views, now sub-tabs) ════ -->
+          <!-- ════ TOP TAB · 目录树 (anchored working tree — the primary workspace entry) ════ -->
+          <div v-show="topTab === 'tree'" class="rd-toppane">
+            <FilesPanel
+              mode="tree"
+              :session-id="sessionId"
+              :cwd="effectiveCwd"
+              @inject="onChildInject"
+              @compose-draft="onChildComposeDraft"
+            />
+          </div>
+
+          <!-- ════ TOP TAB · 最近修改 (agent recently-edited files, newest first) ════ -->
+          <div v-show="topTab === 'recent'" class="rd-toppane">
+            <FilesPanel
+              mode="recent"
+              :session-id="sessionId"
+              :cwd="effectiveCwd"
+              @inject="onChildInject"
+              @compose-draft="onChildComposeDraft"
+            />
+          </div>
+
+          <!-- ════ TOP TAB · 历史输入 (the original three views, now sub-tabs) ════ -->
           <template v-if="topTab === 'history'">
           <!-- Sub-tabs: 图片 / 文件 / 输入 -->
           <div class="rd-subtabs">
@@ -258,17 +294,7 @@
           </div>
           </template>
 
-          <!-- ════ TOP TAB 2 · 文件 (anchored working tree) ════ -->
-          <div v-show="topTab === 'files'" class="rd-toppane">
-            <FilesPanel
-              :session-id="sessionId"
-              :cwd="effectiveCwd"
-              @inject="onChildInject"
-              @compose-draft="onChildComposeDraft"
-            />
-          </div>
-
-          <!-- ════ TOP TAB 3 · 审核 (git diff of the anchored cwd's repo — read-only) ════ -->
+          <!-- ════ TOP TAB · 审核 (git diff of the anchored cwd's repo — read-only) ════ -->
           <div v-show="topTab === 'review'" class="rd-toppane">
             <ReviewPanel :session-id="sessionId" :cwd="effectiveCwd" />
           </div>
@@ -332,8 +358,9 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, Lock, LockOpen } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Lock, LockOpen, PanelLeft, PanelRight } from 'lucide-vue-next'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
@@ -410,6 +437,11 @@ const emit = defineEmits<{
 
 const { isMobile } = useDeviceDetection()
 
+// Dock side (global, persisted). dockLeft drives every direction mirror below (class on the
+// teleported handle/scrim, chevrons, resize-drag sign) — one flag, all geometry derives.
+const { dock, toggle: toggleDock } = useDrawerDock()
+const dockLeft = computed(() => dock.value === 'left')
+
 // The summon handle is vertically draggable along the right edge so it can be moved
 // off whatever terminal text it overlaps; offset persists per-handle.
 const { el: handleEl, style: handleStyle } = useEdgeDrag({ storageKey: 'dw.rdHandle.top' })
@@ -472,19 +504,24 @@ function baseName(path: string): string {
   return trimmed.slice(i + 1) || '/'
 }
 
-// ── TOP-LEVEL tabs (CHG-016): 历史输入 / 文件 / 会话总览. The selected top tab and the
-// 历史输入 sub-tab both persist to localStorage so the drawer reopens where it was left.
-type TopKey = 'history' | 'files' | 'review' | 'overview'
+// ── TOP-LEVEL tabs: file-browsing FIRST (目录树 / 最近修改), then 历史输入 / 审核 / 会话总览.
+// The old single 文件 tab (which held recent+tree as internal sub-tabs) is split into two
+// top-level tabs — 目录树 is the primary workspace entry, 最近修改 the agent-edited timeline.
+// The selected top tab and the 历史输入 sub-tab both persist to localStorage.
+type TopKey = 'tree' | 'recent' | 'history' | 'review' | 'overview'
 const TOP_TAB_KEY = 'dw.rd.tab'
 const SUB_TAB_KEY = 'dw.rd.subtab'
+const TOP_KEYS: TopKey[] = ['tree', 'recent', 'history', 'review', 'overview']
 function loadTop(): TopKey {
   const v = localStorage.getItem(TOP_TAB_KEY)
-  return v === 'files' || v === 'review' || v === 'overview' || v === 'history' ? v : 'history'
+  if (v === 'files') return 'tree' // migrate the old unified 文件 tab → 目录树 (file-first default)
+  return (TOP_KEYS as string[]).includes(v || '') ? (v as TopKey) : 'tree'
 }
 const topTab = ref<TopKey>(loadTop())
 const topTabs: { key: TopKey; label: string }[] = [
+  { key: 'tree', label: '目录树' },
+  { key: 'recent', label: '最近修改' },
   { key: 'history', label: '历史输入' },
-  { key: 'files', label: '文件' },
   { key: 'review', label: '审核' },
   { key: 'overview', label: '会话总览' },
 ]
@@ -582,9 +619,11 @@ function onResizeStart(e: PointerEvent): void {
 function onResizeMove(e: PointerEvent): void {
   if (!resizing) return
   e.preventDefault()
-  // The panel is anchored to the RIGHT edge; dragging the handle left (smaller clientX)
-  // must GROW the width — hence (start − current).
-  panelWidth.value = clampW(resizeStartW + (resizeStartX - e.clientX))
+  // The resize handle is on the panel's INNER edge, which flips with the dock: right-docked, the
+  // handle is on the left, so dragging left (smaller clientX) grows it (start − current);
+  // left-docked, the handle is on the right, so dragging right grows it (current − start).
+  const delta = dockLeft.value ? e.clientX - resizeStartX : resizeStartX - e.clientX
+  panelWidth.value = clampW(resizeStartW + delta)
 }
 function onResizeEnd(): void {
   if (!resizing) return
@@ -1070,6 +1109,39 @@ function glyphClass(name: string): string {
 .rd-resize:active::before {
   background: rgba(192, 128, 255, 0.8);
   height: 60px;
+}
+
+/* ── Dock LEFT — mirror every right-anchored geometry. dockLeft (useDrawerDock) stamps
+   .rd-dock-left on the teleported .rd-handle / .rd-scrim; this one block flips the handle side,
+   the panel's inner border + drop-shadow, the resize edge, and the summon-label offset. The host
+   surface mirrors the squeeze gutter separately (CliTerminalSurface surfaceStyle). ── */
+.rd-handle.rd-dock-left {
+  right: auto;
+  left: 0;
+  border-right: 1px solid #3a2860;
+  border-left: none;
+  border-radius: 0 9px 9px 0;
+  box-shadow: 4px 0 18px rgba(0, 0, 0, 0.45);
+}
+.rd-handle.rd-dock-left .rd-handle-label {
+  right: auto;
+  left: calc(100% + 6px);
+}
+.rd-scrim.rd-dock-left {
+  justify-content: flex-start;
+}
+.rd-scrim.rd-dock-left .rd-panel {
+  border-left: none;
+  border-right: 1px solid #3a2860;
+  box-shadow: 8px 0 40px rgba(0, 0, 0, 0.6);
+}
+.rd-scrim.rd-dock-left .rd-resize {
+  left: auto;
+  right: 0;
+}
+.rd-scrim.rd-dock-left .rd-resize::before {
+  margin-left: 0;
+  margin-right: 1px;
 }
 
 /* 历史输入 sub-tab bar (图片/文件/输入) — mirrors the original tab pills. */

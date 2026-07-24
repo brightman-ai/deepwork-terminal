@@ -17,7 +17,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronLeft, Download, Link2, Image as ImageIcon } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, Download, Link2, Upload, Image as ImageIcon } from 'lucide-vue-next'
 import {
   filesRecent,
   filesTree,
@@ -25,6 +25,7 @@ import {
   filesRaw,
   filesRawRenderUrl,
   filesDownload,
+  filesUploadToDir,
   type RecentFileItem,
   type TreeEntry,
   type SearchEntry,
@@ -39,15 +40,14 @@ import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchB
 // drawer it freezes, so a main-area pane/window switch no longer yanks the file tree / preview
 // the user is mid-read on. FilesPanel just consumes this prop + re-anchors when it changes.
 // '' → server falls back to the session cwd.
-const props = defineProps<{ sessionId: string; cwd: string }>()
+// mode fixes this instance to ONE view. The drawer's top-level tabs (目录树 / 最近修改) each mount
+// their own FilesPanel, so the panel no longer owns a sub-tab switcher — one mode in, one view out.
+const props = defineProps<{ sessionId: string; cwd: string; mode: 'recent' | 'tree' }>()
 
 const emit = defineEmits<{
   (e: 'inject', path: string): void
   (e: 'compose-draft', text: string): void
 }>()
-
-type SubTab = 'recent' | 'tree'
-const subTab = ref<SubTab>('recent')
 
 // ── 最近文件 ──
 const recent = ref<RecentFileItem[]>([])
@@ -180,6 +180,49 @@ function entryAbsPath(entry: TreeEntry): string {
 }
 function entryRelPath(entry: TreeEntry): string {
   return treeRel.value ? `${treeRel.value}/${entry.name}` : entry.name
+}
+
+// ── agent-edit highlight (目录树 优于 sftp/vim: 直接标出 agent 刚碰过的文件) ──
+// The SAME recent-edited set the 最近修改 tab shows (transcript tool_use signal), indexed by
+// absolute path. Browsing the tree then reveals WHICH files the agent just wrote — a relative-time
+// badge on the row — the one thing a plain file tree can't surface. One data source, two views.
+const recentEditedMap = computed(() => {
+  const m = new Map<string, number>()
+  for (const f of recent.value) if (f.tsMs) m.set(f.path, f.tsMs)
+  return m
+})
+function recentEditedAt(entry: TreeEntry): number | undefined {
+  if (entry.isDir) return undefined
+  return recentEditedMap.value.get(entryAbsPath(entry))
+}
+
+// ── upload INTO the browsed tree directory (目录树 顶部按钮) ──
+// Puts a local file where the user is looking, not the tmp/clipboard bucket — the natural file-tree
+// action. Reuses the paste-upload pipeline server-side (size cap → 413 with the zip hint, path
+// guard); on success we reload the level so the new file shows immediately.
+const treeUploading = ref(false)
+const treeUploadInput = ref<HTMLInputElement>()
+function pickTreeUpload(): void { treeUploadInput.value?.click() }
+async function onTreeUploadPicked(e: Event): Promise<void> {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = '' // let the same file be re-picked later
+  if (!files.length) return
+  treeUploading.value = true
+  let ok = 0
+  try {
+    // At the tree ROOT treeRel is '' — send '.' so the backend resolves to the cwd itself, not the
+    // empty-dir path that would fall back to the tmp/clip staging bucket. Sub-dirs pass their rel.
+    const targetDir = treeRel.value || '.'
+    for (const f of files) {
+      if (await filesUploadToDir(props.sessionId, f, targetDir, props.cwd)) ok++
+      else toast(`上传失败：${f.name}（超过 10 MB 可压缩成 zip）`)
+    }
+    if (ok) { await loadTree(treeRel.value); void loadRecent() }
+    if (ok) toast(ok === files.length ? `已上传 ${ok} 个文件` : `已上传 ${ok}/${files.length}`)
+  } finally {
+    treeUploading.value = false
+  }
 }
 
 // ── 目录树 recursive search (VS-Code quick-open) ──
@@ -389,12 +432,6 @@ function relTime(ms: number): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-// Switching to a sub-tab lazily loads its data the first time.
-watch(subTab, (t) => {
-  closePreview()
-  if (t === 'recent' && !recent.value.length) void loadRecent()
-  if (t === 'tree' && !treeEntries.value.length) void loadTree(treeRel.value)
-})
 // Re-anchor when the target session OR the ANCHORED cwd prop changes — i.e. ONLY when the
 // user explicitly re-anchors via the drawer's pane pill (or a session switch). A plain tmux
 // pane/window switch no longer touches props.cwd, so the file tree / preview the user is
@@ -408,39 +445,23 @@ function reanchor(): void {
   searchResults.value = []
   searching.value = false
   closePreview()
-  if (subTab.value === 'recent') void loadRecent()
-  else void loadTree('')
+  if (props.mode === 'recent') void loadRecent()
+  else { void loadTree(''); void loadRecent() } // tree also loads recent → agent-edit highlight
 }
 watch(() => props.sessionId, reanchor)
 watch(() => props.cwd, reanchor)
 
-onMounted(() => { void loadRecent() })
+// tree mode loads BOTH the browse level and the recent-edited set: the latter feeds the in-tree
+// "agent just touched this" highlight (see recentEditedAt). recent mode only needs the list.
+onMounted(() => { if (props.mode === 'recent') void loadRecent(); else { void loadTree(''); void loadRecent() } })
 
 defineExpose({ loadRecent, loadTree })
 </script>
 
 <template>
-  <div class="fp flex flex-col h-full bg-background text-foreground" data-testid="files-panel">
-    <!-- sub-tabs -->
-    <div class="shrink-0 flex items-center border-b border-border bg-card" role="tablist">
-      <button
-        class="px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors"
-        :class="subTab === 'recent' ? 'text-foreground border-b-primary' : 'text-muted-foreground border-b-transparent hover:text-foreground'"
-        type="button"
-        data-testid="fp-subtab-recent"
-        @click="subTab = 'recent'"
-      >最近文件</button>
-      <button
-        class="px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors"
-        :class="subTab === 'tree' ? 'text-foreground border-b-primary' : 'text-muted-foreground border-b-transparent hover:text-foreground'"
-        type="button"
-        data-testid="fp-subtab-tree"
-        @click="subTab = 'tree'"
-      >目录树</button>
-    </div>
-
-    <!-- ── 最近文件 ── -->
-    <div v-show="subTab === 'recent'" class="flex-1 flex flex-col overflow-hidden">
+  <div class="fp flex flex-col h-full bg-background text-foreground" :data-testid="`files-panel-${mode}`">
+    <!-- ── 最近修改 (mode='recent') ── -->
+    <div v-if="mode === 'recent'" class="flex-1 flex flex-col overflow-hidden">
       <!-- Quick filter (client-side, instant) — composes with the category chips below. -->
       <DrawerSearchBox
         v-if="recent.length"
@@ -505,7 +526,7 @@ defineExpose({ loadRecent, loadTree })
     </div>
 
     <!-- ── 目录树 ── -->
-    <div v-show="subTab === 'tree'" class="flex flex-col flex-1 overflow-hidden">
+    <div v-else class="flex flex-col flex-1 overflow-hidden">
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
       <DrawerSearchBox
         v-model="treeQuery"
@@ -533,8 +554,17 @@ defineExpose({ loadRecent, loadTree })
             @click="goCrumb(c.rel)"
           >{{ c.label }}</button>
         </template>
+        <!-- Upload INTO the current browsed directory — the file-tree action sftp makes you leave for. -->
         <button
-          class="ml-auto p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+          class="ml-auto p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0 disabled:opacity-40"
+          type="button"
+          :title="treeUploading ? '上传中…' : `上传文件到当前目录${treeRel ? '（' + treeRel + '）' : ''}`"
+          data-testid="fp-tree-upload"
+          :disabled="treeUploading"
+          @click="pickTreeUpload"
+        ><Upload class="size-3" :class="{ 'animate-pulse': treeUploading }" /></button>
+        <button
+          class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
           type="button" title="复制当前目录路径"
           data-testid="fp-tree-copy-cwd"
           @click="copyText((treeCwd.replace(/\/+$/, '')) + (treeRel ? '/' + treeRel : ''), 'cwd')"
@@ -542,6 +572,7 @@ defineExpose({ loadRecent, loadTree })
           <Check v-if="copiedKey === 'cwd'" class="size-3 text-green-500" />
           <Copy v-else class="size-3" />
         </button>
+        <input ref="treeUploadInput" type="file" multiple class="hidden" data-testid="fp-tree-upload-input" @change="onTreeUploadPicked" />
         </div>
         <!-- 根目录时显示绝对路径，帮助区分多工程 -->
         <div
@@ -604,18 +635,31 @@ defineExpose({ loadRecent, loadTree })
             v-for="e in treeEntries"
             :key="e.name"
             class="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40 transition-colors"
+            :class="recentEditedAt(e) ? 'bg-primary/[0.07] ring-1 ring-primary/20' : ''"
             :data-testid="`fp-tree-${e.name}`"
           >
             <Folder v-if="e.isDir" class="size-4 shrink-0 text-primary/80" />
             <ImageIcon v-else-if="isImage(e.name)" class="size-4 shrink-0 text-muted-foreground" />
-            <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
+            <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(e) ? 'text-primary/80' : ''" />
             <button
               class="min-w-0 flex-1 text-left text-xs truncate"
               :class="e.isDir ? 'text-foreground font-medium' : 'text-foreground'"
               type="button"
               @click="e.isDir ? enterDir(e) : previewTreeFile(e)"
             >{{ e.name }}<span v-if="e.isDir" class="text-muted-foreground/60">/</span></button>
-            <span v-if="!e.isDir" class="text-[0.58rem] text-muted-foreground/70 tabular-nums shrink-0">{{ fmtSize(e.size) }}</span>
+            <!-- agent 刚碰过 → 相对时间徽标（sftp/vim 给不了的信号）; 否则常规文件大小 -->
+            <span
+              v-if="recentEditedAt(e)"
+              class="text-[0.56rem] text-primary/80 tabular-nums shrink-0"
+              title="agent 最近修改"
+            >{{ relTime(recentEditedAt(e)!) }}</span>
+            <span v-else-if="!e.isDir" class="text-[0.58rem] text-muted-foreground/70 tabular-nums shrink-0">{{ fmtSize(e.size) }}</span>
+            <button
+              v-if="!e.isDir"
+              class="px-1.5 py-0.5 rounded text-[0.58rem] text-green-500 border border-border hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
+              type="button" title="插入到对话"
+              @click="injectPath(entryAbsPath(e))"
+            >插入</button>
             <button
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
               type="button" title="复制路径"
