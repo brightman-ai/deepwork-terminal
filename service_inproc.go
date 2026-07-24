@@ -156,8 +156,11 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 		return "", fmt.Errorf("cannot create clipboard dir: %w", err)
 	}
 
-	// Read content for hash dedup.
-	data, err := io.ReadAll(io.LimitReader(content, ClipboardMaxUploadSize))
+	// Read content for hash dedup. UploadLimitBytes() is the runtime-configurable SSOT
+	// (upload_limit.go), not the compile-time ClipboardMaxUploadSize const directly —
+	// keeps this in-proc (Wails) path in sync with a runtime SetUploadLimitMB the same
+	// way the HTTP path (clipboard_paste.go) already is.
+	data, err := io.ReadAll(io.LimitReader(content, UploadLimitBytes()))
 	if err != nil {
 		terminalClipboardUploadErrors.Inc()
 		return "", fmt.Errorf("read content: %w", err)

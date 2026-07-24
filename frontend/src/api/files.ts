@@ -271,60 +271,173 @@ export function filesRawRenderUrl(sessionId: string, relPath: string, cwd?: stri
   return cliApi(path)
 }
 
-/**
- * GET /files/raw?…&download=1 — fetch the FULL bytes of any file (text / image / binary /
- * oversized) and save them locally. Works for formats preview can't render. /files/raw needs
- * the X-CLI-Auth header, so a bare <a download> (unauthenticated GET) would 401 — we fetch
- * authed, wrap the bytes in an object URL, and click a synthetic anchor. `name` is the suggested
- * filename. Returns true on success.
- */
-export async function filesDownload(
+// NOTE: the 目录树 upload + download now go through the CHUNKED protocol (chunkedUpload* below)
+// and the direct-URL streaming download (filesDownloadUrl below) respectively. The former
+// single-shot filesUploadToDir (/paste-upload with a dir field) and blob-buffering filesDownload
+// were removed — one path each, no drift. Clipboard-paste (small images) keeps its own /paste-upload
+// route in clipboard_paste.go; that is a separate bounded context and intentionally NOT unified.
+
+// ── 分片可续传上传（POST /files/upload/{init,chunk,complete,abort}, GET status）─────────────
+// 为什么分片：Cloudflare quick tunnel 单次请求体约 ~100MB 上限，弱网大文件一旦失败不能从 0 重来。
+// 分片=每片远小于墙 + 服务端按 uploadId 落盘记账（重启也在），失败只补缺片。uploadId 由服务端从
+// cwd|dir|name|size 派生（幂等）：同一文件重传自动续传，客户端连 id 都不必持久化。complete 返回与
+// 单发 paste-upload 完全相同的 {path,relPath,size,filename} 形状，下游（抽屉刷新/注入）无需分叉。
+export interface ChunkInitInfo {
+  uploadId: string
+  /** 服务端规定的分片大小（字节）——SSOT，客户端按此切片。 */
+  chunkSize: number
+  totalChunks: number
+  /** 已落盘的分片下标（续传：跳过这些）。 */
+  received: number[]
+}
+/** init：登记一次上传，拿到 uploadId + chunkSize + 已收分片。413=超上限（带 limitMb）。 */
+export async function chunkedUploadInit(
   sessionId: string,
-  relPath: string,
-  name: string,
+  file: File,
+  dir: string,
   cwd?: string,
-): Promise<boolean> {
-  if (!sessionId) return false
+): Promise<{ ok: true; info: ChunkInitInfo } | { ok: false; status: number; limitMb?: number }> {
+  if (!sessionId) return { ok: false, status: 0 }
   const { cliFetch } = useCliAuth()
   try {
-    let path = withScope('/files/raw', sessionId, cwd)
-    if (relPath) path += `&path=${encodeURIComponent(relPath)}`
-    path += '&download=1'
-    const resp = await cliFetch(cliApi(path))
-    if (!resp.ok) return false
-    const url = URL.createObjectURL(await resp.blob())
-    const a = document.createElement('a')
-    a.href = url
-    a.download = name || 'download'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    // Revoke after the click has consumed the URL (next macrotask).
-    setTimeout(() => URL.revokeObjectURL(url), 0)
-    return true
+    const form = new FormData()
+    form.append('session', sessionId)
+    if (cwd) form.append('cwd', cwd)
+    form.append('dir', dir || '.')
+    form.append('name', file.name)
+    form.append('size', String(file.size))
+    const resp = await cliFetch(cliApi('/files/upload/init'), { method: 'POST', body: form })
+    if (!resp.ok) {
+      let limitMb: number | undefined
+      try { limitMb = ((await resp.json()) as { limit_mb?: number }).limit_mb } catch { /* non-JSON */ }
+      return { ok: false, status: resp.status, limitMb }
+    }
+    return { ok: true, info: (await resp.json()) as ChunkInitInfo }
+  } catch {
+    return { ok: false, status: 0 }
+  }
+}
+/** chunk：上传第 index 片（RAW 字节，非 multipart——每片本就小，省一层编码）。返回是否成功。 */
+export async function chunkedUploadChunk(uploadId: string, index: number, blob: Blob): Promise<boolean> {
+  const { cliFetch } = useCliAuth()
+  try {
+    const resp = await cliFetch(
+      cliApi(`/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}`),
+      { method: 'POST', body: blob },
+    )
+    return resp.ok
   } catch {
     return false
   }
 }
-
-/**
- * POST /sessions/{id}/paste-upload with a `dir` field — upload a local file INTO a specific tree
- * directory (the 目录树 "上传到当前目录" button). Reuses the paste-upload pipeline (size cap,
- * filename sanitize, safeResolve path guard); the `dir` makes the file land in that REAL directory
- * instead of the tmp/clipboard staging bucket (and skips its TTL cleanup). Returns true on success.
- */
-export async function filesUploadToDir(sessionId: string, file: File, dir: string, cwd?: string): Promise<boolean> {
-  if (!sessionId) return false
+export interface ChunkCompleteResult { path: string; relPath: string; size: number; filename: string }
+/** complete：所有分片就绪后重组落地。缺片时服务端返 409，返回 null（调用方续传）。 */
+export async function chunkedUploadComplete(sessionId: string, uploadId: string): Promise<ChunkCompleteResult | null> {
   const { cliFetch } = useCliAuth()
   try {
     const form = new FormData()
-    form.append('file', file, file.name)
-    form.append('mime', file.type || 'application/octet-stream')
-    if (dir) form.append('dir', dir)
-    if (cwd) form.append('cwd', cwd)
-    const resp = await cliFetch(cliApi(`/sessions/${encodeURIComponent(sessionId)}/paste-upload`), { method: 'POST', body: form })
-    return resp.ok
+    form.append('session', sessionId)
+    form.append('uploadId', uploadId)
+    const resp = await cliFetch(cliApi('/files/upload/complete'), { method: 'POST', body: form })
+    if (!resp.ok) return null
+    return (await resp.json()) as ChunkCompleteResult
   } catch {
-    return false
+    return null
+  }
+}
+/** abort：取消并清理服务端暂存分片（best-effort，失败无副作用——24h 后服务端也会自扫）。 */
+export async function chunkedUploadAbort(uploadId: string): Promise<void> {
+  if (!uploadId) return
+  const { cliFetch } = useCliAuth()
+  try {
+    const form = new FormData()
+    form.append('uploadId', uploadId)
+    await cliFetch(cliApi('/files/upload/abort'), { method: 'POST', body: form })
+  } catch { /* best-effort */ }
+}
+
+/**
+ * GET /files/raw?…&download=1 的**直链**（不经 fetch→blob，浏览器原生流式落盘）。用于树内“下载”/
+ * 大文件：blob 方式（filesDownload）会把整份文件缓进 JS 内存，大文件/移动端会炸；直链交给浏览器边下边
+ * 写磁盘，且服务端 download 分支走 http.ServeContent（带 Accept-Ranges）→ 浏览器可断点续传。
+ * /files/raw 需鉴权，<a download> 带不了 header，故 auth 走 query（authWrap 接受 ?auth=；pro 下由
+ * 同源会话 cookie 鉴权、该参数被忽略——与 filesRawRenderUrl 同法）。
+ */
+export function filesDownloadUrl(sessionId: string, relPath: string, cwd?: string): string {
+  if (!sessionId) return ''
+  const { getAuthCode } = useCliAuth()
+  let path = withScope('/files/raw', sessionId, cwd)
+  if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+  path += '&download=1'
+  const code = getAuthCode()
+  if (code) path += `&auth=${encodeURIComponent(code)}`
+  return cliApi(path)
+}
+
+// ── 目录树 CRUD（POST /files/{mkdir,create,rename,delete}）───────────────────────────────
+// session/cwd/操作数都走 POST FormData（后端 r.FormValue）；path 均相对 cwd，后端 safeResolve 守卫
+// （../绝对/symlink 逃逸 → 403）。返回 {ok, status} 让 UI 区分 409 已存在 / 404 不存在 等给准确文案。
+export interface FileOpResult {
+  ok: boolean
+  /** HTTP status (0 = 网络/异常). 409=已存在, 404=不存在, 403=越界, 400=非法路径. */
+  status: number
+}
+async function filesPost(op: string, sessionId: string, cwd: string, fields: Record<string, string>): Promise<FileOpResult> {
+  if (!sessionId) return { ok: false, status: 0 }
+  const { cliFetch } = useCliAuth()
+  try {
+    const form = new FormData()
+    form.append('session', sessionId)
+    if (cwd) form.append('cwd', cwd)
+    for (const [k, v] of Object.entries(fields)) form.append(k, v)
+    const resp = await cliFetch(cliApi(`/files/${op}`), { method: 'POST', body: form })
+    return { ok: resp.ok, status: resp.status }
+  } catch {
+    return { ok: false, status: 0 }
+  }
+}
+/** 新建目录（path = 相对 cwd 的新目录路径）。 */
+export const filesMkdir = (sessionId: string, path: string, cwd?: string): Promise<FileOpResult> =>
+  filesPost('mkdir', sessionId, cwd || '', { path })
+/** 新建空文件。 */
+export const filesCreate = (sessionId: string, path: string, cwd?: string): Promise<FileOpResult> =>
+  filesPost('create', sessionId, cwd || '', { path })
+/** 改名/移动（from、to 均相对 cwd）。 */
+export const filesRename = (sessionId: string, from: string, to: string, cwd?: string): Promise<FileOpResult> =>
+  filesPost('rename', sessionId, cwd || '', { from, to })
+/** 删除（文件或目录，目录递归；后端禁删 cwd 根）。 */
+export const filesDelete = (sessionId: string, path: string, cwd?: string): Promise<FileOpResult> =>
+  filesPost('delete', sessionId, cwd || '', { path })
+
+// ── 上传限额（服务端可配，全局设置）───────────────────────────────────────────────────────
+// 服务端是 SSOT：GET 读当前 + 边界，PUT 设置（后端 clamp 到 [floorMb, ceilingMb]）。前端只做入口。
+export interface UploadLimitInfo {
+  maxMb: number
+  defaultMb: number
+  ceilingMb: number
+  floorMb: number
+}
+export async function getUploadLimit(): Promise<UploadLimitInfo | null> {
+  const { cliFetch } = useCliAuth()
+  try {
+    const resp = await cliFetch(cliApi('/files/upload-limit'))
+    if (!resp.ok) return null
+    return (await resp.json()) as UploadLimitInfo
+  } catch {
+    return null
+  }
+}
+/** 设置上限（MB）；返回后端 clamp 后实际生效的 MB，失败 null。 */
+export async function setUploadLimit(mb: number): Promise<number | null> {
+  const { cliFetch } = useCliAuth()
+  try {
+    const form = new FormData()
+    form.append('mb', String(mb))
+    const resp = await cliFetch(cliApi('/files/upload-limit'), { method: 'PUT', body: form })
+    if (!resp.ok) return null
+    const j = (await resp.json()) as { maxMb: number }
+    return j.maxMb
+  } catch {
+    return null
   }
 }

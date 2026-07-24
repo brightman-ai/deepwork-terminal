@@ -538,8 +538,16 @@ watch(activeTab, (v) => { localStorage.setItem(SUB_TAB_KEY, v) })
 // ── Horizontal drag-to-resize. Dragging the left-edge handle LEFT widens the panel.
 // Clamped to [300, min(720, 92vw)]; width persists. Mobile keeps the max-width guard
 // in CSS, so this just changes the base width while staying within the viewport.
-const WIDTH_KEY = 'dw.rd.width'
+// PER-TAB width memory (P1 fix). The width used to be ONE global value: reading a file wide (or
+// 全屏) bled that width into the 目录树 tab, so docking left ate half the screen for what should be a
+// narrow tree. Now each top tab remembers its own comfortable width — list views (树/最近/历史) start
+// compact, reading views (审核/总览) start wide — keyed `dw.rd.width.<tab>`. The old single
+// `dw.rd.width` key is simply abandoned (its stale-wide value no longer pollutes the tree).
+const WIDTH_KEY_BASE = 'dw.rd.width'
 const MIN_W = 300
+const TAB_DEFAULT_W: Record<TopKey, number> = {
+  tree: 340, recent: 340, history: 360, review: 560, overview: 620,
+}
 function maxW(): number {
   // Up to 92vw — near-fullscreen on a PC (the old 720px hard cap was too small for desktop);
   // a sliver of terminal stays visible. The 全屏 button still gives a true 100vw.
@@ -548,11 +556,18 @@ function maxW(): number {
 function clampW(w: number): number {
   return Math.max(MIN_W, Math.min(maxW(), w))
 }
-function loadWidth(): number {
-  const v = parseInt(localStorage.getItem(WIDTH_KEY) || '', 10)
-  return Number.isFinite(v) && v > 0 ? clampW(v) : 320
+function widthKey(tab: TopKey): string { return `${WIDTH_KEY_BASE}.${tab}` }
+function loadWidthFor(tab: TopKey): number {
+  const v = parseInt(localStorage.getItem(widthKey(tab)) || '', 10)
+  return Number.isFinite(v) && v > 0 ? clampW(v) : TAB_DEFAULT_W[tab]
 }
-const panelWidth = ref<number>(loadWidth())
+const panelWidth = ref<number>(loadWidthFor(topTab.value))
+// Switching tabs saves the current width to the OLD tab's slot, then loads the NEW tab's remembered
+// (or default) width — so the tree stays narrow even right after you read a file wide.
+watch(topTab, (nv, ov) => {
+  localStorage.setItem(widthKey(ov), String(panelWidth.value))
+  panelWidth.value = loadWidthFor(nv)
+})
 // Fullscreen toggle: expand the panel to the whole viewport (for reading long files /
 // the overview), independent of the persisted drag-width which it restores on exit.
 const isFull = ref(false)
@@ -629,7 +644,7 @@ function onResizeEnd(): void {
   if (!resizing) return
   resizing = false
   document.documentElement.classList.remove('dw-resizing')
-  localStorage.setItem(WIDTH_KEY, String(panelWidth.value))
+  localStorage.setItem(widthKey(topTab.value), String(panelWidth.value))
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeEnd)
   window.removeEventListener('pointercancel', onResizeEnd)
