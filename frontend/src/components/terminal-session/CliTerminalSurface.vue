@@ -361,6 +361,7 @@ import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverl
 import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
 import AttentionHud from '@terminal/components/terminal-session/AttentionHud.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
+import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { useFocusStateMachine } from '@terminal/composables/cli/useFocusStateMachine'
@@ -423,6 +424,7 @@ const CLI_CONN_LABELS: Partial<Record<WSConnectionStatus, string>> = {
 // ─── Composables ─────────────────────────────────────────────────────────────
 
 const { isMobile } = useDeviceDetection()
+const { dock } = useDrawerDock() // which side the drawer docks — mirrors the squeeze gutter
 const { showAuthDialog, dismissAuthDialog, cliFetch } = useCliAuth()
 
 const focusSM = useFocusStateMachine()
@@ -804,9 +806,14 @@ watch(myDrawerWidthPx, (px) => {
 // is a sibling of .terminal-body under this same root, and squeezing the root in one place is what
 // makes "compose spans only the terminal column" true for free — no separate width binding on the
 // bottom-bar to keep in sync (one geometry point, not two that could drift).
-const surfaceStyle = computed(() =>
-  drawerSqueezePx.value > 0 ? { width: `max(0px, calc(100% - ${drawerSqueezePx.value}px))` } : {}
-)
+// The gutter opens on whichever side the drawer docks: shrinking width alone frees the RIGHT
+// (root is left-anchored), so a LEFT dock also pushes the root right by the same px (margin-left)
+// to free the gutter on the left. One number (drawerSqueezePx), one direction (dock).
+const surfaceStyle = computed(() => {
+  if (drawerSqueezePx.value <= 0) return {}
+  const width = `max(0px, calc(100% - ${drawerSqueezePx.value}px))`
+  return dock.value === 'left' ? { width, marginLeft: `${drawerSqueezePx.value}px` } : { width }
+})
 
 // composeReserve: live px height of OUR OWN bottom toolbar (measured, never guessed), handed to
 // ResourceDrawer so its overlay-mode scrim/panel can stop above it. Only meaningful when there IS
