@@ -15,6 +15,14 @@ type Config struct {
 	DataDir      string // data directory for persistence
 	Version      string // build version (e.g. "v0.4.0"), surfaced to the UI via GET /version; "dev" for source builds
 
+	// Tunnel, when true, opens a Cloudflare quick tunnel at startup so the server is
+	// reachable over the public internet (a temporary *.trycloudflare.com URL, no
+	// Cloudflare account needed) — the same thing the UI's tunnel toggle does, wired to
+	// a launch flag so an agent can bring up public access in one command. The URL is
+	// printed in the startup banner. Named/persistent tunnels stay UI-driven (they need
+	// an interactive `cloudflared login`).
+	Tunnel bool
+
 	// VapidSubscriber is the VAPID JWT "sub" claim — a contact identifying the app
 	// server to the push service. Apple APNs (iOS Web Push) REJECTS a token whose sub
 	// is not a valid mailto: (real-format domain) or https: URL → 403 BadJwtToken.
@@ -77,3 +85,6 @@ func WithAddr(addr string) Option { return func(s *Server) { s.config.Addr = add
 
 // WithAuthCode sets the auth code. When left empty, NewServer generates one.
 func WithAuthCode(code string) Option { return func(s *Server) { s.config.AuthCode = code } }
+
+// WithTunnel opens a Cloudflare quick tunnel at startup when true (see Config.Tunnel).
+func WithTunnel(enabled bool) Option { return func(s *Server) { s.config.Tunnel = enabled } }
