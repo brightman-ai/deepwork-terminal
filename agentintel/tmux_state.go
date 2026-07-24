@@ -487,6 +487,21 @@ func paneKey(p TmuxPane) string {
 	return strconv.Itoa(p.PanePID)
 }
 
+// panePromptState scrapes the pane's last visible lines once and classifies them. The PTY is the
+// ONE per-pane-reliable liveness signal — a spinner can only render in the pane that is actually
+// working — so it is the tiebreaker whenever the transcript-derived status may be stale or (Claude,
+// cwd-located) mis-attributed. Returns PromptUnknown on any capture error, so an ambiguous read
+// never overrides the transcript.
+func (s *TmuxStateService) panePromptState(ctx context.Context, p TmuxPane) PromptState {
+	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	defer cancel()
+	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
+	if err != nil {
+		return PromptUnknown
+	}
+	return AnalyzeOutput(lines)
+}
+
 // paneStatus derives a pane's agent status with a JSONL-gated terminal read:
 //   - transcript being written (PaneAgentMonitor.Active) → working → Running, WITHOUT touching the pane.
 //   - transcript stopped → read the visible pane: a permission/selection/input PROMPT lives there
@@ -508,18 +523,30 @@ func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, agent Det
 	if tool == ToolClaude || tool == ToolCodex {
 		if st, ok := s.paneMonitor.Status(paneKey(p), p.PaneCWD, tool, agent.ProcessPID); ok {
 			switch st {
-			case StatusWaiting, StatusIdle:
-				return st
 			case StatusRunning:
 				// A pending tool may instead be blocked on a permission [Y/n] — that prompt
 				// is terminal UI, absent from the transcript — so confirm against the pane.
-				cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
-				lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
-				cancel()
-				if err == nil && AnalyzeOutput(lines) == PromptNeedsPermission {
+				if s.panePromptState(ctx, p) == PromptNeedsPermission {
 					return StatusWaiting
 				}
 				return StatusRunning
+			case StatusWaiting:
+				return StatusWaiting
+			case StatusIdle:
+				// The transcript says this turn ended (idle → drives the done-unseen dot / "跑完了"
+				// notification). But a transcript-idle can be STALE within a poll: an agent that just
+				// hit a turn boundary and immediately kept going (auto-continue, queued prompt,
+				// next-turn thinking) is still working before its next line lands. The pane's OWN PTY
+				// is the tiebreaker — a live spinner can only render in the pane that's actually
+				// running — so a visibly-spinning idle is vetoed back to Running. Gated on Active()
+				// (transcript freshly written) so a long-settled idle pane, which isn't spinning
+				// anyway, never pays for a pane scrape. Only a POSITIVE spinner overrides; an
+				// idle/unknown PTY trusts the transcript, so a genuinely-done pane still reads Idle.
+				if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) &&
+					s.panePromptState(ctx, p) == PromptRunning {
+					return StatusRunning
+				}
+				return StatusIdle
 			}
 		}
 	}

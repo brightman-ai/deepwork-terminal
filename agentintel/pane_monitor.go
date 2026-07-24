@@ -169,10 +169,22 @@ func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, processP
 	} else if pt != nil {
 		pid = pt.processPID
 	}
-	if ok && pt.processPID == pid && time.Since(pt.locatedAt) < pathRelocateAfter && pt.path != "" {
-		return pt
+	if ok && pt.processPID == pid && pt.path != "" {
+		if time.Since(pt.locatedAt) < pathRelocateAfter {
+			return pt // within the window → trust the cached binding, no readdir/stat
+		}
+		// STICKY (false-"跑完了" fix): past the window, do NOT blindly re-resolve to cwd-newest —
+		// that's exactly how a long-idle pane gets its binding STOLEN by a same-cwd sibling's newer
+		// session file and re-fires a stale done-unseen. Claude gives no per-process session id, but
+		// one PID == one session for its lifetime (a new session is a new process → new PID → the
+		// pid check above already forces a relocate), so a bound file that STILL EXISTS never needs
+		// replacing. Re-locate only once it's actually gone (rotated/deleted).
+		if _, err := os.Stat(pt.path); err == nil {
+			pt.locatedAt = time.Now() // re-validated; keep the binding
+			return pt
+		}
 	}
-	resolved := m.locate(cwd, tool, pid)
+	resolved := m.locate(cwd, tool, pid, m.boundElsewhereLocked(key))
 	if pt == nil {
 		pt = &paneTranscript{}
 		m.cache[key] = pt
@@ -186,13 +198,48 @@ func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, processP
 	return pt
 }
 
-func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool, processPID int) string {
+// boundElsewhereLocked is the set of transcript paths currently bound to OTHER live panes.
+// Resolution excludes them so two panes sharing a cwd can never claim ONE session file — the
+// binding cache is the single source of truth for "which pane owns which transcript". This is
+// what stops a still-running Claude pane (or a long-idle one) from mis-reading a same-cwd
+// sibling's just-completed transcript and reporting the sibling's idle+awaiting as its own (the
+// false "跑完了" done-unseen). Cheap: at most a handful of live agent panes. m.mu MUST be held.
+func (m *PaneAgentMonitor) boundElsewhereLocked(selfKey string) map[string]bool {
+	// NB: do NOT short-circuit on len(cache)<=1 — a pane resolving for the FIRST time isn't in the
+	// cache yet, so a single OTHER entry (a sibling already bound) is exactly the collision to avoid.
+	out := make(map[string]bool, len(m.cache))
+	for k, pt := range m.cache {
+		if k != selfKey && pt.path != "" {
+			out[pt.path] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool, processPID int, boundElsewhere map[string]bool) string {
 	switch tool {
 	case ToolClaude:
+		// Claude doesn't hold its transcript fd open (unlike Codex) and the process exposes no
+		// session id — so a pane can only be located by cwd, which is AMBIGUOUS when two Claude
+		// panes share a repo. Newest-first, SKIPPING any file already owned by another pane, makes
+		// the shared-cwd case collision-free: each pane keeps its own session file instead of
+		// snapping to whichever sibling most recently wrote.
 		if files, err := m.locator.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
+			for _, f := range files {
+				if !boundElsewhere[f] {
+					return f
+				}
+			}
+			// Every candidate is already claimed by a sibling — this pane's own file is among them
+			// but indistinguishable; the newest degrades better than "unknown" (and the PTY-spinner
+			// veto in paneStatus still guards the resulting Idle). Rare: more panes than sessions.
 			return files[0]
 		}
 	case ToolCodex:
+		// Codex is PID-anchored via /proc fd → already unique per pane; exclusion is a no-op.
 		if processPID > 0 {
 			if p, err := m.locator.CodexSessionForProcess(processPID, cwd); err == nil {
 				return p
