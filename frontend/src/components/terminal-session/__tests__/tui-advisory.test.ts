@@ -1,8 +1,17 @@
-import { describe, expect, test, beforeEach } from 'bun:test'
+import { afterAll, describe, expect, test, beforeEach } from 'bun:test'
 
 // In-memory localStorage stub (jsdom-free) so the mute/remember logic is exercised
 // deterministically. Mute persists in localStorage so it survives revisits (no re-nag).
 const store = new Map<string, string>()
+
+// Snapshot whatever this process had before we stub globals here, so we can put things
+// back exactly as we found them once this file's tests are done. Without this,
+// `Object.defineProperty` (unlike a plain assignment) defaults to `writable: false`, so
+// any later test file in the same bun process that does `globalThis.localStorage = ...`
+// (a plain assignment) throws "Attempted to assign to readonly property" — this file's
+// stub otherwise leaks across test files.
+const originalLocalStorage = (globalThis as any).localStorage
+
 Object.defineProperty(globalThis, 'localStorage', {
   value: {
     getItem: (k: string) => store.get(k) ?? null,
@@ -10,6 +19,14 @@ Object.defineProperty(globalThis, 'localStorage', {
     removeItem: (k: string) => { store.delete(k) },
   },
   configurable: true,
+  writable: true,
+})
+
+afterAll(() => {
+  // `delete` (not reassignment) is required to drop the non-writable property
+  // descriptor installed above before restoring the prior value.
+  delete (globalThis as any).localStorage
+  if (originalLocalStorage !== undefined) (globalThis as any).localStorage = originalLocalStorage
 })
 
 import { useTuiAdvisory } from '../../../composables/cli/useTuiAdvisory'

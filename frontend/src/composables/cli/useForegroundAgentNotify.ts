@@ -10,6 +10,8 @@
  * Dedupe + no-double-fire discipline:
  *  - Per-pane edge detection: fire only on running/idle/… → waiting, never on a
  *    pane that was already waiting (prevents repeat-fire on every 1s diff frame).
+ *    The priming/edge/pruning rules are NOT restated here — they come from the shared
+ *    `statusEdgeDetector`, the same primitive the attention HUD observes windows with.
  *  - tag === `dw-agent-${sessionId}` matches the SW push tag, so if the backend
  *    push lands too the OS collapses them onto one notification instead of two.
  */
@@ -17,6 +19,7 @@ import { watch, onUnmounted } from 'vue'
 import type { TmuxState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
+import { createStatusEdgeDetector } from '@terminal/composables/cli/statusEdgeDetector'
 
 interface PaneKey { window: number; pane: number }
 function keyOf(k: PaneKey): string { return `${k.window}:${k.pane}` }
@@ -24,9 +27,9 @@ function keyOf(k: PaneKey): string { return `${k.window}:${k.pane}` }
 export function useForegroundAgentNotify(sessionId: () => string): void {
   const tmux = useTmuxState(sessionId)
   const push = usePushNotifications()
-  // Last-seen status per pane — the edge detector's memory.
-  const lastStatus = new Map<string, string>()
-  let primed = false
+  // Per-pane status memory. Shared implementation (one definition of priming/edge/pruning);
+  // this instance is ours alone, keyed on pane × raw agentStatus.
+  const edges = createStatusEdgeDetector<string>()
 
   function collect(state: TmuxState | null): Map<string, { status: string; tool?: string; title?: string }> {
     const out = new Map<string, { status: string; tool?: string; title?: string }>()
@@ -66,22 +69,17 @@ export function useForegroundAgentNotify(sessionId: () => string): void {
     () => tmux.state.value,
     (state) => {
       const current = collect(state)
-      // First frame just seeds the baseline so we don't fire for panes that were
-      // ALREADY waiting when the tab connected (those are stale, not new edges).
-      if (!primed) {
-        for (const [k, v] of current) lastStatus.set(k, v.status)
-        primed = true
-        return
+      const statuses = new Map<string, string>()
+      for (const [k, v] of current) statuses.set(k, v.status)
+      // The detector seeds its baseline on the first frame, so panes that were ALREADY
+      // waiting when the tab connected are stale rather than new edges, and it forgets
+      // panes that disappeared so a re-created pane re-arms cleanly.
+      for (const edge of edges.diff(statuses)) {
+        if (edge.to !== 'waiting') continue
+        const v = current.get(edge.key)
+        if (!v) continue
+        notifyWaiting(v.tool ? `${v.tool}（${v.title ?? ''}）`.trim() : (v.title ?? ''))
       }
-      for (const [k, v] of current) {
-        const prev = lastStatus.get(k)
-        if (v.status === 'waiting' && prev !== 'waiting') {
-          notifyWaiting(v.tool ? `${v.tool}（${v.title ?? ''}）`.trim() : (v.title ?? ''))
-        }
-        lastStatus.set(k, v.status)
-      }
-      // Forget panes that disappeared so a re-created pane re-arms cleanly.
-      for (const k of [...lastStatus.keys()]) if (!current.has(k)) lastStatus.delete(k)
     },
     { deep: true },
   )

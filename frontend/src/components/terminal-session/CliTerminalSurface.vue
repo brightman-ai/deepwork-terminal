@@ -111,6 +111,18 @@
            this pill, which is exactly the case that used to look "silent" and get retried
            into 3-4 duplicate paths in the PTY. -->
       <UploadProgressFloat :entries="pasteResolver.uploads.value" />
+      <!-- KeyCastr keystroke display (mobile only). Toggled from the main Toolbar's keycast button;
+           defaults ON. No left-edge HUD tab — the toolbar is the SSOT toggle.
+           Lives INSIDE .terminal-body (its `position: relative` is the anchor) because the pills are
+           `position: absolute`: anchored to the viewport they stacked down over .cli-tab-bar and the
+           pane bar, burying the very status dots R1/R3 are polishing. See KeyCastrOverlay.vue's
+           style comment. Sibling of UploadProgressFloat, which is body-relative for the same
+           reason. -->
+      <KeyCastrOverlay
+        v-if="isMobile && keystrokeHudVisible"
+        :entries="keycastEntries"
+        data-testid="keystroke-hud"
+      />
       <XtermTerminal
         ref="xtermRef"
         :active="active"
@@ -302,13 +314,14 @@
       @change="onAttachFileSelected"
     />
 
-    <!-- KeyCastr keystroke display (mobile only). Toggled from the main Toolbar's
-         keycast button; defaults ON. No left-edge HUD tab — the toolbar is the SSOT toggle. -->
-    <KeyCastrOverlay
-      v-if="isMobile && keystrokeHudVisible"
-      :entries="keycastEntries"
-      :bottom-offset="keycastBottomOffset"
-      data-testid="keystroke-hud"
+    <!-- Attention HUD (R1): teleports into #dw-topbar-right (see AttentionHud.vue). Both PC and
+         mobile — never gated on isMobile, unlike KeyCastr, since a HUD that pulls your eye to a
+         window needing you is exactly as valuable with a physical keyboard as with a thumb. -->
+    <AttentionHud
+      :card="attentionHud.card.value"
+      :top-offset="headerBottom"
+      @activate="onHudActivate"
+      @dismiss="onHudDismiss"
     />
   </div>
 </template>
@@ -346,6 +359,7 @@ import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
+import AttentionHud from '@terminal/components/terminal-session/AttentionHud.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -360,6 +374,7 @@ import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import { useTuiAdvisory } from '@terminal/composables/cli/useTuiAdvisory'
 import { useTmuxState, paneStateKey } from '@terminal/composables/cli/useTmuxState'
 import { useAgentOverview } from '@terminal/composables/cli/useAgentOverview'
+import { useAttentionHud } from '@terminal/composables/cli/useAttentionHud'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
 import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
@@ -439,6 +454,7 @@ const {
   groups: ovGroups,
   rollup: ovRollup,
   statusByIndex: ovStatusByIndex,
+  effectiveStatus: ovEffectiveStatus,
   dismiss: ovDismiss,
 } = useAgentOverview(tmux.windows, overviewOpen)
 function toggleOverview(): void {
@@ -457,6 +473,46 @@ function onOverviewSelect(index: number): void {
 watch(overviewOpen, (open) => { void tmux.setOverviewActive(open) })
 // WS7: open-but-unfocused-tab notification fallback (backend push covers no-tab).
 useForegroundAgentNotify(() => props.sessionId)
+
+// ── Attention HUD (R1) ─────────────────────────────────────────────────────────────────────
+// The ACTIVE half of the pane bar's passive dot: a top-right card that interrupts once when a
+// non-visible window IN THIS SESSION flips to waiting/done-unseen. Wired straight to the ONE
+// shared useAgentOverview instance above (ovEffectiveStatus/ovDismiss) — the HUD can never
+// disagree with the dots because it reads the very same status fn and writes the very same seen
+// layer, never a second copy of either (see useAttentionHud.ts's header).
+//
+// Scoped to only the ACTIVE workbench tab via the injected `hidden` seam: every tab (v-show, all
+// kept mounted) constructs its own hud instance, but `hidden` also folds in `!props.active` — so
+// an inactive tab's gate never delivers a card, matching the explicit non-goal "no per-tab HUD"
+// (request.md §3) without adding a second suppression mechanism. `document.hidden` (the actual
+// page-hidden case) is untouched and still belongs to useForegroundAgentNotify (ATT-8: hidden →
+// Web Notification only, never both).
+const attentionHud = useAttentionHud({
+  windows: tmux.windows,
+  effectiveStatus: ovEffectiveStatus,
+  markSeen: ovDismiss,
+  overviewOpen,
+  hidden: () => !props.active || (typeof document !== 'undefined' && document.hidden),
+})
+// Tap: the composable already marks the target seen + silences it + closes (see activate()'s
+// return); this call site's ONLY job is the actual window switch, exactly the split
+// onOverviewSelect already uses for the overview grid's own cards (AOV-9/AOV-14).
+function onHudActivate(): void {
+  const target = attentionHud.activate()
+  if (target) void tmux.selectWindow(target.index)
+}
+function onHudDismiss(): void {
+  attentionHud.dismiss()
+}
+// Leaving this tab collapses whatever card is already on screen. The `hidden` seam above only
+// stops NEW cards; an ALREADY-RAISED one survives, and because every tab stays mounted (v-show)
+// with its own `position: fixed` teleported card, that stale card keeps floating over WHATEVER
+// tab you switched to — for up to the full 8s auto-dismiss, since refreshCard/mergeCard keep
+// re-seating it. Worse, tapping it calls selectWindow on the OLD tab's session, so the visible
+// terminal does nothing at all. Two tabs each holding a card stack two fixed cards on the same
+// pixels. `collapse()` (not `dismiss()`) is the correct verb: leaving a tab is not reading its
+// output, so no seen state is written and the pane-bar dots stay lit (ATT-4).
+watch(() => props.active, (isActive) => { if (!isActive) attentionHud.collapse() })
 const keyCastr = useKeyCastrHud()
 const keycastEntries = keyCastr.entries
 
@@ -774,6 +830,43 @@ const composeReserve = computed(() =>
   isMobile.value && drawerLayout.value === 'overlay' ? bottomBarHeight.value : 0
 )
 
+// headerBottom: the measured (never guessed) bottom edge of this surface's OWN header stack —
+// the topbar above it PLUS this surface's own pane-bar/status row — handed to AttentionHud so its
+// card floats clear of the pane bar's hit targets (ATT-10) instead of guessing a row height the
+// way the old KeyCastr offset once did (see KC-5). `.terminal-body` is the sibling immediately
+// below both rows, so its own top edge in viewport coordinates IS that boundary. Re-measured
+// whenever `.terminal-body` itself resizes — attaching/detaching tmux swaps the row above it
+// between the pane bar and the agent badge, which are different heights — via the SAME
+// ResizeObserver idiom `bottomBarHeight` just above already uses.
+const headerBottom = ref(0)
+let headerBottomObserver: ResizeObserver | null = null
+function measureHeaderBottom(): void {
+  headerBottom.value = terminalBodyRef.value?.getBoundingClientRect().top ?? 0
+}
+watch(terminalBodyRef, (el) => {
+  headerBottomObserver?.disconnect()
+  headerBottomObserver = null
+  if (el && 'ResizeObserver' in window) {
+    headerBottomObserver = new ResizeObserver(measureHeaderBottom)
+    headerBottomObserver.observe(el)
+  }
+  measureHeaderBottom()
+}, { immediate: true })
+onMounted(() => window.addEventListener('resize', measureHeaderBottom))
+onUnmounted(() => {
+  headerBottomObserver?.disconnect()
+  window.removeEventListener('resize', measureHeaderBottom)
+})
+// …plus a re-measure the instant a card appears, which closes the ResizeObserver's one structural
+// blind spot: an RO fires on SIZE, never on pure TRANSLATION. A host shell that inserts or removes
+// an equal-height row above this surface (pro's chrome differs from standalone's) moves
+// `.terminal-body` down or up without changing its box by a single pixel, so `headerBottom` goes
+// silently stale and the card lands over the pane bar it is supposed to clear. A card changes at
+// most once a second and a getBoundingClientRect is cheap, so measuring at the moment of display
+// is strictly better than trusting the last resize: it is the value for the frame the user will
+// actually see. Flushed post-render so the read happens against settled layout.
+watch(() => attentionHud.card.value, (c) => { if (c) measureHeaderBottom() }, { flush: 'post' })
+
 // Debounced reflow: a split-mode squeeze change (open/close, or a live drag-resize of the panel)
 // changes the terminal's actual pixel width, so it needs the SAME robust-resize path every other
 // reflow uses (fit + sendResize), followed by the established ghosting guard (tmux refresh-client)
@@ -815,10 +908,6 @@ const activePanelLabel = computed<'none' | 'numpad' | 'compose'>(() => {
   if (activeMode.value === 'compose') return 'compose'
   return 'none'
 })
-
-const keycastBottomOffset = computed(() =>
-  80 + (activeMode.value === 'keyboard' ? keyboardHeight.value : 0)
-)
 
 const encoder = new TextEncoder()
 

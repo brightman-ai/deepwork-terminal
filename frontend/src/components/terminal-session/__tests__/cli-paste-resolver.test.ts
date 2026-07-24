@@ -1,10 +1,20 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 
 const localStorageStub = {
   getItem: () => null,
   setItem: () => {},
   removeItem: () => {},
 }
+
+// Snapshot whatever this process had before we stub globals here, so we can
+// put things back exactly as we found them once this file's tests are done.
+// Without this, `Object.defineProperty` (unlike a plain assignment) defaults
+// to `writable: false`, so any later test file in the same bun process that
+// does `globalThis.window = ...` (a plain assignment) throws
+// "Attempted to assign to readonly property" — this file's stub otherwise
+// leaks across test files.
+const originalWindow = (globalThis as any).window
+const originalLocalStorage = (globalThis as any).localStorage
 
 Object.defineProperty(globalThis, 'localStorage', {
   value: localStorageStub,
@@ -21,6 +31,15 @@ Object.defineProperty(globalThis, 'window', {
     localStorage: localStorageStub,
   },
   configurable: true,
+})
+
+afterAll(() => {
+  // `delete` (not reassignment) is required to drop the non-writable
+  // property descriptor installed above before restoring the prior value.
+  delete (globalThis as any).window
+  delete (globalThis as any).localStorage
+  if (originalWindow !== undefined) (globalThis as any).window = originalWindow
+  if (originalLocalStorage !== undefined) (globalThis as any).localStorage = originalLocalStorage
 })
 
 type ClipboardSnapshot = import('../../../composables/cli/useCliPasteResolver').ClipboardSnapshot

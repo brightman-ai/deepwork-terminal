@@ -21,7 +21,7 @@ function seqFetch(responses: Array<Response | (() => Response)>): () => number {
     const r = responses[Math.min(calls, responses.length - 1)]
     calls++
     return typeof r === 'function' ? r() : r
-  }) as typeof fetch
+  }) as unknown as typeof fetch
   return () => calls
 }
 

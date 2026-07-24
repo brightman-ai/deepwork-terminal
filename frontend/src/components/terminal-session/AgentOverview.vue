@@ -143,6 +143,7 @@ import {
   windowAgentSignals,
   overviewColumns,
   STATUS_COLOR,
+  STATUS_MOTION,
   type EffectiveStatus,
   type OverviewGroup,
 } from '@terminal/composables/cli/useAgentOverview'
@@ -235,6 +236,16 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   --status-waiting: v-bind('STATUS_COLOR.waiting');
   --status-running: v-bind('STATUS_COLOR.running');
   --status-done: v-bind("STATUS_COLOR['done-unseen']");
+  /* Per-status dot motion — bound live from STATUS_MOTION (useAgentOverview.ts), the same
+     constant TmuxPaneBar.vue and TmuxStatusSheet.vue bind, so no rhythm can drift between the
+     three dot-rendering consumers. `done-unseen` is STATUS_MOTION's documented `null` (static)
+     and therefore has no vars here — that absence IS the contract. */
+  --dot-waiting-duration: v-bind('STATUS_MOTION.waiting.duration');
+  --dot-waiting-easing: v-bind('STATUS_MOTION.waiting.easing');
+  --dot-waiting-min: v-bind('STATUS_MOTION.waiting.minOpacity');
+  --dot-running-duration: v-bind('STATUS_MOTION.running.duration');
+  --dot-running-easing: v-bind('STATUS_MOTION.running.easing');
+  --dot-running-min: v-bind('STATUS_MOTION.running.minOpacity');
   padding: 12px;
   color: #d8c8ee;
   background: #16121f;
@@ -327,10 +338,30 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   color: #b08fd0;
 }
 .ao-group-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.ao-group-head.s-waiting .ao-group-dot { background: var(--status-waiting); }
-.ao-group-head.s-running .ao-group-dot { background: var(--status-running); }
-.ao-group-head.s-done-unseen .ao-group-dot { background: var(--status-done); }
+/* The three-state motion contract (STATUS_MOTION doc comment has the full argument): waiting =
+   slow/big pulse, running = quick/small one, done-unseen = static. Each rule only remaps its own
+   entry onto the single --dot-min-opacity the one shared @keyframes reads. */
+.ao-group-head.s-waiting .ao-group-dot {
+  background: var(--status-waiting);
+  --dot-min-opacity: var(--dot-waiting-min);
+  animation: status-dot-pulse var(--dot-waiting-duration) var(--dot-waiting-easing) infinite;
+}
+.ao-group-head.s-running .ao-group-dot {
+  background: var(--status-running);
+  --dot-min-opacity: var(--dot-running-min);
+  animation: status-dot-pulse var(--dot-running-duration) var(--dot-running-easing) infinite;
+}
+.ao-group-head.s-done-unseen .ao-group-dot { background: var(--status-done); }         /* STATIC by contract */
 .ao-group-head.s-idle .ao-group-dot { background: #7a6a9a; }
+
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: var(--dot-min-opacity); }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ao-group-head.s-waiting .ao-group-dot,
+  .ao-group-head.s-running .ao-group-dot { animation: none; opacity: 1; }
+}
 .ao-group-count { margin-left: auto; color: #6f5a90; font-variant-numeric: tabular-nums; }
 
 /* ── 卡片（基础） ─────────────────────────────────────────────── */
@@ -423,6 +454,9 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
 }
 .ao-card-badge {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 0.6rem;
@@ -430,11 +464,43 @@ function tailLines(w: TmuxWindowState, limit?: number): string[] {
   letter-spacing: 0.2px;
   line-height: 1.5;
 }
+/* The badge's own status DOT — the third consumer of the same 5px round shape the group head
+   (.ao-group-dot) and the pane bar already render, so all three now match in FORM, not just in
+   timing. It is also what carries the breathing (below): animating the badge element itself
+   oscillated a whole colored text capsule ("运行中" pulsing at 0.55↔1), which is an order of
+   magnitude more screen area than a dot and made four running cards out-shout the one static red
+   waiting card — the exact hierarchy inversion R3 exists to prevent. `currentColor` keeps it on
+   the STATUS_COLOR SSOT with no new color declarations. */
+.ao-card-badge::before {
+  content: '';
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
 .ao-card--big .ao-card-badge { font-size: 0.66rem; padding: 2px 9px; }
 .ao-card-badge.s-waiting { color: var(--status-waiting); background: color-mix(in srgb, var(--status-waiting) 14%, transparent); }
 .ao-card-badge.s-running { color: var(--status-running); background: color-mix(in srgb, var(--status-running) 14%, transparent); }
-.ao-card-badge.s-done-unseen { color: var(--status-done); background: color-mix(in srgb, var(--status-done) 16%, transparent); }
+/* Motion (PC big cards + mobile cards share this badge class) lands on the DOT only, never the
+   text: opacity-only (no box-shadow/background-color/width — see STATUS_MOTION's doc comment), and
+   the label stays fully legible instead of fading in and out. The card's own border/box-shadow
+   highlight likewise stays static — a whole card pulsing is an order of magnitude more screen area
+   than a dot, which is the hierarchy inversion this whole contract exists to prevent. */
+.ao-card-badge.s-waiting::before {
+  --dot-min-opacity: var(--dot-waiting-min);
+  animation: status-dot-pulse var(--dot-waiting-duration) var(--dot-waiting-easing) infinite;
+}
+.ao-card-badge.s-running::before {
+  --dot-min-opacity: var(--dot-running-min);
+  animation: status-dot-pulse var(--dot-running-duration) var(--dot-running-easing) infinite;
+}
+.ao-card-badge.s-done-unseen { color: var(--status-done); background: color-mix(in srgb, var(--status-done) 16%, transparent); }         /* STATIC by contract */
 .ao-card-badge.s-idle { color: #9a8ab8; background: rgba(122, 106, 154, 0.16); }
+@media (prefers-reduced-motion: reduce) {
+  .ao-card-badge.s-waiting::before,
+  .ao-card-badge.s-running::before { animation: none; opacity: 1; }
+}
 .ao-card-tool {
   flex-shrink: 0;
   margin-left: auto;

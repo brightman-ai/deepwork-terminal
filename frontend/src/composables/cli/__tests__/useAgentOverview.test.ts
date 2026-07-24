@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'bun:test'
+import { describe, it, expect, beforeEach, afterAll } from 'bun:test'
 import { ref, nextTick } from 'vue'
 import {
   useAgentOverview,
@@ -9,6 +9,7 @@ import {
   windowAwaitingSince,
   overviewColumns,
   STATUS_COLOR,
+  STATUS_MOTION,
 } from '@terminal/composables/cli/useAgentOverview'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 
@@ -31,7 +32,22 @@ const storageStub = {
   key: () => null,
   length: 0,
 } as Storage
-Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storageStub })
+// Snapshot whatever this process had before we stub localStorage here, so we can put
+// things back exactly as we found them once this file's tests are done. Without this,
+// `Object.defineProperty` (unlike a plain assignment) defaults to `writable: false`, so
+// any later test file in the same bun process that does `globalThis.localStorage = ...`
+// (a plain assignment) throws "Attempted to assign to readonly property" — this file's
+// stub otherwise leaks across test files.
+const originalLocalStorage = (globalThis as any).localStorage
+
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, writable: true, value: storageStub })
+
+afterAll(() => {
+  // `delete` (not reassignment) is required to drop the non-writable property
+  // descriptor installed above before restoring the prior value.
+  delete (globalThis as any).localStorage
+  if (originalLocalStorage !== undefined) (globalThis as any).localStorage = originalLocalStorage
+})
 
 beforeEach(() => localStorage.clear())
 
@@ -245,5 +261,53 @@ describe('STATUS_COLOR (single source every dot-rendering surface must agree on)
     expect(STATUS_COLOR.waiting).toBe('#ff5252')
     expect(STATUS_COLOR.running).toBe('#3fb950')
     expect(STATUS_COLOR['done-unseen']).toBe('#e3b341')
+  })
+})
+
+// STATUS_MOTION is STATUS_COLOR's peer and gets the same treatment, for the same reason: it is
+// bound into three SFCs via v-bind, so a value edited in only one of them must fail here.
+//
+// The contract these tests pin was a deliberate reversal (Human, 2026-07-20). The original rule
+// was "only running moves, waiting stays static so the HUD owns attention"; an independent Witness
+// read the result as backwards ("the ones waiting for me are still, the one I don't need to touch
+// is blinking") because the HUD is event-scoped and collapses after 8s, leaving a static red dot
+// beside a moving green one for most of the time on screen. Hence: both move now, with opposite
+// characters. The old "waiting and done-unseen stay static" assertion is void — done-unseen alone
+// is the static one.
+describe('STATUS_MOTION (the three-state dot motion contract)', () => {
+  it('is total over the non-idle statuses — done-unseen is explicitly null, not missing', () => {
+    expect(Object.keys(STATUS_MOTION).sort()).toEqual(['done-unseen', 'running', 'waiting'])
+    expect(STATUS_MOTION['done-unseen']).toBeNull()
+  })
+
+  it('pins waiting as the slow, big pulse and running as the quick, small one', () => {
+    expect(STATUS_MOTION.waiting).toEqual({ duration: '2.6s', easing: 'ease-in-out', minOpacity: 0.35 })
+    expect(STATUS_MOTION.running).toEqual({ duration: '2s', easing: 'ease-in-out', minOpacity: 0.75 })
+  })
+
+  // The actual design invariant, stated as the thing that can regress rather than as the numbers
+  // above: attention hierarchy survives only while the red dot out-shouts the green one. A slow
+  // opacity pulse's pull on the eye tracks its rate of luminance change, 2*amplitude/period — so
+  // that, not period alone and not amplitude alone, is what has to stay ordered. Retuning either
+  // entry is fine; inverting this is the regression that put us here.
+  it('keeps waiting more salient than running (2*amplitude/period, the eye`s actual metric)', () => {
+    const salience = (p: { duration: string; minOpacity: number }) =>
+      (2 * (1 - p.minOpacity)) / parseFloat(p.duration)
+    const waiting = salience(STATUS_MOTION.waiting)
+    const running = salience(STATUS_MOTION.running)
+    expect(waiting).toBeGreaterThan(running)
+    // ...and not just barely: a hair's-width lead would read as "two things blinking", not as a
+    // hierarchy. 2:1 is the margin the current values were chosen to hold.
+    expect(waiting / running).toBeGreaterThanOrEqual(2)
+    // Amplitude is the other half of "strong vs faint" and must point the same way.
+    expect(1 - STATUS_MOTION.waiting.minOpacity).toBeGreaterThan(1 - STATUS_MOTION.running.minOpacity)
+  })
+
+  // A pulse that never dims is a lie dressed as an animation; static must be expressed as null so
+  // the three consumers can omit the CSS entirely rather than run a no-op animation forever.
+  it('never expresses static as minOpacity 1', () => {
+    for (const pulse of Object.values(STATUS_MOTION)) {
+      if (pulse) expect(pulse.minOpacity).toBeLessThan(1)
+    }
   })
 })
