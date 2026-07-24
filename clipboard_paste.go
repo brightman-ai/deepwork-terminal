@@ -18,12 +18,19 @@ import (
 )
 
 const (
-	// ClipboardMaxUploadSize is the single backend authority for the SESSION file-upload cap
+	// ClipboardMaxUploadSize is the compile-time DEFAULT for the SESSION file-upload cap
 	// (paste/attach → agent working dir). Exported because deepwork-pro's parallel session
 	// upload route imports it instead of re-declaring the number — one source, so the two
 	// deployments can never drift (they did: pro's wsSessionUploadMaxBytes was a hand-"aligned"
 	// copy). Distinct from chat-image attachments (a different bounded context, its own smaller
 	// cap) — do NOT fold that in here.
+	//
+	// This is no longer the sole authority at runtime: upload_limit.go layers a
+	// runtime-configurable, persisted override on top (UploadLimitBytes / SetUploadLimitMB),
+	// initialized to this const. Both enforcement points (below, and service_inproc.go's
+	// LimitReader) call UploadLimitBytes(), not this const directly. Keep this const's
+	// value as the shipped default — pro and any caller that never touches upload_limit.go
+	// must keep seeing exactly this number.
 	ClipboardMaxUploadSize = 10 << 20 // 10 MB
 	clipboardTmpDir        = "tmp/clipboard"
 	clipboardTTL           = 24 * time.Hour
@@ -55,22 +62,28 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// so it gets its own status code. 413 lets the client say "文件超过 10MB" without
 	// string-matching an English error, and tells it the failure is DETERMINISTIC:
 	// retrying the same bytes will fail identically.
-	r.Body = http.MaxBytesReader(w, r.Body, ClipboardMaxUploadSize)
+	//
+	// limit is read ONCE up front so the MaxBytesReader gate and the 413 message it can
+	// produce a few lines later always agree, even if a concurrent SetUploadLimitMB
+	// changes the effective cap mid-request (upload_limit.go is the runtime SSOT;
+	// ClipboardMaxUploadSize is only its compile-time default).
+	limit := UploadLimitBytes()
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 
-	if err := r.ParseMultipartForm(ClipboardMaxUploadSize); err != nil {
+	if err := r.ParseMultipartForm(limit); err != nil {
 		terminalClipboardUploadErrors.Inc()
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			terminalLogger.Warn(logCtx, "cli clipboard upload rejected",
 				"reason", "too_large",
 				"session_id", id,
-				"limit_bytes", ClipboardMaxUploadSize,
+				"limit_bytes", limit,
 				"elapsed_ms", time.Since(start).Milliseconds())
-			// limit_mb travels WITH the error so the client can say "文件超过 10 MB 上限"
-			// without hardcoding 10 — the number stays single-sourced at ClipboardMaxUploadSize.
+			// limit_mb travels WITH the error so the client can say "文件超过 N MB 上限"
+			// without hardcoding it — the number stays single-sourced at UploadLimitBytes.
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-				"error":    fmt.Sprintf("file exceeds the %d MB limit", ClipboardMaxUploadSize>>20),
-				"limit_mb": ClipboardMaxUploadSize >> 20,
+				"error":    fmt.Sprintf("file exceeds the %d MB limit", limit>>20),
+				"limit_mb": limit >> 20,
 			})
 			return
 		}

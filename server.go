@@ -68,6 +68,15 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.tunnel = tunnelkit.New(s.config.DataDir)
 	s.authThrottle = authgate.NewThrottle()
 	s.uploads = newUploadIndex(s.config.DataDir)
+	// Runtime-configurable upload cap (upload_limit.go): load any persisted override
+	// (<DataDir>/upload-limit.json) left by a previous SetUploadLimitMB, and remember
+	// DataDir so a future SetUploadLimitMB call knows where to persist. Best-effort — a
+	// missing file is not an error (LoadUploadLimit handles that); an unexpected I/O
+	// error is logged but never blocks startup, since the compile-time
+	// ClipboardMaxUploadSize default already stands as the fallback.
+	if err := LoadUploadLimit(s.config.DataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "upload-limit: failed to load persisted limit: %v\n", err)
+	}
 	// Usage/cost/quota reporter (kit/usage SSOT). Cheap to build — sources only
 	// resolve their roots here; no disk walk until a report is requested.
 	s.usage = newUsageReporter()
@@ -305,6 +314,25 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /files/tree", wrap(s.handleFilesTree))
 	s.mux.HandleFunc("GET /files/search", wrap(s.handleFilesSearch))
 	s.mux.HandleFunc("GET /files/raw", wrap(s.handleFilesRaw))
+	// Write side of the workbench file service: mkdir/create/rename/delete, same
+	// session-cwd anchoring + safeResolve traversal guard as the read handlers above.
+	s.mux.HandleFunc("POST /files/mkdir", wrap(s.handleFilesMkdir))
+	s.mux.HandleFunc("POST /files/create", wrap(s.handleFilesCreate))
+	s.mux.HandleFunc("POST /files/rename", wrap(s.handleFilesRename))
+	s.mux.HandleFunc("POST /files/delete", wrap(s.handleFilesDelete))
+	// Chunked, resumable upload (files_chunk.go): slices a large file into ≤8 MiB parts so it
+	// clears Cloudflare's ~100 MB body cap and survives a flaky mobile link (a dropped upload
+	// resumes from the last landed chunk instead of restarting). Staging on disk under
+	// <DataDir>/uploads-partial; same session-cwd anchoring + safeResolve guard as above.
+	s.mux.HandleFunc("POST /files/upload/init", wrap(s.handleChunkUploadInit))
+	s.mux.HandleFunc("POST /files/upload/chunk", wrap(s.handleChunkUploadChunk))
+	s.mux.HandleFunc("POST /files/upload/complete", wrap(s.handleChunkUploadComplete))
+	s.mux.HandleFunc("GET /files/upload/status", wrap(s.handleChunkUploadStatus))
+	s.mux.HandleFunc("POST /files/upload/abort", wrap(s.handleChunkUploadAbort))
+	// Runtime-configurable session upload cap (upload_limit.go SSOT): read the current
+	// effective/default/floor/ceiling, or set a new one (persisted to DataDir).
+	s.mux.HandleFunc("GET /files/upload-limit", wrap(s.handleUploadLimitGet))
+	s.mux.HandleFunc("PUT /files/upload-limit", wrap(s.handleUploadLimitSet))
 	// Session review (git diff): changed files + per-file unified diff for the workbench
 	// cwd's repository. Read-only; every git arg is passed as a slice (no shell injection).
 	s.mux.HandleFunc("GET /git/diff", wrap(s.handleGitDiff))

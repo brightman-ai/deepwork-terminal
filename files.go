@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -485,10 +484,15 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		defer f.Close()
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", attachmentDisposition(filepath.Base(target)))
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, f)
+		// http.ServeContent adds Accept-Ranges and honours a Range request header, so a
+		// download that drops (flaky mobile, a large 产物) resumes from the byte it stopped at
+		// instead of restarting the whole transfer. It also emits Content-Length and the
+		// status itself (200, or 206 Partial Content for a satisfiable Range) — so we set
+		// NEITHER Content-Length nor WriteHeader here; ServeContent owns both. Content-Type is
+		// pre-set to octet-stream above (ServeContent only sniffs when it's unset), so the
+		// attachment disposition + nosniff still hold for ranged and full responses alike.
+		http.ServeContent(w, r, filepath.Base(target), info.ModTime(), f)
 		return
 	}
 
