@@ -71,13 +71,6 @@
       <!-- Troubleshooting next-step — the 排障闭环 payload -->
       <div v-if="hint" class="phr-hint" :class="`is-${hint.tone}`" :data-testid="`phr-hint-${p.kind}`">
         <span class="phr-hint-text">{{ hint.text }}</span>
-        <button
-          v-if="hint.action === 'install'"
-          class="phr-hint-btn"
-          type="button"
-          :data-testid="`phr-install-${p.kind}`"
-          @click="emit('install')"
-        >开启浏览器通知</button>
       </div>
     </div>
   </div>
@@ -89,7 +82,6 @@ import { useNotifyConfig, type NotifyProvider, type NotifyOutcome, type TestResu
 import { relativeFromMs } from '@terminal/utils/time'
 
 const props = defineProps<{ provider: NotifyProvider }>()
-const emit = defineEmits<{ (e: 'install'): void }>()
 
 const p = computed(() => props.provider)
 const notify = useNotifyConfig()
@@ -139,17 +131,13 @@ const glanceText = computed(() => {
 
 /**
  * Troubleshooting next-step — the 排障闭环.
- *   failed webpush (subscription dead: 410 / BadJwtToken) → 「开启浏览器通知」重订
- *   failed other channel → surface the reason
+ *   failed channel → surface the reason
  *   dormant → the channel's activationHint (e.g. 回机器人任意字符续订)
  */
-const hint = computed<{ text: string; tone: 'bad' | 'warn'; action?: 'install' } | null>(() => {
+const hint = computed<{ text: string; tone: 'bad' | 'warn' } | null>(() => {
   const v = p.value
   const l = latest.value
   if (l?.outcome === 3) {
-    if (v.kind === 'webpush') {
-      return { text: `订阅已失效${l.detail ? `（${l.detail}）` : ''}，点「开启浏览器通知」重新订阅。`, tone: 'bad', action: 'install' }
-    }
     return { text: `最近一次发送失败${l.detail ? `：${l.detail}` : '。'}`, tone: 'bad' }
   }
   if ((l?.outcome === 2 || (!v.healthy && v.configured)) && v.activationHint) {
@@ -310,17 +298,4 @@ async function onTest(): Promise<void> {
 .phr-hint.is-bad { background: rgba(224, 138, 138, 0.1); color: #e8a0a0; border: 1px solid rgba(224, 138, 138, 0.25); }
 .phr-hint.is-warn { background: rgba(216, 180, 138, 0.1); color: #d8b48a; border: 1px solid rgba(216, 180, 138, 0.22); }
 .phr-hint-text { flex: 1; min-width: 0; }
-.phr-hint-btn {
-  flex-shrink: 0;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid #9ac8f5;
-  background: rgba(154, 200, 245, 0.12);
-  color: #9ac8f5;
-  font-size: 0.66rem;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.phr-hint-btn:active { background: rgba(154, 200, 245, 0.22); }
 </style>

@@ -47,11 +47,12 @@ async function check(): Promise<void> {
   } catch { /* offline / transient — try again next tick */ }
 }
 
-/** Drop client caches, nudge the SW to update, then hard-reload onto the latest build.
- *  The load-bearing step is the /fresh hard-navigation; the cache drop is belt-and-
- *  suspenders. We update() the SW rather than unregister() so the push subscription
- *  survives (both shells' SW is push-only, so there's no stale asset cache to evict —
- *  killing it would only cost the user their notifications). */
+/** Drop client caches, nudge any leftover service worker to update, then hard-reload onto
+ *  the latest build. The load-bearing step is the /fresh hard-navigation; the cache drop is
+ *  belt-and-suspenders. This frontend no longer registers a service worker (Web Push / PWA
+ *  was removed), so getRegistrations() is normally empty — the update() loop only matters for
+ *  users upgrading from an older build that still had one registered: nudging it to re-fetch
+ *  its now-removed script lets the stale worker fall away. */
 export async function applyAppUpdate(): Promise<void> {
   try {
     if (typeof window !== 'undefined' && window.caches) {

@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"os"
-	"strings"
 )
 
 // Config for the terminal session server.
@@ -22,38 +21,6 @@ type Config struct {
 	// printed in the startup banner. Named/persistent tunnels stay UI-driven (they need
 	// an interactive `cloudflared login`).
 	Tunnel bool
-
-	// VapidSubscriber is the VAPID JWT "sub" claim — a contact identifying the app
-	// server to the push service. Apple APNs (iOS Web Push) REJECTS a token whose sub
-	// is not a valid mailto: (real-format domain) or https: URL → 403 BadJwtToken.
-	// Pass a BARE email (e.g. "you@your.dev") or an https: URL — webpush-go prepends
-	// "mailto:" automatically (a "mailto:" prefix here would double to "mailto:mailto:…").
-	// Empty → resolved from DW_VAPID_SUBSCRIBER, then defaultVapidSubscriber.
-	VapidSubscriber string
-}
-
-// defaultVapidSubscriber is the fallback VAPID "sub" when neither Config nor the
-// DW_VAPID_SUBSCRIBER env var supplies one. NOTE: webpush-go (vapid.go) auto-prepends
-// "mailto:" to any value that isn't an https: URL, so this is a BARE email (NOT prefixed
-// with "mailto:"). A "mailto:" prefix here would produce an invalid "mailto:mailto:…" sub
-// that Apple rejects with 403 BadJwtToken — the exact bug this const's value fixes.
-const defaultVapidSubscriber = "deepwork-terminal@users.noreply.github.com"
-
-// resolveVapidSubscriber returns the effective VAPID "sub", in precedence order:
-// explicit Config value → DW_VAPID_SUBSCRIBER env → bare-email placeholder. It strips a
-// leading "mailto:" (webpush-go re-adds exactly one) so any input form works and we never
-// emit a double "mailto:mailto:…" sub; https: URLs pass through untouched.
-func resolveVapidSubscriber(cfg Config) string {
-	sub := defaultVapidSubscriber
-	if cfg.VapidSubscriber != "" {
-		sub = cfg.VapidSubscriber
-	} else if env := os.Getenv("DW_VAPID_SUBSCRIBER"); env != "" {
-		sub = env
-	}
-	if !strings.HasPrefix(sub, "https:") {
-		sub = strings.TrimPrefix(sub, "mailto:")
-	}
-	return sub
 }
 
 // DefaultConfig returns sensible defaults.

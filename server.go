@@ -39,7 +39,6 @@ type Server struct {
 	listener     net.Listener
 	tunnel       *tunnelkit.Tunnel
 	tmuxProvider TmuxStateProvider
-	push         *pushStore
 	ilink        *ilinkStore
 	coordinator  *notify.Coordinator
 	uploads      *uploadIndex
@@ -47,6 +46,13 @@ type Server struct {
 	usage        *usageReporter
 	agentUsage   *agentReporter
 	mu           sync.Mutex
+
+	// notifier is the background agent-waiting engine (agent_notifier.go): it polls tmux,
+	// detects a pane finishing a turn, and fans the event out through the coordinator to
+	// every enabled channel (iLink/WeChat, Feishu, …). Channel-agnostic — its lifecycle is
+	// gated on "any channel enabled", not on any single channel. nil when not running.
+	notifier   *agentNotifier
+	notifierMu sync.Mutex
 }
 
 // NewServer creates a terminal session server.
@@ -93,26 +99,15 @@ func NewServer(opts ...Option) (*Server, error) {
 	if s.hooks.AgentStatePush == nil {
 		s.hooks.AgentStatePush = nativeAgentStatePush(s.newAgentIntelMonitor())
 	}
-	// Web Push: load (or generate) persisted VAPID keys + subscriptions. The
-	// resolved subscriber ("sub" claim) must be a valid mailto:/https: URL or Apple
-	// APNs rejects the token — see resolveVapidSubscriber.
-	s.push = newPushStore(s.config.DataDir, resolveVapidSubscriber(s.config))
-	s.push.server = s
-	// WeChat iLink notification channel (channel B). Resumes a prior login if one
-	// is persisted. Wired after push so newIlinkStore can reach s.push.ensureNotifier.
+	// WeChat iLink notification channel. Resumes a prior login if one is persisted.
 	s.ilink = newIlinkStore(s.config.DataDir, s)
 	// Notification coordinator: fans an Event out to every enabled provider (iLink /
-	// web push / Feishu / DingTalk / WeCom) and is the single delivery-metrics owner.
-	// Built after ilink/push so its adapters can wrap them.
+	// Feishu / DingTalk / WeCom / Slack) and is the single delivery-metrics owner.
 	s.coordinator = newNotifyCoordinator(s)
-	// Resume the background notifier at startup whenever ANY delivery channel already
-	// exists — a surviving web-push subscription, a persisted iLink (WeChat) login, or an
-	// enabled webhook provider (Feishu/DingTalk/WeCom). Missing any arm left that channel's
-	// users with no notifier after a restart (it only (re)started on a fresh web-push
-	// subscribe / iLink login), so turn-end pushes silently stopped every restart.
-	if s.push.count() > 0 || s.ilink.loggedIn() || s.coordinator.AnyEnabled(context.Background()) {
-		s.push.ensureNotifier()
-	}
+	// Resume the background notifier at startup whenever ANY delivery channel is enabled —
+	// the coordinator is the SSOT for that. Missing this left webhook-only users (Feishu/…)
+	// with no notifier after a restart, so turn-end notifications silently stopped.
+	s.reconcileNotifier(context.Background())
 	s.mux = http.NewServeMux()
 	s.registerRoutes()
 	return s, nil
@@ -260,11 +255,9 @@ func (s *Server) Port() int {
 	return s.listener.Addr().(*net.TCPAddr).Port
 }
 
-// Close shuts down all sessions and stops the background push notifier.
+// Close shuts down all sessions and stops the background agent notifier.
 func (s *Server) Close() error {
-	if s.push != nil {
-		s.push.stopNotifier()
-	}
+	s.stopNotifier()
 	return s.mgr.CloseAll()
 }
 
@@ -339,10 +332,6 @@ func (s *Server) registerRoutes() {
 	// Session overview metrics (CHG-017): turn/summary breakdown of the CURRENT claude
 	// transcript for the session cwd. Feeds the shared @ce OverviewPanel.
 	s.mux.HandleFunc("GET /sessions/{id}/overview", wrap(s.handleSessionOverview))
-	s.mux.HandleFunc("GET /push/vapid", wrap(s.handlePushVAPID))
-	s.mux.HandleFunc("POST /push/subscribe", wrap(s.handlePushSubscribe))
-	s.mux.HandleFunc("POST /push/unsubscribe", wrap(s.handlePushUnsubscribe))
-	s.mux.HandleFunc("POST /push/test", wrap(s.handlePushTest))
 	// WeChat iLink channel (channel B): scan-code login + status + logout.
 	s.mux.HandleFunc("GET /ilink/status", wrap(s.handleIlinkStatus))
 	s.mux.HandleFunc("POST /ilink/login", wrap(s.handleIlinkLogin))

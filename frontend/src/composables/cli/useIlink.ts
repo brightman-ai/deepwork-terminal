@@ -41,26 +41,16 @@ export interface NotifyMetrics {
   perProvider: NotifyProviderMetric[]
 }
 
-export interface PushSubDetail {
-  origin: string
-  endpointTail: string
-}
-
-export interface WebPushStatus {
-  subscriptions: number
-  notifierRunning: boolean
-  subs?: PushSubDetail[]
-}
-
+// NotifyTestResult mirrors POST /notify/test → { results: { <kind>: <outcome> } }:
+// one entry per ENABLED channel (kind → "sent"/"dormant"/"cooldown"/…). Browser
+// web-push was removed, so there is no per-channel test shape to special-case here.
 export interface NotifyTestResult {
-  webPush: { sent: number; rejected: number; subs: number }
-  ilink: { result: 'sent' | 'dormant' | 'ambiguous' | 'not-configured' }
+  results: Record<string, string>
 }
 
 export interface IlinkApi {
   status: Ref<IlinkStatus>
   metrics: Ref<NotifyMetrics>
-  webPush: Ref<WebPushStatus>
   qrDataUrl: Ref<string>
   busy: Ref<boolean>     // login / logout
   testBusy: Ref<boolean> // dual-channel test (separate so button labels don't cross-talk)
@@ -79,7 +69,6 @@ export function useIlink(): IlinkApi {
   const { cliFetch } = useCliAuth()
   const status = ref<IlinkStatus>({ loggedIn: false, active: false, sentCount: 0, maxSends: 10, qrPending: false })
   const metrics = ref<NotifyMetrics>({ events: 0, lastAtMs: 0, perProvider: [] })
-  const webPush = ref<WebPushStatus>({ subscriptions: 0, notifierRunning: false })
   const qrDataUrl = ref('')
   const busy = ref(false)
   const testBusy = ref(false)
@@ -92,10 +81,9 @@ export function useIlink(): IlinkApi {
     try {
       const r = await cliFetch(cliApi('/notify/status'))
       if (r.ok) {
-        const d = await r.json() as { ilink: IlinkStatus; metrics: NotifyMetrics; webPush: WebPushStatus }
+        const d = await r.json() as { ilink: IlinkStatus; metrics: NotifyMetrics }
         status.value = d.ilink
         metrics.value = d.metrics
-        webPush.value = d.webPush
         // Once logged in (or no scan pending) the QR is stale — drop it.
         if (status.value.loggedIn || !status.value.qrPending) qrDataUrl.value = ''
       }
@@ -172,5 +160,5 @@ export function useIlink(): IlinkApi {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   }
 
-  return { status, metrics, webPush, qrDataUrl, busy, testBusy, error, refresh, startLogin, logout, testBoth, startPolling, stopPolling }
+  return { status, metrics, qrDataUrl, busy, testBusy, error, refresh, startLogin, logout, testBoth, startPolling, stopPolling }
 }

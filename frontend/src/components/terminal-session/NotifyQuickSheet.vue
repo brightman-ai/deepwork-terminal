@@ -1,10 +1,10 @@
 <template>
   <!-- Quick notification glance — a bottom sheet (mobile) / anchored popover
-       (desktop) mirroring the InstallGuideSheet chrome. Lists every notify
-       provider with a toggle, a one-line status glance, and a [发测试] button.
-       Reads the SAME /api/notify/config SSOT as the full settings section
-       (NotificationsSection.vue) via useNotifyConfig, so toggling/testing here
-       and there stay in lock-step. "完整设置 →" jumps to the settings portal. -->
+       (desktop). Lists every notify provider with a toggle, a one-line status
+       glance, and a [发测试] button. Reads the SAME /api/notify/config SSOT as the
+       full settings section (NotificationsSection.vue) via useNotifyConfig, so
+       toggling/testing here and there stay in lock-step. "完整设置 →" jumps to the
+       settings portal. -->
   <Teleport to="body">
     <Transition name="nqs-fade">
       <div
@@ -35,24 +35,20 @@
 
             <div class="nqs-list">
               <ProviderHealthRow
-                v-for="p in providers"
+                v-for="p in visibleProviders"
                 :key="p.kind"
                 :provider="p"
-                @install="onOpenInstall"
               />
             </div>
 
             <p v-if="notify.error.value" class="nqs-error">{{ notify.error.value }}</p>
 
             <div class="nqs-actions">
-              <button class="nqs-install" type="button" data-testid="nqs-open-install" @click="onOpenInstall">
-                📲 安装应用 / 开启浏览器通知
-              </button>
               <button class="nqs-full" type="button" data-testid="nqs-open-settings" @click="onOpenSettings">
                 完整设置 →
               </button>
             </div>
-            <p class="nqs-note">微信测试会真实发送并消耗本轮配额。浏览器(Apple/Chrome)推送需先「安装应用 / 开启通知」。Webhook 渠道（飞书/钉钉/企业微信）的地址与密钥在完整设置里配置。</p>
+            <p class="nqs-note">微信测试会真实发送并消耗本轮配额。Webhook 渠道（飞书/钉钉/企业微信）的地址与密钥在完整设置里配置。</p>
           </div>
         </div>
       </div>
@@ -69,12 +65,17 @@ import { relativeFromMs } from '@terminal/utils/time'
 import ProviderHealthRow from '@terminal/components/terminal-session/ProviderHealthRow.vue'
 
 const props = defineProps<{ open: boolean }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'open-install'): void }>()
+const emit = defineEmits<{ (e: 'close'): void }>()
 
 const { isMobile } = useDeviceDetection()
 const router = useRouter()
 const notify = useNotifyConfig()
 const { providers, metrics, loading } = notify
+
+// The browser/webpush channel was removed from this frontend (no service worker / PWA
+// subscribe UI), so hide that provider even though the backend still reports it. The
+// remaining channels (微信 / 飞书 / 钉钉 / 企业微信 / Slack) render unchanged.
+const visibleProviders = computed(() => providers.value.filter((p) => p.kind !== 'webpush'))
 
 // Refresh the shared SSOT whenever the sheet opens.
 watch(() => props.open, (o) => { if (o) void notify.refresh() }, { immediate: true })
@@ -89,11 +90,6 @@ function onOpenSettings(): void {
   // Deep-link straight to the Notifications section (PortalSectionHost reads ?section=),
   // so "完整设置" lands where the user expects instead of the default first section.
   void router.push({ path: '/portal/settings', query: { section: 'terminal.notifications' } })
-}
-
-function onOpenInstall(): void {
-  emit('close')
-  emit('open-install') // hand off to the PWA-install / browser-push-subscribe guide
 }
 </script>
 
@@ -152,7 +148,7 @@ function onOpenInstall(): void {
 .nqs-error { color: #e08a8a; font-size: 0.72rem; margin: 10px 0 0; }
 
 .nqs-actions { display: flex; gap: 8px; margin-top: 14px; }
-.nqs-full, .nqs-install {
+.nqs-full {
   display: block;
   flex: 1;
   padding: 10px;
@@ -162,10 +158,9 @@ function onOpenInstall(): void {
   font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
+  color: #f5c79a;
 }
-.nqs-full { color: #f5c79a; }
-.nqs-install { color: #9ac8f5; }
-.nqs-full:active, .nqs-install:active { background: #2c2c31; }
+.nqs-full:active { background: #2c2c31; }
 .nqs-note { color: #6b6b72; font-size: 0.66rem; line-height: 1.5; margin: 10px 0 0; }
 
 .nqs-fade-enter-active, .nqs-fade-leave-active { transition: opacity 0.18s ease; }

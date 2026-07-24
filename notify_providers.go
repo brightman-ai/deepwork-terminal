@@ -12,7 +12,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -35,16 +34,14 @@ func newFileConfigStore(dataDir string) *fileConfigStore {
 	}
 }
 
-// defaultNotifyConfig is the out-of-box config: the two channels the user already
-// has (WeChat iLink + web push) ON — matching "默认只开 1-2 个 provider" — and the
-// webhook IM channels OFF until configured. Fan-out of two channels the user owns is
-// the behavior they chose (decision ①), not an accidental double-buzz.
+// defaultNotifyConfig is the out-of-box config: WeChat iLink ON (the channel the user
+// already has, matching "默认只开 1-2 个 provider") and the webhook IM channels OFF until
+// configured.
 func defaultNotifyConfig() notify.Config {
 	return notify.Config{
 		Version: notify.ConfigVersion,
 		Providers: []notify.ProviderConfig{
 			{Kind: "ilink", Enabled: true},
-			{Kind: "webpush", Enabled: true},
 			{Kind: "feishu", Enabled: false},
 			{Kind: "dingtalk", Enabled: false},
 			{Kind: "wecom", Enabled: false},
@@ -141,64 +138,15 @@ func (p ilinkProvider) Status(ctx context.Context, cfg notify.ProviderConfig) no
 	}
 }
 
-// ── web-push provider (wraps the existing pushStore) ────────────────────────────
-
-type webpushProvider struct{ s *Server }
-
-func (p webpushProvider) Kind() string { return "webpush" }
-func (p webpushProvider) Name() string { return "浏览器" }
-
-func (p webpushProvider) Send(ctx context.Context, e notify.Event, cfg notify.ProviderConfig) (notify.Outcome, string) {
-	subs := p.s.push.snapshot()
-	if len(subs) == 0 {
-		return notify.OutcomeNotConfigured, ""
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"title": e.Title,
-		"body":  notify.PlainText(e),
-		"tag":   "dw-notify",
-		"data":  map[string]any{"url": e.DeepURL},
-	})
-	res := p.s.push.broadcast(payload, subs)
-	if res.delivered > 0 {
-		return notify.OutcomeSent, ""
-	}
-	// Failed — surface WHY so the user can self-fix (the Apple-push troubleshooting case).
-	switch {
-	case res.pruned > 0:
-		return notify.OutcomeFailed, fmt.Sprintf("订阅失效(410 Gone)，已移除%d个 — 请重新「开启浏览器通知」", res.pruned)
-	case len(res.rejected) > 0:
-		return notify.OutcomeFailed, fmt.Sprintf("HTTP %d %s", res.rejected[0].Status, res.rejected[0].Reason)
-	default:
-		return notify.OutcomeFailed, "无订阅送达"
-	}
-}
-
-func (p webpushProvider) Status(ctx context.Context, cfg notify.ProviderConfig) notify.Status {
-	n := p.s.push.count()
-	return notify.Status{
-		Name:       "浏览器",
-		Configured: n > 0,
-		Healthy:    n > 0,
-		ActivationHint: func() string {
-			if n == 0 {
-				return "未订阅 — 开启浏览器通知"
-			}
-			return ""
-		}(),
-	}
-}
-
 // ── coordinator builder ─────────────────────────────────────────────────────────
 
 // newNotifyCoordinator wires the fan-out coordinator with all channels in display
 // order. Webhook channels (Feishu/DingTalk/WeCom/Slack) are generic and live in the
-// notify package; iLink + web push are terminal-specific adapters.
+// notify package; iLink is a terminal-specific adapter.
 func newNotifyCoordinator(s *Server) *notify.Coordinator {
 	store := newFileConfigStore(s.config.DataDir)
 	return notify.NewCoordinator(store, nowFunc,
 		ilinkProvider{s: s.ilink},
-		webpushProvider{s: s},
 		notify.NewFeishuProvider(nowFunc),
 		notify.NewDingTalkProvider(nowFunc),
 		notify.NewWeComProvider(nowFunc),

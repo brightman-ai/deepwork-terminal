@@ -1,28 +1,31 @@
 <script setup lang="ts">
 /**
  * Notifications — the full per-provider config panel. Lists every notify channel
- * (微信 iLink / 浏览器 web push / 飞书 / 钉钉 / 企业微信) with: an enable toggle,
- * live status (已配置 / 健康 / 配额 used·max / 今日发送 / activationHint), a [测试]
- * button that fires a REAL test and echoes the honest backend outcome, and — for
- * the webhook IM channels — an inline url + secret form.
+ * (微信 iLink / 飞书 / 钉钉 / 企业微信 / Slack) with: an enable toggle, live status
+ * (已配置 / 健康 / 配额 used·max / 今日发送 / activationHint), a [测试] button that
+ * fires a REAL test and echoes the honest backend outcome, and — for the webhook IM
+ * channels — an inline url + secret form.
  *
  * Reads/mutates through the shared useNotifyConfig SSOT, so toggling/testing here
  * stays in lock-step with the NotifyQuickSheet. Auth rides cliFetch (cli-auth).
  */
-import { onMounted, reactive } from 'vue'
+import { computed, onMounted, reactive } from 'vue'
 import { Settings2 } from 'lucide-vue-next'
 import {
   useNotifyConfig,
   isWebhookKind,
   type NotifyProvider,
 } from '@terminal/composables/cli/useNotifyConfig'
-import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 import ProviderHealthRow from '@terminal/components/terminal-session/ProviderHealthRow.vue'
 import { relativeFromMs } from '@terminal/utils/time'
 
 const notify = useNotifyConfig()
 const { providers, metrics, loading } = notify
-const push = usePushNotifications()
+
+// The browser/webpush channel was removed from this frontend (no service worker / PWA
+// subscribe UI). Hide that provider even though the backend still reports it; the
+// remaining channels (微信 / 飞书 / 钉钉 / 企业微信 / Slack) render unchanged.
+const visibleProviders = computed(() => providers.value.filter((p) => p.kind !== 'webpush'))
 
 // Per-provider transient UI: expanded webhook form state (test/toggle live in the row).
 const formOpen = reactive<Record<string, boolean>>({})
@@ -32,16 +35,6 @@ const busySettings = reactive<Record<string, boolean>>({})
 const formSaved = reactive<Record<string, boolean>>({})
 
 onMounted(() => { void notify.refresh() })
-
-/**
- * Troubleshooting next-step for a dead webpush subscription (410 / BadJwtToken):
- * re-request permission + re-subscribe in place, then refresh so the row's health
- * light recovers. No session binding needed here (the settings portal isn't pane-scoped).
- */
-async function onInstall(): Promise<void> {
-  const ok = await push.subscribe('')
-  if (ok) void notify.refresh()
-}
 
 function toggleForm(p: NotifyProvider): void {
   const open = !formOpen[p.kind]
@@ -92,7 +85,7 @@ async function onClearSecret(p: NotifyProvider): Promise<void> {
 <template>
   <div class="ssec-body" data-testid="settings-section-notifications">
     <div class="ssec-header">Notifications</div>
-    <p class="ssec-hint">agent 等待输入 / 需要确认时，通过下列渠道主动提醒你。默认开启微信与浏览器两通道。</p>
+    <p class="ssec-hint">agent 等待输入 / 需要确认时，通过下列渠道主动提醒你。默认开启微信通道。</p>
 
     <!-- Aggregate delivery metrics (SSOT from the coordinator). -->
     <p v-if="metrics.events > 0" class="nsec-metrics" data-testid="notify-metrics">
@@ -104,14 +97,14 @@ async function onClearSecret(p: NotifyProvider): Promise<void> {
 
     <div class="nsec-list">
       <div
-        v-for="p in providers"
+        v-for="p in visibleProviders"
         :key="p.kind"
         class="nsec-card"
         :data-testid="`notify-provider-${p.kind}`"
       >
         <!-- Shared health row: light + glance + recent-3 + troubleshooting + test/toggle.
              Same component the quick sheet uses, so the two surfaces stay consistent. -->
-        <ProviderHealthRow :provider="p" @install="onInstall" />
+        <ProviderHealthRow :provider="p" />
 
         <!-- Webhook config addendum (飞书 / 钉钉 / 企业微信) — settings-only. -->
         <div v-if="isWebhookKind(p.kind)" class="nsec-webhook">
