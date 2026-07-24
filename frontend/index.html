@@ -8,31 +8,21 @@
          keyboard instead of iOS scroll-shifting the fixed shell and exposing a gap. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="color-scheme" content="dark">
-    <meta name="description" content="Deepwork Terminal — remote terminal portal with agent-aware push notifications.">
+    <meta name="description" content="Deepwork Terminal — remote terminal portal with agent-aware notifications.">
     <title>Deepwork Terminal</title>
 
-    <!-- PWA: installable shell + Web Push. SW + icons are served at root scope by
-         the Go SPA handler (internal/spa/embed.go), so manifest scope '/' is valid. -->
-    <link rel="manifest" href="/manifest.webmanifest">
+    <!-- App shell base color (theme-color drives the mobile browser chrome tint). -->
     <meta name="theme-color" content="#0d0d0f">
-
-    <!-- iOS Safari: no manifest install/Push prompt — these enable "Add to Home
-         Screen" → standalone, which is the ONLY way iOS grants Web Push. -->
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Deepwork">
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 
     <!-- App shell base color (terminal-scoped). The shared @ce stylesheet currently
          renders with the LIGHT :root tokens (.dark is not applied app-wide), so the
-         body background is a light gray. In an iOS standalone PWA the visible viewport
-         (visualViewport.height → --dw-app-viewport-height) excludes the bottom
+         body background is a light gray. On short mobile viewports the visible area
+         (visualViewport.height → --dw-app-viewport-height) can exclude the bottom
          home-indicator inset, so #app ends ABOVE the physical screen bottom and the
          body background shows in that inset band — a gray strip below the dark bottom
          toolbar. Painting the shell root in the canonical dark app color (#0d0d0f =
-         the .dark --background token and the manifest theme-color above) makes that
-         band seamless dark. No-op in a Safari tab: there the viewport spans to the bar
+         the .dark --background token and the theme-color meta above) makes that band
+         seamless dark. No-op in a full Safari tab: there the viewport spans to the bar
          and the body is fully covered, so the body color is never visible. This is the
          terminal's own index.html — it does NOT touch the shared @ce stylesheet. -->
     <style>

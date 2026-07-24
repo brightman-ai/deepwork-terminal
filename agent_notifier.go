@@ -4,47 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	webpush "github.com/SherClockHolmes/webpush-go"
-
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 	"github.com/brightman-ai/deepwork-terminal/notify"
 )
 
-// Background Web Push notifier.
+// Background agent-waiting notifier — the CHANNEL-AGNOSTIC engine behind every notify
+// channel (iLink/WeChat, Feishu, DingTalk, WeCom, Slack).
 //
-// A server-global goroutine (independent of any browser tab) polls the tmux
-// topology every notifyPollInterval, diffs each pane's AgentStatus, and on a
-// transition INTO "waiting" (from any non-waiting state) sends one web push to
-// every stored subscription.
+// A server-global goroutine (independent of any browser tab) polls the tmux topology
+// every notifyPollInterval, diffs each pane's AgentStatus, and on a pane finishing a
+// turn (running → idle/waiting) fans ONE coalesced event out through the coordinator to
+// every enabled provider. It knows nothing about any specific channel.
 //
-// Lifecycle: gated on (tmux installed AND ≥1 subscription). Started by the first
-// subscribe; stopped when the last subscription is removed. No busy-spin — the
-// goroutine only exists while there is someone to notify.
+// Lifecycle (Server-owned): gated on (tmux installed AND ≥1 channel enabled — the
+// coordinator is the SSOT). Started at boot / on a channel being enabled / on iLink
+// login; stopped when the last channel is disabled. No busy-spin — the goroutine only
+// exists while there is someone to notify.
 //
-// Dedupe: a pane that stays "waiting" across ticks does not re-fire. The pane
-// leaves the fired set once it transitions away from "waiting", so the next
-// waiting transition fires again.
-//
-// Prune: a push that fails with 404/410 (subscription gone) removes that
-// subscription from the store.
+// Dedupe: a pane that stays "waiting" across ticks does not re-fire; it leaves the fired
+// set once it transitions away, so the next completion fires again.
 
 const (
 	// notifyPollInterval is how often the notifier recomputes tmux state.
 	notifyPollInterval = 2 * time.Second
 	// notifyStateTimeout bounds a single tmux topology computation.
 	notifyStateTimeout = 3 * time.Second
-	// pushSendTimeout bounds a single web push HTTP request.
-	pushSendTimeout = 10 * time.Second
-	// pushBodyLogLimit caps how much of a push service's error body we log/return.
-	pushBodyLogLimit = 256
 	// notifyPerPaneCooldown suppresses re-notifying the same pane within this window
 	// (a chatty pane that flaps running→idle→running won't flood).
 	notifyPerPaneCooldown = 2 * time.Minute
@@ -53,8 +43,8 @@ const (
 	notifyCoalesceWindow = 5 * time.Second
 )
 
-// pushNotifier is the running poller. Owned by pushStore; one at a time.
-type pushNotifier struct {
+// agentNotifier is the running poller. Owned by *Server; one at a time.
+type agentNotifier struct {
 	server *Server
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -71,20 +61,22 @@ type pushNotifier struct {
 	lastFlush time.Time
 }
 
-// ensureNotifier starts the background notifier if tmux is installed and not
-// already running. Idempotent and safe to call from the subscribe handler.
-func (s *pushStore) ensureNotifier() {
-	if s.server == nil || !s.server.tmuxInstalled() {
+// ensureNotifier starts the background notifier if tmux is installed and not already
+// running. Idempotent — safe to call from server boot, an iLink login, or a channel
+// being enabled (metrics.go SetEnabled). The engine is channel-agnostic; whether any
+// message actually goes out is the coordinator's call per enabled provider.
+func (s *Server) ensureNotifier() {
+	if s == nil || !s.tmuxInstalled() {
 		return
 	}
-	s.mu.Lock()
+	s.notifierMu.Lock()
 	if s.notifier != nil {
-		s.mu.Unlock()
+		s.notifierMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	n := &pushNotifier{
-		server:       s.server,
+	n := &agentNotifier{
+		server:       s,
 		cancel:       cancel,
 		done:         make(chan struct{}),
 		prev:         map[string]agentintel.AgentStatus{},
@@ -95,29 +87,48 @@ func (s *pushStore) ensureNotifier() {
 		archived:     map[string]archivedRec{},
 	}
 	s.notifier = n
-	s.mu.Unlock()
+	s.notifierMu.Unlock()
 
 	n.loadState() // restore per-pane status + delivery metrics before the loop starts
 	go n.run(ctx)
-	logger.Info("push notifier started")
+	logger.Info("agent notifier started")
 }
 
 // stopNotifier stops the background notifier if running. Idempotent.
-func (s *pushStore) stopNotifier() {
-	s.mu.Lock()
+func (s *Server) stopNotifier() {
+	s.notifierMu.Lock()
 	n := s.notifier
 	s.notifier = nil
-	s.mu.Unlock()
+	s.notifierMu.Unlock()
 	if n == nil {
 		return
 	}
 	n.cancel()
 	<-n.done
-	logger.Info("push notifier stopped")
+	logger.Info("agent notifier stopped")
+}
+
+// notifierRunning reports whether the background agent-waiting poller is active.
+func (s *Server) notifierRunning() bool {
+	s.notifierMu.Lock()
+	defer s.notifierMu.Unlock()
+	return s.notifier != nil
+}
+
+// reconcileNotifier is the SINGLE lifecycle decision point: run the poller iff any notify
+// channel is enabled (the coordinator is the SSOT for that). Call after anything that
+// changes the enabled set — server boot, a channel toggle (metrics.go SetEnabled). Both
+// arms are idempotent, so repeated calls are safe.
+func (s *Server) reconcileNotifier(ctx context.Context) {
+	if s.coordinator != nil && s.coordinator.AnyEnabled(ctx) {
+		s.ensureNotifier()
+	} else {
+		s.stopNotifier()
+	}
 }
 
 // run is the poll loop. It exits on ctx cancel.
-func (n *pushNotifier) run(ctx context.Context) {
+func (n *agentNotifier) run(ctx context.Context) {
 	defer close(n.done)
 	defer n.saveState() // persist last-known state on shutdown
 	ticker := time.NewTicker(notifyPollInterval)
@@ -135,7 +146,7 @@ func (n *pushNotifier) run(ctx context.Context) {
 // tick polls the tmux topology, detects per-pane running→{idle,waiting} transitions
 // (a turn just completed / a prompt appeared), buffers them through a per-pane
 // cooldown + a short coalescing window, and tracks panes that vanish as "archived".
-func (n *pushNotifier) tick(ctx context.Context) {
+func (n *agentNotifier) tick(ctx context.Context) {
 	provider := n.server.tmuxProvider
 	if provider == nil {
 		return
@@ -224,7 +235,7 @@ func (n *pushNotifier) tick(ctx context.Context) {
 
 // flush computes the live + archived metrics, builds one (merged) notification with
 // the stats body, sends it through the A/B coordinator, and advances the baseline.
-func (n *pushNotifier) flush(now time.Time, pl *agentintel.ProjectLocator) {
+func (n *agentNotifier) flush(now time.Time, pl *agentintel.ProjectLocator) {
 	var live, triggered []liveSession
 	liveSumm := map[string]agentintel.SessionSummary{}
 	for id, stt := range n.prev {
@@ -350,15 +361,15 @@ func sameDay(a, b time.Time) bool {
 
 type notifierState struct {
 	Prev      map[string]agentintel.AgentStatus `json:"prev"`
-	LastFlush time.Time                          `json:"lastFlush"`
+	LastFlush time.Time                         `json:"lastFlush"`
 	Metrics   notify.MetricsState               `json:"metrics"`
 }
 
-func (n *pushNotifier) statePath() string {
+func (n *agentNotifier) statePath() string {
 	return filepath.Join(n.server.config.DataDir, "notify-state.json")
 }
 
-func (n *pushNotifier) loadState() {
+func (n *agentNotifier) loadState() {
 	b, err := os.ReadFile(n.statePath())
 	if err != nil {
 		return
@@ -376,7 +387,7 @@ func (n *pushNotifier) loadState() {
 	}
 }
 
-func (n *pushNotifier) saveState() {
+func (n *agentNotifier) saveState() {
 	st := notifierState{Prev: n.prev, LastFlush: n.lastFlush}
 	if n.server.coordinator != nil {
 		st.Metrics = n.server.coordinator.MetricsSnapshot()
@@ -420,70 +431,4 @@ func sanitizeField(s string) string {
 		s = string(r[:max]) + "…"
 	}
 	return s
-}
-
-// pushOutcomeKind classifies the result of a single send attempt.
-type pushOutcomeKind int
-
-const (
-	// pushDelivered: the push service accepted the message (2xx).
-	pushDelivered pushOutcomeKind = iota
-	// pushGone: the subscription is dead (404/410) → prune it.
-	pushGone
-	// pushRejected: the service returned a non-2xx, non-gone status (e.g. Apple
-	// 403 BadJwtToken). The message was NOT delivered; surfaced, never pruned.
-	pushRejected
-	// pushError: transport/library error before any HTTP status (no response).
-	pushError
-)
-
-// pushOutcome is the typed result of one sendPush. status is the HTTP status
-// (0 when kind==pushError); reason carries the service's error body / error text
-// so callers can show WHY a push failed (Apple returns e.g. "BadJwtToken").
-type pushOutcome struct {
-	kind   pushOutcomeKind
-	status int
-	reason string
-}
-
-// sendPush delivers one notification and returns a typed outcome. It LOGS every
-// non-2xx result (status + service error body + endpoint tail) so silent failures
-// — the bug where Apple rejected a token but the UI said "sent" — are now visible.
-func sendPush(payload []byte, sub pushSubscription, pub, priv, subscriber string) pushOutcome {
-	ctx, cancel := context.WithTimeout(context.Background(), pushSendTimeout)
-	defer cancel()
-	resp, err := webpush.SendNotificationWithContext(ctx, payload, sub.toWebpush(), &webpush.Options{
-		Subscriber:      subscriber,
-		VAPIDPublicKey:  pub,
-		VAPIDPrivateKey: priv,
-		TTL:             60,
-	})
-	if err != nil {
-		logger.Warn("push send error", "endpoint_tail", endpointTail(sub.Endpoint), "error", err)
-		return pushOutcome{kind: pushError, reason: err.Error()}
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return pushOutcome{kind: pushDelivered, status: resp.StatusCode}
-	}
-
-	// Non-2xx: read the (short) descriptive body the push service returns, e.g.
-	// Apple's "BadJwtToken". This is what makes a rejected push diagnosable.
-	body := readBodySnippet(resp.Body)
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		logger.Info("push gone", "endpoint_tail", endpointTail(sub.Endpoint),
-			"status", resp.StatusCode, "body", body)
-		return pushOutcome{kind: pushGone, status: resp.StatusCode, reason: body}
-	}
-	logger.Warn("push rejected", "endpoint_tail", endpointTail(sub.Endpoint),
-		"status", resp.StatusCode, "body", body)
-	return pushOutcome{kind: pushRejected, status: resp.StatusCode, reason: body}
-}
-
-// readBodySnippet reads at most pushBodyLogLimit bytes of a response body and
-// trims it to a single tidy line for logs / API responses.
-func readBodySnippet(r io.Reader) string {
-	buf, _ := io.ReadAll(io.LimitReader(r, pushBodyLogLimit))
-	return strings.TrimSpace(string(buf))
 }

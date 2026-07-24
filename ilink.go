@@ -63,11 +63,11 @@ const (
 type ilinkState struct {
 	SchemaVer    int       `json:"schema_ver"`
 	LoggedIn     bool      `json:"logged_in"`
-	UserID       string    `json:"user_id"`       // who scanned (SendText target + context-token key)
-	AccountID    string    `json:"account_id"`    // bot account id
-	ContextToken string    `json:"context_token"` // last inbound token, reused for proactive push (+ restart restore)
-	WindowStart  time.Time `json:"window_start"`  // when the current 24h window began (last inbound)
-	SentCount    int       `json:"sent_count"`    // pushes since last inbound (quota vs ilinkMaxSends)
+	UserID       string    `json:"user_id"`        // who scanned (SendText target + context-token key)
+	AccountID    string    `json:"account_id"`     // bot account id
+	ContextToken string    `json:"context_token"`  // last inbound token, reused for proactive push (+ restart restore)
+	WindowStart  time.Time `json:"window_start"`   // when the current 24h window began (last inbound)
+	SentCount    int       `json:"sent_count"`     // pushes since last inbound (quota vs ilinkMaxSends)
 	Dormant      string    `json:"dormant_reason"` // non-empty → channel parked, events fall back to A
 }
 
@@ -114,9 +114,11 @@ func newIlinkStore(dataDir string, srv *Server) *ilinkStore {
 	return s
 }
 
-func (s *ilinkStore) statePath() string             { return filepath.Join(s.dir, "ilink.json") }
-func (s *ilinkStore) tokenPath(acct string) string  { return filepath.Join(s.dir, "ilink-tok-"+sanitizeAcct(acct)+".enc") }
-func (s *ilinkStore) keyPath() string               { return filepath.Join(s.dir, "ilink.key") }
+func (s *ilinkStore) statePath() string { return filepath.Join(s.dir, "ilink.json") }
+func (s *ilinkStore) tokenPath(acct string) string {
+	return filepath.Join(s.dir, "ilink-tok-"+sanitizeAcct(acct)+".enc")
+}
+func (s *ilinkStore) keyPath() string { return filepath.Join(s.dir, "ilink.key") }
 
 func sanitizeAcct(acct string) string {
 	if acct == "" {
@@ -198,7 +200,7 @@ func loadOrCreateIlinkKey(dir string) []byte {
 // seal/open delegate to the shared AES-GCM helpers (notify_providers.go) so the
 // iLink token store and the notify config store use one encryption path (one key).
 func (s *ilinkStore) seal(plain []byte) ([]byte, error) { return aesgcmSeal(s.key, plain) }
-func (s *ilinkStore) open(data []byte) ([]byte, error) { return aesgcmOpen(s.key, data) }
+func (s *ilinkStore) open(data []byte) ([]byte, error)  { return aesgcmOpen(s.key, data) }
 
 // ilinkAtomicWrite writes data to a temp file then renames it into place so a
 // crash mid-write never leaves a half-written (and now undecryptable) file.
@@ -357,8 +359,8 @@ func (s *ilinkStore) ensureStarted() {
 
 	// A logged-in/resumable channel means there is someone to notify → make sure
 	// the shared event poller is running even if Web Push has no subscriptions.
-	if s.server != nil && s.server.push != nil {
-		s.server.push.ensureNotifier()
+	if s.server != nil {
+		s.server.ensureNotifier()
 	}
 	logger.Info("ilink client started")
 }
@@ -423,8 +425,8 @@ func (s *ilinkStore) inboundRefresh(userID, ctxToken string) {
 		client.SetContextToken(userID, ctxToken)
 	}
 	// Someone is now reachable → ensure the poller runs.
-	if s.server != nil && s.server.push != nil {
-		s.server.push.ensureNotifier()
+	if s.server != nil {
+		s.server.ensureNotifier()
 	}
 }
 
@@ -533,13 +535,13 @@ func (s *ilinkStore) logout() {
 
 // statusSnapshot is the frontend-facing view of channel-B state.
 type ilinkStatus struct {
-	LoggedIn    bool   `json:"loggedIn"`
-	Active      bool   `json:"active"` // can push right now (logged in, seeded, not dormant, within window)
-	Dormant     string `json:"dormant,omitempty"`
-	SentCount   int    `json:"sentCount"`
-	MaxSends    int    `json:"maxSends"`
-	UserID      string `json:"userId,omitempty"`
-	QRPending   bool   `json:"qrPending"`
+	LoggedIn  bool   `json:"loggedIn"`
+	Active    bool   `json:"active"` // can push right now (logged in, seeded, not dormant, within window)
+	Dormant   string `json:"dormant,omitempty"`
+	SentCount int    `json:"sentCount"`
+	MaxSends  int    `json:"maxSends"`
+	UserID    string `json:"userId,omitempty"`
+	QRPending bool   `json:"qrPending"`
 }
 
 func (s *ilinkStore) status() ilinkStatus {

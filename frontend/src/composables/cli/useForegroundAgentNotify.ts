@@ -1,24 +1,26 @@
 /**
  * useForegroundAgentNotify — the open-but-unfocused-tab half of the notify story.
  *
- * Backend Web Push covers the NO-tab case. This covers the case where a tab IS open
- * but the user is looking elsewhere (document.hidden): we watch the pushed tmux_state
- * frames for any pane whose agentStatus transitions INTO `waiting`, and — only then,
- * only if the document is hidden and Notification permission is granted — raise a
- * local Notification.
+ * This covers the case where a tab IS open but the user is looking elsewhere
+ * (document.hidden): we watch the pushed tmux_state frames for any pane whose
+ * agentStatus transitions INTO `waiting`, and — only then, only if the document is
+ * hidden and Notification permission is already granted — raise a local Notification.
+ *
+ * Self-contained: it depends only on the standard `Notification` API (checked inline),
+ * NOT on any service-worker / Web-Push plumbing — the app raising a purely local
+ * notification is orthogonal to whether the browser can do Web Push at all.
  *
  * Dedupe + no-double-fire discipline:
  *  - Per-pane edge detection: fire only on running/idle/… → waiting, never on a
  *    pane that was already waiting (prevents repeat-fire on every 1s diff frame).
  *    The priming/edge/pruning rules are NOT restated here — they come from the shared
  *    `statusEdgeDetector`, the same primitive the attention HUD observes windows with.
- *  - tag === `dw-agent-${sessionId}` matches the SW push tag, so if the backend
- *    push lands too the OS collapses them onto one notification instead of two.
+ *  - tag === `dw-agent-${sessionId}` coalesces repeat notifications for the same
+ *    session onto one OS notification instead of stacking several.
  */
 import { watch, onUnmounted } from 'vue'
 import type { TmuxState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 import { createStatusEdgeDetector } from '@terminal/composables/cli/statusEdgeDetector'
 
 interface PaneKey { window: number; pane: number }
@@ -26,7 +28,6 @@ function keyOf(k: PaneKey): string { return `${k.window}:${k.pane}` }
 
 export function useForegroundAgentNotify(sessionId: () => string): void {
   const tmux = useTmuxState(sessionId)
-  const push = usePushNotifications()
   // Per-pane status memory. Shared implementation (one definition of priming/edge/pruning);
   // this instance is ours alone, keyed on pane × raw agentStatus.
   const edges = createStatusEdgeDetector<string>()
@@ -50,8 +51,9 @@ export function useForegroundAgentNotify(sessionId: () => string): void {
   function notifyWaiting(label: string): void {
     // Only the open-but-unfocused case is ours; a focused tab needs no nudge.
     if (typeof document === 'undefined' || !document.hidden) return
-    if (push.permission.value !== 'granted') return
-    if (typeof Notification === 'undefined') return
+    // Inlined support + permission gate (decoupled from the removed push composable):
+    // raise only when the Notification API exists and the user already granted permission.
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
     try {
       const sid = sessionId()
       const n = new Notification('Agent 等待输入', {

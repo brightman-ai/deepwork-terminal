@@ -57,22 +57,14 @@
       @touchend.stop
     >+</button>
 
-    <!-- WS7 secondary entry — contextual notify bell. Pushed to the right; badged when
-         notifications are off, and a one-time inline hint pops near it the first time any pane
-         enters `waiting` while unsubscribed. Opens the shared guide. The connection heartbeat is
-         NOT here — it is pinned (non-scrolling) in the surface status row so a long window list
-         can't push it off-screen. -->
+    <!-- Secondary entry — notify bell. Pushed to the right; a plain tap opens the notify
+         config sheet. The connection heartbeat is NOT here — it is pinned (non-scrolling) in
+         the surface status row so a long window list can't push it off-screen. -->
     <div class="tpb-spacer" />
 
     <div class="tpb-bell-wrap">
-      <Transition name="tpb-hint">
-        <span v-if="showWaitingHint" class="tpb-hint" data-testid="tmux-notify-hint">
-          有 agent 在等待 — 开启通知？
-        </span>
-      </Transition>
       <button
         class="tpb-bell"
-        :class="{ 'is-nudge': bellNudge, 'is-alert': anyWaiting && !push.subscribed.value }"
         type="button"
         title="通知设置"
         aria-label="通知设置"
@@ -84,7 +76,6 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
         </svg>
-        <span v-if="bellNudge" class="tpb-bell-dot" />
       </button>
     </div>
   </div>
@@ -104,10 +95,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
 import { windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
 const props = defineProps<{
@@ -146,33 +136,13 @@ const tmux = useTmuxState(() => props.sessionId)
 const ready = tmux.ready
 const attached = tmux.attached
 const windows = tmux.windows
-const push = usePushNotifications()
 
-// Bell nudges (amber dot) whenever notifications aren't on and aren't hard-denied.
-const bellNudge = computed(() =>
-  push.permission.value !== 'denied' && !push.subscribed.value,
-)
-
+// Passive attention roll-up on the overview capsule uses this; the bell no longer depends on it.
 const anyWaiting = computed(() =>
   windows.value.some(w => windowRawStatus(w) === 'waiting'),
 )
 
-// One-time inline hint: first time a pane enters `waiting` while unsubscribed, pop a
-// hint near the bell for a few seconds. `hintShown` makes it fire at most once per tab.
-const showWaitingHint = ref(false)
-const hintShown = ref(false)
-let hintTimer: ReturnType<typeof setTimeout> | null = null
-watch(anyWaiting, (waiting) => {
-  if (waiting && !hintShown.value && !push.subscribed.value && push.permission.value !== 'denied') {
-    hintShown.value = true
-    showWaitingHint.value = true
-    if (hintTimer) clearTimeout(hintTimer)
-    hintTimer = setTimeout(() => { showWaitingHint.value = false }, 6000)
-  }
-})
-
 function onBellClick(): void {
-  showWaitingHint.value = false
   emit('open-notify')
 }
 
@@ -368,16 +338,7 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   transition: color 0.1s, background 0.1s;
 }
 .tpb-bell:active { transform: scale(0.92); }
-.tpb-bell.is-nudge { color: #b08fd0; }
-.tpb-bell.is-alert { color: #f08a3c; }
-.tpb-bell-dot {
-  position: absolute;
-  top: 3px; right: 3px;
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: #f08a3c;
-  box-shadow: 0 0 0 2px #16121f;
-}
+.tpb-bell:hover { color: #b08fd0; }
 
 /* Global roll-up (compact glance) merged INTO the leading Agent Overview capsule (方向 Y). */
 .tpb-caps-rollup { display: inline-flex; align-items: center; gap: 5px; font-size: 0.62rem; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -409,25 +370,6 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--status-waiting); box-shadow: 0 0 0 2px #16121f;
 }
-
-.tpb-hint {
-  position: absolute;
-  right: calc(100% + 6px);
-  top: 50%;
-  transform: translateY(-50%);
-  white-space: nowrap;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: #251a14;
-  border: 1px solid #4a3320;
-  color: #e0b08a;
-  font-size: 0.62rem;
-  font-weight: 500;
-  pointer-events: none;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-}
-.tpb-hint-enter-active, .tpb-hint-leave-active { transition: opacity 0.2s ease, transform 0.2s ease; }
-.tpb-hint-enter-from, .tpb-hint-leave-to { opacity: 0; transform: translateY(-50%) translateX(6px); }
 
 /* Per-window cwd/status tip. Teleported to <body> to escape the bar's overflow clip;
    Vue keeps the scoped data-attr on teleported nodes, so these scoped rules still apply. */

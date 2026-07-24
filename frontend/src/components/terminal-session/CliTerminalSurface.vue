@@ -82,12 +82,9 @@
       @touchstart.passive="onTerminalTouchStart"
       @touchend.passive="onTerminalTouchEnd"
     >
-      <!-- WS7 primary entry — always-visible install/notify icon, top-right of the
-           terminal surface (the workbench title row lives in the parent CliTabBar). -->
-      <!-- ONE notification entry: the platform-aware install/notify icon opens the
-           quick notify-provider sheet (toggles/test/status). The PWA-install + browser
-           push-subscribe guide is reached from INSIDE that sheet (its "安装应用 / 开启
-           浏览器通知" action), so there is no second redundant bell. -->
+      <!-- TUI-mode fallback entry — shown only when copy/scroll is degraded (fullscreen TUI).
+           The notify entry point lives on the pane bar's bell → the shared NotifyQuickSheet
+           (and the settings Notifications section); there is no install/PWA icon here. -->
       <div class="surface-notify-entries">
         <button
           v-if="tuiState === 'collapsed'"
@@ -103,7 +100,6 @@
           </svg>
           <span class="surface-tui-dot" />
         </button>
-        <InstallNotifyIcon @open="notifyQuickOpen = true" />
       </div>
       <!-- Non-blocking paste-upload feedback: reads the SSOT upload-progress store owned
            by useClipboardPaste (via pasteResolver.uploads). Delayed-reveal (300ms) means a
@@ -270,19 +266,11 @@
       @update:layout-mode="drawerLayoutMode = $event"
     />
 
-    <!-- WS7: platform-aware install + notification guide (shared by both entries). -->
-    <InstallGuideSheet
-      :session-id="sessionId"
-      :open="installGuideOpen"
-      @close="installGuideOpen = false"
-    />
-
     <!-- Quick notify-provider config sheet — same /api/notify/config SSOT as the
          settings Notifications section, so toggling/testing stays in lock-step. -->
     <NotifyQuickSheet
       :open="notifyQuickOpen"
       @close="notifyQuickOpen = false"
-      @open-install="notifyQuickOpen = false; installGuideOpen = true"
     />
 
     <!-- Claude fullscreen → copy/scroll broken advisory; switch flips the live session to classic. -->
@@ -352,8 +340,6 @@ import AgentOverview from '@terminal/components/terminal-session/AgentOverview.v
 import ConnectionChip from '@ce/components/connection/ConnectionChip.vue'
 import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
-import InstallGuideSheet from '@terminal/components/terminal-session/InstallGuideSheet.vue'
-import InstallNotifyIcon from '@terminal/components/terminal-session/InstallNotifyIcon.vue'
 import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickSheet.vue'
 import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
@@ -535,7 +521,6 @@ const bottomBarRef = ref<HTMLDivElement>()
 
 const tmuxDetected = ref(false)
 const tmuxSheetOpen = ref(false)
-const installGuideOpen = ref(false) // WS7: install + notify guide sheet
 const notifyQuickOpen = ref(false) // quick notify-provider config sheet
 
 // "Claude is in fullscreen → copy/scroll broken" advisory. Fed by the terminal buffer-type change
@@ -1802,8 +1787,9 @@ function clipboardWrite(text: string): Promise<boolean> {
 
 // onSendKey + openInstallGuide are exposed so the host (CliPortal) can drive the
 // relocated tmux pane bar — which now lives in the header/status row, outside this
-// surface's body. openInstallGuide backs the pane bar's contextual notify bell.
-function openInstallGuide() { installGuideOpen.value = true }
+// surface's body. openInstallGuide opens the notify-provider quick sheet (the notify
+// entry point backing the pane bar's bell); the name is kept for the host API.
+function openInstallGuide() { notifyQuickOpen.value = true }
 defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide })
 </script>
 

@@ -65,10 +65,10 @@ func (s *Server) handleNotifyConfigSave(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	// Enabling a channel (e.g. a WeChat/Feishu/DingTalk webhook) must bring the notifier up
-	// now — otherwise nothing polls for turn-ends until the next restart. Idempotent + a no-op
-	// when it's already running; harmless if the user just toggled everything off.
-	s.push.ensureNotifier()
+	// A channel toggle changes whether anything needs polling: enabling brings the notifier up
+	// now (else nothing polls for turn-ends until the next restart), disabling the last channel
+	// stops it. reconcileNotifier makes the running state match "any channel enabled".
+	s.reconcileNotifier(r.Context())
 	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
 }
 
@@ -108,7 +108,7 @@ func (s *Server) handleNotifyProviderSettings(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// Configuring a webhook is intent to use it → make sure the notifier is running.
-	s.push.ensureNotifier()
+	s.ensureNotifier()
 	writeJSON(w, http.StatusOK, s.notifyConfigPayload(r))
 }
 
@@ -155,8 +155,8 @@ func (s *Server) notifyTestEvent() notify.Event {
 }
 
 // handleNotifyStatus → GET /notify/status. Back-compat overview consumed by the
-// current IGS UI: iLink + web-push health sub-objects + tunnel URL + the new
-// provider config/metrics (so the UI can migrate incrementally to /api/notify/config).
+// current IGS UI: iLink health + tunnel URL + notifier liveness + the new provider
+// config/metrics (so the UI can migrate incrementally to /api/notify/config).
 func (s *Server) handleNotifyStatus(w http.ResponseWriter, r *http.Request) {
 	var ilinkView ilinkStatus
 	if s.ilink != nil {
@@ -167,10 +167,6 @@ func (s *Server) handleNotifyStatus(w http.ResponseWriter, r *http.Request) {
 	payload := s.notifyConfigPayload(r)
 	payload["tunnelUrl"] = s.tunnel.PublicURL()
 	payload["ilink"] = ilinkView
-	payload["webPush"] = map[string]any{
-		"subscriptions":   s.push.count(),
-		"notifierRunning": s.push.notifierRunning(),
-		"subs":            s.push.subsDetails(),
-	}
+	payload["notifierRunning"] = s.notifierRunning()
 	writeJSON(w, http.StatusOK, payload)
 }
