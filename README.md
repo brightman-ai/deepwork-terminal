@@ -2,13 +2,15 @@
 
 **English** | [简体中文](README_CN.md)
 
-A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) — from your phone or a laptop on the go, reach and drive the desktop/laptop back home where the agent actually runs. With auth, Cloudflare tunnel, Web Push / WeChat notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
+A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) — reach the machine where the agent actually runs from anywhere: your **phone** on the go, or a **browser tab in place of an SSH session** on a remote box. With auth, one-flag public access via Cloudflare tunnel, Web Push / WeChat notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
 
 ## Why deepwork-terminal
 
 You kick off a long refactor in Claude Code and close your laptop. On the way out it stalls on a `Proceed? [Y/n]` — and the rest of the run is wasted. **Agents are async, but you're mobile, and the terminal is pinned to one machine.**
 
 deepwork-terminal moves that terminal — the agent's status, its output files, the `[Y/n]` prompt — onto your phone's browser, and pings you (Web Push **or** WeChat) when an agent actually needs you. Tap the notification, land on the exact session, reply, get back to your day.
+
+And it isn't only for when you're away from the keyboard. **SSH into a box to run agents there?** A browser tab beats a raw SSH session at exactly the things that are clumsy over SSH: flip between tmux panes without memorizing shortcuts, get pinged the moment *one* of several agents finishes, drag a file up or pull one down, and paste a screenshot straight to the agent — no `scp`, no hunting for the right pane.
 
 Four details that actually change the experience:
 
@@ -29,17 +31,23 @@ Four details that actually change the experience:
 **Mobile-first terminal**
 - Full PTY terminal over WebSocket, with reconnect
 - Quick-keyboard bar for tmux (copy-mode, split / zoom / switch pane, new / list / detach session) — no shortcuts to memorize, dynamic prefix
-- Paste a screenshot with `Ctrl/Cmd+V` → lands in the active pane's cwd, path injected into the terminal; mobile upload too
-- Resource drawer: cross-session upload index, input-history reuse, image / text preview & fuzzy file search
+- Paste a screenshot with `Ctrl/Cmd+V` → lands in the active pane's cwd, path injected into the terminal; mobile upload and one-tap download too
+- Resource drawer: cross-session upload index, input-history reuse, fuzzy file search, and in-browser preview of agent output — markdown, code, text/logs, and HTML reports (source ⇄ rendered toggle)
 
 **Deploy anywhere**
 - Embedded Vue SPA — zero static file serving; ships as a single binary
-- Optional Cloudflare Tunnel (auto-downloads `cloudflared`)
+- One-flag public access — `--tunnel` opens a Cloudflare quick tunnel at launch (auto-downloads `cloudflared`, no account needed); persistent named tunnels via the UI
 - Hook points for auth, session lifecycle, and shell customization
 
 ## Install
 
-Fastest path — a prebuilt binary, **no Go or Node required**:
+**AI-native — just ask your coding agent.** You already have Claude Code or Codex open; hand it the whole job in one sentence:
+
+> *"Install deepwork-terminal from github.com/brightman-ai/deepwork-terminal — grab a prebuilt binary for my platform, or build from source if there isn't one. Run it on port 8222, then ask me whether to expose it on the public internet with `--tunnel`."*
+
+The agent downloads (or builds), launches, and reads the access URL + login code back to you from the startup output. Because public access is a single `--tunnel` flag, "now make it reachable from my phone" is one more sentence — no dashboard, no config file.
+
+Prefer to do it by hand? A prebuilt binary, **no Go or Node required**:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/brightman-ai/deepwork-terminal/main/install.sh | sh
@@ -83,8 +91,11 @@ Grab a tarball from the [Releases page](https://github.com/brightman-ai/deepwork
 
 ```bash
 dw-terminal --version
-dw-terminal --addr :8022
+dw-terminal --addr :8222              # serve on port 8222 (reachable on your LAN)
+dw-terminal --addr :8222 --tunnel     # ... and expose it on the public internet
 ```
+
+On startup dw-terminal prints — to **stdout**, so an agent driving it can read them straight back — the reachable URLs (local + network, plus the public `*.trycloudflare.com` URL when `--tunnel` is set) and the login code. Run `dw-terminal --help` for all flags.
 
 **Platform notes**
 
