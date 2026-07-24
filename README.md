@@ -2,24 +2,31 @@
 
 **English** | [简体中文](README_CN.md)
 
-A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) — reach the machine where the agent actually runs from anywhere: your **phone** on the go, or a **browser tab in place of an SSH session** on a remote box. With auth, one-flag public access via Cloudflare tunnel, Web Push / WeChat notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
+A **mobile-first web terminal for watching and steering your AI coding agents** (Claude Code / Codex) — reach the machine where the agent actually runs from anywhere: your **phone** on the go, or a **browser tab in place of an SSH session** on a remote box. Sessions live in tmux, so they survive disconnects. With auth, one-flag public access via Cloudflare tunnel, WeChat / Feishu / Web Push notifications, and an embedded Vue frontend. Drop it into any Go application via a single HTTP handler.
 
 ## Why deepwork-terminal
 
-You kick off a long refactor in Claude Code and close your laptop. On the way out it stalls on a `Proceed? [Y/n]` — and the rest of the run is wasted. **Agents are async, but you're mobile, and the terminal is pinned to one machine.**
+You kick off a long refactor in Claude Code and close your laptop. On the way out it stalls on a `Proceed? [Y/n]` — and the rest of the run is wasted. **Agents run async on one machine; you don't stay at that machine.**
 
-deepwork-terminal moves that terminal — the agent's status, its output files, the `[Y/n]` prompt — onto your phone's browser, and pings you (Web Push **or** WeChat) when an agent actually needs you. Tap the notification, land on the exact session, reply, get back to your day.
+deepwork-terminal unpins the terminal: it puts the agent's status, its output files, and that `[Y/n]` prompt in any browser, **keeps the session alive across disconnects**, and **pings you (WeChat / Feishu / Web Push) the moment an agent needs you or finishes**.
 
-And it isn't only for when you're away from the keyboard. **SSH into a box to run agents there?** A browser tab beats a raw SSH session at exactly the things that are clumsy over SSH: flip between tmux panes without memorizing shortcuts, get pinged the moment *one* of several agents finishes, drag a file up or pull one down, and paste a screenshot straight to the agent — no `scp`, no hunting for the right pane.
+## Who it's for
 
-Four details that actually change the experience:
+Three situations where it earns its place:
 
-1. **Remote screenshot paste** — `Ctrl/Cmd+V` a screenshot on your PC; it lands in the agent's current working directory and the relative path is injected straight into the command line. Mobile file/photo upload works too — and since the input box is just a normal field, multi-line text and your phone's **voice input** go straight to the agent.
-2. **Watch agents from your phone** — install as a PWA for Web Push and tap to deep-link back to the exact session; WeChat (iLink official channel) as a backup; an agent status strip up top; a keyboard-aware viewport that never covers your input.
-3. **tmux quick-keyboard bar** — one row of buttons for copy / split / switch pane / new session, with your live tmux prefix shown — no shortcuts to memorize. No tmux? You can still run multiple terminals, just without pane splits.
-4. **Cross-session continuity** — a global upload index, input-history reuse, and a file drawer (image/text preview + fuzzy search) that follow you across sessions.
+**1 · You step away — the agent shouldn't stall.**
+You're running Claude Code / Codex on your desktop, then you're off to a meeting or out the door. When the agent hits a `[Y/n]` or finishes, a push — **WeChat / Feishu / browser Web Push** — finds you; tap it to deep-link straight to that session and reply in one line. The input box is a normal field, so multi-line text and your phone's **voice input** go right to the agent. *Async agent, mobile you.*
 
-**Who it's for**: people who run agents heavily and step away from the desk often. **Not for**: someone who only codes in one window on one machine and never goes remote — you don't need this.
+**2 · Remote development that survives the network.**
+Your session lives in **tmux** on the dev box, so the **process persists** — lock the phone, switch apps, drop off wifi, hop networks; reconnect and you're exactly where you left off. A two-hour agent run never dies to a flaky link. It's `tmux`/`screen`'s "detach and survive," but with a web/mobile UI you'll actually want to use — reach it over HTTPS from anywhere via the built-in Cloudflare tunnel or your own Tailscale.
+
+**3 · Heavy tmux user, many panes.**
+Several agents open at once. deepwork-terminal gives tmux the best touch/web control layer there is: a one-row quick-key bar (copy / split / switch pane / new session, live prefix shown — nothing to memorize), a pane overview, and one-tap window switching. Flipping between agents gets smooth enough that you stop reaching for the raw terminal.
+
+**Across all three — SSH-grade file transfer, no `scp`.**
+Copy, upload, download, and browse files in the agent's working tree, all in the browser: `Ctrl/Cmd+V` a screenshot straight into the cwd (relative path auto-injected), upload from your phone's camera roll, **chunked resumable upload** for big files over a flaky link or a tunnel, one-tap download, and a VS-Code-style directory tree (create / rename / delete, fuzzy search, in-browser preview). The moves that are clumsy over SSH become one step.
+
+**Not for** someone who only codes in one window on one machine and never goes remote — you genuinely don't need this.
 
 ## Features
 
