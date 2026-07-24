@@ -109,11 +109,11 @@ func TestClipboardUpload_TooLargeIs413(t *testing.T) {
 	require.NoError(t, err)
 	sess := sessionByName(t, sm, "clip")
 
-	oversized := bytes.Repeat([]byte("x"), clipboardMaxUploadSize+1024)
+	oversized := bytes.Repeat([]byte("x"), ClipboardMaxUploadSize+1024)
 	status, body := postPasteUploadRaw(t, server.URL, sess.ID, dir, "huge.bin", "application/octet-stream", oversized)
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, status, "an oversized upload must be 413, not a generic 400")
-	assert.EqualValues(t, clipboardMaxUploadSize>>20, body["limit_mb"], "the limit must travel with the error")
+	assert.EqualValues(t, ClipboardMaxUploadSize>>20, body["limit_mb"], "the limit must travel with the error")
 }
 
 // TestSanitizeClipboardFilename_RejectsTraversal: with the MIME gate gone, name sanitation is
