@@ -192,18 +192,53 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.listener = ln
 	s.mu.Unlock()
 
-	// Print startup info: auth code + LAN address.
-	port := s.Port()
-	fmt.Fprintf(os.Stderr, "\n  Auth Code: %s\n", s.config.AuthCode)
-	hostname, _ := os.Hostname()
-	fmt.Fprintf(os.Stderr, "  LAN:       http://%s:%d\n\n", hostname, port)
-
 	srv := &http.Server{Handler: secured}
-	go func() {
-		<-ctx.Done()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	// One canonical startup summary (see emitStartupBanner). Local is reachable the moment
+	// Serve accepts, so we print before bringing up the optional tunnel.
+	s.emitStartupBanner()
+
+	// Public access on demand: open a Cloudflare quick tunnel and append its live URL to the
+	// banner. Synchronous — Serve is already accepting above, so cloudflared can reach
+	// localhost, and a printed URL means the tunnel is actually up (not merely requested).
+	// ctx cancellation (Ctrl-C mid-connect) aborts the wait cleanly.
+	if s.config.Tunnel {
+		localAddr := fmt.Sprintf("http://localhost:%d", s.Port())
+		if url, terr := s.tunnel.Start(ctx, localAddr); terr != nil {
+			fmt.Fprintf(os.Stderr, "  Internet:  tunnel failed: %v\n\n", terr)
+		} else {
+			fmt.Printf("  Internet:  %s\n\n", url)
+		}
+	}
+
+	select {
+	case <-ctx.Done():
 		srv.Close()
-	}()
-	return srv.Serve(ln)
+		return nil
+	case err := <-serveErr:
+		return err
+	}
+}
+
+// emitStartupBanner prints the ONE canonical startup summary to stdout — the addresses to
+// reach the server and the auth code to get in. It is the single owner of startup output
+// (main.go prints nothing), so there is one format on one stream: an agent driving the CLI
+// parses every access detail from stdout, and stderr stays reserved for errors. The Internet
+// line is appended by the caller once the optional tunnel is live, so the trailing blank line
+// is emitted here only when no tunnel will follow.
+func (s *Server) emitStartupBanner() {
+	port := s.Port()
+	fmt.Printf("\n  dw-terminal %s\n\n", s.config.Version)
+	fmt.Printf("  Local:     http://localhost:%d\n", port)
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		fmt.Printf("  Network:   http://%s:%d\n", hostname, port)
+	}
+	fmt.Printf("  Auth Code: %s\n", s.config.AuthCode)
+	if !s.config.Tunnel {
+		fmt.Println()
+	}
 }
 
 // Port returns the actual listening port (useful when Addr is ":0").

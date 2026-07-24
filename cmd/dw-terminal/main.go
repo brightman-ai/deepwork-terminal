@@ -56,9 +56,26 @@ func resolveVersion() string {
 }
 
 func main() {
-	addr := flag.String("addr", ":8022", "listen address")
-	shell := flag.String("shell", "", "shell command (default: $SHELL)")
-	authCode := flag.String("auth-code", "", "auth code (default: generated)")
+	// A self-explaining --help: an agent (or a human) running `dw-terminal --help` should be
+	// able to drive the tool from this text alone — what each flag means, and copy-pasteable
+	// examples for the common intents (LAN-only, public access, pinned code).
+	flag.Usage = func() {
+		out := flag.CommandLine.Output()
+		fmt.Fprint(out, "dw-terminal — a mobile-first web terminal to watch and steer your AI coding\n"+
+			"agents (Claude Code / Codex) from your phone or another machine.\n\n"+
+			"Usage:\n  dw-terminal [flags]\n\nFlags:\n")
+		flag.PrintDefaults()
+		fmt.Fprint(out, "\nExamples:\n"+
+			"  dw-terminal --addr :8222              serve on port 8222 (reachable on your LAN)\n"+
+			"  dw-terminal --addr :8222 --tunnel     also expose it on the public internet\n"+
+			"  dw-terminal --auth-code 1234-5678     pin a known login code instead of a random one\n\n"+
+			"On startup the reachable URLs and the login code are printed to stdout.\n")
+	}
+
+	addr := flag.String("addr", ":8022", "listen address; \":8222\" = port 8222 on all interfaces")
+	tunnel := flag.Bool("tunnel", false, "expose over the public internet via a Cloudflare quick tunnel (no account needed)")
+	shell := flag.String("shell", "", "shell to launch for each session (default: $SHELL)")
+	authCode := flag.String("auth-code", "", "login code (default: a random code, printed at startup)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -72,6 +89,7 @@ func main() {
 	cfg := terminal.DefaultConfig()
 	cfg.Addr = *addr
 	cfg.Version = resolvedVersion
+	cfg.Tunnel = *tunnel
 	if *authCode != "" {
 		cfg.AuthCode = *authCode
 	}
@@ -88,7 +106,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	fmt.Printf("dw-terminal listening on http://localhost%s\n", cfg.Addr)
+	// The server owns the startup banner (addresses + auth code, and the tunnel URL when
+	// --tunnel is set) — a single output owner, so main.go prints nothing here.
 	if err := srv.ListenAndServe(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 	}
