@@ -86,7 +86,12 @@
                   >
                     <span class="tss-win-idx mono">{{ w.index }}</span>
                     <span class="tss-win-name">{{ w.name }}</span>
-                    <span v-if="winDot(w)" class="tss-win-dot" :style="{ background: winDot(w) }" />
+                    <span
+                      v-if="winDot(w)"
+                      class="tss-win-dot"
+                      :class="winMotionClass(w)"
+                      :style="{ background: winDot(w) }"
+                    />
                   </button>
                 </div>
               </div>
@@ -103,7 +108,7 @@ import { computed } from 'vue'
 import type { TmuxSessionState, TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
-import { windowRawStatus, STATUS_COLOR, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
 const props = defineProps<{
   sessionId: string
@@ -165,6 +170,17 @@ function winDot(w: TmuxWindowState): string {
   const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
   return s === 'idle' ? '' : STATUS_COLOR[s]
 }
+
+/** Motion class for the window dot. Kept separate from winDot()'s color rather than folded into
+ *  one string because color and motion land on different CSS surfaces (inline :style vs a class
+ *  rule). Mirrors TmuxPaneBar's dotClass(); `done-unseen` maps to '' because STATUS_MOTION says
+ *  it is static — see that constant for the three-state contract. */
+function winMotionClass(w: TmuxWindowState): string {
+  const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
+  if (s === 'waiting') return 'tss-win-dot--waiting'
+  if (s === 'running') return 'tss-win-dot--running'
+  return ''
+}
 </script>
 
 <style scoped>
@@ -185,6 +201,16 @@ function winDot(w: TmuxWindowState): string {
      intentionally muted "tool healthy" tone for the AGENTS rollup (a per-tool aggregate, not
      a per-window EffectiveStatus), so it stays a literal, not a drifted copy. */
   --status-waiting: v-bind('STATUS_COLOR.waiting');
+  /* Per-status dot motion — bound live from STATUS_MOTION (useAgentOverview.ts), the same
+     constant TmuxPaneBar.vue and AgentOverview.vue bind (see .tss-win-dot--* below), so no
+     rhythm can drift between the three consumers. `done-unseen` is STATUS_MOTION's documented
+     `null` (static) and therefore has no vars here — that absence IS the contract. */
+  --dot-waiting-duration: v-bind('STATUS_MOTION.waiting.duration');
+  --dot-waiting-easing: v-bind('STATUS_MOTION.waiting.easing');
+  --dot-waiting-min: v-bind('STATUS_MOTION.waiting.minOpacity');
+  --dot-running-duration: v-bind('STATUS_MOTION.running.duration');
+  --dot-running-easing: v-bind('STATUS_MOTION.running.easing');
+  --dot-running-min: v-bind('STATUS_MOTION.running.minOpacity');
   display: flex;
   flex-direction: column;
   background: #160f22;
@@ -293,7 +319,17 @@ function winDot(w: TmuxWindowState): string {
 .tss-chip.is-waiting { background: #2a1018; border-color: #5a2030; }
 .tss-chip-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .tss-chip-dot.busy { background: #6a8a6a; } /* intentionally muted — see .tss-panel comment */
-.tss-chip-dot.wait { background: var(--status-waiting); animation: tss-pulse 1.3s infinite; }
+/* This is the per-TOOL rollup chip, not a per-window EffectiveStatus dot — but it is still the
+   "something is waiting for you" red, and it sits on the SAME sheet as the .tss-win-dot--waiting
+   dots below. It used to run its own tss-pulse (1.3s, 1↔0.4) from back when waiting dots were
+   static and nothing could clash with it. Now that waiting dots pulse too, a second, faster,
+   stronger red rhythm on the same screen is precisely the "two things randomly blinking" failure
+   STATUS_MOTION warns about — so it joins the SSOT rather than staying a third vocabulary. */
+.tss-chip-dot.wait {
+  background: var(--status-waiting);
+  --dot-min-opacity: var(--dot-waiting-min);
+  animation: status-dot-pulse var(--dot-waiting-duration) var(--dot-waiting-easing) infinite;
+}
 .tss-chip-name { color: #c8a0e8; font-weight: 600; }
 .tss-chip-count {
   color: #9a86ba; font-variant-numeric: tabular-nums;
@@ -344,10 +380,26 @@ function winDot(w: TmuxWindowState): string {
 /* Color is bound inline from STATUS_COLOR (useAgentOverview — the shared SSOT with
    TmuxPaneBar), not a class rule here, so this list can't drift to a different palette. */
 .tss-win-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+/* The three-state motion contract (STATUS_MOTION doc comment has the full argument): waiting =
+   slow/big, running = quick/small, done-unseen = static. Each rule only remaps its own entry onto
+   the single --dot-min-opacity the one shared @keyframes reads. Opacity-only. */
+.tss-win-dot--waiting {
+  --dot-min-opacity: var(--dot-waiting-min);
+  animation: status-dot-pulse var(--dot-waiting-duration) var(--dot-waiting-easing) infinite;
+}
+.tss-win-dot--running {
+  --dot-min-opacity: var(--dot-running-min);
+  animation: status-dot-pulse var(--dot-running-duration) var(--dot-running-easing) infinite;
+}
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: var(--dot-min-opacity); }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tss-win-dot--waiting, .tss-win-dot--running, .tss-chip-dot.wait { animation: none; opacity: 1; }
+}
 
 .tss-empty { color: #5a4a78; font-style: italic; font-size: 0.7rem; padding: 4px 0; }
-
-@keyframes tss-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 /* Sheet enter/leave */
 .tss-fade-enter-active, .tss-fade-leave-active { transition: opacity 0.18s ease; }

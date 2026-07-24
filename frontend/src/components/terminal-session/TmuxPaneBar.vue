@@ -108,7 +108,7 @@ import { computed, ref, watch } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { usePushNotifications } from '@terminal/composables/cli/usePushNotifications'
-import { windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
 const props = defineProps<{
   sessionId: string
@@ -253,6 +253,16 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   --status-waiting: v-bind('STATUS_COLOR.waiting');
   --status-running: v-bind('STATUS_COLOR.running');
   --status-done: v-bind("STATUS_COLOR['done-unseen']");
+  /* Per-status dot motion — bound live from STATUS_MOTION (useAgentOverview.ts), the same
+     constant TmuxStatusSheet.vue and AgentOverview.vue bind, so no rhythm can drift between the
+     three dot-rendering consumers. `done-unseen` is STATUS_MOTION's documented `null` (static),
+     so it has no vars here — the absence below IS the contract, not an oversight. */
+  --dot-waiting-duration: v-bind('STATUS_MOTION.waiting.duration');
+  --dot-waiting-easing: v-bind('STATUS_MOTION.waiting.easing');
+  --dot-waiting-min: v-bind('STATUS_MOTION.waiting.minOpacity');
+  --dot-running-duration: v-bind('STATUS_MOTION.running.duration');
+  --dot-running-easing: v-bind('STATUS_MOTION.running.easing');
+  --dot-running-min: v-bind('STATUS_MOTION.running.minOpacity');
   display: flex;
   align-items: center;
   gap: 4px;
@@ -315,9 +325,29 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   height: 5px;
   border-radius: 50%;
 }
-.tpb-dot--waiting { background: var(--status-waiting); }   /* red — needs your input */
-.tpb-dot--running { background: var(--status-running); }   /* green — agent actively running (incl. thinking) */
-.tpb-dot--done { background: var(--status-done); }         /* amber — finished, needs you (unseen); distinct from running-green + waiting-red */
+/* The three-state motion contract (see STATUS_MOTION's doc comment for the whole argument):
+   waiting = slow, big pulse ("I'm waiting for you"); running = quick, small one ("I'm alive");
+   done-unseen = static. Each rule only remaps its own STATUS_MOTION entry onto the single
+   --dot-min-opacity the one shared @keyframes reads — one curve, two rhythms, no rival copy. */
+.tpb-dot--waiting {
+  background: var(--status-waiting);   /* red — needs your input */
+  --dot-min-opacity: var(--dot-waiting-min);
+  animation: status-dot-pulse var(--dot-waiting-duration) var(--dot-waiting-easing) infinite;
+}
+.tpb-dot--running {
+  background: var(--status-running);   /* green — agent actively running (incl. thinking) */
+  --dot-min-opacity: var(--dot-running-min);
+  animation: status-dot-pulse var(--dot-running-duration) var(--dot-running-easing) infinite;
+}
+.tpb-dot--done { background: var(--status-done); }         /* amber — finished, unseen; STATIC by contract */
+
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: var(--dot-min-opacity); }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tpb-dot--waiting, .tpb-dot--running { animation: none; opacity: 1; }
+}
 
 /* WS7 — contextual notify bell, pushed to the trailing edge. */
 .tpb-spacer { flex: 1; min-width: 6px; }

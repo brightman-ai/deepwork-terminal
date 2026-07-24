@@ -113,8 +113,14 @@ let graphvizPromise: Promise<{ dot(src: string): string }> | null = null
 function loadGraphviz() {
   if (!graphvizPromise) {
     graphvizPromise = (async () => {
-      const { Graphviz } = await import('@hpcc-js/wasm/graphviz')
-      return Graphviz.load()
+      // @hpcc-js/wasm@2.34.5 ships a `types/graphviz.d.ts` that re-exports from the (uninstalled,
+      // dev-only) `@hpcc-js/wasm-graphviz` package — an upstream packaging bug, not a runtime
+      // issue: the bundled dist/graphviz.js genuinely exports `Graphviz` at runtime. Narrow the
+      // import to the shape we actually use instead of losing type-checking with `any`.
+      const mod = (await import('@hpcc-js/wasm/graphviz')) as unknown as {
+        Graphviz: { load(): Promise<{ dot(src: string): string }> }
+      }
+      return mod.Graphviz.load()
     })()
   }
   return graphvizPromise

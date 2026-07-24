@@ -192,8 +192,10 @@ func openProcessFiles(pid int) []string {
 				add(target)
 			}
 		}
-	}
-	if len(paths) > 0 {
+		// /proc 可读即为 fd 真相——零 jsonl 命中=该进程确实没开 rollout，也是答案。
+		// 曾经空命中还掉进下面的 lsof 兜底：每轮 tmux 扫描 × 每个 codex pane 对忙进程
+		// 反复 lsof（单次 100% CPU），生产实测并发风暴把 load 拉到 19。lsof 只属于
+		// 无 /proc 的平台（macOS/BSD）。
 		return paths
 	}
 	// macOS/BSD fallback. -Fn emits one filename per n-prefixed line and no

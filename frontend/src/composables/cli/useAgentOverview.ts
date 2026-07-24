@@ -34,6 +34,82 @@ export const STATUS_COLOR: Record<Exclude<EffectiveStatus, 'idle'>, string> = {
   'done-unseen': '#e3b341', // amber — finished, unread (distinct from running-green / waiting-red)
 }
 
+/** One status dot's pulse. The peak is ALWAYS opacity 1 (a dot never gets brighter than its
+ *  STATUS_COLOR), so a pulse is fully described by how long one dim→bright→dim cycle takes, the
+ *  curve it takes, and how far down it dims. Amplitude is therefore `1 - minOpacity` — the term
+ *  the vocabulary below reasons in. */
+export interface DotPulse {
+  /** One full dim→bright→dim cycle (CSS `animation-duration`). */
+  duration: string
+  /** CSS `animation-timing-function`. */
+  easing: string
+  /** Opacity at the trough. `1` would be a no-op — express "static" as `null`, not as `1`. */
+  minOpacity: number
+}
+
+/** Shared `@keyframes` token. Not load-bearing for the browser (each scoped style block still
+ *  declares its own copy — Vue scopes keyframe names per-SFC); it exists so `rg -n
+ *  'status-dot-pulse'` finds this export plus exactly its consumers, and a future ad-hoc 2nd
+ *  motion vocabulary stands out immediately. Deliberately ONE keyframes for all statuses: it
+ *  reads `--dot-min-opacity`, which each status rule sets from its own STATUS_MOTION entry, so
+ *  two different rhythms come out of one curve definition rather than two rival ones. */
+export const DOT_PULSE_KEYFRAMES = 'status-dot-pulse'
+
+/** The ONE status→motion mapping, the exact peer of STATUS_COLOR above: color and motion are the
+ *  two halves of what a dot SAYS, so they live together and every dot-rendering consumer (pane
+ *  bar / status sheet / overview grid) binds both via `v-bind` CSS custom properties. Same
+ *  anti-drift mechanism, no second one invented.
+ *
+ *  Keyed over every non-idle status and TOTAL over that set (a test pins the key list): `null`
+ *  means "decided to be static", never "nobody got around to it". `idle` renders no dot at all,
+ *  so it has neither a color nor a motion — same omission as STATUS_COLOR, same reason.
+ *
+ *  ── The three-state motion contract (Human, 2026-07-20; supersedes the original R3 rule that
+ *  only `running` moved) ────────────────────────────────────────────────────────────────────
+ *  | waiting     | 2.6s, 0.35↔1 | slow, big  | "I'm here waiting for you" — insistent, unhurried |
+ *  | running     | 2.0s, 0.75↔1 | quick, small| "I'm still alive" — faint but continuous         |
+ *  | done-unseen | static       | —          | a finished state expresses no liveness, and does
+ *                                              not nag you either                                |
+ *
+ *  Why this replaced "only running breathes": that rule assumed the attention HUD carried the
+ *  "who needs you" signal, so the red dot didn't have to. But the HUD is EVENT-scoped (8s, then
+ *  it collapses) — for most of the time on screen, "who is waiting for you" is carried by the red
+ *  dot alone, next to a green dot that was the only thing moving. An independent Witness read the
+ *  result as backwards ("the ones waiting for me are still, the one I don't need to touch is
+ *  blinking"), which is exactly what the geometry predicts.
+ *
+ *  Why the two rhythms don't fight — reason in SALIENCE, not in period. A slow opacity pulse's
+ *  pull on the eye tracks its rate of luminance change, ≈ 2·amplitude/period:
+ *    waiting  2·0.65/2.6 = 0.50 /s      running  2·0.25/2.0 = 0.25 /s
+ *  Red changes twice as fast as green and swings 2.6× as far, on top of being the more salient
+ *  hue — so the hierarchy is preserved with margin, in the same direction as before but no longer
+ *  by making red mute. Keep that 2:1 salience ratio if you ever retune: raising `running`'s
+ *  amplitude or dropping `waiting`'s is the exact regression this table exists to prevent.
+ *
+ *  Opacity-only by design: no box-shadow / background-color / width. Those force a repaint;
+ *  opacity (and transform) compose on the GPU, so many dots pulsing at once costs no frames on
+ *  mobile. Every consumer must also degrade all of this to static under
+ *  `prefers-reduced-motion: reduce`. Do not vary a period with agent activity (no such signal
+ *  exists), do not enlarge a dot to "add" motion, and do not introduce a third rhythm — a
+ *  waiting-ish thing that pulses on some other schedule is what "two things randomly blinking"
+ *  actually looks like. */
+export const STATUS_MOTION = {
+  waiting: { duration: '2.6s', easing: 'ease-in-out', minOpacity: 0.35 },
+  running: { duration: '2s', easing: 'ease-in-out', minOpacity: 0.75 },
+  'done-unseen': null,
+} as const satisfies Record<Exclude<EffectiveStatus, 'idle'>, DotPulse | null>
+
+/** The ONE urgency ordering, most-urgent-first — co-located with STATUS_COLOR/STATUS_MOTION for
+ *  the same reason they are (an EffectiveStatus and its canonical ranking are one concept).
+ *
+ *  This is the array `groups` below literally iterates, so the overview grid's top-to-bottom order
+ *  IS this constant — and `useAttentionHud`'s `urgencyRank` imports it rather than restating it, so
+ *  the card's "jump to the worst one" cannot drift from the grid's top row. Reordering here
+ *  reorders both, by construction; there is no second copy to forget.
+ *  (Bound by `useAttentionHud.test.ts`'s "URGENCY_ORDER drives the overview groups" test — that
+ *  test is what makes this comment a fact rather than a hope.) */
+export const URGENCY_ORDER: readonly EffectiveStatus[] = ['waiting', 'running', 'done-unseen', 'idle']
+
 /** Raw per-window status from its panes: any waiting → waiting; any running → running; else idle. */
 export function windowRawStatus(w: TmuxWindowState): 'waiting' | 'running' | 'idle' {
   const panes = w.panes ?? []
@@ -87,8 +163,10 @@ export function windowAgentSignals(w: TmuxWindowState): string[] {
     })
 }
 
-/** Stable seen-state key: tmux window id (`@N`), falling back to index if a backend omits it. */
-function windowKey(w: TmuxWindowState): string {
+/** Stable seen-state key: tmux window id (`@N`), falling back to index if a backend omits it.
+ *  Exported because the attention HUD keys its ledgers on the SAME identity the seen layer uses —
+ *  a second copy of this fallback would drift the moment either side changed. */
+export function windowKey(w: TmuxWindowState): string {
   return w.windowId || `#${w.index}`
 }
 
@@ -137,8 +215,15 @@ function saveSeen(map: Record<string, string>): void {
 /** A dated (non-zero) AwaitingSince. A tmux "zero" time (`0001-01-01…`, from omitempty not
  *  applying to time.Time) or an absent value means the wait couldn't be dated (e.g. a PTY-only
  *  permission prompt) → treated as "unknown completion": never persist-dismissable, so such a
- *  high-signal wait keeps showing (incl. across F5) rather than being wrongly muted. */
-function isDatedSince(since: string | undefined): since is string {
+ *  high-signal wait keeps showing (incl. across F5) rather than being wrongly muted.
+ *
+ *  NOT a rare edge case, and not a bug to be fixed upstream: the backend contract-tests the zero
+ *  value (`agentintel/awaiting_since_contract_test.go`), every PTY-derived wait carries it, and
+ *  `CodexDriver` never emits a driver-side waiting at all — so for Codex, EVERY waiting is undated.
+ *  Exported because the attention HUD must branch on the SAME predicate: one policy for "we cannot
+ *  tell two of these apart", not one per consumer. The policy is fail-OPEN (keep showing / stay
+ *  interruptible), because the alternative silently swallows the highest-signal state in the app. */
+export function isDatedSince(since: string | undefined): since is string {
   return !!since && !since.startsWith('0001-01-01')
 }
 
@@ -216,8 +301,7 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
       if (!buckets.has(s)) buckets.set(s, [])
       buckets.get(s)!.push(w)
     }
-    const order: EffectiveStatus[] = ['waiting', 'running', 'done-unseen', 'idle']
-    return order
+    return URGENCY_ORDER
       .filter((s) => buckets.has(s))
       .map((s) => ({
         status: s,
