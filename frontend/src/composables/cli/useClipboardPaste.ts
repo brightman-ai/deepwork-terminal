@@ -287,7 +287,9 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
     return uploadFile(blob, mime, { filename, source: 'legacy-image' })
   }
 
-  return { processPaste, uploadFile, uploadImage, uploading, lastError, uploads: uploadProgress.entries }
+  // dismissUpload exposes the store's single deletion authority (remove) so the progress float
+  // can close an errored pill — the only mutation the float triggers; everything else flows in.
+  return { processPaste, uploadFile, uploadImage, uploading, lastError, uploads: uploadProgress.entries, dismissUpload: uploadProgress.remove }
 }
 
 interface XhrUploadResult {

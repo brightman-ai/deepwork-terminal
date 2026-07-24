@@ -27,7 +27,13 @@ export function classifyUploadFailure(status: number, body: UploadErrorBody | nu
     // limit_mb is sent by the server (clipboardMaxUploadSize). Never hardcode it here — two
     // copies of one number drift exactly the way the two upload allowlists did.
     const mb = body?.limit_mb
-    return { message: mb ? `文件超过 ${mb} MB 上限` : '文件超过大小上限', retryable: false }
+    // Actionable next step: this channel accepts ANY file, so a large one usually compresses
+    // well — point the user at zip rather than leaving them stuck at a hard "too big". (The
+    // number still comes from the server's limit_mb; only the suggestion is fixed text.)
+    return {
+      message: mb ? `文件超过 ${mb} MB 上限，可压缩成 zip 再上传` : '文件超过大小上限，可压缩成 zip 再上传',
+      retryable: false,
+    }
   }
   if (status === 401 || status === 429) {
     // The only 4xx the user can clear: the caller has already re-prompted for the auth code,

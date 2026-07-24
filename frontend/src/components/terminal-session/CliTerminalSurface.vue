@@ -110,7 +110,7 @@
            normal fast paste shows nothing at all — only a slow upload or an error surfaces
            this pill, which is exactly the case that used to look "silent" and get retried
            into 3-4 duplicate paths in the PTY. -->
-      <UploadProgressFloat :entries="pasteResolver.uploads.value" />
+      <UploadProgressFloat :entries="pasteResolver.uploads.value" @dismiss="pasteResolver.dismissUpload" />
       <!-- KeyCastr keystroke display (mobile only). Toggled from the main Toolbar's keycast button;
            defaults ON. No left-edge HUD tab — the toolbar is the SSOT toggle.
            Lives INSIDE .terminal-body (its `position: relative` is the anchor) because the pills are
