@@ -157,7 +157,7 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 	}
 
 	// Read content for hash dedup.
-	data, err := io.ReadAll(io.LimitReader(content, clipboardMaxUploadSize))
+	data, err := io.ReadAll(io.LimitReader(content, ClipboardMaxUploadSize))
 	if err != nil {
 		terminalClipboardUploadErrors.Inc()
 		return "", fmt.Errorf("read content: %w", err)

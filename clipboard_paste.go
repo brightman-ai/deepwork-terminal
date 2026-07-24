@@ -18,7 +18,13 @@ import (
 )
 
 const (
-	clipboardMaxUploadSize = 10 << 20 // 10 MB
+	// ClipboardMaxUploadSize is the single backend authority for the SESSION file-upload cap
+	// (paste/attach → agent working dir). Exported because deepwork-pro's parallel session
+	// upload route imports it instead of re-declaring the number — one source, so the two
+	// deployments can never drift (they did: pro's wsSessionUploadMaxBytes was a hand-"aligned"
+	// copy). Distinct from chat-image attachments (a different bounded context, its own smaller
+	// cap) — do NOT fold that in here.
+	ClipboardMaxUploadSize = 10 << 20 // 10 MB
 	clipboardTmpDir        = "tmp/clipboard"
 	clipboardTTL           = 24 * time.Hour
 )
@@ -49,22 +55,22 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// so it gets its own status code. 413 lets the client say "文件超过 10MB" without
 	// string-matching an English error, and tells it the failure is DETERMINISTIC:
 	// retrying the same bytes will fail identically.
-	r.Body = http.MaxBytesReader(w, r.Body, clipboardMaxUploadSize)
+	r.Body = http.MaxBytesReader(w, r.Body, ClipboardMaxUploadSize)
 
-	if err := r.ParseMultipartForm(clipboardMaxUploadSize); err != nil {
+	if err := r.ParseMultipartForm(ClipboardMaxUploadSize); err != nil {
 		terminalClipboardUploadErrors.Inc()
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			terminalLogger.Warn(logCtx, "cli clipboard upload rejected",
 				"reason", "too_large",
 				"session_id", id,
-				"limit_bytes", clipboardMaxUploadSize,
+				"limit_bytes", ClipboardMaxUploadSize,
 				"elapsed_ms", time.Since(start).Milliseconds())
 			// limit_mb travels WITH the error so the client can say "文件超过 10 MB 上限"
-			// without hardcoding 10 — the number stays single-sourced at clipboardMaxUploadSize.
+			// without hardcoding 10 — the number stays single-sourced at ClipboardMaxUploadSize.
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-				"error":    fmt.Sprintf("file exceeds the %d MB limit", clipboardMaxUploadSize>>20),
-				"limit_mb": clipboardMaxUploadSize >> 20,
+				"error":    fmt.Sprintf("file exceeds the %d MB limit", ClipboardMaxUploadSize>>20),
+				"limit_mb": ClipboardMaxUploadSize >> 20,
 			})
 			return
 		}
@@ -124,12 +130,27 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	if cwd == "" {
 		cwd = sess.WorkingDir()
 	}
-	subDir := "clip"
-	if !isImage {
-		subDir = "files"
+	// Landing dir. With a `dir` form field the client is uploading INTO a browsed tree directory
+	// (the 目录树 upload button): the file lands THERE as a real file the user placed, guarded by
+	// safeResolve against traversal — and, crucially, NOT swept by the tmp/clipboard TTL cleanup
+	// (that would delete the user's own files). Without `dir`, uploads stage under a time-bucketed
+	// tmp/{clip|files} dir that IS cleaned.
+	uploadDir := r.FormValue("dir")
+	var sessionDir string
+	if uploadDir != "" {
+		resolved, derr := safeResolve(cwd, uploadDir)
+		if derr != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "target dir not allowed"})
+			return
+		}
+		sessionDir = resolved
+	} else {
+		subDir := "clip"
+		if !isImage {
+			subDir = "files"
+		}
+		sessionDir = filepath.Join(cwd, "tmp", subDir, now.Format("01-02-15"))
 	}
-	hourDir := filepath.Join(cwd, "tmp", subDir, now.Format("01-02-15"))
-	sessionDir := hourDir
 	if err := os.MkdirAll(sessionDir, 0700); err != nil {
 		terminalClipboardUploadErrors.Inc()
 		terminalLogger.Warn(logCtx, "cli clipboard upload failed",
@@ -142,8 +163,10 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Lazy cleanup: remove files older than TTL
-	go cleanupOldClipboardFiles(sessionDir, clipboardTTL)
+	// Lazy TTL cleanup applies ONLY to the tmp staging dir, never a user-chosen target dir.
+	if uploadDir == "" {
+		go cleanupOldClipboardFiles(sessionDir, clipboardTTL)
+	}
 
 	// Read file into memory for hash dedup
 	data, err := io.ReadAll(file)
