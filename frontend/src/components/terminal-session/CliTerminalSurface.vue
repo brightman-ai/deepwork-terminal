@@ -361,6 +361,7 @@ import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverl
 import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
 import AttentionHud from '@terminal/components/terminal-session/AttentionHud.vue'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
+import { ghostRefreshWait } from '@terminal/composables/cli/ghostRefresh'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -1008,6 +1009,7 @@ watch(wsStatus, (val) => {
   emit('connection-change', val)
   hud.updateSnapshot({ ws: val })
   if (val === 'connected') {
+    const wasReconnect = everConnected // true here ⇒ we'd connected before ⇒ this is a RE-connect
     everConnected = true
     runtimeDiag.value = '' // healthy again → drop any stale reason
     // DOM layout 可能还没稳定 (特别是 Wails 首次渲染)，阶梯式 fit:
@@ -1015,6 +1017,11 @@ watch(wsStatus, (val) => {
     setTimeout(robustFitAndResize, 100)
     setTimeout(robustFitAndResize, 500)
     setTimeout(robustFitAndResize, 1500)
+    // On a RE-connect the server replays up to 256KB of ring buffer onto a screen that was never
+    // cleared; for an alt-screen TUI that overlays stale frame fragments (garble). Once the resize
+    // ladder above has re-asserted the size, force one clean full repaint (refresh-client) to
+    // discard the replay residue. First connect starts from a blank screen, so it needs none.
+    if (wasReconnect) setTimeout(scheduleGhostRefresh, 1600)
   } else if ((val === 'disconnected' || val === 'reconnecting') && props.isRemote && !everConnected) {
     void classifyFailure()
   }
@@ -1273,17 +1280,29 @@ let lastBufferType = ''
 // `tmux refresh-client` (resend every cell) does. So we debounce a refresh-client: during a
 // continuous stream this stays armed and does NOT fire (no extra full redraws mid-stream); it
 // fires once the output settles — when the user reads and residue would be visible.
+// GHOST_REFRESH_DEBOUNCE: quiet-period before a trailing refresh-client (residue is only visible
+// once the user reads, so coalesce a burst). GHOST_REFRESH_MAXWAIT: the hard cap that fixes the
+// mid-stream garble — under a continuous stream the debounce alone re-armed on every frame and
+// NEVER fired (spinner/tokens arrive < debounce apart), so divergence lingered until the stream
+// paused. Capping the delay at maxWait forces a refresh-client at least ~every 1.2s while output
+// flows, bounding how long any residue can stay on screen. See ghostRefresh.ts for the math + test.
+const GHOST_REFRESH_DEBOUNCE = 160
+const GHOST_REFRESH_MAXWAIT = 1200
 let ghostRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let ghostBurstStartedAt = 0
 function scheduleGhostRefresh(): void {
   if (!tmux.attached.value) return
   const term = xtermRef.value?.terminal?.()
   if (!term || term.buffer.active.type !== 'alternate') return
+  const now = Date.now()
   if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
+  else ghostBurstStartedAt = now // first frame of a new burst → anchor the maxWait window
+  const wait = ghostRefreshWait(ghostBurstStartedAt, now, GHOST_REFRESH_DEBOUNCE, GHOST_REFRESH_MAXWAIT)
   ghostRefreshTimer = setTimeout(() => {
-    ghostRefreshTimer = null
+    ghostRefreshTimer = null // burst ends here; the next frame re-anchors ghostBurstStartedAt
     const t = xtermRef.value?.terminal?.()
     if (t && t.buffer.active.type === 'alternate') void tmux.runRefreshClient()
-  }, 160)
+  }, wait)
 }
 
 function onTerminalReady(terminal: Terminal) {
