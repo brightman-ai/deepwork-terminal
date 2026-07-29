@@ -31,6 +31,7 @@ import { fmtTokens, fmtCost, fmtCredits } from './cost'
 import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
 import { usageMoneyPresentation } from './usageBillingPresentation'
+import { groupPresentation } from './quotaStaleness'
 
 defineProps<{ showDetail?: boolean }>()
 const emit = defineEmits<{ (e: 'detail'): void }>()
@@ -214,6 +215,27 @@ function sourceLabel(source?: string): string {
   return ''
 }
 // Spell out what the active family means, since its whole job is to explain a missing bar.
+/**
+ * 这一组读数「有多可信」+ 据此怎么呈现。判定全在 quotaStaleness.ts（纯函数、带测试），这里只把
+ * 组件手上的现状喂进去。
+ *
+ * canProbe 只对 codex 为真：probe 通道（拿 ~/.codex/auth.json 直接问账号，和 `codex /status`
+ * 同源）目前只有 codex 有。claude 的读数来自它自己写的快照，没有等价的"就地问一次"，所以那边
+ * 只降权、不给一个点了没反应的按钮。
+ */
+function staleOf(q: RuntimeQuota, group: QuotaGroup) {
+  return groupPresentation({
+    stale: !!group.snapshot?.stale,
+    ageSeconds: group.snapshot?.age_seconds ?? 0,
+    allInferred: (group.windows || []).length > 0 && (group.windows || []).every((w) => !!w.inferred),
+    runtime: q.runtime,
+    canProbe: q.runtime === 'codex',
+    // q.family = 最新那条账号读数的 family = 当前生效的家族。与它不一致的分组是历史。
+    groupFamily: group.family || '',
+    activeFamily: q.family || '',
+  })
+}
+
 function familyHint(group: QuotaGroup): string {
   const kinds = (group.windows ?? []).map((w) => kindLabel(w.kind)).join(' + ')
   return kinds
@@ -460,22 +482,39 @@ onUnmounted(() => {
               v-for="(group, groupIndex) in quotaGroupsFor(q)"
               :key="group.family || group.snapshot?.captured_at || groupIndex"
               class="uchip-group"
-              :class="{ 'is-stale': group.snapshot?.stale }"
+              :class="{ 'is-stale': staleOf(q, group).dim }"
             >
-              <div v-if="group.family || group.snapshot?.stale" class="uchip-group-head">
+              <div v-if="group.family || staleOf(q, group).badge" class="uchip-group-head">
                 <span v-if="group.family" class="uchip-plan uchip-family" :title="familyHint(group)">{{ group.family }}</span>
-                <span v-if="group.snapshot?.stale" class="uchip-badge stale">数据已过期</span>
+                <!-- 「数据已过期」本身就是动作：点它直接向账号查询（probe，与 codex /status 同源）。
+                     只说问题不给出路，等于把诊断丢回给用户。 -->
+                <button
+                  v-if="staleOf(q, group).badge"
+                  type="button"
+                  class="uchip-badge stale is-action"
+                  :title="staleOf(q, group).hint"
+                  :data-testid="`uchip-stale-${q.runtime}`"
+                  :disabled="loading"
+                  @click.stop="refresh"
+                >{{ staleOf(q, group).badge }}<span class="uchip-stale-go">↻</span></button>
               </div>
+              <!-- 折叠档：既过期、值又全是"推断"（窗口早已重置、此后零上报）——那个 100% 是缺省
+                   猜测而非事实，不配占一整行绿条。 -->
+              <div
+                v-if="staleOf(q, group).collapse"
+                class="uchip-dim uchip-note"
+                :data-testid="`uchip-collapsed-${q.runtime}`"
+              >{{ staleOf(q, group).note }}</div>
               <!-- key by INDEX: duplicate kinds are a domain contradiction; the backend drops
                    them before they reach this list. -->
-              <div v-for="(w, i) in group.windows" :key="i" class="uchip-win">
+              <div v-for="(w, i) in (staleOf(q, group).collapse ? [] : group.windows)" :key="i" class="uchip-win">
                 <span class="uchip-win-k">{{ kindLabel(w.kind) }}</span>
                 <span class="uchip-bar"><span class="uchip-bar-fill" :style="{ width: w.remaining_percent + '%' }" :class="'lvl-' + (w.remaining_percent < 15 ? 'crit' : w.remaining_percent < 40 ? 'warn' : 'ok')" /></span>
                 <span class="uchip-win-p">{{ Math.round(w.remaining_percent) }}%</span>
                 <span v-if="w.inferred" class="uchip-win-r uchip-inferred" title="窗口已重置，且此后运行时未上报任何用量 ⟹ 未使用。此值为推断，非实测。">已重置 · 推断</span>
                 <span v-else class="uchip-win-r">{{ fmtReset(w.reset_at) }}</span>
               </div>
-              <div v-if="group.snapshot" class="uchip-dim uchip-note">
+              <div v-if="group.snapshot && !staleOf(q, group).collapse" class="uchip-dim uchip-note">
                 额度更新于 {{ fmtAt(group.snapshot.captured_at) }}
                 <span v-if="sourceLabel(group.snapshot.source)" class="uchip-src">· {{ sourceLabel(group.snapshot.source) }}</span>
               </div>
@@ -719,7 +758,24 @@ onUnmounted(() => {
 .uchip-rt-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 .uchip-group { padding: 4px 0 5px; }
 .uchip-group + .uchip-group { border-top: 1px dashed #2a2d35; }
+/* 过期读数必须**看起来就是旧的**。此前只降了一点整体不透明度（0.72），主体仍是满格实心绿条 +
+   大号百分比 —— 视觉权重和新鲜读数几乎没差别，于是角落那句"已过期"没人看见（Human 实测：
+   "这个额度一直不对"，而它其实一直如实标着过期）。
+   现在：实心条改成**描边空心**（一眼看出这不是实测量），数字转中性灰。数字仍然显示——它曾经
+   是真的，只是老了，藏起来反而是另一种不诚实。 */
 .uchip-group.is-stale { opacity: 0.72; }
+.uchip-group.is-stale .uchip-bar-fill {
+  background: transparent !important;
+  border: 1px dashed currentColor;
+  opacity: 0.65;
+}
+.uchip-group.is-stale .uchip-win-p { color: hsl(var(--muted-foreground)); font-weight: 500; }
+
+/* 「数据已过期」是按钮，不是标签：给它按钮该有的意符。 */
+.uchip-badge.stale.is-action { border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+.uchip-badge.stale.is-action:hover:not(:disabled) { color: #e5e7eb; background: rgba(154,160,170,0.24); }
+.uchip-badge.stale.is-action:disabled { cursor: progress; opacity: 0.6; }
+.uchip-stale-go { font-size: 10px; line-height: 1; }
 .uchip-group-head { display: flex; align-items: center; gap: 6px; min-height: 17px; margin-bottom: 1px; }
 .uchip-plan { font-size: 10px; color: #8b909a; font-weight: 400; }
 .uchip-badge { font-size: 9.5px; font-weight: 500; border-radius: 4px; padding: 1px 5px; margin-left: auto; }
