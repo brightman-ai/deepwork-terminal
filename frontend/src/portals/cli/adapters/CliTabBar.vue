@@ -136,17 +136,18 @@
     <div class="cli-tab-bar__spacer" />
     <!-- SSOT top-right chrome cluster. ONE flex row owns this corner so nothing here can overlap
          another (the old viewport-fixed help fab used to float over — and swallow the taps of — the
-         usage chip). Order = least→most peripheral: version · usage chip · #dw-topbar-right outlet.
+         usage chip). Order: version · #dw-topbar-right outlet (? ⌨) · 刷新 · 远端 —— 与 pro 顶栏
+         逐枚同序（Human 2026-07-29 定：两壳顶右簇必须长一样）。
          #dw-topbar-right mirrors pro's MainLayout outlet: ANY top-right widget (help, future chrome)
          teleports into it and lands in-row, gapped — never a new fixed corner. -->
     <div class="cli-tab-bar__chrome">
-      <!-- Build version — unobtrusive; lets a user tell which release they're on without a terminal. -->
-      <span
-        v-if="versionLabel"
-        class="cli-tab-bar__version"
-        data-testid="cli-portal-version"
-        :title="'deepwork-terminal ' + fullVersionLabel"
-      >{{ versionLabel }}</span>
+      <!-- Build version — 连按钮带「关于」面板整个封装在共享组件里（pro 顶栏用的是同一枚），
+           所以这里没有任何版本相关的判定或文案。 -->
+      <VersionBadge app-name="deepwork-terminal" data-testid="cli-portal-version" />
+      <!-- Teleport outlet for viewport-agnostic top-right chrome (HelpCenter 的 "?"、快捷键指引 ⌨).
+           位置在刷新/远端两枚之前 —— 与 pro 顶栏同序（? ⌨ ⟳ ▤）。这两组的性质不同：teleport 进来的
+           是"帮助/指引"类入口，后面两枚是"动作"类按钮，指引在前、动作在后，两壳一致。 -->
+      <span :id="TOPBAR_RIGHT_OUTLET_ID" class="cli-tab-bar__outlet" data-testid="topbar-outlet-right" />
       <!-- Manual force-refresh: always available (not just PWA — a plain F5/reload can still
            leave a long-lived tab on a stale build behind a cache/tunnel/proxy, and the
            auto-update pill only appears once its poll notices; this gives an explicit escape
@@ -169,14 +170,12 @@
       ><Server :size="14" /></button>
       <!-- Host-provided status widget (standalone mounts the UsageChip here via CliPortal). -->
       <slot name="status" />
-      <!-- Teleport outlet for viewport-agnostic top-right chrome (HelpCenter's inline "?", etc.). -->
-      <span id="dw-topbar-right" class="cli-tab-bar__outlet" data-testid="topbar-outlet-right" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { computed } from 'vue'
 import { RefreshCw, Server, LayoutGrid } from 'lucide-vue-next'
 import {
   agentSaidText,
@@ -194,11 +193,11 @@ import {
   type TabNotLive,
 } from '@terminal/composables/cli/tabLiveness'
 import type { WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
-import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
-import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { TAB_CLOSE_OPACITY } from '@terminal/composables/cli/tabChrome'
 import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
+import VersionBadge from '@terminal/components/chrome/VersionBadge.vue'
+import { TOPBAR_RIGHT_OUTLET_ID } from '@terminal/composables/cli/useTopbarOutlet'
 
 // Auto-update detection: surfaces the "有更新" pill when a newer build is deployed, and
 // owns the shared clear-and-reload used by the pill + PWA refresh button + HelpCenter.
@@ -241,32 +240,6 @@ const emit = defineEmits<{
   (e: 'context-menu', event: MouseEvent, tabId: string): void
 }>()
 
-// Build version, fetched once from GET /version. Keep the badge short: release builds and
-// dirty source builds both display as vX.Y.Z; the full string remains in the title.
-const { cliFetch } = useCliAuth()
-const version = ref('')
-const fullVersionLabel = computed(() => formatFullVersion(version.value))
-const versionLabel = computed(() => formatShortVersion(version.value))
-
-function formatFullVersion(raw: string): string {
-  const v = raw.trim()
-  if (!v) return ''
-  return /^\d/.test(v) ? 'v' + v : v
-}
-
-function formatShortVersion(raw: string): string {
-  const full = formatFullVersion(raw)
-  const match = full.match(/^v?(\d+\.\d+\.\d+)/)
-  return match ? `v${match[1]}` : full
-}
-
-// Empty until fetched (and stays empty on failure → the badge hides).
-onMounted(async () => {
-  try {
-    const r = await cliFetch(cliApi('/version'))
-    if (r.ok) version.value = ((await r.json()) as { version?: string }).version ?? ''
-  } catch { /* badge just stays hidden */ }
-})
 
 // The force-fresh clear-and-reload lives in useAppUpdate.applyAppUpdate() now (SSOT for the
 // manual refresh button, the auto-update pill, and HelpCenter's manual entry).
@@ -613,17 +586,5 @@ const rollupSegs = computed(() =>
   gap: 8px;
 }
 
-/* Build version — muted, unobtrusive, pinned right (after the spacer). */
-.cli-tab-bar__version {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  font-size: 0.62rem;
-  letter-spacing: 0.3px;
-  color: hsl(var(--muted-foreground));
-  opacity: 0.55;
-  white-space: nowrap;
-  user-select: text;
-}
 
 </style>

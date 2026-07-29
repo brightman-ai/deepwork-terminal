@@ -11,17 +11,17 @@
  *
  * A first-visit pulse draws the eye to the "?" once, then never nags again.
  */
-import { onMounted, onUnmounted, ref, computed, watch, nextTick } from 'vue'
-import { useRoute } from 'vue-router'
+import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { HelpCircle, X, ClipboardCopy, Play, Check, Sparkles, RefreshCw } from 'lucide-vue-next'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { applyAppUpdate } from '@terminal/composables/cli/useAppUpdate'
+import { useTopbarOutlet } from '@terminal/composables/cli/useTopbarOutlet'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const { cliFetch } = useCliAuth()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   /**
    * Explicit override for WHERE the "?" trigger renders:
    *  - true    → always inline (teleport into the #dw-topbar-right outlet)
@@ -33,16 +33,31 @@ const props = defineProps<{
    * pro passes it explicitly (:inline="!isMobile") to pin its exact desktop/mobile split.
    */
   inline?: boolean
-}>()
+}>(), {
+  // ⚠️ `inline: undefined` 不是可有可无的样板，它是 AUTO 这一档**能否存在**的前提。
+  //
+  // Vue 对声明为 Boolean 的 prop 做**布尔转型**：属性没写时值是 `false`，**不是 `undefined`**。
+  // 于是 standalone 的 `<HelpCenter />`（不传 inline）拿到的 props.inline 是 false，下面那句
+  // `props.inline !== undefined ? props.inline : outletPresent` 永远走前一支 —— **AUTO 这一档
+  // 从来就到不了**，"?" 永远是 position:fixed 悬浮球，永远压在顶右出口上，把「快捷键指引」⌨
+  // 盖掉（Human 2026-07-29 实测截图）。pro 之所以没事，只是因为它显式传了 :inline="!isMobile"。
+  //
+  // 显式 `default: undefined` 关掉那次转型，"没传" 才真的是 "没传"。
+  //
+  // 这个坑值得记：**类型上写 `inline?: boolean` 看着是三态，运行时却只有两态。** 我为此先后
+  // 误判了两次（怪懒加载路由、怪探测时机），直到把 ref 的真值打到 window 上才看见真相 ——
+  // 教训是「连续两次盲修 observable 没变，第三个动作必须是可见性动作，而不是第三次猜」。
+  inline: undefined,
+})
 
-// Outlet presence drives inline-vs-fab. Re-checked only on navigation (the sole time the outlet
-// mounts/unmounts) — never on the hot xterm DOM-render path, so it costs nothing at rest.
-const route = useRoute()
-const outletPresent = ref(false)
-function refreshOutlet() {
-  void nextTick(() => { outletPresent.value = !!document.getElementById('dw-topbar-right') })
-}
-watch(() => route.path, refreshOutlet)
+// AUTO 档的判据：出口在不在。走共享的 useTopbarOutlet（全局单例，见那个文件）。
+//
+// 这里原先是本组件自己写的一次性探测 + `watch(() => route.path)`（无 immediate）：App.vue 全局
+// 挂载本组件，而拥有出口的 CliTabBar 在**懒加载**的 /portal/cli 路由里，探测跑在它下载完之前；
+// 此后 path 再没变过，watcher 也就永远不触发。这确实是个真缺陷，但它**不是** "?" 变悬浮球的原因
+// ——真原因是上面那个布尔转型（AUTO 档压根到不了，这个 ref 的值是多少都不影响结果）。两件事都修
+// 了，但别把它们的因果搞混：判据修好了，档位也得先能到达。
+const outletPresent = useTopbarOutlet()
 
 // Teleport gate: a target absent on the first render frame silently no-ops and never retries, so
 // only go inline AFTER onMounted (by which point the shell owning #dw-topbar-right is mounted).
@@ -168,7 +183,6 @@ async function runTmux() {
 onMounted(() => {
   void load()
   ready.value = true
-  refreshOutlet() // first-frame outlet probe (route watcher covers later navigations)
   if (pulse.value) window.addEventListener('keydown', onFirstKey, { once: true })
 })
 onUnmounted(() => window.removeEventListener('keydown', onFirstKey))

@@ -274,12 +274,32 @@ func (s *Server) handleHudLog(w http.ResponseWriter, r *http.Request) {
 // handleVersion handles GET /version — returns the running binary's build version so the
 // UI can show it (the tab bar). Release builds inject it via ldflags; source builds report
 // "dev". Falls back to "dev" if the embedding host never set Config.Version.
+//
+// It ALSO carries the newest published release when one is known and strictly newer — the
+// "程序旧了" axis (see release_check.go). Riding on /version rather than getting its own
+// endpoint is deliberate: the UI asks this exact question at the exact moment it renders the
+// version badge, so one round-trip answers both halves of "am I current?". The lookup itself
+// never blocks this handler (cached + refreshed in the background), and a build that is not a
+// clean release tag never triggers it at all.
+//
+// releaseState is the authoritative four-way answer (local/current/outdated/unknown) — the UI
+// renders it, never re-derives it. "unknown" (offline / not looked up yet) is deliberately a
+// DISTINCT state from "current": claiming "已是最新" on a failed lookup would be a confident lie.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	v := s.config.Version
 	if v == "" {
 		v = "dev"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"version": v})
+	body := map[string]string{"version": v, "releaseState": string(ReleaseLocal)}
+	if s.releases != nil {
+		rel, state := s.releases.Latest(v)
+		body["releaseState"] = string(state)
+		if state == ReleaseOutdated {
+			body["latest"] = rel.Tag
+			body["latestUrl"] = rel.URL
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleWebSocket handles GET /sessions/{id}/ws — WebSocket terminal I/O.
