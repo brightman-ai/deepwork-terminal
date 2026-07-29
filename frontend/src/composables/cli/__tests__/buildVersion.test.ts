@@ -7,8 +7,16 @@ describe('formatShortVersion', () => {
     expect(formatShortVersion('0.7.14')).toBe('v0.7.14')
   })
 
-  it('git describe 只留 vX.Y.Z，丢掉 -N-g<hash> 那截', () => {
-    expect(formatShortVersion('v0.7.14-3-gb2535a0')).toBe('v0.7.14')
+  // 刻意的契约变更（2026-07-30）：以前把 `-3-g<hash>` 整段丢掉，于是一个"在 tag 之后又走了 3 个
+  // 提交"的 WIP 构建显示得和正式发版**一模一样**。而本地部署（pro 天天把 WIP 推到 8087）正是这个
+  // 状态。现在保留一个 `+`：一个字符，说清"这不是那个 tag 本身"。
+  it('git describe：留 vX.Y.Z，但用 + 保住"领先于该 tag"这个事实', () => {
+    expect(formatShortVersion('v0.7.14-3-gb2535a0')).toBe('v0.7.14+')
+    expect(formatShortVersion('v0.2.0-dirty')).toBe('v0.2.0+')
+  })
+
+  it('正好在 tag 上 → 没有 +（发版和 WIP 必须一眼可分）', () => {
+    expect(formatShortVersion('v0.7.16')).toBe('v0.7.16')
   })
 
   it('裸 go build：dev- 前缀删掉，只留 7 位 hash', () => {

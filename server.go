@@ -87,11 +87,12 @@ func NewServer(opts ...Option) (*Server, error) {
 	s := &Server{
 		config:       DefaultConfig(),
 		sessionAgent: newSessionAgentTracker(),
-		releases:     newReleaseChecker(),
 	}
 	for _, o := range opts {
 		o(s)
 	}
+	// 在 opts 之后构造：上游仓库来自 Config，而 Config 是被 opts 灌进来的。
+	s.releases = newReleaseChecker(s.config.ReleaseRepo)
 	if s.config.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		s.config.DataDir = filepath.Join(home, ".dw-terminal")

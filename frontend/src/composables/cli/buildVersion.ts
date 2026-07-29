@@ -11,8 +11,9 @@
  * | 构建方式 | 服务端返回 | 徽标显示 |
  * |---|---|---|
  * | 发版（goreleaser 打 tag） | `v0.7.14` | `v0.7.14` |
- * | build.sh（git describe） | `v0.7.14-3-gb2535a0` | `v0.7.14` |
+ * | build.sh（git describe，正好在 tag 上） | `v0.7.14` | `v0.7.14` |
  * | 裸 `go build`（VCS 戳） | `dev-b2535a0-dirty` | `b2535a0*` |
+ * | tag 之后又走了几个提交 | `v0.2.0-3-gabc1234` | `v0.2.0+` |
  *
  * **为什么不带分支名**（Human 提过 `main_xxx` 这种形态）：分支几乎永远是 `main`，它会是这串里
  * 最长、信息量最低的一段，而这里恰恰是整个顶栏最缺地方的一格。真正回答"我跑的是不是我刚构建的
@@ -34,9 +35,13 @@ export function formatFullVersion(raw: string): string {
 export function formatShortVersion(raw: string): string {
   const full = formatFullVersion(raw)
   if (!full) return ''
-  // ① 带语义化版本号的（发版 / git describe）→ 只留 vX.Y.Z，丢掉 `-3-g<hash>` 那截。
-  const semver = full.match(/^v?(\d+\.\d+\.\d+)/)
-  if (semver) return `v${semver[1]}`
+  // ① 带语义化版本号的（发版 / git describe）→ 只留 vX.Y.Z。
+  //    但**不能把"不在 tag 上"这件事一起丢掉**：`git describe` 的 `-3-g<hash>` / `-dirty`
+  //    意味着这个构建**领先于或偏离了那个 tag**，而这恰恰是本地部署最常见的状态（pro 天天把
+  //    WIP 推到 8087）。丢了它，一个 WIP 构建会显示得和正式发版一模一样。用一个 `+` 表示
+  //    "在这个 tag 之后还有东西"——一个字符，含义明确，不占地方。
+  const semver = full.match(/^v?(\d+\.\d+\.\d+)(.*)$/)
+  if (semver) return `v${semver[1]}${semver[2] ? '+' : ''}`
   // ② 未打标的构建：`dev-<hash>` / `dev-<hash>-dirty` → `<hash>` / `<hash>*`。
   //    `dev-` 前缀不带信息（没 tag 本来就说明它不是发版），删掉；hash 是唯一有身份的那一段。
   const dev = full.match(/^dev-([0-9a-f]{7,40})(-dirty)?$/i)

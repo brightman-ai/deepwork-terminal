@@ -52,7 +52,7 @@ func TestIsNewerRelease(t *testing.T) {
 // 本地构建绝不发起网络请求 —— 这既是隐私性质，也是"不对开发者说噪音话"的落实。
 func TestLatestNeverQueriesForLocalBuilds(t *testing.T) {
 	called := false
-	c := newReleaseChecker()
+	c := newReleaseChecker("owner/repo")
 	c.httpGet = func(context.Context, string) (*http.Response, error) {
 		called = true
 		return nil, io.EOF
@@ -66,7 +66,7 @@ func TestLatestNeverQueriesForLocalBuilds(t *testing.T) {
 }
 
 func TestFetchParsesRelease(t *testing.T) {
-	c := newReleaseChecker()
+	c := newReleaseChecker("owner/repo")
 	c.httpGet = func(context.Context, string) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -94,7 +94,7 @@ func TestFetchFailsClosed(t *testing.T) {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"tag_name":""}`))}, nil
 		},
 	} {
-		c := newReleaseChecker()
+		c := newReleaseChecker("owner/repo")
 		c.httpGet = get
 		if got := c.fetch(); got.Tag != "" || got.URL != "" {
 			t.Errorf("%s: fetch() = %+v, want empty", name, got)
@@ -106,7 +106,7 @@ func TestFetchFailsClosed(t *testing.T) {
 // 说"✓ 已是最新"，是一句自信的假话）。
 func TestLatestFourStates(t *testing.T) {
 	t.Run("unknown: 是发布版但还没有结果", func(t *testing.T) {
-		c := newReleaseChecker()
+		c := newReleaseChecker("owner/repo")
 		c.httpGet = func(context.Context, string) (*http.Response, error) { return nil, io.EOF }
 		_, state := c.Latest("v0.7.14")
 		if state != ReleaseUnknown {
@@ -114,7 +114,7 @@ func TestLatestFourStates(t *testing.T) {
 		}
 	})
 	t.Run("current: 查到了且就是最新", func(t *testing.T) {
-		c := newReleaseChecker()
+		c := newReleaseChecker("owner/repo")
 		c.info = ReleaseInfo{Tag: "v0.7.14", URL: "u"}
 		c.checkedAt = time.Now()
 		_, state := c.Latest("v0.7.14")
@@ -123,7 +123,7 @@ func TestLatestFourStates(t *testing.T) {
 		}
 	})
 	t.Run("outdated: 查到了更新的", func(t *testing.T) {
-		c := newReleaseChecker()
+		c := newReleaseChecker("owner/repo")
 		c.info = ReleaseInfo{Tag: "v0.7.16", URL: "u"}
 		c.checkedAt = time.Now()
 		info, state := c.Latest("v0.7.14")
@@ -132,7 +132,7 @@ func TestLatestFourStates(t *testing.T) {
 		}
 	})
 	t.Run("local: 本地构建", func(t *testing.T) {
-		c := newReleaseChecker()
+		c := newReleaseChecker("owner/repo")
 		c.info = ReleaseInfo{Tag: "v9.9.9", URL: "u"} // 即使缓存里有更新的，也不对本地构建说
 		c.checkedAt = time.Now()
 		_, state := c.Latest("dev-b2535a0")
@@ -140,4 +140,23 @@ func TestLatestFourStates(t *testing.T) {
 			t.Errorf("state = %s, want local", state)
 		}
 	})
+}
+
+// 没声明上游（Config.ReleaseRepo 为空）就绝不查，也绝不下任何关于发布版的结论 —— 这是
+// deepwork-pro 那种"用自己的 tag 嵌入本包"的场景的安全闸门：拿 pro 的 v0.2.0 去比
+// deepwork-terminal 的 release，无论比出什么都是假话。
+func TestLatestNeverChecksWithoutAnUpstreamRepo(t *testing.T) {
+	called := false
+	c := newReleaseChecker("")
+	c.httpGet = func(context.Context, string) (*http.Response, error) {
+		called = true
+		return nil, io.EOF
+	}
+	info, state := c.Latest("v0.2.0") // 干净的发布版号，但不是本产品的
+	if state != ReleaseLocal || info.Tag != "" {
+		t.Errorf("Latest = %+v/%s, want empty/local", info, state)
+	}
+	if called {
+		t.Error("没声明上游仓库时不该发起任何网络请求")
+	}
 }
