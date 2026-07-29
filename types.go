@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/brightman-ai/deepwork-terminal/ansisignal"
 )
 
 // SessionStatus represents the lifecycle state of a terminal session.
@@ -46,6 +48,9 @@ type Session struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
+	// waitOnce guards the single legitimate call to Cmd.Wait — see Session.reap.
+	waitOnce sync.Once
+
 	// exitCode stores the shell exit code once the process exits.
 	exitCode int
 
@@ -54,7 +59,65 @@ type Session struct {
 	// [Ref: BUG-6, DDC-13]
 	TmuxDetected bool `json:"tmuxDetected"`
 
-	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected
+	// lastSignal is the most recent UNANSWERED explicit signal from the program in this
+	// session — a BEL or an OSC desktop notification (see ansisignal). It is deliberately
+	// sticky: unlike a transient event it stays until the user actually responds (any input
+	// to this session clears it), so a bell that rang while the tab was closed is still
+	// waiting when they come back. Zero Kind means "nothing pending".
+	lastSignal   ansisignal.Signal
+	lastSignalAt time.Time
+	// lastSignalSeq increments on every recorded signal. Two identical bells are
+	// indistinguishable by content, so the sequence number is what tells a client "this is a
+	// NEW one" rather than the same one still standing.
+	lastSignalSeq uint64
+
+	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*
+}
+
+// RecordSignal stores an explicit out-of-band signal as this session's pending
+// "needs-you" state and returns its sequence number (thread-safe).
+func (s *Session) RecordSignal(sig ansisignal.Signal, at time.Time) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSignal = sig
+	s.lastSignalAt = at
+	s.lastSignalSeq++
+	return s.lastSignalSeq
+}
+
+// PendingSignal returns the unanswered signal, when the session has one (thread-safe).
+func (s *Session) PendingSignal() (sig ansisignal.Signal, at time.Time, seq uint64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastSignal.Kind == "" {
+		return ansisignal.Signal{}, time.Time{}, 0, false
+	}
+	return s.lastSignal, s.lastSignalAt, s.lastSignalSeq, true
+}
+
+// ClearSignal drops the pending signal — the user answered. The sequence number is NOT
+// reset, so the next signal still reads as new to a client that saw the previous one.
+func (s *Session) ClearSignal() {
+	s.mu.Lock()
+	s.lastSignal = ansisignal.Signal{}
+	s.lastSignalAt = time.Time{}
+	s.mu.Unlock()
+}
+
+// reap waits for the shell process, exactly once.
+//
+// os/exec.Cmd.Wait is NOT safe for concurrent use, and two callers legitimately want to reap:
+// readLoop (the PTY hit EOF on its own) and Destroy (we killed it deliberately). Racing them
+// corrupts ProcessState and double-closes the same descriptors — `go test -race` caught it.
+//
+// sync.Once doubles as the barrier that makes this correct rather than merely deduplicated:
+// Once.Do guarantees no call returns until the single call to f has returned, so whichever
+// caller loses the race still blocks until Wait is done and may safely read ProcessState after.
+func (s *Session) reap() {
+	if s.Cmd == nil {
+		return
+	}
+	s.waitOnce.Do(func() { _ = s.Cmd.Wait() })
 }
 
 // Done returns a channel that is closed when the PTY read loop exits.
@@ -163,6 +226,17 @@ func stripANSIForTail(s string) string {
 				i = j
 				continue
 			}
+			// Two-character escapes (ESC = / ESC > keypad mode, ESC M reverse index, charset
+			// selects like ESC ( B …). Not CSI, not OSC, so the branches above skip them and the
+			// bare ESC used to survive into the text — visible as a stray "\x1b=" at the end of a
+			// zsh prompt line in the Agent Overview card. Drop the pair (plus the extra byte the
+			// charset selectors carry) so a tail is plain text.
+			if s[i+1] == '(' || s[i+1] == ')' || s[i+1] == '#' {
+				i += 3 // ESC ( B, ESC ) 0, ESC # 8 …
+				continue
+			}
+			i += 2
+			continue
 		}
 		result = append(result, s[i])
 		i++
@@ -245,7 +319,33 @@ const (
 	MsgTypeSessionMeta  = "session_meta" // server → client: pushed once after WS handshake
 	MsgTypeAgentState   = "agent_state"  // server → client: agent state push (replaces SSE)
 	MsgTypeTmuxState    = "tmux_state"   // server → client: tmux topology/prefix/agent-status push (terminal-owned)
+	// server → client: every session's status + live tail, for the NON-tmux Agent Overview.
+	// Structural twin of tmux_state — one frame describing all units, pushed on the active
+	// session's existing WS by the same 1s diff-suppressed ticker. See sessions_overview.go.
+	MsgTypeSessionsOverview = "sessions_overview"
+	// server → client: the sessions whose program EXPLICITLY asked for the user (BEL / OSC
+	// notification). Same one-frame-describes-everything shape as sessions_overview, and for
+	// the same reason: a bell can ring in a background session that has no WebSocket of its
+	// own. See session_signal.go.
+	MsgTypeAgentSignal = "agent_signal"
 )
+
+// AgentSignalEntry is one session's currently-unanswered explicit signal.
+type AgentSignalEntry struct {
+	SessionID string `json:"sessionId"`
+	Kind      string `json:"kind"`            // "bell" | "notify"
+	Title     string `json:"title,omitempty"` // OSC notifications only
+	Body      string `json:"body,omitempty"`  // OSC notifications only
+	At        string `json:"at"`              // RFC3339 (ms precision) when it arrived
+	Seq       uint64 `json:"seq"`             // per-session counter; a new value = a NEW signal
+}
+
+// AgentSignalPayload is the payload of an "agent_signal" control message. Signals is the
+// COMPLETE current set (never a delta), so an empty array is the explicit "nothing pending
+// anymore" that clears the client's state.
+type AgentSignalPayload struct {
+	Signals []AgentSignalEntry `json:"signals"`
+}
 
 // AgentStatePushFunc subscribes to agent state changes for a session.
 // Returns a channel of JSON-encoded AgentIntelResponse and a cleanup function.

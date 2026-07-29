@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 
+	"github.com/brightman-ai/deepwork-terminal/ansisignal"
 	"github.com/brightman-ai/kit/log"
 	"github.com/brightman-ai/kit/obs"
 )
@@ -165,6 +167,16 @@ type SessionManager struct {
 	bufferSize   int
 	defaultShell string
 	ptyFactory   PTYFactory
+
+	// OnSignal is called from the PTY read goroutine for every EXPLICIT out-of-band signal
+	// the program emitted (BEL / OSC notification — see ansisignal). It is a pure tap: the
+	// bytes are already on their way to the browser by the time it runs, and nothing it does
+	// can alter them.
+	//
+	// Must be set BEFORE the first session is created (NewServer does): read loops run
+	// concurrently, so assigning it later is a data race. It runs on the output hot path, so
+	// the implementation must not block — see onSessionSignal for how that is honoured.
+	OnSignal func(*Session, ansisignal.Signal)
 }
 
 // NewSessionManager creates a new SessionManager.
@@ -322,11 +334,31 @@ func (m *SessionManager) Get(id string) (*Session, error) {
 }
 
 // List returns all sessions.
+// List returns every live session in STABLE CREATION ORDER (oldest first).
+//
+// The sort is load-bearing, not cosmetic. sync.Map.Range visits in an unspecified order that
+// varies between calls, and pro's CLI derives its whole tab strip straight from this list — so
+// an unsorted List() meant:
+//   - a newly created terminal could appear anywhere in the strip, including first, where the
+//     position-based label renders it as "终端1" while an older tab is also showing "终端1";
+//   - the numbers reshuffled on every poll, which silently breaks the two things built on top of
+//     them — `prefix+N` jump-to-tab and the overview card numbering (both promise "the number you
+//     see is the number you press").
+//
+// Creation order is also simply what a user means by "the new tab goes on the end". Ties (two
+// sessions created inside the same clock tick) fall back to ID so the order is total and never
+// flickers between two equally-old sessions.
 func (m *SessionManager) List() []*Session {
 	var result []*Session
 	m.sessions.Range(func(_, value any) bool {
 		result = append(result, value.(*Session))
 		return true
+	})
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
 	return result
 }
@@ -359,10 +391,9 @@ func (m *SessionManager) Destroy(id string) error {
 		_ = ptyFile.Close()
 	}
 
-	// Wait for process to avoid zombies.
-	if sess.Cmd != nil {
-		_ = sess.Cmd.Wait()
-	}
+	// Reap to avoid zombies. Goes through reap() rather than Cmd.Wait() directly because
+	// readLoop is racing us to reap the very process we just killed.
+	sess.reap()
 
 	logger.Info("session destroyed", "id", id)
 	terminalActive.Sub(1)
@@ -471,7 +502,13 @@ func detectTmux(cmd *exec.Cmd) bool {
 func (m *SessionManager) readLoop(sess *Session, ptyFile *os.File) {
 	buf := make([]byte, 32*1024)
 	outputLogCtx := obs.WithStage(context.Background(), stgTerminalOutput)
+	// One scanner per session: it carries the parser state that lets an OSC sequence split
+	// across PTY read boundaries (which happens constantly) still be recognised.
+	var signals ansisignal.Scanner
 	defer func() {
+		// Reap before touching ProcessState: reap() is the barrier that makes the read safe
+		// even when Destroy is concurrently killing this same process (see Session.reap).
+		sess.reap()
 		sess.doneOnce.Do(func() {
 			exitCode := 0
 			if sess.Cmd != nil && sess.Cmd.ProcessState != nil {
@@ -508,14 +545,22 @@ func (m *SessionManager) readLoop(sess *Session, ptyFile *os.File) {
 				}
 			}
 			sess.subMu.RUnlock()
+
+			// Signal tap — deliberately AFTER the buffer write and the subscriber fan-out, so
+			// nothing here can delay a single byte reaching the user's terminal. It is a pure
+			// observer: the scanner never consumes or rewrites the stream (see ansisignal).
+			if m.OnSignal != nil {
+				for _, sig := range signals.Feed(data) {
+					m.OnSignal(sess, sig)
+				}
+			}
 		}
 		if err != nil {
 			if err != io.EOF {
 				logger.Debug("pty read error", "id", sess.ID, "error", err)
 			}
-			if sess.Cmd != nil {
-				_ = sess.Cmd.Wait()
-			}
+			// No reap here: the deferred exit handler above reaps on every return path,
+			// so keeping a second call site would only re-introduce two owners.
 			return
 		}
 	}
