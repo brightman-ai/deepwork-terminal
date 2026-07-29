@@ -7,12 +7,13 @@ import {
   type ReopenPorts,
 } from '../reopenDetached'
 import {
+  postTerminalNotice,
   postReopenNotice,
-  takePendingReopenNotice,
+  takePendingTerminalNotice,
   reopenNoticeOf,
   noteUserInput,
-  forgetReopenNotice,
-} from '../reopenNotice'
+  forgetTerminalNotice,
+} from '../terminalNotice'
 
 /**
  * 这组测试锁的是**留痕**：进程已结束的标签现在会被自动重开一个 shell，而这件事与被删掉的静默
@@ -117,19 +118,19 @@ describe('reopenNoticeLine — 那行字本身', () => {
   })
 })
 
-describe('reopenNotice 投递箱 — 痕迹怎么送到屏幕上', () => {
+describe('terminalNotice 投递箱 — 那行字怎么送到屏幕上', () => {
   // 每条测试用自己的 session id，跨测试不共享状态；仍显式清一遍，避免顺序依赖。
-  beforeEach(() => { forgetReopenNotice('s-a'); forgetReopenNotice('s-b') })
+  beforeEach(() => { forgetTerminalNotice('s-a'); forgetTerminalNotice('s-b') })
 
   it('那行字只写一次：取走即消费，重连不会再冒出来一遍', () => {
     postReopenNotice('s-a', '\r\n[已重开]\r\n')
-    expect(takePendingReopenNotice('s-a')).toBe('\r\n[已重开]\r\n')
-    expect(takePendingReopenNotice('s-a')).toBeNull()
+    expect(takePendingTerminalNotice('s-a')).toBe('\r\n[已重开]\r\n')
+    expect(takePendingTerminalNotice('s-a')).toBeNull()
   })
 
   it('字写完了，标记还挂着（标签栏还得看得见是哪几个）', () => {
     postReopenNotice('s-a', 'x')
-    takePendingReopenNotice('s-a')
+    takePendingTerminalNotice('s-a')
     expect(reopenNoticeOf('s-a')).toBe('x')
   })
 
@@ -137,7 +138,7 @@ describe('reopenNotice 投递箱 — 痕迹怎么送到屏幕上', () => {
     postReopenNotice('s-a', 'x')
     noteUserInput('s-a')
     expect(reopenNoticeOf('s-a')).toBeUndefined()
-    expect(takePendingReopenNotice('s-a')).toBeNull()
+    expect(takePendingTerminalNotice('s-a')).toBeNull()
   })
 
   it('别的终端里的输入不会撤掉这个终端的标记', () => {
@@ -148,14 +149,49 @@ describe('reopenNotice 投递箱 — 痕迹怎么送到屏幕上', () => {
 
   it('没被重开过的 session 什么都拿不到（默认零噪音）', () => {
     expect(reopenNoticeOf('s-b')).toBeUndefined()
-    expect(takePendingReopenNotice('s-b')).toBeNull()
+    expect(takePendingTerminalNotice('s-b')).toBeNull()
     expect(reopenNoticeOf(undefined)).toBeUndefined()
   })
 
   it('标签关掉后不留残余', () => {
     postReopenNotice('s-a', 'x')
-    forgetReopenNotice('s-a')
+    forgetTerminalNotice('s-a')
     expect(reopenNoticeOf('s-a')).toBeUndefined()
-    expect(takePendingReopenNotice('s-a')).toBeNull()
+    expect(takePendingTerminalNotice('s-a')).toBeNull()
+  })
+})
+
+describe('写字 与 挂「已重开」小标 是两件事', () => {
+  beforeEach(() => { forgetTerminalNotice('s-a'); forgetTerminalNotice('s-b') })
+
+  it('只写字（postTerminalNotice）：字照样送到，但标签上绝不冒出「已重开」', () => {
+    // 这是 pro 进场落到别的终端时走的入口——那个终端并没有被重开，点亮小标会是新的一句谎。
+    postTerminalNotice('s-a', '\r\n[你要找的那个已随重启结束，这里是另一个]\r\n')
+
+    expect(takePendingTerminalNotice('s-a')).toContain('已随重启结束')
+    expect(reopenNoticeOf('s-a')).toBeUndefined()
+  })
+
+  it('重开（postReopenNotice）= 先写字，再挂标记（两件事都做）', () => {
+    postReopenNotice('s-b', 'x')
+    expect(takePendingTerminalNotice('s-b')).toBe('x')
+    expect(reopenNoticeOf('s-b')).toBe('x')
+  })
+
+  it('只写字的那行同样只写一次，且用户动手后不再补写', () => {
+    postTerminalNotice('s-a', 'x')
+    expect(takePendingTerminalNotice('s-a')).toBe('x')
+    expect(takePendingTerminalNotice('s-a')).toBeNull()
+
+    postTerminalNotice('s-b', 'y')
+    noteUserInput('s-b')
+    expect(takePendingTerminalNotice('s-b')).toBeNull()
+  })
+
+  it('空 session / 空文案一律不投递（不给不存在的终端排队）', () => {
+    postTerminalNotice('', 'x')
+    postTerminalNotice('s-a', '')
+    expect(takePendingTerminalNotice('s-a')).toBeNull()
+    expect(takePendingTerminalNotice('')).toBeNull()
   })
 })

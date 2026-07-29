@@ -3,11 +3,11 @@ import { reconcileTabs, type ReconcilePorts } from '../reconcileTabs'
 import { reopenDetachedTabs } from '../reopenDetached'
 import {
   postReopenNotice,
-  takePendingReopenNotice,
+  takePendingTerminalNotice,
   reopenNoticeOf,
   noteUserInput,
-  forgetReopenNotice,
-} from '../reopenNotice'
+  forgetTerminalNotice,
+} from '../terminalNotice'
 import type { TabLiveness } from '../tabLiveness'
 
 /**
@@ -63,7 +63,7 @@ function workbench(tabs: FakeTab[], server: Set<string>) {
   /** 终端连接层做的事：xterm 就绪时取走那行字写进屏幕（一次性）。 */
   function attachTerminals(): void {
     for (const t of tabs) {
-      const line = t.sessionId ? takePendingReopenNotice(t.sessionId) : null
+      const line = t.sessionId ? takePendingTerminalNotice(t.sessionId) : null
       if (line) notices.push(line)
     }
   }
@@ -73,7 +73,7 @@ function workbench(tabs: FakeTab[], server: Set<string>) {
 
 describe('自动重开只打扰一次', () => {
   beforeEach(() => {
-    for (let i = 1; i <= 4; i++) forgetReopenNotice(`new-session-${i}`)
+    for (let i = 1; i <= 4; i++) forgetTerminalNotice(`new-session-${i}`)
   })
 
   it('第一次进场：重开一次 + 留一行痕；第二次进场：什么都不建、一个字都不写', async () => {
