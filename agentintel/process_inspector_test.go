@@ -34,6 +34,31 @@ func TestToolFromCommand(t *testing.T) {
 	}
 }
 
+// TestDetectAgentInTreeIgnoresSelfUpdater is a REAL case, not a hypothetical: `bun install
+// -g @openai/codex` is the exact command Codex's own binary runs to update itself (the
+// string is compiled into it, and it is what the user saw on screen the night a
+// self-updating pane was misread). filepath.Base of that package spec is "codex", so the
+// installer used to be detected as the agent — and being DEEPER in the tree it displaced the
+// real codex process, which unbinds the pane's transcript for the whole update.
+func TestDetectAgentInTreeIgnoresSelfUpdater(t *testing.T) {
+	procs := []ProcessInfo{
+		{PID: 100, PPID: 1, Command: "-zsh"},
+		{PID: 200, PPID: 100, Command: "bun /home/user/.bun/bin/codex --yolo"},
+		{PID: 300, PPID: 200, Command: "bun install -g @openai/codex"},
+	}
+	got := detectAgentInTree(procs, 100)
+	if got.Tool != ToolCodex || got.ProcessPID != 200 {
+		t.Fatalf("detected agent = %+v, want the real codex pid 200 (not its installer)", got)
+	}
+	// The installer's own command line, standing alone, is not an agent either.
+	if tool := toolFromCommand("bun install -g @openai/codex"); tool != ToolNone {
+		t.Fatalf("a package install line was detected as %q", tool)
+	}
+	if tool := toolFromCommand("npm install -g @anthropic-ai/claude-code"); tool != ToolNone {
+		t.Fatalf("a package install line was detected as %q", tool)
+	}
+}
+
 func TestDetectAgentInTreeIgnoresCodexHelperProcess(t *testing.T) {
 	procs := []ProcessInfo{
 		{PID: 100, PPID: 1, Command: "zsh"},

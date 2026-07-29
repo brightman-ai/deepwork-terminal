@@ -191,7 +191,21 @@ func toolFromCommand(cmd string) AgentTool {
 // different runtime identity and must never steal the pane binding.
 func matchesToolName(cmd, name string) bool {
 	for _, token := range strings.Fields(cmd) {
-		base := strings.ToLower(filepath.Base(strings.Trim(token, "\"'")))
+		token = strings.Trim(token, "\"'")
+		// A SCOPED PACKAGE SPEC is not an executable. Codex updates itself by running
+		// `bun install -g @openai/codex` (verbatim, straight out of its own binary), and
+		// filepath.Base of that spec is "codex" — so the package manager doing the update
+		// was detected as an agent, and being the DEEPER process it displaced the real
+		// codex from DetectedAgent.ProcessPID. Downstream that unbinds the pane's
+		// transcript (a PID change forces a re-locate, and an installer holds no rollout),
+		// so a self-updating pane loses its parsed state and its status collapses to a
+		// mtime guess. Nothing that starts with '@' is a program; skipping those tokens
+		// also costs nothing for `npx @openai/codex`, whose actual agent is the child
+		// process this function is meant to find in the first place.
+		if strings.HasPrefix(token, "@") {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(token))
 		if base == name || base == name+".exe" {
 			return true
 		}

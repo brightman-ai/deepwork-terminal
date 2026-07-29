@@ -60,35 +60,74 @@ func makeAssistantTextRow(msgID, text string) map[string]any {
 	}
 }
 
-// A turn ending on a free-text question is escalated to waiting (red); one ending on a
-// statement stays idle (done/amber); replying clears it. Heuristic, best-effort (see
-// textEndsQuestion) — false positives accepted per product decision.
-func TestClaudeDriver_FreeTextQuestion(t *testing.T) {
+// A turn that ends on a free-text question is NEEDS-YOU, not BLOCKED.
+//
+// Waiting is reserved for a modal CLI (an elicitation tool's card, a permission prompt): the agent
+// cannot proceed until you answer, which is why the frontend paints it red and refuses to dismiss
+// it. After end_turn the agent is at an empty prompt — you can type anything — so a question there
+// is the same severity as any other finished turn, distinguished only by EndedOnQuestion. This
+// used to escalate to waiting and produced undismissable red dots on agents that were merely idle
+// (every waiting in the local transcript corpus came from this path, mostly on closers like
+// "需要我做什么？").
+func TestClaudeDriver_FreeTextQuestionIsNeedsYouNotBlocked(t *testing.T) {
 	q := makeAssistantTextRow("m1", "方案 A 或 B，各有取舍。你偏好哪种？")
 	d := NewClaudeDriver(writeJSONL(t, []map[string]any{q}), "s1")
 	if err := d.Update(); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if got := d.State().Status; got != StatusWaiting {
-		t.Errorf("free-text question → got %q, want %q", got, StatusWaiting)
+	if got := d.State().Status; got != StatusIdle {
+		t.Errorf("free-text question → status %q, want %q (not blocked)", got, StatusIdle)
+	}
+	as := d.AgentState()
+	if !as.AwaitingUser {
+		t.Error("free-text question → AwaitingUser false, want true (the signal must not be lost)")
+	}
+	if !as.EndedOnQuestion {
+		t.Error("free-text question → EndedOnQuestion false, want true")
 	}
 
+	// A statement end is also needs-you, but NOT flagged as a question — that flag is the only
+	// thing separating the two, so it has to actually separate them.
 	s := makeAssistantTextRow("m2", "已完成并提交，无需你操作。")
 	d2 := NewClaudeDriver(writeJSONL(t, []map[string]any{s}), "s2")
 	if err := d2.Update(); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if got := d2.State().Status; got != StatusIdle {
-		t.Errorf("statement end → got %q, want %q", got, StatusIdle)
+	as2 := d2.AgentState()
+	if d2.State().Status != StatusIdle || !as2.AwaitingUser {
+		t.Errorf("statement end → status %q awaiting %v, want idle + awaiting", d2.State().Status, as2.AwaitingUser)
+	}
+	if as2.EndedOnQuestion {
+		t.Error("statement end → EndedOnQuestion true, want false")
 	}
 
-	// You replied after the question → no longer waiting.
+	// You replied → neither waiting nor needs-you nor a pending question.
 	d3 := NewClaudeDriver(writeJSONL(t, []map[string]any{q, makeUserRow()}), "s3")
 	if err := d3.Update(); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if got := d3.State().Status; got == StatusWaiting {
-		t.Errorf("after reply → got waiting, want non-waiting")
+	as3 := d3.AgentState()
+	if d3.State().Status == StatusWaiting || as3.AwaitingUser || as3.EndedOnQuestion {
+		t.Errorf("after reply → status %q awaiting %v question %v, want all cleared",
+			d3.State().Status, as3.AwaitingUser, as3.EndedOnQuestion)
+	}
+}
+
+// The counterpart guard: a genuinely modal turn (AskUserQuestion pending) MUST stay waiting.
+// Together with the test above this pins the exact line between "blocked" and "your move" —
+// loosening either one silently reintroduces the false-red family.
+func TestClaudeDriver_ElicitationStaysBlocked(t *testing.T) {
+	d := NewClaudeDriver(writeJSONL(t, []map[string]any{
+		makeAssistantToolUseRow("m1", "claude-x", "AskUserQuestion"),
+	}), "s1")
+	if err := d.Update(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := d.State().Status; got != StatusWaiting {
+		t.Errorf("pending AskUserQuestion → status %q, want %q", got, StatusWaiting)
+	}
+	if !d.AgentState().AwaitingUser {
+		t.Error("pending AskUserQuestion → AwaitingUser false, want true")
 	}
 }
 

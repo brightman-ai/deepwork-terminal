@@ -57,6 +57,20 @@ type AgentState struct {
 	// Zero when not awaiting. [needs-you dot persistence]
 	AwaitingSince time.Time `json:"awaitingSince,omitempty"`
 
+	// EndedOnQuestion: the completed turn ended on a free-text question ("要我继续吗？") rather
+	// than on a statement. It REFINES AwaitingUser — it never creates one — so a consumer can
+	// label the same needs-you signal "有提问" instead of "已完成" without changing its severity.
+	//
+	// This used to escalate the turn all the way to StatusWaiting (red, undismissable). That was
+	// wrong on both counts. Wrong severity: after end_turn the agent is sitting at an EMPTY
+	// prompt — nothing is blocked, you can type anything — whereas Waiting means the CLI is
+	// modal (an AskUserQuestion card, a permission [Y/n]) and literally cannot proceed. Wrong
+	// confidence: it is a '?'-on-the-last-line heuristic, and a survey of the local transcript
+	// corpus found EVERY waiting came from it, two thirds of them on conversational closers
+	// ("要做点什么？", "需要我做什么？") — i.e. an idle agent flagged as blocking the user, with
+	// no way to dismiss it. Demoting it to a flag keeps the information and drops the false alarm.
+	EndedOnQuestion bool `json:"endedOnQuestion,omitempty"`
+
 	// Token usage (from JSONL parsing)
 	InputTokens       int `json:"inputTokens"`
 	OutputTokens      int `json:"outputTokens"`

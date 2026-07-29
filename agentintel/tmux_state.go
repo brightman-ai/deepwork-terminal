@@ -2,6 +2,7 @@ package agentintel
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -37,6 +38,18 @@ type TmuxPaneState struct {
 	// awaiting). Reload-proof (transcript-derived) → the frontend keys its per-window "seen"
 	// dismissal on it so a cleared dot stays cleared across F5 yet re-appears on a new turn.
 	AwaitingSince time.Time `json:"awaitingSince,omitempty"`
+	// EndedOnQuestion: the completed turn ended on a free-text question. Refines the SAME
+	// needs-you dot's label ("有提问" vs "已完成") — it never raises its severity, because an
+	// agent at an empty prompt is not blocked. See AgentState.EndedOnQuestion.
+	EndedOnQuestion bool `json:"endedOnQuestion,omitempty"`
+	// StatusRule / StatusEvidence explain WHY this pane is asking for the user: the single
+	// rule that produced the verdict (StatusRule, e.g. "screen.approval") and the screen line
+	// that matched it, scrubbed and truncated. Present only while AwaitingUser holds — a
+	// running pane accuses nobody, so it needs no defence. Diagnostic fields: nothing renders
+	// them, they exist so a wrong red dot can be traced instead of re-argued. See
+	// status_decision.go.
+	StatusRule     string `json:"statusRule,omitempty"`
+	StatusEvidence string `json:"statusEvidence,omitempty"`
 }
 
 // TmuxWindowState is one window with its panes.
@@ -443,16 +456,30 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		if agent, ok := agents[p.PanePID]; ok {
 			tool := agent.Tool
 			ps.AgentTool = tool
-			ps.AgentStatus = s.paneStatus(ctx, p, agent)
+			decision := s.paneDecision(ctx, p, agent)
+			ps.AgentStatus = decision.Status
 			// Needs-you: an explicit block (waiting) always counts; an idle pane counts
-			// only if the driver says a turn actually completed (not fresh-idle). Awaiting()
+			// only if the driver says a turn actually completed (not fresh-idle). Snapshot()
 			// reuses the driver Status() just updated, so no extra transcript read.
+			snap := s.paneMonitor.Snapshot(paneKey(p))
 			ps.AwaitingUser = ps.AgentStatus == StatusWaiting ||
-				(ps.AgentStatus == StatusIdle && s.paneMonitor.Awaiting(paneKey(p), p.PaneCWD, tool))
+				(ps.AgentStatus == StatusIdle && snap.AwaitingUser)
+			decision.Awaiting = ps.AwaitingUser
 			// Carry the reload-proof "completed at" so the frontend's seen-layer can tell
-			// THIS completion from the next one (reuses the driver just updated above).
+			// THIS completion from the next one, plus whether that turn ended on a question
+			// (labels the same amber dot "有提问" instead of a bare "已完成").
 			if ps.AwaitingUser {
-				ps.AwaitingSince = s.paneMonitor.AwaitingSince(paneKey(p))
+				ps.AwaitingSince = snap.AwaitingSince
+				ps.EndedOnQuestion = snap.EndedOnQuestion
+				// Provenance rides ONLY on the decisions that ask something of the user: those
+				// are the ones that can be wrong in a way the user feels, and confining the
+				// fields to them keeps a merely-running pane's payload byte-identical between
+				// polls (the whole tmux_state frame is diff-suppressed — see handlers).
+				ps.StatusRule = string(decision.Rule)
+				ps.StatusEvidence = decision.Evidence
+			}
+			if decision.IsAttention() {
+				LogStatusDecision(ctx, "tmux", fmt.Sprintf("%s.%d", p.SessionWindow, p.PaneIndex), tool, decision)
 			}
 			agentKeys[paneKey(p)] = true
 		}
@@ -487,22 +514,23 @@ func paneKey(p TmuxPane) string {
 	return strconv.Itoa(p.PanePID)
 }
 
-// panePromptState scrapes the pane's last visible lines once and classifies them. The PTY is the
+// panePromptVerdict scrapes the pane's last visible lines once and classifies them. The PTY is the
 // ONE per-pane-reliable liveness signal — a spinner can only render in the pane that is actually
 // working — so it is the tiebreaker whenever the transcript-derived status may be stale or (Claude,
 // cwd-located) mis-attributed. Returns PromptUnknown on any capture error, so an ambiguous read
 // never overrides the transcript.
-func (s *TmuxStateService) panePromptState(ctx context.Context, p TmuxPane) PromptState {
+func (s *TmuxStateService) panePromptVerdict(ctx context.Context, p TmuxPane) OutputVerdict {
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
 	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
 	if err != nil {
-		return PromptUnknown
+		return OutputVerdict{State: PromptUnknown, Rule: RuleNone}
 	}
-	return AnalyzeOutput(lines)
+	return AnalyzeOutputDetail(lines)
 }
 
-// paneStatus derives a pane's agent status with a JSONL-gated terminal read:
+// paneDecision derives a pane's agent status with a JSONL-gated terminal read, and names the
+// rule that produced it:
 //   - transcript being written (PaneAgentMonitor.Active) → working → Running, WITHOUT touching the pane.
 //   - transcript stopped → read the visible pane: a permission/selection/input PROMPT lives there
 //     (never in the transcript), so AnalyzeOutput on it is the ground truth — needs-permission →
@@ -510,7 +538,10 @@ func (s *TmuxStateService) panePromptState(ctx context.Context, p TmuxPane) Prom
 //
 // This keeps the (slightly brittle, version-coupled) prompt scrape OFF the hot path: it runs only
 // for stopped panes, not every agent pane every poll — accurate where it matters, cheap otherwise.
-func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, agent DetectedAgent) AgentStatus {
+//
+// It returns a StatusDecision rather than a bare status so a wrong verdict can be traced to ONE
+// rule afterwards; the classification itself is unchanged.
+func (s *TmuxStateService) paneDecision(ctx context.Context, p TmuxPane, agent DetectedAgent) StatusDecision {
 	tool := agent.Tool
 	// Accurate JSONL-derived status: a turn's end is recorded in the transcript
 	// (Claude end_turn / Codex task_complete → waiting/idle), a Bash/Read tool is
@@ -526,12 +557,13 @@ func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, agent Det
 			case StatusRunning:
 				// A pending tool may instead be blocked on a permission [Y/n] — that prompt
 				// is terminal UI, absent from the transcript — so confirm against the pane.
-				if s.panePromptState(ctx, p) == PromptNeedsPermission {
-					return StatusWaiting
+				if v := s.panePromptVerdict(ctx, p); v.State == PromptNeedsPermission {
+					return StatusDecision{Status: StatusWaiting, Rule: v.Rule, Evidence: v.Line}
 				}
-				return StatusRunning
+				return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptRunning}
 			case StatusWaiting:
-				return StatusWaiting
+				return StatusDecision{Status: StatusWaiting,
+					Rule: TranscriptStatusRule(StatusWaiting, s.paneMonitor.Snapshot(paneKey(p)))}
 			case StatusIdle:
 				// The transcript says this turn ended (idle → drives the done-unseen dot / "跑完了"
 				// notification). But a transcript-idle can be STALE within a poll: an agent that just
@@ -542,31 +574,36 @@ func (s *TmuxStateService) paneStatus(ctx context.Context, p TmuxPane, agent Det
 				// (transcript freshly written) so a long-settled idle pane, which isn't spinning
 				// anyway, never pays for a pane scrape. Only a POSITIVE spinner overrides; an
 				// idle/unknown PTY trusts the transcript, so a genuinely-done pane still reads Idle.
-				if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) &&
-					s.panePromptState(ctx, p) == PromptRunning {
-					return StatusRunning
+				if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) {
+					if v := s.panePromptVerdict(ctx, p); v.State == PromptRunning {
+						return StatusDecision{Status: StatusRunning, Rule: v.Rule, Evidence: v.Line}
+					}
 				}
-				return StatusIdle
+				return StatusDecision{Status: StatusIdle,
+					Rule: TranscriptStatusRule(StatusIdle, s.paneMonitor.Snapshot(paneKey(p)))}
 			}
 		}
 	}
 
-	// Codex, or Claude transcript not locatable yet: the mtime gate + terminal read.
+	// Codex, or Claude transcript not locatable yet: the mtime gate + terminal read. NOTE this
+	// is the one arm where the SCREEN ALONE can declare Waiting — there is no transcript
+	// opinion to confirm — so its decisions carry the screen rule and the line that matched.
 	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) {
-		return StatusRunning
+		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptWriting}
 	}
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
 	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
 	if err != nil {
-		return StatusRunning
+		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptUnlocatable}
 	}
-	switch AnalyzeOutput(lines) {
+	v := AnalyzeOutputDetail(lines)
+	switch v.State {
 	case PromptNeedsPermission:
-		return StatusWaiting
+		return StatusDecision{Status: StatusWaiting, Rule: v.Rule, Evidence: v.Line}
 	case PromptRunning:
-		return StatusRunning
+		return StatusDecision{Status: StatusRunning, Rule: v.Rule, Evidence: v.Line}
 	default:
-		return StatusIdle
+		return StatusDecision{Status: StatusIdle, Rule: v.Rule, Evidence: v.Line}
 	}
 }

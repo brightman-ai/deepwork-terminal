@@ -44,6 +44,30 @@ type Server struct {
 	uploads      *uploadIndex
 	authThrottle *authgate.Throttle
 	usage        *usageReporter
+
+	// sessionAgent detects which agent runs in each non-tmux session and binds it to its own
+	// transcript. Built in (not a host hook) so both shells behave identically — see
+	// session_agent.go for why that indirection was removed.
+	sessionAgent *sessionAgentTracker
+
+	// signals holds the per-session debounce/cooldown clocks for EXPLICIT out-of-band
+	// signals (BEL / OSC notifications). See session_signal.go.
+	signals *signalGate
+
+	// hasAgent qualifies a BEL: only a session actually running an agent may turn one into a
+	// signal. Held as a field rather than called directly so a test can exercise the ACCEPTED
+	// path — no unit test can conjure a real `claude` process, and an accept path nothing
+	// covers is free to rot into "no bell ever qualifies" with the suite still green. Written
+	// once in NewServer, before any session exists, so the read loops never race it.
+	hasAgent func(*Session) bool
+
+	// One tick's Agent Overview snapshot, shared by every connected WS writer AND by the REST
+	// session list. The payload is global (all sessions) but its callers are per-connection, so
+	// without this each client would rebuild the identical answer every second. See
+	// overviewSnapshot.
+	overviewCacheMu sync.Mutex
+	overviewCache   overviewSnapshot
+	overviewCacheAt time.Time
 	agentUsage   *agentReporter
 	mu           sync.Mutex
 
@@ -58,7 +82,8 @@ type Server struct {
 // NewServer creates a terminal session server.
 func NewServer(opts ...Option) (*Server, error) {
 	s := &Server{
-		config: DefaultConfig(),
+		config:       DefaultConfig(),
+		sessionAgent: newSessionAgentTracker(),
 	}
 	for _, o := range opts {
 		o(s)
@@ -88,6 +113,12 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.usage = newUsageReporter()
 	s.agentUsage = newAgentReporter(s.config.DataDir)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
+	// Explicit-signal tap: a terminal program saying "I need you" out loud (BEL / OSC
+	// notification) is the only NON-inferred attention signal we get. Wired here, before any
+	// session can exist, because the read loops that call it run concurrently.
+	s.signals = newSignalGate()
+	s.hasAgent = s.sessionHasAgent
+	s.mgr.OnSignal = s.onSessionSignal
 	// Default in-process tmux provider so standalone gets tmux state without a host.
 	// An injected provider (WithTmuxProvider) wins over the default.
 	if s.tmuxProvider == nil {
@@ -114,10 +145,12 @@ func NewServer(opts ...Option) (*Server, error) {
 }
 
 // tmuxInstalled reports whether tmux is available, via the default provider's
-// service when present. Used to gate the push notifier (don't poll without tmux).
+// service when present. Used to skip the TMUX HALF of a notifier tick (don't shell out for
+// a topology that cannot exist) — never to gate the notifier itself, which also serves
+// non-tmux sessions.
 func (s *Server) tmuxInstalled() bool {
 	if p, ok := s.tmuxProvider.(*defaultTmuxProvider); ok {
-		return p.svc.TmuxInstalled()
+		return p.TmuxInstalled()
 	}
 	// A host-injected provider implies a tmux-aware environment.
 	return s.tmuxProvider != nil

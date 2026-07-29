@@ -106,3 +106,25 @@ func trimTrailingBlank(lines []string) []string {
 	}
 	return lines[:end]
 }
+
+// TailFromLines reduces already-decoded screen lines to the last `limit` lines of the agent's
+// REAL output, applying the same per-tool chrome stripping the tmux Agent Overview uses.
+//
+// It is the non-tmux twin of TmuxProber.CaptureWindowTail. tmux gets rendered lines from
+// `capture-pane`; a plain session gets them from Session.TailOutput (which owns the ANSI/OSC
+// decoding — do NOT pass raw PTY bytes here, they are a redraw stream, not a screen). Both then
+// share this one stripping decision so the two previews look like one feature.
+//
+// Callers pass the whole visible screen, not a pre-truncated tail: an agent's chrome is ~12 lines
+// pinned to the bottom, so cutting to `limit` BEFORE stripping would throw away exactly the
+// content worth showing.
+func TailFromLines(lines []string, tool AgentTool, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	content := stripAgentChrome(lines, tool)
+	if len(content) > limit {
+		content = content[len(content)-limit:]
+	}
+	return content
+}
