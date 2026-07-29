@@ -1,0 +1,63 @@
+/**
+ * terminalFit — 「这个终端此刻能不能被测量」。
+ *
+ * ## 它修的是什么
+ *
+ * 标签切换用 v-show（`display: none`），因为 xterm 绑的是长命进程，不能随可见性生灭。但
+ * **一个 `display: none` 的元素没有盒子，也就没有尺寸**——而 FitAddon 并不知道这件事：
+ *
+ * ```js
+ * const r = getComputedStyle(terminal.element.parentElement)
+ * const width  = Math.max(0, parseInt(r.getPropertyValue('width')))
+ * ```
+ *
+ * CSSOM 规定：元素没有盒子时，`getComputedStyle` 返回的是**计算值**而不是使用值。我们的
+ * `.xterm-container` 写的是 `width: 100%; height: 100%`，于是隐藏时这两个读数就是字符串
+ * `"100%"`——而 `parseInt("100%") === 100`。**它不是 NaN**，所以 FitAddon 自己那道
+ * `isNaN` 闸门一点都拦不住：100 被当成 100 像素，算出一个又窄又矮的终端。
+ *
+ * 实测（夹具 19097，1440×900）：
+ *
+ * | 标签状态 | PTY 里 `stty size` |
+ * |---|---|
+ * | 显示   | `52 162` |
+ * | 隐藏   | `6 10`  ← ResizeObserver 在隐藏瞬间触发 fit，把 10×6 发给了服务端 |
+ *
+ * 对得上算术：`cols = max(2, floor((100 - 14) / 8.4)) = 10`、`rows = max(1, floor(100 / 16.8)) = 6`。
+ *
+ * ## 用户看到的
+ *
+ * 切回这个标签时，屏幕上是那个 10 列进程**最后画的那一帧**——一根窄条。客户端随即发出正确的
+ * 尺寸，服务端 SIGWINCH，程序重画，才铺满宽屏。这中间隔着**一个完整的往返**：本机是几毫秒
+ * （看不见），走 cloudflare tunnel 是几百毫秒（用户实测原话："切换 terminal tab 时会有一个
+ * 短期的内容显示是窄条，然后才会切换为宽屏适配屏幕"）。**延迟不是病因，是显影液。**
+ *
+ * 而比闪一下更糟的是：后台标签的 PTY 在你不看它的整段时间里都是 10 列——跑在里面的 agent
+ * 一直按 10 列输出，滚动缓冲被永久搞坏，切回来 reflow 也救不回全屏 TUI 的帧。
+ *
+ * ## 为什么修在这里
+ *
+ * 之前的处理是「切回来时重新 fit」（pro 那份 TerminalSurface 的注释原话就写着"消除 v-show
+ * 隐藏时无法测量尺寸的问题"）——那是在**症状**上打补丁：承认隐藏时量不准，却仍然让它量、
+ * 还把量出来的结果发给了服务端。真正的不变量只有一句：
+ *
+ *   **量不到尺寸的终端，就不该有尺寸主张——它上一次量准的尺寸继续有效，直到它重新可见。**
+ *
+ * 所以闸门放在「测量」这个动作本身上，而不是给每个调用点各打一次补丁：fit 的每一条路径
+ * （ResizeObserver、变可见、连接后的阶梯 fit、抽屉挤压重排）最终都汇到同一处。
+ */
+
+/** 拿得到盒子才量得到尺寸。`display: none`（自己或任一祖先）→ offsetWidth/Height 归零。
+ *
+ *  用 offsetWidth/offsetHeight 而不是 `offsetParent !== null`：后者对 `position: fixed`
+ *  的元素同样返回 null，会把一个完全可见的终端误判成不可测量。
+ *
+ *  `visibility: hidden` 有盒子、有真实尺寸 —— 判定为**可测量**，这是对的：它的几何是真的，
+ *  只是没画出来。 */
+export function canMeasureTerminal(el: {
+  offsetWidth?: number
+  offsetHeight?: number
+} | null | undefined): boolean {
+  if (!el) return false
+  return (el.offsetWidth ?? 0) > 0 && (el.offsetHeight ?? 0) > 0
+}
