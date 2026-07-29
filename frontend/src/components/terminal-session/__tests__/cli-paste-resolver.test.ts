@@ -94,26 +94,32 @@ describe('CliPasteResolver pure helpers', () => {
 
   test('prefixes injected paths with @ so CLIs treat them as file references', async () => {
     const { withReferencePrefix } = await helpers()
-    // Bare paths gain an @ prefix.
-    expect(withReferencePrefix(['tmp/clip/07-04-20/xxx.png'])).toEqual(['@tmp/clip/07-04-20/xxx.png'])
+    // Bare relative paths gain an @ prefix AND a ./ marker — `tmp/…` reads as
+    // ambiguous (easily misread as system /tmp) without it.
+    expect(withReferencePrefix(['tmp/clip/07-04-20/xxx.png'])).toEqual(['@./tmp/clip/07-04-20/xxx.png'])
     expect(withReferencePrefix(['tmp/clip/a.png', 'tmp/clip/b.png'])).toEqual([
-      '@tmp/clip/a.png',
-      '@tmp/clip/b.png',
+      '@./tmp/clip/a.png',
+      '@./tmp/clip/b.png',
     ])
     // Idempotent: an already-prefixed path is not double-prefixed.
     expect(withReferencePrefix(['@tmp/clip/a.png', 'tmp/clip/b.png'])).toEqual([
       '@tmp/clip/a.png',
-      '@tmp/clip/b.png',
+      '@./tmp/clip/b.png',
     ])
+    // Already dot-relative / absolute / home-relative paths are left untouched —
+    // only a bare relative path is ambiguous.
+    expect(withReferencePrefix(['./tmp/clip/a.png'])).toEqual(['@./tmp/clip/a.png'])
+    expect(withReferencePrefix(['/Users/me/img.png'])).toEqual(['@/Users/me/img.png'])
+    expect(withReferencePrefix(['~/Downloads/img.png'])).toEqual(['@~/Downloads/img.png'])
   })
 
-  test('end-to-end injection prefixes @ then keeps quoting + trailing space', async () => {
+  test('end-to-end injection prefixes @./ then keeps quoting + trailing space', async () => {
     const { formatPathsForPty, withReferencePrefix, uniqueOrderedPaths } = await helpers()
     // Mirrors injectPaths: dedupe -> @-prefix -> format for PTY.
     const injected = (paths: string[]) => formatPathsForPty(withReferencePrefix(uniqueOrderedPaths(paths)))
-    expect(injected(['tmp/clip/07-04-20/xxx.png'])).toBe('@tmp/clip/07-04-20/xxx.png ')
-    expect(injected(['tmp/clip/a.png', 'tmp/clip/a.png', 'tmp/clip/b.png'])).toBe('@tmp/clip/a.png @tmp/clip/b.png ')
-    // Paths needing shell-quoting keep the @ inside the quotes.
+    expect(injected(['tmp/clip/07-04-20/xxx.png'])).toBe('@./tmp/clip/07-04-20/xxx.png ')
+    expect(injected(['tmp/clip/a.png', 'tmp/clip/a.png', 'tmp/clip/b.png'])).toBe('@./tmp/clip/a.png @./tmp/clip/b.png ')
+    // Paths needing shell-quoting keep the @ inside the quotes; absolute paths stay bare.
     expect(injected(['/Users/me/My File.png'])).toBe("'@/Users/me/My File.png' ")
   })
 

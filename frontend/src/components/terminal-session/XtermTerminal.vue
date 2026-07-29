@@ -31,6 +31,8 @@ import { nextTick, ref, onMounted, onUnmounted, watch } from 'vue'
 import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
+import type { TerminalFindOptions } from './terminalSearchOptions'
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
@@ -69,8 +71,15 @@ const { isMobile } = useDeviceDetection()
 const terminalContainer = ref<HTMLDivElement>()
 const terminalInputProxy = ref<HTMLTextAreaElement>()
 const transcript = ref('')
+// Search (in-terminal find, [Ref: TerminalSearchBar]). resultIndex is 0-based, -1 = no active
+// match (empty query, or the addon hasn't computed results for this term/options yet — see
+// buildSearchOptions: results are only tracked when `decorations` is passed).
+const searchResultIndex = ref(-1)
+const searchResultCount = ref(0)
 let terminal: Terminal | null = null
 let fitAddon: FitAddon | null = null
+let searchAddon: SearchAddon | null = null
+let searchResultsSub: { dispose(): void } | null = null
 let resizeObserver: ResizeObserver | null = null
 let resizeDebounce: ReturnType<typeof setTimeout> | null = null
 let renderSyncRaf = 0
@@ -259,11 +268,45 @@ function attachXtermKeydownFallback(textarea: HTMLTextAreaElement | null): () =>
   }
 }
 
+// Fixed highlight palette for search matches. `matchOverviewRuler` / `activeMatchColorOverviewRuler`
+// are mandatory on ISearchDecorationOptions even though this terminal has no overview ruler
+// enabled, so they just reuse the match colors. Kept visually distinct from the existing
+// selection color (rgba(80, 160, 255, 0.5), blue) so a search highlight is never mistaken for a
+// live text selection: amber for "a match", a brighter orange for "the current match".
+const SEARCH_DECORATIONS = {
+  matchBackground: '#5a4415',
+  matchBorder: '#d9a441',
+  matchOverviewRuler: '#d9a441',
+  activeMatchBackground: '#8a5a12',
+  activeMatchBorder: '#f5b342',
+  activeMatchColorOverviewRuler: '#f5b342',
+}
+
+function buildSearchOptions(options?: TerminalFindOptions): ISearchOptions {
+  return {
+    caseSensitive: options?.caseSensitive,
+    wholeWord: options?.wholeWord,
+    regex: options?.regex,
+    // Match tracking (onDidChangeResults / resultCount) only runs when `decorations` is set —
+    // without it the addon still moves the selection but never computes the total count, so this
+    // is not optional even though callers never author it themselves.
+    decorations: SEARCH_DECORATIONS,
+  }
+}
+
 function initTerminal() {
   if (terminal) return
   if (!terminalContainer.value) return
 
   terminal = new Terminal({
+    // Required for @xterm/addon-search's match highlighting: SearchAddon's decorations call
+    // Terminal.registerDecoration(), which xterm.js gates behind `allowProposedApi` — with it
+    // unset (default false) EVERY registerDecoration() call throws "You must set the
+    // allowProposedApi option to true to use proposed API", which aborts findNext/findPrevious
+    // BEFORE they reach _fireResults()/_findNextAndSelect() — search silently always reports 0
+    // matches and never moves the selection, with no visible console error surfaced through the
+    // normal event-handler path. [Ref: search-always-zero-matches root cause]
+    allowProposedApi: true,
     cursorBlink: true,
     fontSize: isMobile.value ? 12 : 14,
     fontFamily: "'Cascadia Code', 'Fira Code', 'Source Code Pro', Menlo, Monaco, monospace",
@@ -285,6 +328,13 @@ function initTerminal() {
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
   terminal.loadAddon(new WebLinksAddon())
+
+  searchAddon = new SearchAddon()
+  terminal.loadAddon(searchAddon)
+  searchResultsSub = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+    searchResultIndex.value = resultIndex
+    searchResultCount.value = resultCount
+  })
 
   terminal.open(terminalContainer.value)
   const helperTextarea = configureInputAnchor()
@@ -404,6 +454,8 @@ onMounted(() => {
 onUnmounted(() => {
   xtermKeydownFallback.dispose()
   for (const cleanup of diagnosticCleanups.splice(0)) cleanup()
+  searchResultsSub?.dispose()
+  searchResultsSub = null
   if (resizeDebounce) clearTimeout(resizeDebounce)
   if (renderSyncRaf) window.cancelAnimationFrame(renderSyncRaf)
   if (renderSyncTrailing) clearTimeout(renderSyncTrailing)
@@ -436,13 +488,52 @@ function fit() {
   fitAddon?.fit()
 }
 
+/** Search forward for `term` from the current position (wraps). Empty term is a no-op clear —
+ *  calling the addon with '' would just drop the selection without resetting our own counters.
+ *  `incremental` is findNext-only (native addon semantics): pass true for as-you-type calls so a
+ *  still-matching longer query expands the current match instead of jumping to a new position;
+ *  leave it false/omitted for an explicit "next match" (Enter / the ▼ button). */
+function findNext(term: string, options?: TerminalFindOptions, incremental?: boolean): boolean {
+  if (!searchAddon || !term) {
+    searchResultIndex.value = -1
+    searchResultCount.value = 0
+    return false
+  }
+  return searchAddon.findNext(term, { ...buildSearchOptions(options), incremental })
+}
+
+/** Search backward for `term` from the current position (wraps). */
+function findPrevious(term: string, options?: TerminalFindOptions): boolean {
+  if (!searchAddon || !term) return false
+  return searchAddon.findPrevious(term, buildSearchOptions(options))
+}
+
+/** Clears match highlights/selection and resets the exposed counters. `clearDecorations()` alone
+ *  does NOT fire `onDidChangeResults` (see addon source: clearResults() just empties the internal
+ *  array without emitting), so the counters are reset here explicitly rather than relying on it. */
+function clearSearch(): void {
+  searchAddon?.clearActiveDecoration()
+  searchAddon?.clearDecorations()
+  searchResultIndex.value = -1
+  searchResultCount.value = 0
+}
+
 watch(() => props.active, (active) => {
   if (active) {
     void nextTick(() => setTimeout(() => fit(), 50))
   }
 })
 
-defineExpose({ write, fit, terminal: () => terminal })
+defineExpose({
+  write,
+  fit,
+  terminal: () => terminal,
+  findNext,
+  findPrevious,
+  clearSearch,
+  searchResultIndex,
+  searchResultCount,
+})
 </script>
 
 <style scoped>
