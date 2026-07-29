@@ -20,6 +20,9 @@
  */
 import { computed, ref, watch, type Ref } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
+import type { TabNotLive } from './tabLiveness'
+// 「这个名字是用户起的，还是自动生成的占位」以及「终端N」这套措辞的 SSOT（标签栏也读它）。
+import { displayTabName, isDefaultTabName } from './useTabDisplayName'
 
 export type EffectiveStatus = 'waiting' | 'running' | 'done-unseen' | 'idle'
 
@@ -145,22 +148,88 @@ export function windowTool(w: TmuxWindowState): string {
   return active?.agentTool ?? panes.find((p) => p.agentTool)?.agentTool ?? ''
 }
 
+/** Display name for an agent tool. '' stays '' (no agent → no name to show). */
+export function agentToolLabel(tool: string | undefined): string {
+  return tool === 'codex' ? 'Codex' : tool === 'claude' ? 'Claude' : (tool ?? '')
+}
+
+/**
+ * The ONE phrasing of "what is this agent doing", shared by every surface that says it in words
+ * (tmux pane attribution, non-tmux session cards, the per-surface status chip).
+ *
+ * Needs-you splits by HOW the turn ended: a question wants an answer, a report wants a glance.
+ * Same dot, same urgency — only the wording differs, so the label carries the nuance the status
+ * model deliberately refuses to carry as a separate colour. Co-located with STATUS_COLOR /
+ * STATUS_MOTION for the same reason they are: colour, motion and WORDS are the three things a
+ * status says, and a surface that invents its own wording is as much a drift as one that invents
+ * its own hex.
+ */
+export function agentStatusLabel(
+  status: string | undefined,
+  awaitingUser?: boolean,
+  endedOnQuestion?: boolean,
+): string {
+  if (status === 'waiting') return '等待输入'
+  if (status === 'running') return '运行中'
+  if (awaitingUser) return endedOnQuestion ? '有提问' : '已完成'
+  return '空闲'
+}
+
+/** "Codex 运行中" — tool + status in one phrase, or '' when there is no agent to describe. */
+export function agentSignalText(
+  tool: string | undefined,
+  status: string | undefined,
+  awaitingUser?: boolean,
+  endedOnQuestion?: boolean,
+): string {
+  const name = agentToolLabel(tool)
+  return name ? `${name} ${agentStatusLabel(status, awaitingUser, endedOnQuestion)}` : ''
+}
+
+/** The three fields an explicit signal contributes to wording (see useAgentSignals.AgentSignal).
+ *  Structural, not the wire type itself, so the phrasing family below stays free of that import —
+ *  it is the same "words" concept as agentStatusLabel/agentSignalText, just a different source. */
+export interface AgentSaidLike {
+  title?: string
+  body?: string
+}
+
+/**
+ * The agent's OWN words, quoted — 「Codex 说：“任务已完成”」.
+ *
+ * Third member of the phrasing family above, and the only one that is not our judgement: the other
+ * two describe what we INFERRED a session is doing, this one repeats what the program itself said
+ * when it emitted an OSC notification. That difference is the entire value of the explicit-signal
+ * path, so the wording marks it — quotes plus an attribution, so a glance separates "它说的" from
+ * "我们推断的". Restrained on purpose: no icon, no exclamation, no severity of its own.
+ *
+ * Returns '' when there is nothing quotable — a bare BEL carries no text, and an empty quote
+ * (「Claude 说：“”」 or a stray "undefined") says less than the existing agentSignalText wording the
+ * caller falls back to. Never invent a body for a bell: we genuinely do not know what it wanted.
+ *
+ * `tool` is the detected engine (claude/codex) and wins over the signal's own title, which is the
+ * emitting app's name and usually says the same thing twice ("Codex" / "Claude Code"). With neither,
+ * the terminal itself is named as the speaker rather than dropping the attribution.
+ */
+export function agentSaidText(sig: AgentSaidLike | undefined, tool?: string): string {
+  const body = (sig?.body ?? '').trim()
+  const title = (sig?.title ?? '').trim()
+  const quote = body || title
+  if (!quote) return ''
+  const named = agentToolLabel(tool) || (title && title !== quote ? title : '')
+  const who = named || '终端'
+  // 中英混排：拉丁名后补一个空格（"Codex 说"），中文名不补（"终端说"）。
+  const gap = /[A-Za-z0-9)\]]$/.test(who) ? ' ' : ''
+  return `${who}${gap}说：“${quote}”`
+}
+
 /** Per-pane attribution for split windows. A window-level red dot can legitimately come
  * from a background pane while its active pane is running; exposing the owner prevents the
  * signal from looking like a stale, undismissable status. */
 export function windowAgentSignals(w: TmuxWindowState): string[] {
   return (w.panes ?? [])
     .filter((p) => p.agentTool)
-    .map((p) => {
-      const tool = p.agentTool === 'codex' ? 'Codex'
-        : p.agentTool === 'claude' ? 'Claude'
-          : p.agentTool
-      const status = p.agentStatus === 'waiting' ? '等待输入'
-        : p.agentStatus === 'running' ? '运行中'
-          : p.awaitingUser ? '已完成'
-            : '空闲'
-      return `${tool} ${status}`
-    })
+    .map((p) => agentSignalText(p.agentTool, p.agentStatus, p.awaitingUser, p.endedOnQuestion))
 }
 
 /** Stable seen-state key: tmux window id (`@N`), falling back to index if a backend omits it.
@@ -170,20 +239,132 @@ export function windowKey(w: TmuxWindowState): string {
   return w.windowId || `#${w.index}`
 }
 
-export interface OverviewGroup {
-  status: EffectiveStatus
-  windows: TmuxWindowState[]
+/**
+ * OverviewUnit — the ONE thing an overview card represents, whatever produced it.
+ *
+ * The status model, the seen-state machine and the urgency grouping below are about "an agent
+ * working somewhere you aren't looking" — a concept that has nothing to do with tmux. Binding them
+ * to TmuxWindowState is what left non-tmux users with no overview at all (and then with a list
+ * strictly worse than the tab strip). Both sources normalize INTO this shape:
+ *   • tmux    → tmuxWindowsToUnits()   (a window, its panes collapsed to one card)
+ *   • non-tmux→ sessionsToUnits()      (a PTY session, from the sessions_overview WS frame)
+ * so there is exactly one state machine and one card renderer, not two of each.
+ */
+export interface OverviewUnit {
+  /** Stable seen-state identity. tmux: window id (`@N`); cli: session id. Never a reusable index. */
+  key: string
+  /** Ordering + the "jump to N" number shown on the card. */
+  index: number
+  /** 原始名：tmux window 名 / session 标题 / 标签名，**可能是自动生成的占位**（pro 的 session
+   *  名就是一个字不差的「终端」）。卡面显示的标题一律走 overviewCardTitle，不直接渲染这个字段。 */
+  title: string
+  /** You are currently looking at this unit's real terminal (drives the seen layer). */
+  active: boolean
+  cwd: string
+  /** '' | 'claude' | 'codex' — the engine badge. */
+  tool: string
+  /** Backend-reported liveness, before the seen layer is applied. */
+  rawStatus: 'waiting' | 'running' | 'idle'
+  /** Backend "needs-you": finished a turn / blocked, not yet responded to. */
+  awaiting: boolean
+  /** Reload-proof completion time the seen layer dismisses against ('' = undated). */
+  awaitingSince: string
+  /** Per-agent attribution lines ("Claude 运行中"). Split tmux windows can have several. */
+  signals: string[]
+  /**
+   * agent 自己喊的那一句，已成句：「Codex 说：“任务已完成”」（措辞见 agentSaidText）。
+   *
+   * 省略/'' = 这个单元当前没有显式信号，或者信号是一记裸 BEL（没带正文）——两种情况卡片都沿用
+   * 既有措辞（signals / 徽章），绝不显示空引号。它只是**多出来的原话**，不改状态、不改颜色：
+   * 显式信号在后端就落在 AwaitingUser（琥珀）上，前端这里一个字都不许把它抬成红色阻塞态。
+   *
+   * 只有 PTY session 卡片会有值：显式信号按 session 归属（一个 tmux window 里哪个 pane 响的铃，
+   * 这条路径并不知道），所以 tmux 那侧留空而不是猜一个。
+   */
+  agentSaid?: string
+  /** Last few lines of REAL output (agent chrome already stripped, server-side). */
+  tail: string[]
+  /**
+   * 第二个轴：这张卡背后**还有没有活着的进程**（见 tabLiveness.ts）。
+   *
+   * 省略 = 有（tmux window / 服务端推送的 session 天然都活着，两个既有来源一个字都不用改）。
+   * 有值只可能是 detached / unreachable，由宿主为「没有 session 的标签」补出来的卡片携带——
+   * 那种卡片永远不会出现在服务端帧里，但恰恰是最该被看见的（用户以为 agent 还在跑的就是它）。
+   * 它不参与状态分组（没有进程就谈不上 waiting/running，rawStatus 就是 idle），只改卡面上那枚
+   * 徽章的措辞，免得一个已经死掉的终端被写成「空闲」——那正是本次要消灭的那类半真话。
+   */
+  liveness?: TabNotLive
+}
+
+/** tmux windows → units. Reuses the window* accessors above so tmux's semantics (active pane
+ *  wins for cwd/tool, any pane waiting → waiting) stay defined in exactly one place. */
+export function tmuxWindowsToUnits(windows: TmuxWindowState[]): OverviewUnit[] {
+  return windows.map((w) => ({
+    key: windowKey(w),
+    index: w.index,
+    title: w.name,
+    active: !!w.active,
+    cwd: windowCwd(w),
+    tool: windowTool(w),
+    rawStatus: windowRawStatus(w),
+    awaiting: windowAwaiting(w),
+    awaitingSince: windowAwaitingSince(w),
+    signals: windowAgentSignals(w),
+    tail: w.tail ?? [],
+  }))
+}
+
+/** 路径的最后一段（'' / '/' → ''）。尾部斜杠先剃掉，否则 `/a/b/` 会得到空串。 */
+function cwdBasename(cwd: string): string {
+  const trimmed = (cwd || '').replace(/\/+$/, '')
+  if (!trimmed) return ''
+  const i = trimmed.lastIndexOf('/')
+  return i >= 0 ? trimmed.slice(i + 1) : trimmed
 }
 
 /**
- * PC 概览活跃大卡的每行列数（布局规则 SSOT，纯函数可单测）：
- * 每行 ≤3；恰好 4 个走 2×2 田字格；n≤3 就 n 列；更多则 3 列换行。
- * 空闲卡不走此处（收成 chip 条），只算活跃(等你/运行/完成待看)数。
+ * 卡片标题：**这张卡是哪个终端**，一眼可辨（布局之外的另一半 SSOT，两条数据源共用）。
+ *
+ * 优先级：用户自己起的名 → cwd 的 basename → 「终端N」。
+ *
+ * 为什么要有中间那一档：tmux 侧的窗口名（`ws portal 2` / `voice-code`）天然可扫读，而非 tmux 侧
+ * 的 session 名默认就是一个字不差的「终端」——四张卡四个「终端」，编号又已经在左边的徽标里，标题
+ * 那一行等于什么都没说（Human 实测）。cwd 的 basename 恰好是 tmux 用户自己敲出来的那种名字
+ * （`deepwork-terminal`），所以拿它当默认名不是新发明，是把 tmux 侧行之有效的东西补给另一条路径。
+ *
+ * 「自动生成的占位名」的判定和「终端N」的措辞都取自 useTabDisplayName（标签栏同款），这里不另起
+ * 一套词：卡片和标签必须是同一个称呼，否则用户要在两个地方认两个名字。
  */
-export function overviewColumns(activeCount: number): number {
-  if (activeCount <= 3) return Math.max(1, activeCount)
-  if (activeCount === 4) return 2
-  return 3
+export function overviewCardTitle(u: Pick<OverviewUnit, 'title' | 'cwd' | 'index'>): string {
+  const raw = (u.title || '').trim()
+  // 用户改过名就永远听用户的——哪怕它比 basename 短、比 basename 怪。
+  if (raw && !isDefaultTabName(raw)) return raw
+  const base = cwdBasename(u.cwd)
+  if (base) return base
+  // 连 cwd 都没有（例如进程已结束的标签）：退回带编号的占位，至少与标签栏、前缀+N 对得上。
+  return displayTabName('终端', u.index)
+}
+
+export interface OverviewGroup {
+  status: EffectiveStatus
+  units: OverviewUnit[]
+}
+
+/**
+ * PC 概览大卡网格的每行列数（布局几何的唯一规则，纯函数可单测）：卡片不足 3 张就按张数给列
+ * （下限 1，免得 0 张时出一个 0 列的网格），3 张及以上恒 3 列、纵向滚动。
+ *
+ * **一套几何，两条数据源共用**：tmux 窗口和非 tmux session 都是 OverviewUnit，进的是同一张
+ * 网格、同一个列数函数、同一个卡高（.ao-active 的 grid-auto-rows）。这里没有、也不许再有
+ * "卡少的时候换一套排法"的分支。
+ *
+ * 曾经有过一个「少卡档」（≤4 个单元时：空闲也当大卡、单卡宽度封顶 520px、恰好 4 张排成 2×2
+ * 田字格），初衷是"卡少时别太空旷"。Human 实测把它判死：4 个会话被排成 2×2、每张卡大到占满
+ * 整屏、纵向几乎不滚动，一屏能扫到的会话反而比 tmux 的一行 3 张更少。结论写进规则：**卡片数量
+ * 只决定用几列，永远不决定卡片多大**——留白比"看不到第 5 个会话"便宜得多。
+ */
+export function overviewColumns(cardCount: number): number {
+  return Math.min(Math.max(1, cardCount), 3)
 }
 
 // ─── persisted "seen" layer (localStorage, device-local) ─────────────────────────────
@@ -227,7 +408,25 @@ export function isDatedSince(since: string | undefined): since is string {
   return !!since && !since.startsWith('0001-01-01')
 }
 
+/**
+ * The tmux entry point. Signature and behavior are UNCHANGED — it maps windows to units and
+ * delegates to the shared core, so every tmux consumer and its tests are untouched while the
+ * state machine itself becomes source-agnostic. Non-tmux callers use useOverviewUnits directly.
+ */
 export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: Ref<boolean>) {
+  const units = computed(() => tmuxWindowsToUnits(windows.value))
+  const core = useOverviewUnits(units, overviewOpen)
+  // effectiveStatus/dismiss keep taking a WINDOW so every existing tmux caller (pane bar, status
+  // sheet, surface, their tests) is untouched by the generalization. The seen layer keys on
+  // windowKey either way, so a window and its unit are the same identity.
+  return {
+    ...core,
+    effectiveStatus: (w: TmuxWindowState): EffectiveStatus => core.effectiveStatus(tmuxWindowsToUnits([w])[0]),
+    dismiss: (w: TmuxWindowState): void => core.dismiss(tmuxWindowsToUnits([w])[0]),
+  }
+}
+
+export function useOverviewUnits(windows: Ref<OverviewUnit[]>, overviewOpen: Ref<boolean>) {
   // Device-local "seen" layer over the backend's reload-proof "needs-you" (awaitingUser +
   // awaitingSince). A finished window keeps its dot until you've SEEN this completion — "seen" =
   // the window became ACTIVE (you switched to it), keyed on the pushed `active` flag so a native
@@ -239,21 +438,31 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
     saveSeen(seen.value)
   }
 
+  // Session-scoped dismissal for UNDATED waits (see isDatedSince). Those carry no timestamp, so
+  // there is nothing to persist a dismissal against and nothing a later turn could invalidate —
+  // storing one would mute the unit forever, which is exactly why the dated path refuses to.
+  // Keeping it in memory gives the user the action they expect ("I've handled this, stop nagging")
+  // while a reload honestly re-asks, and the entry is dropped the moment the unit stops awaiting
+  // so the NEXT completion shows up again on its own.
+  const undatedSeen = ref<Set<string>>(new Set())
+
   watch(
     windows,
     (wins) => {
       const live = new Set<string>()
       let changed = false
       for (const w of wins) {
-        live.add(windowKey(w))
+        live.add(w.key)
+        // Stopped awaiting → re-arm the undated dismissal, so its next completion is visible.
+        if (!w.awaiting) undatedSeen.value.delete(w.key)
         // You're viewing a finished window (it's active; overview closed so the terminal is what
         // you see) → seen: remember THIS completion's timestamp. `active` comes from the topology
         // push, so a native ctrl+b switch clears it exactly like a pane-bar tap. No running→re-arm
         // needed: a new turn carries a newer AwaitingSince, so the stored one stops matching and
         // the dot returns on its own — reload-proof, because both sides are transcript-derived.
-        if (w.active && !overviewOpen.value && windowAwaiting(w)) {
-          const k = windowKey(w)
-          const since = windowAwaitingSince(w)
+        if (w.active && !overviewOpen.value && w.awaiting) {
+          const k = w.key
+          const since = w.awaitingSince
           if (since && seen.value[k] !== since) {
             seen.value[k] = since
             changed = true
@@ -267,35 +476,47 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
           changed = true
         }
       }
+      for (const k of undatedSeen.value) {
+        if (!live.has(k)) undatedSeen.value.delete(k)
+      }
       if (changed) persistSeen()
     },
     { immediate: true, deep: true },
   )
 
-  /** Explicit "handled — hide it" for a window (e.g. tapping its overview card). No re-arm needed:
-   *  its next turn's newer AwaitingSince won't match the stored one, so the dot returns by itself. */
-  function dismiss(w: TmuxWindowState): void {
-    const since = windowAwaitingSince(w)
-    if (!since || seen.value[windowKey(w)] === since) return
-    seen.value[windowKey(w)] = since
+  /** Explicit "handled — hide it" for a unit (e.g. tapping its overview card).
+   *
+   *  Dated wait → persisted against that timestamp; no re-arm needed, because its next turn's
+   *  newer AwaitingSince won't match the stored one and the dot returns by itself.
+   *  Undated wait → session-scoped (see undatedSeen). Before this, dismiss() simply returned for
+   *  undated waits, which read to the user as a dot that "去除不掉". */
+  function dismiss(w: OverviewUnit): void {
+    const since = w.awaitingSince
+    if (!isDatedSince(since)) {
+      if (w.awaiting) undatedSeen.value = new Set(undatedSeen.value).add(w.key)
+      return
+    }
+    if (seen.value[w.key] === since) return
+    seen.value[w.key] = since
     persistSeen()
   }
 
-  function effectiveStatus(w: TmuxWindowState): EffectiveStatus {
-    const raw = windowRawStatus(w)
+  function effectiveStatus(w: OverviewUnit): EffectiveStatus {
+    const raw = w.rawStatus
     if (raw !== 'idle') return raw // waiting (red) / running (green) come straight from the backend
     // Idle: "needs-you" (finished a turn, not yet responded) unless you've SEEN this exact
     // completion — stored AwaitingSince equals the current one. A later turn's newer timestamp
-    // won't match → dot re-appears; an undated wait never matches → stays shown (not muted).
-    const since = windowAwaitingSince(w)
-    return windowAwaiting(w) && !(isDatedSince(since) && seen.value[windowKey(w)] === since)
-      ? 'done-unseen'
-      : 'idle'
+    // won't match → dot re-appears. An undated wait can't be matched that way, so it stays shown
+    // by default (fail-open) but honors an explicit session-scoped dismissal.
+    if (!w.awaiting) return 'idle'
+    const since = w.awaitingSince
+    if (isDatedSince(since)) return seen.value[w.key] === since ? 'idle' : 'done-unseen'
+    return undatedSeen.value.has(w.key) ? 'idle' : 'done-unseen'
   }
 
-  /** Windows grouped by effective status, groups ordered by urgency, windows by index within. */
+  /** Units grouped by effective status, groups ordered by urgency, units by index within. */
   const groups = computed<OverviewGroup[]>(() => {
-    const buckets = new Map<EffectiveStatus, TmuxWindowState[]>()
+    const buckets = new Map<EffectiveStatus, OverviewUnit[]>()
     for (const w of windows.value) {
       const s = effectiveStatus(w)
       if (!buckets.has(s)) buckets.set(s, [])
@@ -305,7 +526,7 @@ export function useAgentOverview(windows: Ref<TmuxWindowState[]>, overviewOpen: 
       .filter((s) => buckets.has(s))
       .map((s) => ({
         status: s,
-        windows: buckets.get(s)!.slice().sort((a, b) => a.index - b.index),
+        units: buckets.get(s)!.slice().sort((a, b) => a.index - b.index),
       }))
   })
 

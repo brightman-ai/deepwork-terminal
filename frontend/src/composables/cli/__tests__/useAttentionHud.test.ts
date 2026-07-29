@@ -648,26 +648,31 @@ describe('useAttentionHud', () => {
     expect(h.hud.card.value?.items.map((c) => c.index)).toEqual([6])
   })
 
-  it('the seen layer the HUD delegates to REFUSES an undated dismiss (one policy, not two)', () => {
-    // The HUD's `markSeen` IS `useAgentOverview.dismiss`, so "undated ⇒ never persist-dismissable"
-    // is not something the HUD re-decides — it inherits it. Asserted against the real composable
-    // (the harness's markSeen is a spy and could not show this): tapping the card writes through,
-    // and the seen layer declines the write, so an undated prompt keeps its dot instead of being
-    // wrongly muted. The HUD's own gates use the SAME `isDatedSince` predicate for the same reason.
+  it('the seen layer the HUD delegates to REFUSES to PERSIST an undated dismiss (one policy, not two)', () => {
+    // The HUD's `markSeen` IS `useAgentOverview.dismiss`, so the undated policy is not something
+    // the HUD re-decides — it inherits it. Asserted against the real composable (the harness's
+    // markSeen is a spy and could not show this). The policy: an explicit dismiss takes effect for
+    // this session, but nothing is written to storage, so a reload re-asks instead of muting a
+    // high-signal prompt forever. The HUD's own gates use the SAME `isDatedSince` predicate.
     const w = win(6, { awaiting: true, since: ZERO_TIME })
     const windows = ref<TmuxWindowState[]>([w])
     const ov = useAgentOverview(windows, ref(false))
 
     expect(ov.effectiveStatus(w)).toBe('done-unseen')
     ov.dismiss(w)
-    expect(ov.effectiveStatus(w)).toBe('done-unseen') // still lit — a dated one would go 'idle' here
+    expect(ov.effectiveStatus(w)).toBe('idle') // honored here…
 
-    // Control: the very same call on a DATED completion does mute it, proving the refusal above is
-    // the undated branch and not a broken dismiss.
+    // …but not remembered: a fresh composable (the F5 case) sees it lit again.
+    const reloaded = useAgentOverview(ref<TmuxWindowState[]>([w]), ref(false))
+    expect(reloaded.effectiveStatus(w)).toBe('done-unseen')
+
+    // Control: a DATED completion IS persisted, proving the distinction above is the undated
+    // branch and not a broken dismiss.
     const dated = win(7, { awaiting: true, since: T1 })
     windows.value = [w, dated]
     expect(ov.effectiveStatus(dated)).toBe('done-unseen')
     ov.dismiss(dated)
     expect(ov.effectiveStatus(dated)).toBe('idle')
+    expect(useAgentOverview(ref<TmuxWindowState[]>([dated]), ref(false)).effectiveStatus(dated)).toBe('idle')
   })
 })

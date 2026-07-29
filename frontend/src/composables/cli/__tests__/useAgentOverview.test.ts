@@ -7,6 +7,7 @@ import {
   windowTool,
   windowAgentSignals,
   windowAwaitingSince,
+  overviewCardTitle,
   overviewColumns,
   STATUS_COLOR,
   STATUS_MOTION,
@@ -186,19 +187,40 @@ describe('needs-you state (backend awaitingUser + reload-proof seen)', () => {
     expect(ov2.effectiveStatus(win(1, { status: 'idle', awaiting: true, since: T2 }))).toBe('done-unseen')
   })
 
-  it('an UNDATED wait (zero timestamp, e.g. PTY-only permission prompt) is never dismissable — stays shown', async () => {
+  it('an UNDATED wait is dismissable for THIS session only — cleared now, re-asked after F5', async () => {
+    // Two requirements pull against each other here. An undated wait carries no identity, so a
+    // PERSISTED dismissal could never be invalidated by a later turn and would mute the window
+    // forever — hence the original fail-open rule. But refusing the dismissal outright is what the
+    // user experiences as "这个红点竟然去除不掉". Session-scoped satisfies both: the explicit tap
+    // works, and a reload honestly re-asks rather than silently swallowing a high-signal wait.
     const windows = ref([win(1, { status: 'idle', awaiting: true, since: TZERO })])
     const ov = useAgentOverview(windows, ref(true))
     await nextTick()
     expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
 
-    ov.dismiss(windows.value[0]) // no dated key to remember → no-op
-    expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
+    ov.dismiss(windows.value[0])
+    expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
 
-    // F5 → still shown (a high-signal wait must not be silently muted).
+    // F5 → shown again: nothing was written to storage.
     const ov2 = useAgentOverview(ref([win(1, { status: 'idle', awaiting: true, since: TZERO })]), ref(true))
     await nextTick()
     expect(ov2.effectiveStatus(win(1, { status: 'idle', awaiting: true, since: TZERO }))).toBe('done-unseen')
+  })
+
+  it('a dismissed UNDATED wait re-arms once the window stops awaiting', async () => {
+    // Without this the session-scoped dismissal would swallow the window's NEXT prompt too, which
+    // is the failure mode the fail-open rule was protecting against in the first place.
+    const windows = ref([win(1, { status: 'idle', awaiting: true, since: TZERO })])
+    const ov = useAgentOverview(windows, ref(true))
+    await nextTick()
+    ov.dismiss(windows.value[0])
+    expect(ov.effectiveStatus(windows.value[0])).toBe('idle')
+
+    windows.value = [win(1, { status: 'running' })] // you replied; it went back to work
+    await nextTick()
+    windows.value = [win(1, { status: 'idle', awaiting: true, since: TZERO })] // new prompt
+    await nextTick()
+    expect(ov.effectiveStatus(windows.value[0])).toBe('done-unseen')
   })
 
   it('seen-state is pruned for vanished windows (reused id starts clean)', async () => {
@@ -218,16 +240,77 @@ describe('needs-you state (backend awaitingUser + reload-proof seen)', () => {
   })
 })
 
-describe('overviewColumns (PC 活跃大卡每行 ≤3, 4→2×2 田字格)', () => {
-  it('n≤3 → n 列；4 → 2 列(田字格)；更多 → 3 列', () => {
-    expect(overviewColumns(0)).toBe(1)
+// 布局几何是**一套**，两条数据源（tmux window / 非 tmux session）共用。曾经有过一个「少卡档」
+// （≤4 个单元时空闲也当大卡、单卡宽度封顶 520px、恰好 4 张排成 2×2），Human 实测判死：4 个会话
+// 被排成 2×2、每张卡大到占满整屏、几乎不滚动，一屏扫到的会话比 tmux 的一行 3 张还少。下面这组
+// 用例把"删干净了"钉死：只剩一个只看卡片数的函数，且卡片数只决定列数、不决定卡片大小。
+describe('overviewColumns (唯一的布局几何：宽屏一行 ≤3 张)', () => {
+  it('不足 3 张按张数给列，3 张及以上恒 3 列', () => {
+    expect(overviewColumns(0)).toBe(1) // 0 列的网格没有意义，下限 1
     expect(overviewColumns(1)).toBe(1)
     expect(overviewColumns(2)).toBe(2)
     expect(overviewColumns(3)).toBe(3)
-    expect(overviewColumns(4)).toBe(2)
     expect(overviewColumns(5)).toBe(3)
     expect(overviewColumns(6)).toBe(3)
     expect(overviewColumns(9)).toBe(3)
+  })
+
+  // 用户实测的那一屏：4 个会话。旧规则给 2 列（2×2 巨卡），归一后必须是 3 列 + 第 4 张换行，
+  // 也就是"多出来的排到下一行、继续纵向滚"，而不是把卡片撑大去填满一屏。
+  it('4 张不再是 2×2 田字格，而是和 tmux 一样的一行 3 张', () => {
+    expect(overviewColumns(4)).toBe(3)
+  })
+
+  // 稀疏档留下的最后一点痕迹也不许有：任何张数下，列数都只是"张数封顶 3"这一条规则的结果。
+  // 一旦有人再按张数塞进第二档（某个区间返回别的列数），这里立刻炸。
+  it('列数是卡片数的单调不减函数，且恒等于 min(max(n,1), 3)', () => {
+    let prev = 0
+    for (let n = 0; n <= 24; n++) {
+      const cols = overviewColumns(n)
+      expect(cols).toBe(Math.min(Math.max(n, 1), 3))
+      expect(cols).toBeGreaterThanOrEqual(prev)
+      prev = cols
+    }
+  })
+})
+
+// 非 tmux 那条路径上，四张卡的标题全是一个字不差的「终端」（服务端 session 名的默认值），编号
+// 又已经在左边的徽标里 —— 标题那一行等于没有信息。tmux 侧之所以可扫读，是因为窗口名就是项目名；
+// 这组用例把"两条路径同一套命名规则"钉死：自定义名 → cwd basename → 终端N。
+describe('overviewCardTitle (卡片标题：一眼分得出是哪个终端)', () => {
+  const unit = (title: string, cwd: string, index = 1) => ({ title, cwd, index })
+
+  it('用户自己起的名永远赢（tmux 窗口名就是这一档，行为一个字不变）', () => {
+    expect(overviewCardTitle(unit('ws portal 2', '/home/me/deepwork-pro'))).toBe('ws portal 2')
+    expect(overviewCardTitle(unit('voice-code', ''))).toBe('voice-code')
+    // 名字比 basename 短/怪也听用户的 —— 改过名就是表过态。
+    expect(overviewCardTitle(unit('部署', '/home/me/deepwork-terminal'))).toBe('部署')
+  })
+
+  it('自动生成的占位名（「终端」/「终端3」/空）退回 cwd 的 basename', () => {
+    expect(overviewCardTitle(unit('终端', '/home/me/code/deepwork-terminal'))).toBe('deepwork-terminal')
+    expect(overviewCardTitle(unit('终端 3', '/home/me/code/teamworkbench'))).toBe('teamworkbench')
+    expect(overviewCardTitle(unit('终端3', '/home/me/code/voice-code'))).toBe('voice-code')
+    expect(overviewCardTitle(unit('', '/srv/app'))).toBe('app')
+    expect(overviewCardTitle(unit('   ', '/srv/app'))).toBe('app')
+    // 尾部斜杠不能把 basename 吃成空串。
+    expect(overviewCardTitle(unit('终端', '/home/me/code/deepwork-terminal/'))).toBe('deepwork-terminal')
+    // 相对路径/单段路径同样取最后一段。
+    expect(overviewCardTitle(unit('终端', 'deepwork-terminal'))).toBe('deepwork-terminal')
+  })
+
+  it('连 cwd 都没有才回落「终端N」，编号与标签栏/前缀+N 对得上', () => {
+    expect(overviewCardTitle(unit('终端', '', 4))).toBe('终端4')
+    expect(overviewCardTitle(unit('', '', 2))).toBe('终端2')
+    // 根目录没有可读的最后一段，也走编号回落，而不是显示一个孤零零的「/」。
+    expect(overviewCardTitle(unit('终端', '/', 7))).toBe('终端7')
+  })
+
+  it('同 cwd 的多个终端不会互相冒充：编号仍在卡片左侧徽标里（标题相同是允许的）', () => {
+    // 这里显式记录取舍：basename 可能重名，但"看得出是哪个项目"比"绝对唯一"更有用，
+    // 唯一性由卡片上恒显的 w.index 承担 —— 它同时是 终端N 和 前缀+N 的目标。
+    expect(overviewCardTitle(unit('终端', '/home/me/code/dw', 1))).toBe('dw')
+    expect(overviewCardTitle(unit('终端', '/home/me/code/dw', 2))).toBe('dw')
   })
 })
 
