@@ -8,6 +8,7 @@ import { ref, reactive, onUnmounted } from 'vue'
 import type { WSConnectionStatus, WSControlMessage } from '@terminal/types/terminal'
 import { wsUrl } from '@ce/utils/runtimeBase'
 import { cliApi, peerApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { takePendingReopenNotice, noteUserInput } from '@terminal/composables/cli/reopenNotice'
 
 export interface WebSocketClientOptions {
   /** Auth code. Value or getter — a getter is read live on every (re)connect, so a peer/code
@@ -180,6 +181,9 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
 
   // [TH-0501-m9j] Direct synchronous binary WS send. No intermediate layers.
   function sendBinary(data: Uint8Array) {
+    // 用户在这个终端里动手了 → 撤掉「已重开」标记（reopenNotice 不变量 ③）。放在这里而不是
+    // xterm 的按键回调上，是因为粘贴 / 工具栏按键 / 组合输入最终都汇到这一条出口，一处即全部。
+    noteUserInput(sessionId())
     if (ws && ws.readyState === WebSocket.OPEN) {
       lastInputAt = Date.now()
       bytesSentInWindow += data.byteLength
@@ -291,6 +295,12 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   function onMessage(binaryHandler: (data: ArrayBuffer) => void, controlHandler?: (msg: WSControlMessage) => void) {
     onBinaryMessage = binaryHandler
     if (controlHandler) onControlMessage = controlHandler
+    // 自动重开留下的那行说明，就在这里交付：注册输出回调的那一刻 xterm 已经就绪（宿主是在
+    // terminal ready 里调的本函数），而这条 session 的第一批真实输出还没到，所以它稳定地落在
+    // 屏幕最前面。**只走输出方向**——合成的字节交给「收到输出」的回调，与 sendBinary 无关，
+    // 因此永远不会被敲进 PTY（reopenNotice 不变量 ②）。取走即消费，重连不会再写第二遍。
+    const notice = takePendingReopenNotice(sessionId())
+    if (notice) binaryHandler(new TextEncoder().encode(notice).buffer as ArrayBuffer)
   }
 
   onUnmounted(disconnect)

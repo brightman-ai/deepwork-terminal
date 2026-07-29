@@ -123,6 +123,26 @@ export function useWorkbench() {
     save()
   }
 
+  /** Records where the terminal ACTUALLY is now, so the stored cwd stops being "where this tab was
+   *  created" and becomes "where its work lives".
+   *
+   *  This is what makes 自动重开 restore the working state instead of just a shell: after a server
+   *  restart the session list is empty, so the live cwd is unrecoverable — the only copy left is
+   *  whatever we persisted before it died. Without this, a tab created at "~" and then `cd`'d into
+   *  a project reopens in the home directory, and the trace line honestly but uselessly reports
+   *  "已回到主目录 ~".
+   *
+   *  No-ops when unchanged: save() is debounced but still a network write, and a terminal sitting
+   *  in one directory must not generate a request per poll. */
+  function setTabCwd(tabId: string, cwd: string): void {
+    if (!cwd) return
+    const group = findGroupForTab(tabId)
+    const tab = group?.tabs.find(t => t.id === tabId)
+    if (!tab || tab.cwd === cwd) return
+    tab.cwd = cwd
+    save()
+  }
+
   function setActiveTab(tabId: string): void {
     const cfg = ensureConfig()
     const group = findGroupForTab(tabId)
@@ -212,6 +232,7 @@ export function useWorkbench() {
     load,
     save,
     addTab,
+    setTabCwd,
     removeTab,
     renameTab,
     setActiveTab,

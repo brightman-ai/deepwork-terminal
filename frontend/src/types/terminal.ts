@@ -18,7 +18,7 @@ export interface TerminalSessionInfo {
 }
 
 export interface WSControlMessage {
-  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state'
+  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal'
   payload?: Record<string, unknown>
 }
 
@@ -47,6 +47,11 @@ export interface TmuxPaneState {
    *  Overview's per-window "seen" layer dismisses against this: the same value across F5 keeps a
    *  cleared dot cleared; a new turn's newer value re-shows it. Absent/zero = undated wait. */
   awaitingSince?: string
+  /** That completed turn ended on a free-text question rather than a report. It re-LABELS the
+   *  same needs-you dot ("有提问" vs "已完成") and never raises its severity: after end_turn the
+   *  agent sits at an empty prompt, so nothing is blocked. Escalating this to a red `waiting` is
+   *  what used to paint undismissable red dots on idle agents. */
+  endedOnQuestion?: boolean
 }
 export interface TmuxWindowState {
   index: number
@@ -112,6 +117,12 @@ export interface AgentState {
   totalTokens: number
   tmuxWindow?: number | null
   tmuxPane?: number | null
+  /** Backend "needs-you": finished a turn / blocked, not yet responded to. Mirrors
+   *  agentintel.AgentState.AwaitingUser — the same signal TmuxPaneState carries per pane. */
+  awaitingUser?: boolean
+  /** That turn ended on a free-text question rather than a report. Re-labels the needs-you
+   *  signal ("有提问" vs "已完成"); never raises its severity. */
+  endedOnQuestion?: boolean
   startedAt?: string
   updatedAt: string
 }

@@ -611,14 +611,29 @@ const REFERENCE_PREFIX = '@'
 
 /**
  * Prefix each filesystem path with `@` so downstream claude/codex CLIs recognize
- * it as a file reference (`@tmp/clip/…png`) rather than literal text. Idempotent:
+ * it as a file reference (`@./tmp/clip/…png`) rather than literal text. Idempotent:
  * a path already starting with `@` is left untouched (no double-prefix).
  * Applied ONLY to path injections — never to plain-text paste.
  */
 export function withReferencePrefix(paths: string[]): string[] {
   return paths.map(path =>
-    path.startsWith(REFERENCE_PREFIX) ? path : `${REFERENCE_PREFIX}${path}`,
+    path.startsWith(REFERENCE_PREFIX) ? path : `${REFERENCE_PREFIX}${ensureCwdRelativeMarker(path)}`,
   )
+}
+
+/**
+ * A bare relative path like `tmp/clip/x.png` reads as ambiguous — both to a human
+ * skimming the transcript and to an agent resolving it — because `tmp/…` is easily
+ * misread as the system `/tmp` dir instead of `{cwd}/tmp`. Prefixing it with `./`
+ * makes the cwd-relative intent explicit, same as shell convention. Absolute paths
+ * (from native-clipboard drag/drop) and already dot-relative / `~`-relative paths
+ * are left untouched — only a bare relative path is ambiguous.
+ */
+function ensureCwdRelativeMarker(path: string): string {
+  if (path.startsWith('/') || path.startsWith('~') || path.startsWith('./') || path.startsWith('../')) {
+    return path
+  }
+  return `./${path}`
 }
 
 export function shouldProbeNativeClipboard(snapshot: ClipboardSnapshot, env: PasteEnvironment): boolean {

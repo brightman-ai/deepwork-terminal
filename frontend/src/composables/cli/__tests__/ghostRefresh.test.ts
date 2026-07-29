@@ -2,38 +2,37 @@ import { describe, it, expect } from 'bun:test'
 import { ghostRefreshWait } from '../ghostRefresh'
 
 /**
- * ghostRefreshWait: the alt-screen ghosting guard's debounce math. Regression guard for the
- * "内容在刷时才花" garble — the old plain 160ms trailing debounce re-armed on every output frame
- * and NEVER fired under a continuous stream, so mid-stream xterm↔tmux divergence stayed visible.
- * The maxWait cap must force a refresh-client at least every ~maxWait even while output keeps
- * flowing, yet still give the full trailing debounce once the stream is fresh.
+ * ghostRefreshWait: the alt-screen ghosting guard's leading-edge-throttle math. Regression guard
+ * for two garbles: the v1 "内容在刷时才花" bug (a plain trailing debounce re-arms forever under a
+ * continuous stream and never fires), and the v2 residue that a real user still caught even while
+ * the debounce-with-maxWait cap was firing correctly (bounded from burst START, not from the last
+ * correction). v3's throttle fires immediately on the first frame after idle, then at most once
+ * per minInterval thereafter — tight from the LAST fire, not the burst start.
  */
-const DEBOUNCE = 160
-const MAXWAIT = 1200
+const MIN_INTERVAL = 120
 
 describe('ghostRefreshWait', () => {
-  it('gives the full trailing debounce at the start of a burst', () => {
-    // now == burstStartedAt → nothing elapsed → wait the full debounce.
-    expect(ghostRefreshWait(0, 0, DEBOUNCE, MAXWAIT)).toBe(DEBOUNCE)
+  it('fires immediately when nothing has fired yet', () => {
+    expect(ghostRefreshWait(null, 0, MIN_INTERVAL)).toBe(0)
+    expect(ghostRefreshWait(null, 5000, MIN_INTERVAL)).toBe(0)
   })
 
-  it('stays at the debounce while well inside the maxWait window', () => {
-    // 500ms into a continuous burst: 0 + 1200 - 500 = 700 > 160 → still the plain debounce.
-    expect(ghostRefreshWait(0, 500, DEBOUNCE, MAXWAIT)).toBe(DEBOUNCE)
+  it('withholds for the remainder of minInterval right after a fire', () => {
+    // fired at t=0, now t=30 → 120 - 30 = 90ms left before the next fire is allowed.
+    expect(ghostRefreshWait(0, 30, MIN_INTERVAL)).toBe(90)
   })
 
-  it('shrinks below the debounce as the maxWait cap approaches (forces a mid-stream fire)', () => {
-    // 1100ms in: 0 + 1200 - 1100 = 100 < 160 → capped, will fire in 100ms even though output flows.
-    expect(ghostRefreshWait(0, 1100, DEBOUNCE, MAXWAIT)).toBe(100)
+  it('shrinks linearly as minInterval elapses', () => {
+    expect(ghostRefreshWait(0, 100, MIN_INTERVAL)).toBe(20)
   })
 
-  it('clamps to 0 at and past the maxWait cap (never negative → fires now)', () => {
-    expect(ghostRefreshWait(0, 1200, DEBOUNCE, MAXWAIT)).toBe(0)
-    expect(ghostRefreshWait(0, 5000, DEBOUNCE, MAXWAIT)).toBe(0) // long continuous stream
+  it('clamps to 0 at and past minInterval (never negative → fires now)', () => {
+    expect(ghostRefreshWait(0, 120, MIN_INTERVAL)).toBe(0)
+    expect(ghostRefreshWait(0, 5000, MIN_INTERVAL)).toBe(0) // long continuous stream
   })
 
-  it('is burst-relative: a fresh burst gets the full debounce again', () => {
-    // burst restarted at t=2000, now t=2000 → full debounce (the post-fire re-arm case).
-    expect(ghostRefreshWait(2000, 2000, DEBOUNCE, MAXWAIT)).toBe(DEBOUNCE)
+  it('is relative to the LAST fire, not a burst start — a later fire resets the window', () => {
+    // last fired at t=2000, now t=2000 → full interval owed again (the post-fire re-arm case).
+    expect(ghostRefreshWait(2000, 2000, MIN_INTERVAL)).toBe(MIN_INTERVAL)
   })
 })

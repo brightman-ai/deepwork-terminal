@@ -1,5 +1,26 @@
 <template>
   <div class="cli-tab-bar dw-titlebar-blend" data-testid="cli-portal-tab-bar">
+    <!-- D7 overview — LEADS the strip. It is the "zoom out to all terminals" control, so it
+         belongs before the tabs it summarizes (the same reading order as a breadcrumb's root).
+         It was in the far-right chrome cluster, where it read as one more utility icon next to
+         refresh/version and was routinely missed. -->
+    <button
+      class="cli-tab-bar__overview"
+      type="button"
+      data-testid="cli-portal-overview-trigger"
+      title="标签总览（所有终端的状态与实时预览）"
+      @click="emit('toggle-overview')"
+    >
+      <LayoutGrid :size="14" />
+      <!-- Global roll-up, merged INTO the toggle capsule — the same shape TmuxPaneBar's
+           .tpb-caps-rollup has, for the same reason: the glance count belongs next to the control
+           that opens the full view, pinned at the strip's left edge so it survives horizontal
+           scrolling of a long tab list. This is what non-tmux was missing versus tmux. -->
+      <span v-if="rollupSegs.length" class="cli-tab-bar__rollup" data-testid="cli-portal-rollup">
+        <span v-for="s in rollupSegs" :key="s.status" class="ctb-seg" :class="`s-${s.status}`">{{ s.icon }}{{ s.count }}</span>
+      </span>
+    </button>
+
     <!-- Groups + tabs -->
     <template v-for="group in groups" :key="group.id">
       <!-- Group header (only when multiple groups) -->
@@ -21,14 +42,28 @@
           class="cli-tab-bar__tab"
           :class="{
             'is-active': tab.id === activeTabId,
-            'needs-input': tabNeedsInput(tab.id),
+            'needs-input': tabStatus(tab.id) === 'waiting',
+            'not-live': !!notLive(tab.id),
           }"
+          :title="tabTitle(tab)"
           :data-testid="`cli-portal-tab-${tab.id}`"
           @click="emit('switch', tab.id)"
           @dblclick.stop="emit('rename-start', tab.id)"
+          @contextmenu="emit('context-menu', $event, tab.id)"
         >
-          <!-- Agent status dot -->
-          <span class="tab-agent-dot" :class="tabDotClass(tab.id)" />
+          <!-- 前导点有两个轴，存活态优先：进程都不在了，"agent 在干嘛"就无从谈起。
+               ① 没活着 → 中性灰、静止（LIVENESS_COLOR / LIVENESS_MOTION）
+               ② 活着   → agent 状态点，SAME status vocabulary as the overview cards and the tmux
+                  pane bar (STATUS_COLOR + STATUS_MOTION, seen-aware effectiveStatus). It used to
+                  carry a private palette and no done-unseen tier, so a tab and its own overview
+                  card could show different colours for the same terminal. -->
+          <span
+            v-if="notLive(tab.id)"
+            class="tab-agent-dot"
+            :class="`l-${notLive(tab.id)}`"
+            :data-testid="`cli-portal-tab-liveness-${tab.id}`"
+          />
+          <span v-else-if="tabStatus(tab.id)" class="tab-agent-dot" :class="`s-${tabStatus(tab.id)}`" />
 
           <!-- Rename input -->
           <input
@@ -46,7 +81,17 @@
             @dblclick.stop
             @mousedown.stop
           />
-          <span v-else class="tab-name">{{ tab.name }}</span>
+          <span v-else class="tab-name">{{ displayTabName(tab.name, tabPositions.get(tab.id)) }}</span>
+
+          <!-- 「已重开」——服务重启后这个标签背后的进程没了，我们替用户开了一个新 shell 并 cd 回
+               原目录。终端里那行说明是主要的告知，这枚小标只是让人在标签栏一眼看出「是哪几个」。
+               它在用户于该终端首次输入后消失（他动手了就说明看见了），所以刻意做得克制：中性色、
+               无动效、不抢 needs-input 的注意力。 -->
+          <span
+            v-if="reopened(tab.id)"
+            class="tab-reopened"
+            :data-testid="`cli-portal-tab-reopened-${tab.id}`"
+          >已重开</span>
 
           <!-- Close -->
           <span
@@ -58,31 +103,15 @@
       </template>
     </template>
 
-    <!-- Add tab — branches into 本机 / 远程 via a small dropdown (Teleported so the tab bar's
-         overflow:hidden can't clip it). -->
+    <!-- D5: "+" creates a LOCAL terminal directly — no branch menu. Remote terminal is now its
+         own small icon button, out in the top-right chrome cluster (远程终端 is the minority path
+         and shouldn't intercept every tap on the primary "new terminal" action). -->
     <button
-      ref="addBtnRef"
       class="cli-tab-bar__tab cli-tab-bar__tab--add"
       data-testid="cli-portal-add-tab"
-      @click="toggleAddMenu"
+      title="新建本机终端"
+      @click="emit('add')"
     >+</button>
-    <Teleport to="body">
-      <div
-        v-if="addMenuOpen"
-        class="cli-add-menu-scrim"
-        data-testid="cli-portal-add-menu"
-        @click.self="addMenuOpen = false"
-      >
-        <div class="cli-add-menu" :style="addMenuStyle">
-          <button class="cli-add-menu__item" data-testid="cli-portal-add-local" @click="pickAdd('local')">
-            <Monitor :size="15" /><span>本机终端</span>
-          </button>
-          <button class="cli-add-menu__item" data-testid="cli-portal-add-remote" @click="pickAdd('remote')">
-            <Server :size="15" /><span>远程终端…</span>
-          </button>
-        </div>
-      </div>
-    </Teleport>
 
     <!-- Usage chip TRAILS the tabs (it is contextual to the terminal session, so it belongs with
          them — the same slot pro's CliV2 fills right after its TopTabBar). Keeping it here (not in
@@ -118,16 +147,26 @@
         data-testid="cli-portal-version"
         :title="'deepwork-terminal ' + fullVersionLabel"
       >{{ versionLabel }}</span>
-      <!-- PWA-only refresh: a standalone PWA has no address bar / F5, so a wedged state can't be
-           reloaded. Force-fresh via /fresh (bypasses any stale cached index.html). -->
+      <!-- Manual force-refresh: always available (not just PWA — a plain F5/reload can still
+           leave a long-lived tab on a stale build behind a cache/tunnel/proxy, and the
+           auto-update pill only appears once its poll notices; this gives an explicit escape
+           hatch the user can tap right away). Force-fresh via /fresh (bypasses any stale
+           cached index.html). -->
       <button
-        v-if="isPWA"
         class="cli-tab-bar__refresh"
         type="button"
         data-testid="cli-portal-refresh"
-        title="刷新（PWA 无 F5）"
+        title="强制刷新到最新版本"
         @click="applyUpdate"
       ><RefreshCw :size="14" /></button>
+      <!-- D5: 远程终端 — split out of the "+" menu into its own small icon (minority path). -->
+      <button
+        class="cli-tab-bar__refresh"
+        type="button"
+        data-testid="cli-portal-add-remote"
+        title="新建远程终端"
+        @click="emit('add-remote')"
+      ><Server :size="14" /></button>
       <!-- Host-provided status widget (standalone mounts the UsageChip here via CliPortal). -->
       <slot name="status" />
       <!-- Teleport outlet for viewport-agnostic top-right chrome (HelpCenter's inline "?", etc.). -->
@@ -138,20 +177,31 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { RefreshCw, Monitor, Server } from 'lucide-vue-next'
-import type { WorkbenchGroup } from '@terminal/types/workbench'
+import { RefreshCw, Server, LayoutGrid } from 'lucide-vue-next'
+import {
+  agentSaidText,
+  STATUS_COLOR,
+  STATUS_MOTION,
+  URGENCY_ORDER,
+  type EffectiveStatus,
+} from '@terminal/composables/cli/useAgentOverview'
+import { useAgentSignals } from '@terminal/composables/cli/useAgentSignals'
+import { sessionEntry } from '@terminal/composables/cli/useSessionsOverview'
+import {
+  LIVENESS_COLOR,
+  LIVENESS_LABEL,
+  type TabLiveness,
+  type TabNotLive,
+} from '@terminal/composables/cli/tabLiveness'
+import type { WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
+import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
 
 // Auto-update detection: surfaces the "有更新" pill when a newer build is deployed, and
 // owns the shared clear-and-reload used by the pill + PWA refresh button + HelpCenter.
 const { updateAvailable, applyUpdate } = useAppUpdate()
-
-interface TabRuntime {
-  agentState: { status?: string } | null
-  wsStatus: string
-}
 
 const props = defineProps<{
   groups: WorkbenchGroup[]
@@ -159,7 +209,19 @@ const props = defineProps<{
   showGroupHeaders: boolean
   renamingTabId: string | null
   renameValue: string
-  tabRuntimes: Record<string, TabRuntime>
+  /** D4: 1-based visible position per tab id — drives the "终端N" live-position label. */
+  tabPositions: Map<string, number>
+  /** tabId → seen-aware status, from the SAME useOverviewUnits instance the overview grid reads.
+   *  Absent id = no agent = no dot (an empty shell has no status worth a colour). */
+  tabStatuses: Map<string, EffectiveStatus>
+  /** tabId → 存活态（进程还在不在）。缺条目 = live。和 tabStatuses 是两个轴，不是两种说法：
+   *  进程没了的时候 agent 状态无从谈起，所以存活态优先渲染。 */
+  tabLiveness?: Map<string, TabLiveness>
+  /** 刚被自动重开过、且用户还没在里面输入过的标签。是「留痕」的标签栏那一半（另一半是终端里
+   *  那行说明）——没有它，自动重开就退化成它要取代的那次静默重建。 */
+  reopenedTabs?: Set<string>
+  /** Global status counts for the roll-up capsule (same source, same numbers as the overview). */
+  rollup: Record<EffectiveStatus, number>
 }>()
 
 const emit = defineEmits<{
@@ -172,6 +234,10 @@ const emit = defineEmits<{
   (e: 'rename-commit'): void
   (e: 'rename-cancel'): void
   (e: 'toggle-group', groupId: string): void
+  (e: 'toggle-overview'): void
+  /** Right-click on a tab. The host owns the menu (it knows the live cwd + the tab set), so the
+   *  bar only reports WHERE and ON WHAT — it never decides what the menu contains. */
+  (e: 'context-menu', event: MouseEvent, tabId: string): void
 }>()
 
 // Build version, fetched once from GET /version. Keep the badge short: release builds and
@@ -201,49 +267,82 @@ onMounted(async () => {
   } catch { /* badge just stays hidden */ }
 })
 
-// ── Add-tab dropdown (本机 / 远程) ──
-const addBtnRef = ref<HTMLButtonElement | null>(null)
-const addMenuOpen = ref(false)
-const addMenuStyle = ref<Record<string, string>>({})
-function toggleAddMenu() {
-  if (addMenuOpen.value) { addMenuOpen.value = false; return }
-  const r = addBtnRef.value?.getBoundingClientRect()
-  if (r) addMenuStyle.value = { top: `${r.bottom + 4}px`, left: `${r.left}px` }
-  addMenuOpen.value = true
-}
-function pickAdd(which: 'local' | 'remote') {
-  addMenuOpen.value = false
-  if (which === 'local') emit('add')
-  else emit('add-remote')
-}
-
-// A standalone PWA has no browser chrome (no address bar, no F5), so show an in-app refresh.
-const isPWA = computed(
-  () =>
-    typeof window !== 'undefined' &&
-    (window.matchMedia?.('(display-mode: standalone)').matches === true ||
-      (window.navigator as { standalone?: boolean }).standalone === true),
-)
 // The force-fresh clear-and-reload lives in useAppUpdate.applyAppUpdate() now (SSOT for the
-// PWA refresh button, the auto-update pill, and HelpCenter's manual entry).
+// manual refresh button, the auto-update pill, and HelpCenter's manual entry).
 
-function tabDotClass(tabId: string): string {
-  const rt = props.tabRuntimes[tabId]
-  if (!rt) return 'dot-idle'
-  const status = rt.agentState?.status
-  if (status === 'running') return 'dot-running'
-  if (status === 'waiting') return 'dot-waiting'
-  if (rt.wsStatus === 'connected') return 'dot-connected'
-  return 'dot-idle'
+/** '' when this tab has no agent — an idle shell renders NO dot, exactly like the overview grid
+ *  and the pane bar (idle is deliberately absent from STATUS_COLOR for this reason). */
+function tabStatus(tabId: string): EffectiveStatus | '' {
+  const s = props.tabStatuses.get(tabId)
+  return s && s !== 'idle' ? s : ''
 }
 
-function tabNeedsInput(tabId: string): boolean {
-  const rt = props.tabRuntimes[tabId]
-  return rt?.agentState?.status === 'waiting'
+/** null = 这个标签背后还有活着的进程（默认）。有值就一定要说出来。 */
+function notLive(tabId: string): TabNotLive | null {
+  const l = props.tabLiveness?.get(tabId)
+  return l && l !== 'live' ? l : null
 }
+
+/** 这个标签现在挂的是自动重开出来的新 shell，且用户还没动过手。 */
+function reopened(tabId: string): boolean {
+  return props.reopenedTabs?.has(tabId) ?? false
+}
+
+// 显式信号（BEL / OSC 9·777·99）：唯一带着 agent 原话的那条帧。标签上只有一枚点，容不下一句话，
+// 所以原话落在 hover 提示里——点告诉你"哪个终端在喊"，提示告诉你"它喊的是什么"。
+const { signalFor } = useAgentSignals()
+
+/**
+ * 标签 hover 提示 = 存活态 · agent 原话。
+ *
+ * 两者都没有时返回 undefined（不挂空 title，浏览器就不弹提示，与改动前逐字一致）。原话的措辞取自
+ * agentSaidText（和总览卡片同一个 SSOT），说话人取自 sessions_overview 帧里检测到的引擎，所以同一个
+ * 终端在卡片和标签上不会被叫成两个名字；裸 BEL 没有正文，那时这里什么也不加。
+ */
+function tabTitle(tab: WorkbenchTab): string | undefined {
+  const parts: string[] = []
+  const l = notLive(tab.id)
+  if (l) parts.push(LIVENESS_LABEL[l])
+  // 小标只有两个字，放不下「为什么」——完整那句话在这里补上（终端里也写了同样一句）。
+  if (reopened(tab.id)) parts.push('上一个进程已随服务重启结束，这是一个新的 shell')
+  const said = agentSaidText(signalFor(tab.sessionId), sessionEntry(tab.sessionId)?.agentTool)
+  if (said) parts.push(said)
+  return parts.length ? parts.join(' · ') : undefined
+}
+
+/** Roll-up segments, most-urgent first, zero counts dropped. Ordering comes from URGENCY_ORDER
+ *  (the same constant the overview groups iterate), so the capsule can't disagree with the grid. */
+const ROLLUP_ICON: Record<Exclude<EffectiveStatus, 'idle'>, string> = {
+  waiting: '◉', running: '●', 'done-unseen': '✓',
+}
+const rollupSegs = computed(() =>
+  URGENCY_ORDER
+    .filter((s): s is Exclude<EffectiveStatus, 'idle'> => s !== 'idle')
+    .map((status) => ({ status, icon: ROLLUP_ICON[status], count: props.rollup?.[status] ?? 0 }))
+    .filter((s) => s.count > 0),
+)
 </script>
 
 <style scoped>
+/* Overview trigger — leads the strip, separated from the first tab by a hairline so it reads as
+   chrome ("all of them") rather than as a tab. flex-shrink:0 keeps it pinned while tabs scroll. */
+.cli-tab-bar__overview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  min-width: 34px;
+  padding: 0 9px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-right: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+}
+.cli-tab-bar__overview:hover { color: hsl(var(--foreground)); background: hsl(var(--accent)); }
+.cli-tab-bar__overview:active { transform: scale(0.92); }
+
 /* PWA-only refresh button — sits on the right, mirrors the add-tab affordance. */
 .cli-tab-bar__refresh {
   display: inline-flex;
@@ -395,17 +494,79 @@ function tabNeedsInput(tabId: string): boolean {
 .cli-tab-bar__tab.is-active .tab-close { opacity: 0.6; }
 .tab-close:hover { opacity: 1 !important; color: #ff6b6b; background: rgba(255,255,255,0.12); }
 
-/* Agent dot */
+/* Agent dot — colours + rhythms bound from the SSOT constants, never typed as hex here.
+   Fourth consumer of the same pair (pane bar / status sheet / overview grid are the others). */
+.cli-tab-bar {
+  --status-waiting: v-bind('STATUS_COLOR.waiting');
+  --status-running: v-bind('STATUS_COLOR.running');
+  --status-done: v-bind("STATUS_COLOR['done-unseen']");
+  --dot-waiting-duration: v-bind('STATUS_MOTION.waiting.duration');
+  --dot-waiting-easing: v-bind('STATUS_MOTION.waiting.easing');
+  --dot-waiting-min: v-bind('STATUS_MOTION.waiting.minOpacity');
+  --dot-running-duration: v-bind('STATUS_MOTION.running.duration');
+  --dot-running-easing: v-bind('STATUS_MOTION.running.easing');
+  --dot-running-min: v-bind('STATUS_MOTION.running.minOpacity');
+  /* 第二个轴（存活）的两枚中性灰，同样从 SSOT 绑来，不在这里敲 hex。 */
+  --liveness-detached: v-bind('LIVENESS_COLOR.detached');
+  --liveness-unreachable: v-bind('LIVENESS_COLOR.unreachable');
+}
 .tab-agent-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.dot-idle      { background: #444; }
-.dot-connected { background: #4caf50; }
-.dot-running   { background: #4caf50; }
-.dot-waiting   { background: #ff9800; }
+.tab-agent-dot.s-waiting {
+  background: var(--status-waiting);
+  --dot-min-opacity: var(--dot-waiting-min);
+  animation: status-dot-pulse var(--dot-waiting-duration) var(--dot-waiting-easing) infinite;
+}
+.tab-agent-dot.s-running {
+  background: var(--status-running);
+  --dot-min-opacity: var(--dot-running-min);
+  animation: status-dot-pulse var(--dot-running-duration) var(--dot-running-easing) infinite;
+}
+.tab-agent-dot.s-done-unseen { background: var(--status-done); }  /* STATIC by contract */
+/* 存活态点：中性灰、静止（LIVENESS_MOTION 两档都是 null——脉冲表达的是"我还活着"）。 */
+.tab-agent-dot.l-detached { background: var(--liveness-detached); }
+.tab-agent-dot.l-unreachable { background: var(--liveness-unreachable); }
+/* 名字压暗：标签还在（用户的工作上下文没丢），但它不代表一个活着的终端了。 */
+.cli-tab-bar__tab.not-live .tab-name { opacity: 0.62; }
+/* 「已重开」小标：中性描边、无动效。它报告的是一件**已经做完**的事，不是要人处理的事，
+   所以不配色、不脉冲——那些是 waiting/running 的语言。 */
+.tab-reopened {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 3px;
+  font-size: 0.6rem;
+  line-height: 14px;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: var(--dot-min-opacity); }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-agent-dot { animation: none !important; opacity: 1; }
+}
+
+/* Roll-up capsule inside the overview toggle. */
+.cli-tab-bar__rollup {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 5px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.ctb-seg { display: inline-flex; align-items: center; gap: 1px; }
+.ctb-seg.s-waiting { color: var(--status-waiting); }
+.ctb-seg.s-running { color: var(--status-running); }
+.ctb-seg.s-done-unseen { color: var(--status-done); }
 
 /* Add button */
 .cli-tab-bar__tab--add {
@@ -461,37 +622,4 @@ function tabNeedsInput(tabId: string): boolean {
   user-select: text;
 }
 
-/* Add-tab dropdown (Teleported to body; scoped styles still apply via the data-v attr). The
-   full-screen scrim catches an outside-click to dismiss; the menu floats at the + button. */
-.cli-add-menu-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 900;
-}
-.cli-add-menu {
-  position: fixed;
-  min-width: 168px;
-  display: flex;
-  flex-direction: column;
-  padding: 4px;
-  background: hsl(var(--popover, 240 6% 12%));
-  border: 1px solid hsl(var(--border, 240 4% 24%));
-  border-radius: 10px;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
-}
-.cli-add-menu__item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  background: transparent;
-  border: none;
-  border-radius: 7px;
-  color: hsl(var(--foreground, 0 0% 92%));
-  font-size: 0.85rem;
-  text-align: left;
-  cursor: pointer;
-}
-.cli-add-menu__item:hover { background: hsl(var(--accent, 240 4% 20%)); }
-.cli-add-menu__item :deep(svg) { color: hsl(var(--muted-foreground)); flex-shrink: 0; }
 </style>
