@@ -197,6 +197,7 @@ import type { WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
+import { TAB_CLOSE_OPACITY } from '@terminal/composables/cli/tabChrome'
 import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
 
 // Auto-update detection: surfaces the "有更新" pill when a newer build is deployed, and
@@ -478,21 +479,24 @@ const rollupSegs = computed(() =>
   outline: none;
 }
 
-/* Close (visible on hover/active) */
+/* Close ✕ —— 常驻可见，不再靠 hover 揭示。取值与理由都在共享的 TAB_CLOSE_OPACITY，
+   pro 的 TopTabBar 用同一份：hover 揭示会让 iOS 把切标签的第一次点击吃掉。 */
 .tab-close {
   font-size: 1rem;
   line-height: 1;
   flex-shrink: 0;
   padding: 0 2px;
   border-radius: 3px;
-  opacity: 0;
+  opacity: v-bind('TAB_CLOSE_OPACITY.idle');
   margin-left: auto;
   color: hsl(var(--muted-foreground));
   transition: opacity 0.1s;
 }
-.cli-tab-bar__tab:hover .tab-close,
-.cli-tab-bar__tab.is-active .tab-close { opacity: 0.6; }
-.tab-close:hover { opacity: 1 !important; color: #ff6b6b; background: rgba(255,255,255,0.12); }
+.tab-close:hover {
+  opacity: v-bind('TAB_CLOSE_OPACITY.hover');
+  color: #ff6b6b;
+  background: rgba(255,255,255,0.12);
+}
 
 /* Agent dot — colours + rhythms bound from the SSOT constants, never typed as hex here.
    Fourth consumer of the same pair (pane bar / status sheet / overview grid are the others). */

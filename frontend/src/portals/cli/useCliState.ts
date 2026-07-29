@@ -21,7 +21,7 @@ import { type TabLiveness, type TabNotLive } from '@terminal/composables/cli/tab
 import { reconcileTabs } from '@terminal/composables/cli/reconcileTabs'
 import { reopenDetachedTabs, type ReopenCandidate } from '@terminal/composables/cli/reopenDetached'
 import { selectOverviewCard } from '@terminal/composables/cli/overviewSelection'
-import { postReopenNotice, reopenNoticeOf, forgetReopenNotice } from '@terminal/composables/cli/reopenNotice'
+import { postReopenNotice, reopenNoticeOf, forgetTerminalNotice } from '@terminal/composables/cli/terminalNotice'
 
 interface TabRuntime {
   agentState: AgentState | null
@@ -84,11 +84,11 @@ export function useCliState(runtime: PortalRuntimeResult) {
   const tabLivenessMap = computed(() => new Map<string, TabLiveness>(Object.entries(tabLiveness)))
 
   // ─── 「这个标签刚被自动重开过」──────────────────────────────────────────────
-  // 真相按 session id 存在 reopenNotice.ts（那行字要由终端连接层写进 xterm，而连接层只认识
+  // 真相按 session id 存在 terminalNotice.ts（那行字要由终端连接层写进 xterm，而连接层只认识
   // session id），这里只做「标签 → 它那条 session 还挂不挂着标记」的投影。不在这里再存一份
   // tabId 版本：两处各留一份，迟早出现「标签上还写着已重开、终端里早被用户敲过」的分叉。
   /** 标签栏读的只读投影：哪些标签还挂着「已重开」小标。用户在该终端首次输入后自动消失
-   *  （撤标由 useWebSocketClient.sendBinary 那一处出口负责，见 reopenNotice 不变量 ③）。 */
+   *  （撤标由 useWebSocketClient.sendBinary 那一处出口负责，见 terminalNotice 不变量 ③）。 */
   const reopenedTabIds = computed(
     () => new Set(allTabs.value.filter(t => !!reopenNoticeOf(t.sessionId)).map(t => t.id)),
   )
@@ -340,7 +340,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     delete tabRuntimes[tabId]
     delete surfaceRefs[tabId]
     delete tabLiveness[tabId]
-    forgetReopenNotice(tab?.sessionId)
+    forgetTerminalNotice(tab?.sessionId)
     removeTab(tabId)
   }
 
