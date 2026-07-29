@@ -27,15 +27,22 @@ func summaryTokens(s agentintel.SessionSummary) tokens {
 	return tokens{s.InputTokens, s.OutputTokens, s.CacheCreateTokens, s.CacheReadTokens}
 }
 
-// liveSession is one tmux pane the notifier tracks, with its computed metrics.
+// liveSession is one agent target the notifier tracks (a tmux pane or a PTY session), with
+// its computed metrics.
 type liveSession struct {
-	tool       string
-	session    string
-	window     int
-	windowName string
-	pane       int
-	status     agentintel.AgentStatus
-	summary    agentintel.SessionSummary
+	// key is the target's identity within a batch (the notifier's tracking key). Empty for
+	// a tmux-shaped value built without one, which then falls back to its coordinates.
+	key string
+	// location is a pre-rendered "where". Set for PTY sessions, which have no window/pane
+	// coordinates to render; empty for tmux panes, which do.
+	location    string
+	tool        string
+	session     string
+	window      int
+	windowName  string
+	pane        int
+	status      agentintel.AgentStatus
+	summary     agentintel.SessionSummary
 	activeToday bool // transcript modified today
 }
 
@@ -144,7 +151,14 @@ func fmtCost(cost float64, has bool) string {
 
 // sessionLocation is the readable "where" of a session (no transcript uuid — the
 // user finds it unreadable). e.g. "main · 窗口3 editor · 面板0".
+//
+// A PTY session brings its own: it has no window/pane coordinates, so its tab title is the
+// entire address and rendering it as "title · 窗口0 · 面板0" would invent a topology that
+// does not exist.
 func sessionLocation(s liveSession) string {
+	if s.location != "" {
+		return sanitizeField(s.location)
+	}
 	var b strings.Builder
 	b.WriteString(sanitizeField(s.session))
 	if wn := sanitizeField(s.windowName); wn != "" {
@@ -191,8 +205,13 @@ func sessionStats(s liveSession) string {
 	return stats
 }
 
-// paneKey is the stable identity of a pane within a notification batch.
+// paneKey is the stable identity of a target within a notification batch. The notifier's own
+// key wins when present — two PTY tabs can share a title, and their tmux-shaped coordinates
+// are both 0, so deriving identity from those would silently merge them into one 🆕 marker.
 func paneKey(s liveSession) string {
+	if s.key != "" {
+		return s.key
+	}
 	return fmt.Sprintf("%s:%d:%d", s.session, s.window, s.pane)
 }
 

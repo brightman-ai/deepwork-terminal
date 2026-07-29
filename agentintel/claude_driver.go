@@ -243,17 +243,19 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 	//   threshold is NOT used — a long-running tool (build/test) is running, not
 	//   waiting. Permission waits are caught by PTY AnalyzeOutput + the interrupted
 	//   flag (watcher.currentResponse), not by elapsed time here.
+	//
+	// Waiting means BLOCKED: the CLI is modal and cannot proceed without you (an
+	// elicitation tool's card, a permission prompt, an interrupted tool). A turn that
+	// merely ENDED on a question mark is not blocked — the agent is sitting at an empty
+	// prompt like after any other end_turn — so it stays Idle and rides AwaitingUser +
+	// EndedOnQuestion instead. See AgentState.EndedOnQuestion for the evidence behind
+	// that split; the short version is that the '?' heuristic produced every waiting in
+	// the local corpus and most of them were closers like "需要我做什么？".
 	if cd.state.LastUserAt.IsZero() && cd.state.LastAssistAt.IsZero() {
 		// No JSONL data — agent just started, waiting for first prompt.
 		s.Status = StatusIdle
 		s.WaitReason = WaitNone
 	} else if cd.state.StopReason == "tool_use" && isElicitationTool(cd.state.PendingTool) {
-		s.Status = StatusWaiting
-		s.WaitReason = WaitQuestion
-	} else if cd.state.StopReason == "end_turn" && cd.state.LastMsgQuestion {
-		// Turn ended on a free-text question → escalate the amber "done" to red "waiting for
-		// your answer". Heuristic (see textEndsQuestion); cleared the moment you reply (the
-		// user row resets StopReason + LastMsgQuestion), so it can't stick past your response.
 		s.Status = StatusWaiting
 		s.WaitReason = WaitQuestion
 	} else if s.Status != StatusWaiting && !cd.state.LastUserAt.IsZero() && cd.state.LastUserAt.After(cd.state.LastAssistAt) {
@@ -289,6 +291,9 @@ func (cd *ClaudeDriver) AgentState() AgentState {
 		Status:            s.Status,
 		WaitReason:        s.WaitReason,
 		AwaitingUser:      awaiting,
+		// Refines the needs-you signal without changing its severity: a turn that ended on a
+		// question is still "your move", just phrased as a question rather than a report.
+		EndedOnQuestion:   awaiting && s.LastMsgQuestion,
 		InputTokens:       s.Usage.InputTokens,
 		OutputTokens:      s.Usage.OutputTokens,
 		CacheReadTokens:   s.Usage.CacheReadTokens,

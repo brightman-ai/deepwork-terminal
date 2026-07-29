@@ -62,12 +62,32 @@ var promptChars = map[rune]bool{
 	'%': true,
 }
 
+// OutputVerdict is AnalyzeOutput's answer WITH its provenance: which rule fired and the
+// exact line that convinced it.
+//
+// The state alone is not diagnosable after the fact — six independent rules produce
+// PromptNeedsPermission and the screen they read is overwritten seconds later, so a wrong
+// verdict leaves no trace of its cause (see status_decision.go for the incident that made
+// this necessary). Line is already scrubbed and truncated, so it is safe to log and to ship.
+type OutputVerdict struct {
+	State PromptState
+	Rule  StatusRule
+	Line  string
+}
+
 // AnalyzeOutput examines the last few lines of terminal output to detect prompt state.
 // This is the LOWEST priority signal — only used when JSONL and process signals are
 // ambiguous. Uses structural patterns only; no hardcoded tool-specific strings.
-func AnalyzeOutput(lines []string) PromptState {
+//
+// Thin wrapper over AnalyzeOutputDetail: callers that only branch on the state keep reading
+// as before, callers that must be able to explain the verdict take the detail.
+func AnalyzeOutput(lines []string) PromptState { return AnalyzeOutputDetail(lines).State }
+
+// AnalyzeOutputDetail is AnalyzeOutput plus the rule + matched line behind the answer.
+// Identical classification — every return carries the rule that produced it and nothing more.
+func AnalyzeOutputDetail(lines []string) OutputVerdict {
 	if len(lines) == 0 {
-		return PromptUnknown
+		return OutputVerdict{State: PromptUnknown, Rule: RuleScreenQuiet}
 	}
 
 	// 1. Check last 5 lines for approval/permission/choice prompts.
@@ -78,12 +98,12 @@ func AnalyzeOutput(lines []string) PromptState {
 	for _, line := range checkLines {
 		for _, pat := range approvalPatterns {
 			if pat.MatchString(line) {
-				return PromptNeedsPermission
+				return OutputVerdict{PromptNeedsPermission, RuleScreenApproval, truncEvidence(line)}
 			}
 		}
 		for _, pat := range interactivePromptPatterns {
 			if pat.MatchString(line) {
-				return PromptNeedsPermission
+				return OutputVerdict{PromptNeedsPermission, RuleScreenInteractive, truncEvidence(line)}
 			}
 		}
 	}
@@ -91,20 +111,24 @@ func AnalyzeOutput(lines []string) PromptState {
 	// 1b. Check for numbered choice list (e.g., "1. Yes, auto-accept" / "2. Yes, manually").
 	// Need ≥2 consecutive numbered items in last 5 lines to confirm it's a choice menu.
 	choiceCount := 0
+	choiceLine := ""
 	for _, line := range checkLines {
 		if choiceListPattern.MatchString(line) {
 			choiceCount++
+			if choiceLine == "" {
+				choiceLine = line // the first item identifies the menu; the rest are its siblings
+			}
 		}
 	}
 	if choiceCount >= 2 {
-		return PromptNeedsPermission
+		return OutputVerdict{PromptNeedsPermission, RuleScreenChoiceList, truncEvidence(choiceLine)}
 	}
 
 	// 2. Check last line for spinner characters → running.
 	lastLine := lines[len(lines)-1]
 	for _, r := range lastLine {
 		if strings.ContainsRune(spinnerChars, r) {
-			return PromptRunning
+			return OutputVerdict{PromptRunning, RuleScreenSpinner, truncEvidence(lastLine)}
 		}
 	}
 
@@ -120,24 +144,24 @@ func AnalyzeOutput(lines []string) PromptState {
 		}
 	}
 	if lastNonEmpty == "" {
-		return PromptUnknown
+		return OutputVerdict{State: PromptUnknown, Rule: RuleScreenQuiet}
 	}
 
 	// 4. Check if last non-empty line looks like a prompt (short, starts with prompt char).
 	isPromptLine := isShellPrompt(lastNonEmpty)
 	if !isPromptLine {
-		return PromptUnknown
+		return OutputVerdict{State: PromptUnknown, Rule: RuleScreenQuiet}
 	}
 
 	// 5. Try to upgrade to PromptIdle if second-to-last line contains a model-like pattern.
 	if lastNonEmptyIdx > 0 {
 		prevLine := strings.TrimSpace(lines[lastNonEmptyIdx-1])
 		if prevLine != "" && modelPattern.MatchString(prevLine) {
-			return PromptIdle
+			return OutputVerdict{PromptIdle, RuleScreenPromptIdle, truncEvidence(lastNonEmpty)}
 		}
 	}
 
-	return PromptLikelyIdle
+	return OutputVerdict{PromptLikelyIdle, RuleScreenPromptLikely, truncEvidence(lastNonEmpty)}
 }
 
 // isShellPrompt returns true if the line looks like a shell/CLI prompt:

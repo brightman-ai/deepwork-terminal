@@ -58,6 +58,9 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		AgentTool   string        `json:"agentTool,omitempty"`
 		AgentStatus string        `json:"agentStatus,omitempty"`
 	}
+	// Agent state comes from the SAME per-tick snapshot the overview cards render, so the tab dot
+	// and the card can never disagree — they are one computation, not two that happen to match.
+	agents := s.sessionAgentStatuses(r.Context())
 	result := make([]sessionInfo, 0, len(sessions))
 	for _, sess := range sessions {
 		sess.mu.Lock()
@@ -74,15 +77,10 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			LastSeen:   formatCLITime(sess.LastActive),
 			LastActive: sess.LastActive.Format("2006-01-02T15:04:05Z07:00"),
 		}
-		shellPID := sess.ShellPID()
 		sess.mu.Unlock()
 
-		// Lightweight agent detection via injected function (avoids import cycle).
-		if s.hooks.AgentDetect != nil && shellPID > 0 {
-			if tool, status := s.hooks.AgentDetect(r.Context(), shellPID, info.CWD); tool != "" {
-				info.AgentTool = tool
-				info.AgentStatus = status
-			}
+		if a, ok := agents[sess.ID]; ok {
+			info.AgentTool, info.AgentStatus = a[0], a[1]
 		}
 		result = append(result, info)
 	}
@@ -239,6 +237,9 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	sess.LastActive = time.Now()
 	sess.mu.Unlock()
+	// Same clearing rule as the WS paths — iOS clients type through this endpoint, so
+	// skipping it here would leave exactly those users with a signal that never clears.
+	noteUserInput(sess, data)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -407,6 +408,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	tmuxTicker := time.NewTicker(tmuxStatePollInterval)
 	defer tmuxTicker.Stop()
 	var lastTmuxState []byte
+	// Non-tmux Agent Overview feed — same ticker, same diff suppression, separate frame.
+	// See sessions_overview.go for why this rides the existing connection instead of polling.
+	var lastSessionsOverview []byte
+	// Explicit-signal feed (session_signal.go). Seeded with the EMPTY payload so a quiet
+	// machine pushes nothing, while a signal that is already pending at attach time is
+	// delivered on the first tick.
+	lastAgentSignals := emptyAgentSignals
 
 	// Start writer goroutine: PTY output → WS binary frames + agent state → WS control.
 	writerDone := make(chan struct{})
@@ -416,27 +424,58 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-tmuxTicker.C:
-				if s.tmuxProvider == nil {
-					continue
+				// TWO independent feeds share this tick. tmux_state is gated on a tmux provider;
+				// sessions_overview must NOT be — a user without tmux is precisely who needs it,
+				// so the old early `continue` on the tmux branch would have starved exactly the
+				// intended audience. Keep them in separate blocks.
+				if s.tmuxProvider != nil {
+					raw, terr := s.tmuxProvider.TmuxState(ctx, wsShellPID)
+					if terr == nil && raw != nil && !bytes.Equal(raw, lastTmuxState) {
+						lastTmuxState = raw
+						msg, _ := json.Marshal(WSControlMessage{
+							Type:    MsgTypeTmuxState,
+							Payload: raw,
+						})
+						writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
+						err := conn.Write(writeCtx, websocket.MessageText, msg)
+						writeCancel()
+						if err != nil {
+							logger.Debug("ws tmux_state write failed", "id", id, "error", err)
+							return
+						}
+					}
 				}
-				raw, terr := s.tmuxProvider.TmuxState(ctx, wsShellPID)
-				if terr != nil || raw == nil {
-					continue
+				if raw := s.sessionsOverviewJSON(ctx); raw != nil && !bytes.Equal(raw, lastSessionsOverview) {
+					lastSessionsOverview = raw
+					msg, _ := json.Marshal(WSControlMessage{
+						Type:    MsgTypeSessionsOverview,
+						Payload: raw,
+					})
+					writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
+					err := conn.Write(writeCtx, websocket.MessageText, msg)
+					writeCancel()
+					if err != nil {
+						logger.Debug("ws sessions_overview write failed", "id", id, "error", err)
+						return
+					}
 				}
-				if bytes.Equal(raw, lastTmuxState) {
-					continue // no change → no push
-				}
-				lastTmuxState = raw
-				msg, _ := json.Marshal(WSControlMessage{
-					Type:    MsgTypeTmuxState,
-					Payload: raw,
-				})
-				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-				err := conn.Write(writeCtx, websocket.MessageText, msg)
-				writeCancel()
-				if err != nil {
-					logger.Debug("ws tmux_state write failed", "id", id, "error", err)
-					return
+				// Explicit signals ride the same tick for the same reason as the two above:
+				// no extra connection, no client polling. A signal can come from ANY session
+				// (a bell in a background tab has no WS of its own), so the frame describes
+				// all of them, exactly like sessions_overview.
+				if raw := s.agentSignalsJSON(); raw != nil && !bytes.Equal(raw, lastAgentSignals) {
+					lastAgentSignals = raw
+					msg, _ := json.Marshal(WSControlMessage{
+						Type:    MsgTypeAgentSignal,
+						Payload: raw,
+					})
+					writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
+					err := conn.Write(writeCtx, websocket.MessageText, msg)
+					writeCancel()
+					if err != nil {
+						logger.Debug("ws agent_signal write failed", "id", id, "error", err)
+						return
+					}
 				}
 			case data, ok := <-dataCh:
 				if !ok {
@@ -510,6 +549,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				sess.mu.Lock()
 				sess.LastActive = time.Now()
 				sess.mu.Unlock()
+				// The human answered → the "needs you" signal is spent (session_signal.go).
+				noteUserInput(sess, data)
 			}
 
 		case websocket.MessageText:
@@ -608,6 +649,7 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 			sess.mu.Lock()
 			sess.LastActive = time.Now()
 			sess.mu.Unlock()
+			noteUserInput(sess, payload.Data)
 		}
 
 	case MsgTypeTmuxNav:

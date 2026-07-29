@@ -23,43 +23,50 @@ type TmuxStateProvider interface {
 // defaultTmuxProvider is the terminal-owned provider backed by agentintel.
 // It caches prefix + installed and uses a single batched tmux query for topology,
 // so a ~1s WS poll stays cheap.
+//
+// *agentintel.TmuxStateService is embedded (not held as a named field) so every
+// capability it exposes — CopyMotion, NewSession, SelectWindow, SetOverviewActive,
+// RefreshClient, TmuxInstalled, ... — is promoted onto defaultTmuxProvider for
+// free via Go method promotion. This is deliberate: handleTmux* discovers optional
+// capabilities via type assertion (s.tmuxProvider.(TmuxRefresher), etc.), and a
+// hand-written one-line forwarder per method is a silent trap — the day
+// TmuxStateService gained RefreshClient, defaultTmuxProvider did NOT get a matching
+// forwarder, the type assertion quietly failed, and handleTmuxRefresh 501'd in
+// production on every deployment for as long as nobody re-derived it. Embedding
+// makes that whole bug class structurally impossible: a new exported method on the
+// service is automatically satisfied here, with zero lines to remember to write.
+// TmuxState below is the one deliberate exception — it adapts State's return type
+// (renames + JSON-encodes it), so it cannot be promotion-only and stays hand-written.
 type defaultTmuxProvider struct {
-	svc *agentintel.TmuxStateService
+	*agentintel.TmuxStateService
 }
 
 func newDefaultTmuxProvider() *defaultTmuxProvider {
-	return &defaultTmuxProvider{svc: agentintel.NewTmuxStateService()}
+	return &defaultTmuxProvider{TmuxStateService: agentintel.NewTmuxStateService()}
 }
 
+// TmuxState satisfies TmuxStateProvider. Kept as an explicit adapter (not promoted)
+// because it renames State()'s return value and JSON-encodes it for the wire.
 func (p *defaultTmuxProvider) TmuxState(ctx context.Context, shellPID int) (json.RawMessage, error) {
-	st := p.svc.State(ctx, shellPID)
+	st := p.State(ctx, shellPID)
 	return json.Marshal(st)
 }
-
-// CopyMotion satisfies TmuxCopyMotioner — the default provider can drive copy-mode
-// scrolls because it owns an in-process tmux service on the same socket.
-func (p *defaultTmuxProvider) CopyMotion(ctx context.Context, session, motion string) error {
-	return p.svc.CopyMotion(ctx, session, motion)
-}
-
-// NewSession satisfies TmuxSessionMaker — creates a detached session and switches the
-// shellPID's client onto it. Returns the new session name.
-func (p *defaultTmuxProvider) NewSession(ctx context.Context, shellPID int) (string, error) {
-	return p.svc.NewSession(ctx, shellPID)
-}
-
-// SelectWindow satisfies TmuxWindowSelector — switches the shellPID's client onto window
-// `index` server-side, so index ≥10 can't leak a `select-window -t N` burst into the pane.
-func (p *defaultTmuxProvider) SelectWindow(ctx context.Context, shellPID, index int) error {
-	return p.svc.SelectWindow(ctx, shellPID, index)
-}
-
-// SetOverviewActive satisfies TmuxOverviewToggler — gates per-window tail capture on whether a
-// client has the Agent Overview open.
-func (p *defaultTmuxProvider) SetOverviewActive(v bool) { p.svc.SetOverviewActive(v) }
 
 // WithTmuxProvider overrides the default in-process tmux provider.
 // Hosts use this to supply a richer snapshot; standalone needs nothing.
 func WithTmuxProvider(p TmuxStateProvider) Option {
 	return func(s *Server) { s.tmuxProvider = p }
 }
+
+// Compile-time capability contract — the SSOT for what defaultTmuxProvider must keep
+// satisfying. Any capability interface handleTmux* type-asserts against belongs in this
+// list; a future one added here without a matching promoted/adapted method fails the
+// build immediately instead of 501ing silently at runtime (see the doc comment above).
+var (
+	_ TmuxStateProvider   = (*defaultTmuxProvider)(nil)
+	_ TmuxCopyMotioner    = (*defaultTmuxProvider)(nil)
+	_ TmuxSessionMaker    = (*defaultTmuxProvider)(nil)
+	_ TmuxWindowSelector  = (*defaultTmuxProvider)(nil)
+	_ TmuxOverviewToggler = (*defaultTmuxProvider)(nil)
+	_ TmuxRefresher       = (*defaultTmuxProvider)(nil)
+)

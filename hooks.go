@@ -11,8 +11,11 @@ type Hooks struct {
 	OnCommand      func(ctx context.Context, id string, cmd string) (handled bool, err error)
 	Store          SessionStore
 
-	// AgentDetect optionally enriches session list with agent tool/status.
-	// Injected by the host to avoid import cycles.
+	// AgentDetect is a DEPRECATED override for agent detection, consulted only when the built-in
+	// detector finds no agent in a session. Detection now lives in this package (session_agent.go)
+	// because hosting it outside produced two shells with different behavior and a transcript
+	// binding that mixed up same-directory sessions. Kept for embedders with a runtime the
+	// built-in detector doesn't know; new code should not set it.
 	AgentDetect AgentDetectFunc
 
 	// AgentStatePush optionally subscribes to agent state changes for WS push.

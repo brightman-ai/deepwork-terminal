@@ -445,7 +445,7 @@ func (w *AgentStateWatcher) updateDriver() error {
 }
 
 func (w *AgentStateWatcher) publishIfChanged(ctx context.Context) {
-	resp := w.currentResponse()
+	resp := w.currentResponse(ctx)
 	fp := fingerprintAgentIntelResponse(resp)
 
 	w.mu.Lock()
@@ -471,7 +471,7 @@ func (w *AgentStateWatcher) publishIfChanged(ctx context.Context) {
 		"session_id", w.sessionID, "tool", string(w.tool), "subscribers", subscriberCount)
 }
 
-func (w *AgentStateWatcher) currentResponse() AgentIntelResponse {
+func (w *AgentStateWatcher) currentResponse(ctx context.Context) AgentIntelResponse {
 	// Copy state under lock, then release before I/O (os.Stat, PTY probe).
 	// Avoids nested RLock deadlock (isJSONLFresh also needs the path).
 	w.mu.RLock()
@@ -521,11 +521,18 @@ func (w *AgentStateWatcher) currentResponse() AgentIntelResponse {
 	if w.ptySource != nil && jsonlFresh {
 		// Output analysis: detect prompts/permission from terminal lines.
 		if lines := w.ptySource.TailLines(8); len(lines) > 0 {
-			switch AnalyzeOutput(lines) {
+			// The DETAILED verdict: this is the THIRD independent path that can declare
+			// "waiting" (the tmux poller and the per-session tracker are the other two), and a
+			// user staring at a red badge cannot tell which one produced it. Recording the rule
+			// + the matched line here makes the badge accountable wherever it came from.
+			v := AnalyzeOutputDetail(lines)
+			switch v.State {
 			case PromptNeedsPermission:
 				state.Status = StatusWaiting
 				state.WaitReason = WaitPermission
 				state.SignalSource = "output"
+				LogStatusDecision(ctx, "watcher", w.sessionID, tool,
+					StatusDecision{Status: StatusWaiting, Awaiting: true, Rule: v.Rule, Evidence: v.Line})
 			case PromptIdle, PromptLikelyIdle:
 				if state.Status == StatusRunning {
 					state.Status = StatusIdle

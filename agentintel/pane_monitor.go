@@ -126,37 +126,25 @@ func (m *PaneAgentMonitor) Status(key, cwd string, tool AgentTool, processPID ..
 	return st, st != ""
 }
 
-// Awaiting reports whether the pane's agent finished a turn and is waiting on the
-// user (needs-you). Cheap: reuses the driver already updated by Status() this poll,
-// so call it right after Status() with no extra transcript read.
-func (m *PaneAgentMonitor) Awaiting(key, cwd string, tool AgentTool) bool {
-	if m == nil || tool == ToolNone || key == "" {
-		return false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	pt := m.cache[key]
-	if pt == nil || pt.driver == nil {
-		return false
-	}
-	return pt.driver.AgentState().AwaitingUser
-}
-
-// AwaitingSince returns the transcript timestamp of the turn-completion behind the pane's
-// current needs-you state (zero when not awaiting or the driver isn't cached). Reuses the
-// driver already updated by Status() this poll — no extra transcript read. The frontend keys
-// its reload-proof "seen" layer on this. Call right after Status()/Awaiting().
-func (m *PaneAgentMonitor) AwaitingSince(key string) time.Time {
+// Snapshot returns the pane's full AgentState — needs-you (AwaitingUser), the reload-proof
+// completion time behind it (AwaitingSince), and whether that turn ended on a question
+// (EndedOnQuestion). Cheap: reuses the driver already updated by Status() this poll, so call it
+// right after Status() with no extra transcript read. Zero value when the driver isn't cached.
+//
+// One accessor rather than one method per field: every caller wants the same consistent view of
+// ONE driver read, and three getters made it possible to mix a fresh AwaitingUser with a stale
+// AwaitingSince — a real hazard now that the frontend dismisses dots by timestamp.
+func (m *PaneAgentMonitor) Snapshot(key string) AgentState {
 	if m == nil || key == "" {
-		return time.Time{}
+		return AgentState{}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	pt := m.cache[key]
 	if pt == nil || pt.driver == nil {
-		return time.Time{}
+		return AgentState{}
 	}
-	return pt.driver.AgentState().AwaitingSince
+	return pt.driver.AgentState()
 }
 
 // entryLocked returns the pane's cache entry, (re)locating the transcript path
