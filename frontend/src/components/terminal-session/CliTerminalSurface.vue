@@ -412,6 +412,7 @@ import {
   visibleSurfaceActions,
   type SurfaceActionId,
 } from '@terminal/components/terminal-session/surfaceActionBar'
+import { canMeasureTerminal } from '@terminal/components/terminal-session/terminalFit'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { ghostRefreshWait } from '@terminal/composables/cli/ghostRefresh'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
@@ -1111,7 +1112,13 @@ const composeReserve = computed(() =>
 const headerBottom = ref(0)
 let headerBottomObserver: ResizeObserver | null = null
 function measureHeaderBottom(): void {
-  headerBottom.value = terminalBodyRef.value?.getBoundingClientRect().top ?? 0
+  // 同一条不变量（terminalFit.ts）：量不到就不记，上一次量准的值继续有效。这个 RO 和 xterm 那个
+  // 一样会在标签隐藏时收到一次 0×0 回调，而 `display: none` 元素的 getBoundingClientRect() 全是
+  // 0 —— 记下去就是把"顶部"写成 0。这里的后果比 PTY 那处轻（卡片本来就只在当前标签出现，且
+  // 下面还有一次 flush:'post' 的补测），但**能量到才有资格记**这件事不该分轻重两套标准。
+  const el = terminalBodyRef.value
+  if (!canMeasureTerminal(el)) return
+  headerBottom.value = el!.getBoundingClientRect().top
 }
 watch(terminalBodyRef, (el) => {
   headerBottomObserver?.disconnect()

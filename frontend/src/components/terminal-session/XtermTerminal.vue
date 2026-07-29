@@ -33,6 +33,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
 import type { TerminalFindOptions } from './terminalSearchOptions'
+import { canMeasureTerminal } from './terminalFit'
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
@@ -346,11 +347,15 @@ function initTerminal() {
     attachCliInputDiagnostics(terminalInputProxy.value, 'xterm-proxy', { disableProxy: props.disableProxy }),
   )
 
-  // Initial fit.
-  try {
-    fitAddon.fit()
-  } catch {
-    // Container may not be visible yet.
+  // Initial fit — only if this terminal is actually on screen. A terminal born inside a hidden
+  // tab keeps xterm's 80×24 default until it is first shown; measuring it here would size it to
+  // ~10×6 (see terminalFit.ts) and every replayed byte would wrap at 10 columns.
+  if (canMeasureTerminal(terminalContainer.value)) {
+    try {
+      fitAddon.fit()
+    } catch {
+      // Container may not be visible yet.
+    }
   }
 
   // [TH-0501-m9j] Platform-aware input routing.
@@ -427,10 +432,13 @@ function initTerminal() {
 
   // ResizeObserver → debounce → emit resize.
   // [Ref: CAP-mobile-interaction S3, DDC-12]
+  //
+  // 隐藏也会触发这个回调（元素失去盒子 = 一次 0×0 的尺寸变化），而那正是最不能量的一刻 ——
+  // 修复前这条路径把 10×6 一路发到了服务端的 pty.Setsize。闸门见 terminalFit.ts。
   resizeObserver = new ResizeObserver(() => {
     if (resizeDebounce) clearTimeout(resizeDebounce)
     resizeDebounce = setTimeout(() => {
-      if (fitAddon && terminal) {
+      if (fitAddon && terminal && canMeasureTerminal(terminalContainer.value)) {
         try {
           fitAddon.fit()
           emit('resize', terminal.cols, terminal.rows)
@@ -479,12 +487,18 @@ function write(data: string | Uint8Array) {
 
 /**
  * Fit the terminal to its container.
+ *
+ * 不可测量时**保持上一次量准的尺寸**（见 terminalFit.ts）。调用方（robustFitAndResize、
+ * 变可见、连接后的阶梯 fit、抽屉挤压重排）随后照常读 terminal.cols/rows 上报 —— 读到的
+ * 是那个仍然正确的旧值，发到服务端就是一次无变化的 setsize（内核不会发 SIGWINCH），
+ * 所以调用方一个字都不用改。
  */
 function fit() {
   if (!terminal) {
     initTerminal()
     if (!terminal) return
   }
+  if (!canMeasureTerminal(terminalContainer.value)) return
   fitAddon?.fit()
 }
 
