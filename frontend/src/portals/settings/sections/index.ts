@@ -3,7 +3,7 @@
  * into the 'settings' slot rendered by the @ce SettingsPortal. Also wires the host-injected authed
  * fetch so SHARED @ce sections (e.g. Internet Access) reach the terminal backend with cli auth.
  */
-import { Info, Terminal, Globe, Bell } from 'lucide-vue-next'
+import { Info, Terminal, Globe, Bell, Keyboard } from 'lucide-vue-next'
 import { definePortalSection, unregisterPortalSection, setSettingsApiFetch } from '@ce/framework/portal'
 import { apiUrl } from '@ce/utils/runtimeBase'
 
@@ -19,6 +19,9 @@ setSettingsApiFetch((path, init) => {
 definePortalSection({ slot: 'settings', id: 'terminal.system', group: 'terminal', label: 'System', icon: Info, order: 10, component: () => import('./SystemSection.vue') })
 definePortalSection({ slot: 'settings', id: 'terminal.shell', group: 'terminal', label: 'Terminal', icon: Terminal, order: 20, component: () => import('./ShellSection.vue') })
 definePortalSection({ slot: 'settings', id: 'terminal.notifications', group: 'terminal', label: 'Notifications', icon: Bell, order: 25, component: () => import('./NotificationsSection.vue') })
+// Tab shortcuts (D3): all six bindings are rebindable. id 'shortcuts' is what the CLI portal's
+// first-run guide banner deep-links to (?cat=shortcuts).
+definePortalSection({ slot: 'settings', id: 'shortcuts', group: 'terminal', label: 'Shortcuts', icon: Keyboard, order: 27, component: () => import('./ShortcutsSection.vue') })
 // Merged "Access" section: auth code (view/copy/edit/rotate) + share link/QR + the Cloudflare
 // tunnel. Auth and network are one story (reach this server remotely) — splitting them across two
 // nav items hurt discoverability. AccessSection COMPOSES the shared @ce Internet Access component,

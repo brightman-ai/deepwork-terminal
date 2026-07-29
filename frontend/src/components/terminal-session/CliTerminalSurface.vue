@@ -24,8 +24,8 @@
          the strip + connection/agent badges show. This is the exact dedup the hosts used
          to do — now owned by the surface so every host gets it for free. -->
     <!-- Per-surface status row (SSOT for BOTH hosts). One thin line, never stacked:
-         · LEFT (ssr-main): scrollable — tmux window tabs when attached, else the agent badge.
-           Only this zone scrolls.
+         · LEFT (ssr-main): scrollable — tmux window tabs when attached, else THIS terminal's
+           action bar (see the non-tmux branch below). Only this zone scrolls.
          · RIGHT (ssr-health): the connection heartbeat, PINNED — it never scrolls and is never
            pushed off by a long tmux window list, so it stays fully visible regardless of pane
            count. This is the ONLY connection-health widget (the host tab bar no longer renders a
@@ -46,13 +46,55 @@
           @toggle-overview="toggleOverview"
           @select-window="onOverviewSelect"
         />
-        <AgentStatusBadge
-          v-else-if="tmuxReady && (agentState || notifications.length > 0)"
-          class="ssr-agent"
-          :state="agentState"
-          :notifications="notifications"
-          data-testid="surface-agent-status"
-        />
+        <!-- 非 tmux：这半边过去挂的是一枚状态徽标（"● Codex 运行中"，没有 agent 时退化成"终端"
+             两个字）。它复述的正是正上方标签栏已经有的那枚状态点 —— 常驻 chrome 里最贵的一格，
+             拿来说一句已经说过的话；而且它读的还是另一条推送（useAgentIntel），于是同一时刻这里
+             写着红色"等待输入"、顶上标签点却是绿色"运行中"（Human 实测截图）。
+             现在这半边是【当前终端的动作条】：
+               · 左区**锚死**（flex-shrink:0，永远是这一行最左那一格）：动作按固定顺序出场，条件
+                 动作只在自己的位置上出现/消失，位置从不因内容而移动；这张表和它的出现条件都在
+                 surfaceActionBar.ts 里（纯函数 + 测试），模板对它一无所知。
+               · 中区一行"此刻最具体的真话"：agent 那一句 → 正在跑的命令 → cwd，逐级回落、永不空着。
+                 前面那枚状态色点走 STATUS_COLOR/STATUS_MOTION 同一套 SSOT，状态读的是标签点读的
+                 那同一帧 —— 状态与内容合成一行，所以不再单独渲染一枚复述标签栏的徽标。
+             tmux 那半边一个字未动。 -->
+        <template v-else-if="tmuxReady">
+          <div class="ssr-actions" data-testid="surface-actions">
+            <button
+              v-for="a in surfaceActions"
+              :key="a.id"
+              class="ssr-action"
+              :class="{ 'is-alert': a.id === 'interrupt' }"
+              type="button"
+              :title="a.hint ? `${a.label} · ${a.hint}` : a.label"
+              :aria-label="a.label"
+              :data-testid="`surface-action-${a.id}`"
+              @click="a.run()"
+            ><component :is="a.icon" :size="15" aria-hidden="true" /><span
+              v-if="a.badge"
+              class="ssr-action-badge"
+              :data-testid="`surface-action-badge-${a.id}`"
+            >{{ a.badge }}</span></button>
+          </div>
+          <!-- 窄屏降级：这一格只占剩余宽度（flex:1 + min-width:0），文字超出就省略号，永远不换行、
+               不把动作或右侧心跳挤走；再窄先砍 cwd 档（价值最低），最后整格收起，按钮一个不砍。 -->
+          <div
+            v-if="surfaceSlotContent.text"
+            class="ssr-note"
+            :class="`ssr-note--${surfaceSlotContent.tier}`"
+            :title="surfaceSlotContent.text"
+            :data-tier="surfaceSlotContent.tier"
+            data-testid="surface-note"
+          ><span
+            v-if="surfaceDotColor"
+            class="ssr-dot"
+            :class="`ssr-dot--${surfaceDotStatus}`"
+            :style="surfaceDotStyle"
+            :title="surfaceDotLabel"
+            :data-status="surfaceDotStatus"
+            data-testid="surface-status-dot"
+          /><span class="ssr-note-text">{{ surfaceSlotContent.text }}</span></div>
+        </template>
       </div>
       <ConnectionChip
         class="ssr-health"
@@ -129,6 +171,21 @@
         @resize="onTerminalResize"
         @ready="onTerminalReady"
       />
+      <!-- 终端内查找 (Ctrl/Cmd+F 等价物, findInTerminal shortcut). v-if'd — a fresh instance each
+           open, no state to leak across closes. Bottom-docked so it never fights the top-right
+           notify/upload floats for the same pixels (see TerminalSearchBar.vue's own style note). -->
+      <!-- 不在这里再挂一个 data-testid：组件自己带 `terminal-search-bar`，父层传的同名属性会
+           顺着 fallthrough 把它盖掉（实测 DOM 上只剩父层那个），于是组件自己的测试契约失效。 -->
+      <TerminalSearchBar
+        v-if="terminalSearchOpen"
+        ref="terminalSearchBarRef"
+        :result-index="terminalSearchResultIndex"
+        :result-count="terminalSearchResultCount"
+        @search="onTerminalSearch"
+        @next="onTerminalSearchNext"
+        @previous="onTerminalSearchPrevious"
+        @close="closeTerminalSearch"
+      />
       <!-- Agent Overview: an overlay over the (still-mounted) terminal so xterm keeps its state
            behind it. Picking a card switches to that window + closes back to the live terminal. -->
       <!-- Overlay sits INSIDE .terminal-body, whose touch handlers drive copy-mode. Stop touches
@@ -146,6 +203,7 @@
           :rollup="ovRollup"
           :is-mobile="isMobile"
           @select="onOverviewSelect"
+          @close="overviewOpen = false"
         />
       </div>
     </div>
@@ -323,7 +381,8 @@ let drawerWidthCssVarOwner: string | null = null
 </script>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, type Component } from 'vue'
+import { ArrowDownToLine, Copy, Search, Square } from 'lucide-vue-next'
 import { Terminal } from 'xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -338,7 +397,6 @@ import AgentOverview from '@terminal/components/terminal-session/AgentOverview.v
 // 连接健康 chip = @ce SSOT 组件 (与 workbench/pro 共享同一实现)。终端传英文文案 + cli
 // testid 前缀保持既有 UX/测试契约; WS 是持续流量, 内联吞吐保持默认开 (inlineThroughput=true)。
 import ConnectionChip from '@ce/components/connection/ConnectionChip.vue'
-import AgentStatusBadge from '@terminal/components/terminal-session/AgentStatusBadge.vue'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickSheet.vue'
 import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue'
@@ -346,6 +404,14 @@ import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
 import AttentionHud from '@terminal/components/terminal-session/AttentionHud.vue'
+import TerminalSearchBar from '@terminal/components/terminal-session/TerminalSearchBar.vue'
+import type { TerminalFindOptions } from '@terminal/components/terminal-session/terminalSearchOptions'
+import { handleFindShortcut } from '@terminal/components/terminal-session/terminalFindShortcut'
+import {
+  surfaceSlot,
+  visibleSurfaceActions,
+  type SurfaceActionId,
+} from '@terminal/components/terminal-session/surfaceActionBar'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import { ghostRefreshWait } from '@terminal/composables/cli/ghostRefresh'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
@@ -361,10 +427,20 @@ import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import { useTuiAdvisory } from '@terminal/composables/cli/useTuiAdvisory'
 import { useTmuxState, paneStateKey } from '@terminal/composables/cli/useTmuxState'
-import { useAgentOverview } from '@terminal/composables/cli/useAgentOverview'
+import {
+  applySessionsOverviewFrame,
+  sessionEntry,
+  sessionNoteText,
+  sessionRawStatus,
+  sessionSignalText,
+} from '@terminal/composables/cli/useSessionsOverview'
+import { applyAgentSignalFrame } from '@terminal/composables/cli/useAgentSignals'
+import { STATUS_COLOR, STATUS_MOTION, useAgentOverview, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 import { useAttentionHud } from '@terminal/composables/cli/useAttentionHud'
 import { useForegroundAgentNotify } from '@terminal/composables/cli/useForegroundAgentNotify'
 import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
+import { useShortcutsConfig, bindingFor, bindingLabel } from '@terminal/composables/cli/useShortcutsConfig'
+import { matchesBinding } from '@terminal/composables/cli/useTabShortcuts'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
@@ -516,6 +592,207 @@ const mobileOverlayRef = ref<InstanceType<typeof MobileOverlay>>()
 const terminalBodyRef = ref<HTMLDivElement>()
 const attachInputRef = ref<HTMLInputElement>()
 const bottomBarRef = ref<HTMLDivElement>()
+
+// ─── Terminal find (Ctrl/Cmd+F equivalent, findInTerminal shortcut) ───────────────────────────
+// TerminalSearchBar (v-if in the template) owns the query text + toggle state; XtermTerminal owns
+// the @xterm/addon-search wrapper. This surface is just the wire between them, plus the global
+// shortcut that opens the bar in the first place — the exact same "own the mount point, relay to
+// the addon" split the rest of this file uses for xterm.
+const terminalSearchOpen = ref(false)
+const terminalSearchBarRef = ref<InstanceType<typeof TerminalSearchBar>>()
+// NB: xtermRef's instance type auto-unwraps refs exposed via defineExpose (Vue component-instance
+// typing), so these are already plain numbers here — NOT `.value` on a Ref.
+const terminalSearchResultIndex = computed(() => xtermRef.value?.searchResultIndex ?? -1)
+const terminalSearchResultCount = computed(() => xtermRef.value?.searchResultCount ?? 0)
+const { config: shortcutsConfig, load: loadShortcutsConfig } = useShortcutsConfig()
+
+function openTerminalSearch(): void {
+  terminalSearchOpen.value = true
+}
+/** 搜索条已经开着时的"再来一次"：把焦点送回输入框并全选已有查询词（直接改词重搜）。 */
+function refocusTerminalSearch(): void {
+  terminalSearchBarRef.value?.focus(true)
+}
+/** 键盘和动作条按钮走同一条：没开就开，已开就送回焦点 —— 两个入口一个行为。 */
+function openOrRefocusTerminalSearch(): void {
+  if (terminalSearchOpen.value) refocusTerminalSearch()
+  else openTerminalSearch()
+}
+function closeTerminalSearch(): void {
+  terminalSearchOpen.value = false
+  xtermRef.value?.clearSearch()
+  // Escape/关闭必须把焦点还给终端 — 否则会停在一个已经卸载的 <input> 上，敲键盘毫无反应。
+  void nextTick(() => xtermRef.value?.terminal?.()?.focus())
+}
+function onTerminalSearch(term: string, options: TerminalFindOptions, incremental: boolean): void {
+  xtermRef.value?.findNext(term, options, incremental)
+}
+function onTerminalSearchNext(term: string, options: TerminalFindOptions): void {
+  xtermRef.value?.findNext(term, options)
+}
+function onTerminalSearchPrevious(term: string, options: TerminalFindOptions): void {
+  xtermRef.value?.findPrevious(term, options)
+}
+// Capture-phase so it wins ahead of both the browser's native find-in-page AND xterm's own
+// keydown handling — mirrors onKeydownDirect below. Gated on `props.active`: every tab's surface
+// stays mounted (v-show) so ALL of them receive this event, but only the visible one may act on
+// it.
+//
+// 判定顺序是这里的全部要害，所以它被抽成了纯函数（terminalFindShortcut.ts，带测试）：**先匹配按键、
+// 再决定开还是聚焦**。反过来写（先看搜索条开没开就早退）会让第二次 Cmd+F 走不到 preventDefault，
+// 按键漏给浏览器，于是屏幕上同时出现两个查找框（Human 实测截图）。被接管的快捷键必须每一次都吃掉。
+function onFindShortcutKeydown(e: KeyboardEvent): void {
+  handleFindShortcut(
+    e,
+    {
+      active: props.active,
+      matches: matchesBinding(e, bindingFor(shortcutsConfig.value, 'findInTerminal')),
+      open: terminalSearchOpen.value,
+    },
+    { open: openTerminalSearch, refocus: refocusTerminalSearch },
+  )
+}
+
+// ─── 当前终端的动作条 ─────────────────────────────────────────────────────────────────────────
+//
+// 状态行左半边（非 tmux 时）装的东西。判定全在 surfaceActionBar.ts（纯函数，带测试）：出场顺序、
+// 每个动作的出现条件、中区那句话的逐级回落。这里只做它做不到的事 —— 把 xterm/WS 的现状读成一组
+// 布尔值喂进去，再把返回的表配上图标渲染出来。
+//
+// 这一行值得放按钮的理由写在那个模块的头部（一句话：我们是浏览器里的终端，可见控件的权重天然高于
+// 原生终端，而右侧心跳让这一行的空间成本早已付出）。
+//
+// ── 终端滚动位置：贴底了没有、下面积了多少新行 ──────────────────────────────────────────────
+// 数据来自 xterm 自己的 buffer（viewportY / baseY），不另造滚动监听 —— 见 onTerminalReady 里
+// 已有的 onScroll/onRender 两个回调，这里只是搭车。
+const terminalAtBottom = ref(true)
+const terminalNewLinesBelow = ref(0)
+// 上一次"贴着底"时的 baseY。离底后新推进来的行数 = 现在的 baseY - 它。非响应式：它只是算差值的锚点。
+let bottomBaseY = 0
+function noteTerminalScrollPosition(term: Terminal): void {
+  const b = term.buffer.active
+  // alt-screen（全屏 TUI）没有滚动回滚的概念，viewportY 恒为 0：那里"回到最新"毫无意义，
+  // 恒定按贴底处理，按钮就不会在一个滚不动的界面上出现。
+  const atBottom = b.type === 'alternate' || b.viewportY >= b.baseY
+  if (atBottom) {
+    bottomBaseY = b.baseY
+    if (!terminalAtBottom.value) terminalAtBottom.value = true
+    if (terminalNewLinesBelow.value !== 0) terminalNewLinesBelow.value = 0
+    return
+  }
+  if (terminalAtBottom.value) terminalAtBottom.value = false
+  const behind = Math.max(0, b.baseY - bottomBaseY)
+  if (terminalNewLinesBelow.value !== behind) terminalNewLinesBelow.value = behind
+}
+function scrollTerminalToBottom(): void {
+  const term = xtermRef.value?.terminal?.()
+  if (!term) return
+  term.scrollToBottom()
+  noteTerminalScrollPosition(term)
+  hud.record('state', '回到最新')
+}
+
+// ── 选区：有没有可复制的东西 ────────────────────────────────────────────────────────────────
+const terminalHasSelection = ref(false)
+async function copyTerminalSelection(): Promise<void> {
+  const term = xtermRef.value?.terminal?.()
+  const sel = term?.getSelection() ?? ''
+  if (!term || !sel) return
+  const ok = await clipboardWrite(sel)
+  hud.record('state', ok ? `copy ok: ${sel.length} chars` : `copy FAILED (${sel.length} chars)`)
+  // 成功才清选区：按钮随之消失，就是"复制到了"的反馈；失败留着选区，让人能再按一次。
+  if (ok) {
+    term.clearSelection()
+    terminalHasSelection.value = false
+  }
+}
+
+// ── 终端标题（OSC 0/2）：多数 shell 会把正在跑的命令写进去，原生终端标题栏显示的就是它 ──────
+const terminalTitle = ref('')
+
+/** 这个会话此刻的状态帧 —— 和顶部标签那枚点读的是同一帧（sessions_overview），不是第二条推送。 */
+const surfaceEntry = computed(() => sessionEntry(props.sessionId))
+/** 只有"检测到 agent 且它在跑"才允许出现「中断」：裸 shell 的一个单击不该能中断任何东西。 */
+const surfaceAgentRunning = computed(
+  () => !!surfaceEntry.value?.agentTool && sessionRawStatus(surfaceEntry.value) === 'running',
+)
+
+const SURFACE_ACTION_ICON: Record<SurfaceActionId, Component> = {
+  search: Search,
+  'to-bottom': ArrowDownToLine,
+  copy: Copy,
+  interrupt: Square,
+}
+
+const surfaceActions = computed(() =>
+  visibleSurfaceActions(
+    {
+      atBottom: terminalAtBottom.value,
+      newLinesBelow: terminalNewLinesBelow.value,
+      hasSelection: terminalHasSelection.value,
+      agentRunning: surfaceAgentRunning.value,
+    },
+    {
+      openSearch: openOrRefocusTerminalSearch,
+      scrollToBottom: scrollTerminalToBottom,
+      copySelection: () => { void copyTerminalSelection() },
+      sendKey: (seq: string) => { sendBinary(encoder.encode(seq)) },
+    },
+    // 快捷键文案取自用户自己的配置（可改键），措辞用 bindingLabel —— 和设置页里显示的逐字同一套。
+    bindingLabel(bindingFor(shortcutsConfig.value, 'findInTerminal')),
+  ).map((a) => ({ ...a, icon: SURFACE_ACTION_ICON[a.id] })),
+)
+
+/**
+ * 中区那句话 —— 「这个终端此刻在发生什么」，逐级回落，永不空着。
+ *
+ * 第一档（agent 那一句）来自 `sessionNoteText`，也就是**顶部标签那枚状态点读的同一帧**。改动前这里
+ * 读的是 useAgentIntel(sessionId) 的另一条推送，于是同一个 session 在同一时刻，这里写着红色
+ * 「Codex 等待输入」、顶上标签点却是绿色「运行中」（Human 实测截图）。两条判定路径就是两个真相；
+ * 现在只剩一条，逐字相等由 useSessionsOverview.test.ts 钉死。
+ */
+const surfaceSlotContent = computed(() =>
+  surfaceSlot({
+    agent: sessionNoteText(props.sessionId),
+    title: terminalTitle.value,
+    cwd: surfaceEntry.value?.cwd ?? '',
+  }),
+)
+
+/**
+ * 状态色点。走 STATUS_COLOR / STATUS_MOTION 这一套 SSOT（和标签点、总览卡片同一套颜色与动效），
+ * 状态则来自上面那同一帧 —— 于是"状态"和"内容"合成一行，不再单独渲染一枚复述标签栏的徽标。
+ *
+ * idle 没有颜色也没有点（STATUS_COLOR 里就没有这一档），和标签点一模一样：一个闲着的终端不需要
+ * 一枚常亮的点来宣告它闲着。
+ */
+const surfaceDotStatus = computed<EffectiveStatus>(() => {
+  const e = surfaceEntry.value
+  if (!e) return 'idle'
+  const raw = sessionRawStatus(e)
+  if (raw !== 'idle') return raw
+  return e.awaitingUser ? 'done-unseen' : 'idle'
+})
+const surfaceDotColor = computed(() => {
+  const s = surfaceDotStatus.value
+  return s === 'idle' ? '' : STATUS_COLOR[s]
+})
+/** 颜色 + 脉动参数，全部现取自 STATUS_COLOR / STATUS_MOTION；动画声明本身在 scoped CSS 里
+ *  （Vue 给 @keyframes 改了名，内联 animation 追不到）。 */
+const surfaceDotStyle = computed<Record<string, string>>(() => {
+  const s = surfaceDotStatus.value
+  if (s === 'idle') return {}
+  const style: Record<string, string> = { background: STATUS_COLOR[s] }
+  const motion = STATUS_MOTION[s]
+  if (motion) {
+    style['--dot-duration'] = motion.duration
+    style['--dot-easing'] = motion.easing
+    style['--dot-min-opacity'] = String(motion.minOpacity)
+  }
+  return style
+})
+/** 点的 hover 文案 = 标签点那句状态话（"Codex 运行中"），同一个措辞 SSOT。 */
+const surfaceDotLabel = computed(() => sessionSignalText(props.sessionId))
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -911,7 +1188,10 @@ const {
   netStats,
   connect,
   reconnect: wsReconnect,
-  disconnect: wsDisconnect,
+  // NB: `disconnect` is deliberately NOT pulled in. The socket's lifetime is the surface's
+  // lifetime (useWebSocketClient closes it on unmount); nothing in this component may close it
+  // on a visibility change — that was the "Reconnecting…" on every tab switch. If you find
+  // yourself needing it here, re-read the `props.active` watch below first.
   sendBinary: sendBinaryRaw,
   sendResize,
   onMessage,
@@ -1029,26 +1309,39 @@ function hasTmuxAgentTopology(state: AgentState | null, list: AgentState[]): boo
   return state?.tmuxWindow != null || list.some(item => item.tmuxWindow != null)
 }
 
-// ─── active prop watch — connect / disconnect on tab switch ───────────────────
-
+// ─── active prop watch — become visible ───────────────────────────────────────
+//
+// The attachment (WebSocket) is NOT torn down when the tab goes to the background. A terminal
+// attachment binds to a long-running process; its lifetime is a property of the SESSION, not of
+// whether you happen to be looking at it — the same invariant that made every surface stay
+// mounted (v-show) instead of being keyed on the active id.
+//
+// It used to `wsDisconnect()` on deactivate and reconnect on activate. Keeping the surface mounted
+// removed the xterm rebuild (the bulk of the delay), but the socket still re-handshook and replayed
+// up to `wsReplayMaxBytes` of scrollback on EVERY switch — which is the residual "Reconnecting…"
+// flash that survived that fix. Half the cure looked like a cure because the other half was fast.
+//
+// The cost is real and bounded: N open tabs means N open sockets. That is what a terminal
+// multiplexer's client is supposed to hold — and the server-side overview snapshot is already
+// memoized per tick, so N clients cost one computation, not N. `connectGuarded()` stays
+// idempotent (useWebSocketClient no-ops when already connected), so a re-activate is free.
 watch(() => props.active, (isActive) => {
-  if (isActive) {
-    connectGuarded()
-    // tab 切换后重新 fit，消除 v-show 隐藏时 xterm 无法测量尺寸的问题
-    nextTick(() => {
-      const xterm = xtermRef.value
-      if (xterm) {
-        xterm.fit()
-        const term = xterm.terminal?.()
-        if (term) {
-          sendResize(term.cols, term.rows)
-          terminalRows.value = term.rows
-        }
-      }
-    })
-  } else {
-    wsDisconnect()
-  }
+  if (!isActive) return
+  // Still connect here: a tab that was never activated has no socket yet (onMounted only connects
+  // the active one), so the FIRST activation is what opens it. Later ones are no-ops.
+  connectGuarded()
+  // Re-fit on show: xterm cannot measure itself while v-show has it display:none, so its cols/rows
+  // are stale from whatever the viewport was when it was last visible.
+  nextTick(() => {
+    const xterm = xtermRef.value
+    if (!xterm) return
+    xterm.fit()
+    const term = xterm.terminal?.()
+    if (term) {
+      sendResize(term.cols, term.rows)
+      terminalRows.value = term.rows
+    }
+  })
 }, { immediate: false })
 
 // ─── Page visibility ──────────────────────────────────────────────────────────
@@ -1219,8 +1512,10 @@ function onTerminalBodyTouchMove(e: TouchEvent) {
 }
 
 onMounted(() => {
+  void loadShortcutsConfig()
   document.addEventListener('visibilitychange', onVisibilityChange)
   document.addEventListener('keydown', onKeydownDirect, { capture: true })
+  document.addEventListener('keydown', onFindShortcutKeydown, { capture: true })
   document.addEventListener('paste', onClipboardPaste, { capture: true })
   terminalBodyRef.value?.addEventListener('touchmove', onTerminalBodyTouchMove, { passive: false })
   window.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
@@ -1244,6 +1539,7 @@ onUnmounted(() => {
   }
   terminalBodyRef.value?.removeEventListener('touchmove', onTerminalBodyTouchMove)
   document.removeEventListener('keydown', onKeydownDirect, { capture: true })
+  document.removeEventListener('keydown', onFindShortcutKeydown, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('scroll', lockKeyboardViewportScroll)
@@ -1262,29 +1558,28 @@ let lastBufferType = ''
 // stale glyphs from a previous frame (e.g. a "0" column left after two-digit content scrolls away)
 // — residue that lives in xterm's BUFFER, diverged from tmux. Proven in-session: a client-side
 // `term.refresh()` does NOT clear it (it re-renders the same diverged buffer); only a server-side
-// `tmux refresh-client` (resend every cell) does. So we debounce a refresh-client: during a
-// continuous stream this stays armed and does NOT fire (no extra full redraws mid-stream); it
-// fires once the output settles — when the user reads and residue would be visible.
-// GHOST_REFRESH_DEBOUNCE: quiet-period before a trailing refresh-client (residue is only visible
-// once the user reads, so coalesce a burst). GHOST_REFRESH_MAXWAIT: the hard cap that fixes the
-// mid-stream garble — under a continuous stream the debounce alone re-armed on every frame and
-// NEVER fired (spinner/tokens arrive < debounce apart), so divergence lingered until the stream
-// paused. Capping the delay at maxWait forces a refresh-client at least ~every 1.2s while output
-// flows, bounding how long any residue can stay on screen. See ghostRefresh.ts for the math + test.
-const GHOST_REFRESH_DEBOUNCE = 160
-const GHOST_REFRESH_MAXWAIT = 1200
+// `tmux refresh-client` (resend every cell) does.
+//
+// LEADING-EDGE THROTTLE (v3, 2026-07-26): replaces a trailing-debounce-with-maxWait-cap (v2) that
+// only guaranteed a fire "eventually, within maxWait of BURST START" — production caught residue
+// within that window even though the mechanism was confirmed firing correctly live (~once/sec,
+// ~15ms/call, 100% success). The first output frame after idle fires a refresh-client on the next
+// tick; further frames are ignored while one is pending/cooling down; the next frame after
+// GHOST_REFRESH_MIN_INTERVAL fires again immediately. This bounds staleness from the LAST
+// correction instead of from burst start. A real per-call cost of ~15ms means the interval can be
+// small without approaching any request-cost ceiling. See ghostRefresh.ts for the math + test.
+const GHOST_REFRESH_MIN_INTERVAL = 120
 let ghostRefreshTimer: ReturnType<typeof setTimeout> | null = null
-let ghostBurstStartedAt = 0
+let ghostLastFiredAt: number | null = null
 function scheduleGhostRefresh(): void {
   if (!tmux.attached.value) return
   const term = xtermRef.value?.terminal?.()
   if (!term || term.buffer.active.type !== 'alternate') return
-  const now = Date.now()
-  if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
-  else ghostBurstStartedAt = now // first frame of a new burst → anchor the maxWait window
-  const wait = ghostRefreshWait(ghostBurstStartedAt, now, GHOST_REFRESH_DEBOUNCE, GHOST_REFRESH_MAXWAIT)
+  if (ghostRefreshTimer) return // a fire is already pending/cooling down — later frames in the same window are no-ops
+  const wait = ghostRefreshWait(ghostLastFiredAt, Date.now(), GHOST_REFRESH_MIN_INTERVAL)
   ghostRefreshTimer = setTimeout(() => {
-    ghostRefreshTimer = null // burst ends here; the next frame re-anchors ghostBurstStartedAt
+    ghostRefreshTimer = null
+    ghostLastFiredAt = Date.now()
     const t = xtermRef.value?.terminal?.()
     if (t && t.buffer.active.type === 'alternate') void tmux.runRefreshClient()
   }, wait)
@@ -1303,6 +1598,21 @@ function onTerminalReady(terminal: Terminal) {
 
   terminal.onScroll(() => {
     viewportY.value = terminal.buffer.active.viewportY
+    // 同一个事件顺手回答"贴底了没有 / 下面积了多少新行"——「回到最新」按钮的全部输入。
+    // xterm 在滚动**和**新行推进缓冲区时都会 fire 这个事件，所以这里既盖住"用户滚上去了"，
+    // 也盖住"用户没动、但底下又来了新输出"。
+    noteTerminalScrollPosition(terminal)
+  })
+  // 有选区才出现「复制」——问 xterm 自己，不猜。
+  terminal.onSelectionChange(() => {
+    const has = terminal.hasSelection()
+    if (terminalHasSelection.value !== has) terminalHasSelection.value = has
+  })
+  // 终端标题（OSC 0/2）。多数 shell 会把正在跑的命令写进去，这是"此刻在跑什么"最诚实的客户端来源
+  // ——原生终端标题栏显示的就是它，我们没有第二份数据可用（后端那一帧不带命令字段）。
+  terminal.onTitleChange((title) => {
+    const t = (title || '').trim()
+    if (terminalTitle.value !== t) terminalTitle.value = t
   })
   // Keep the reactive `viewportY` AUTHORITATIVE for the overlay's anchor RENDER math.
   // onScroll alone is insufficient: in tmux copy-mode (alt-screen) PgUp/PgDn redraw the grid
@@ -1314,6 +1624,8 @@ function onTerminalReady(terminal: Terminal) {
   terminal.onRender(() => {
     const vY = terminal.buffer.active.viewportY
     if (viewportY.value !== vY) viewportY.value = vY
+    // 同上：onScroll 在 alt-screen 的 PgUp/PgDn（原地重绘）里不 fire，靠这里兜住。
+    noteTerminalScrollPosition(terminal)
     // Ghosting guard: when Claude Code's fullscreen TUI switches buffers (normal↔alternate on
     // launch/exit/resize-reflow), stale cells from the previous buffer can linger in the canvas
     // renderer. Force a full repaint on the transition so no residue survives. Guarded on the
@@ -1354,6 +1666,19 @@ function onTerminalReady(terminal: Terminal) {
           break
         case 'tmux_state':
           tmux.handleWSMessage(msg.payload)
+          break
+        // Non-tmux Agent Overview: every session's status + live tail, pushed on THIS surface's
+        // socket but owned by the portal. Handed to a module-level singleton rather than emitted,
+        // since the consumer (tab strip / overview popover) is not an ancestor of this component.
+        case 'sessions_overview':
+          applySessionsOverviewFrame(msg.payload)
+          break
+        // Explicit "I need you" signals (BEL / OSC 9 / 777 / 99) — the ONE frame that carries the
+        // agent's own words. Same singleton hand-off as the frame above, and for the same reason:
+        // it describes EVERY session (a bell can ring where no socket is open) while its consumers
+        // (overview cards, tab strip) live in the portal, not under this component.
+        case 'agent_signal':
+          applyAgentSignalFrame(msg.payload)
           break
         case 'error':
           console.error('WS error:', msg.payload)
@@ -1848,7 +2173,112 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
 }
 .ssr-main::-webkit-scrollbar { display: none; }
 .ssr-main :deep(.tmux-pane-bar) { flex: 1; min-width: 0; }
-.ssr-agent { padding: 0 8px; }
+
+/* 非 tmux 时的动作条。flex-shrink:0 + 排在最前 = 位置锚死在行首：右边那句话出现/消失/变长，
+   动作一个像素都不动（一个会移动的常驻按钮等于每次都要重新找它）。 */
+.ssr-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+/* 常驻 chrome：默认几乎透明（muted-foreground，无边框无底色），只在 hover/focus 时才浮起来。
+   视觉重量必须低于终端内容本身 —— 它是随时可用的工具，不是要人看的东西。 */
+.ssr-action {
+  position: relative; /* 行数角标绝对定位在它上面 */
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: hsl(var(--muted-foreground, 240 5% 64%));
+  cursor: pointer;
+  flex-shrink: 0;
+  touch-action: manipulation;
+  transition: color 0.1s, background 0.1s;
+}
+.ssr-action:hover { color: hsl(var(--foreground, 0 0% 98%)); background: hsl(var(--accent, 240 4% 22%)); }
+.ssr-action:focus-visible { outline: 1px solid hsl(var(--ring, 240 5% 64%)); outline-offset: -1px; }
+.ssr-action:active { transform: scale(0.92); }
+/* 触屏上 24px 太小 —— 手指目标放大到 30px，但视觉尺寸（图标）不变。 */
+.is-mobile .ssr-action { width: 30px; height: 30px; }
+/* 「中断」是唯一一个会改变正在跑的东西的动作，hover 时用红色说明这一点（静止态仍与其余同重量，
+   它不该在没事发生时也喊）。 */
+.ssr-action.is-alert:hover { color: #ff6b6b; background: rgba(255, 82, 82, 0.12); }
+/* 「回到最新」角上的行数。绝对定位 → 它不改变按钮尺寸，所以数字从 1 变到 99+ 时按钮不会变宽、
+   后面的按钮也就不会被推着走。 */
+.ssr-action-badge {
+  position: absolute;
+  top: -1px;
+  right: -3px;
+  min-width: 13px;
+  padding: 0 2px;
+  border-radius: 7px;
+  background: hsl(var(--muted-foreground, 240 5% 64%));
+  color: hsl(var(--background, 240 6% 10%));
+  font-size: 0.55rem;
+  line-height: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* "此刻最具体的真话"。单行、省略号、低对比度：它是一句旁白，不是标题。 */
+.ssr-note {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: hsl(var(--muted-foreground, 240 5% 64%));
+}
+.ssr-note-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* cwd 档是这行里价值最低的一句（它只回答"我在哪"），所以它也是窄屏第一个被砍的。 */
+.ssr-note--cwd { opacity: 0.85; }
+.ssr-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+/* 节奏本身（时长/曲线/谷底不透明度）由 surfaceDotStyle 从 STATUS_MOTION 现算成三个 CSS 变量注进来
+   —— 和 TmuxPaneBar / TmuxStatusSheet / AgentOverview 读的是同一个常量，四处的点不可能各跳各的。
+   动画声明必须留在这个 scoped 块里：Vue 会把 @keyframes 改名加 scope hash，内联 style 里的
+   animation 追不到那个新名字。done-unseen 在 STATUS_MOTION 里是 null（静止），所以没有它的规则
+   —— 缺席即契约，不是漏了。 */
+.ssr-dot--waiting,
+.ssr-dot--running {
+  animation: status-dot-pulse var(--dot-duration) var(--dot-easing) infinite;
+}
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: var(--dot-min-opacity); }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ssr-dot--waiting, .ssr-dot--running { animation: none; opacity: 1; }
+}
+
+/* 窄屏降级顺序（按钮永不被砍 —— 手机上它们价值最高）：
+   1) ≤560px：先砍 cwd 档，那是三档里最不具体的一句；
+   2) ≤420px：整格中区收起，只剩动作 + 右侧心跳。 */
+@media (max-width: 560px) {
+  .ssr-note--cwd { display: none; }
+}
+@media (max-width: 420px) {
+  .ssr-note { display: none; }
+}
 /* Pinned heartbeat — never scrolls, never pushed off by a long window list. */
 .ssr-health {
   flex-shrink: 0;
