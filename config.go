@@ -13,6 +13,14 @@ type Config struct {
 	AuthCode     string // auto-generated auth code, printed to console on start
 	DataDir      string // data directory for persistence
 	Version      string // build version (e.g. "v0.4.0"), surfaced to the UI via GET /version; "dev" for source builds
+	// ReleaseRepo is the GitHub "owner/name" whose published releases this build's Version
+	// should be compared against ("有新版本吗"). EMPTY DISABLES THE CHECK, and empty is the
+	// default on purpose: only the binary knows which product it is. deepwork-pro embeds this
+	// package as a subsystem and stamps Version with ITS OWN tag — comparing that against
+	// deepwork-terminal's releases would either claim "已是最新发布版" about a repo it does not
+	// come from, or point the user at another product's download page. A library must not
+	// assume its embedder's identity; the binary opts in (see cmd/dw-terminal/main.go).
+	ReleaseRepo string
 
 	// Tunnel, when true, opens a Cloudflare quick tunnel at startup so the server is
 	// reachable over the public internet (a temporary *.trycloudflare.com URL, no

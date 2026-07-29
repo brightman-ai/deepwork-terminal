@@ -60,6 +60,9 @@ func main() {
 	cfg := terminal.DefaultConfig()
 	cfg.Addr = *addr
 	cfg.Version = resolvedVersion
+	// 本二进制就是 deepwork-terminal —— 由它显式声明自己的上游（Config.ReleaseRepo 默认为空，
+	// 嵌入方不会被动继承这个身份）。
+	cfg.ReleaseRepo = "brightman-ai/deepwork-terminal"
 	cfg.Tunnel = *tunnel
 	if *authCode != "" {
 		cfg.AuthCode = *authCode

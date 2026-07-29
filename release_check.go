@@ -32,10 +32,10 @@ import (
 //
 //   - **只有 release 构建才查**。跑 `dev-<hash>` 的是开发者，他手上的代码**可能比 release 还新**，
 //     对他说"有新版本"是噪音，甚至是误导。isReleaseVersion 就是这道闸门。
+//   - **只有知道自己是哪个产品才查**。仓库名来自 Config.ReleaseRepo，空则整条检查关闭 —— 嵌入方
+//     （deepwork-pro）用的是它自己的 tag，拿它去比 deepwork-terminal 的 release 只会说假话。
 //   - **不后台轮询**。缓存 + 懒触发（有人问 /version 才顺手刷新），没有常驻 goroutine。
 //   - **查不到 ≠ 已是最新**。失败就是失败，如实返回空，让 UI 说"没查到"，绝不显示一个假的 ✓。
-const releaseRepo = "brightman-ai/deepwork-terminal"
-
 const (
 	// 成功结果缓存这么久 —— 发布是低频事件，没必要问得勤。
 	releaseCacheTTL = 6 * time.Hour
@@ -51,6 +51,8 @@ type ReleaseInfo struct {
 }
 
 type releaseChecker struct {
+	// repo 是 "owner/name"；空 ⟹ 这个构建没有声明自己的上游，一律不查。
+	repo      string
 	mu        sync.Mutex
 	info      ReleaseInfo
 	checkedAt time.Time
@@ -59,8 +61,8 @@ type releaseChecker struct {
 	httpGet func(ctx context.Context, url string) (*http.Response, error)
 }
 
-func newReleaseChecker() *releaseChecker {
-	return &releaseChecker{httpGet: defaultReleaseGet}
+func newReleaseChecker(repo string) *releaseChecker {
+	return &releaseChecker{repo: repo, httpGet: defaultReleaseGet}
 }
 
 func defaultReleaseGet(ctx context.Context, url string) (*http.Response, error) {
@@ -100,8 +102,9 @@ const (
 // 代价是首次加载多半是 unknown，下一次才有结果 —— 对一个低频事件这完全可以接受，而且 unknown
 // 本来就是一句诚实的话。
 func (c *releaseChecker) Latest(currentVersion string) (ReleaseInfo, ReleaseState) {
-	if !isReleaseVersion(currentVersion) {
-		return ReleaseInfo{}, ReleaseLocal // 本地构建：不查，也不说话
+	if c.repo == "" || !isReleaseVersion(currentVersion) {
+		// 没声明上游，或不是发布版：不查，也不对它说任何关于发布版的话。
+		return ReleaseInfo{}, ReleaseLocal
 	}
 	c.mu.Lock()
 	info, fresh := c.info, time.Since(c.checkedAt) < c.ttlLocked()
@@ -138,7 +141,7 @@ func (c *releaseChecker) refresh() {
 func (c *releaseChecker) fetch() ReleaseInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 	defer cancel()
-	resp, err := c.httpGet(ctx, "https://api.github.com/repos/"+releaseRepo+"/releases/latest")
+	resp, err := c.httpGet(ctx, "https://api.github.com/repos/"+c.repo+"/releases/latest")
 	if err != nil {
 		logger.Debug("release check failed", "error", err)
 		return ReleaseInfo{}
