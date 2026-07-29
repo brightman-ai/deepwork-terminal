@@ -6,6 +6,7 @@
 // (see docs/topics/TH-20260728-cli-tabbar-convergence/session.md Round 2 for why).
 import { ref, onMounted, onUnmounted } from 'vue'
 import { Keyboard, X } from 'lucide-vue-next'
+import { useTopbarOutlet } from '@terminal/composables/cli/useTopbarOutlet'
 
 const props = defineProps<{
   /** Settings deep-link target for "查看/修改快捷键" — pushed by the host via router. */
@@ -20,7 +21,11 @@ const seen = ref(localStorage.getItem(SEEN_KEY) === '1')
 // BOTH shells — standalone's CliTabBar declares it, pro's MainLayout mirrors it — which is why
 // the collapsed icon can be shell-agnostic.
 const ready = ref(false)
-const hasOutlet = ref(false)
+// 出口在不在 —— 用共享的 useTopbarOutlet（SSOT），不再自己写一次性探测。本组件和 CliTabBar
+// 是同一个 chunk 里的兄弟，onMounted 是 post-flush 的，所以这里原本就探得到；换成共享实现是为了
+// 两个消费者只有一套判定 —— HelpCenter 那份一次性探测在 standalone 上从来没成功过（懒加载路由），
+// 留两套等于留着下一次分叉。
+const hasOutlet = useTopbarOutlet()
 
 function dismiss(): void {
   seen.value = true
@@ -37,7 +42,6 @@ function onFirstAltKey(e: KeyboardEvent): void {
 onMounted(() => {
   if (!seen.value) window.addEventListener('keydown', onFirstAltKey, { capture: true })
   ready.value = true
-  hasOutlet.value = !!document.getElementById('dw-topbar-right')
 })
 onUnmounted(() => window.removeEventListener('keydown', onFirstAltKey, { capture: true }))
 

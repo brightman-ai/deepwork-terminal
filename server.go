@@ -44,6 +44,9 @@ type Server struct {
 	uploads      *uploadIndex
 	authThrottle *authgate.Throttle
 	usage        *usageReporter
+	// releases answers "机器上装的这个程序有没有新发布版" —— 与前端 useAppUpdate 负责的
+	// "页面旧了" 是两条独立的轴，见 release_check.go 文件头。
+	releases *releaseChecker
 
 	// sessionAgent detects which agent runs in each non-tmux session and binds it to its own
 	// transcript. Built in (not a host hook) so both shells behave identically — see
@@ -84,6 +87,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	s := &Server{
 		config:       DefaultConfig(),
 		sessionAgent: newSessionAgentTracker(),
+		releases:     newReleaseChecker(),
 	}
 	for _, o := range opts {
 		o(s)

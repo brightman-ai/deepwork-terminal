@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime/debug"
 
 	terminal "github.com/brightman-ai/deepwork-terminal"
 )
@@ -19,40 +18,12 @@ var (
 	date    = "unknown"
 )
 
-// resolveVersion returns the version to surface (CLI + UI badge). A release injects a clean
-// tag via ldflags. A plain `go build` leaves it "dev" — opaque, you can't tell which commit
-// it's from — so we enrich it from the VCS stamp Go embeds automatically (debug.ReadBuildInfo):
-// "dev-<shorthash>" (+"-dirty" when the tree had uncommitted changes). build.sh injects a
-// `git describe` instead (e.g. "v0.5.0" or "v0.5.0-3-g<hash>"), which takes precedence here.
+// resolveVersion returns the version to surface (CLI + UI badge). The rule itself lives in
+// terminal.BuildVersion — deepwork-pro's dw-host embeds this same package and needs the exact
+// same answer for its own badge, so "what a build's identity looks like" is defined once there
+// rather than once per binary.
 func resolveVersion() string {
-	if version != "dev" {
-		return version
-	}
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return version
-	}
-	var rev string
-	var dirty bool
-	for _, s := range info.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			rev = s.Value
-		case "vcs.modified":
-			dirty = s.Value == "true"
-		}
-	}
-	if rev == "" {
-		return version
-	}
-	if len(rev) > 7 {
-		rev = rev[:7]
-	}
-	v := "dev-" + rev
-	if dirty {
-		v += "-dirty"
-	}
-	return v
+	return terminal.BuildVersion(version)
 }
 
 func main() {
