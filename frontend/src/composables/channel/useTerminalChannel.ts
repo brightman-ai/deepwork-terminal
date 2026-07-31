@@ -12,7 +12,7 @@
  * 不重复 WS 核心逻辑，所有 transport 细节保留在 useWebSocketClient。
  */
 import { computed, type Ref } from 'vue'
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import { useWebSocketClient, type WebSocketClientOptions } from '@terminal/composables/cli/useWebSocketClient'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import type { AgentState, WSControlMessage } from '@terminal/types/terminal'

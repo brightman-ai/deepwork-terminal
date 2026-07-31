@@ -45,6 +45,24 @@ function _pushEvent(msg: string, ext: Record<string, unknown>): void {
   if (_buf.length > MAX_BUFFER) _buf.splice(0, _buf.length - MAX_BUFFER)
   _startFlush()
 }
+
+/**
+ * reportServerEvent — put ONE fact in the server log, regardless of the cli_diag flag.
+ *
+ * Distinct from reportCliInputDiagnostic (gated, high-frequency, per-keystroke) and from the CE
+ * logger (createLogger → configureRemoteSink → POST /api/telemetry/log). The CE path is the right
+ * long-term channel and the standalone terminal now serves that route, but its sender does not
+ * attach the auth header this server requires on every request — so from :8087 it 401s and the
+ * line is dropped silently, by design ("observability must never block user actions"). Fixing that
+ * properly means changing the shared CE sender, which is a third repo and both consumers' problem.
+ *
+ * So: rare, decision-grade facts (which renderer did this terminal actually get?) go through the
+ * endpoint that is already proven to work from here, with the auth this server demands. Use it for
+ * things you would otherwise ask a user to open DevTools for — not for anything per-frame.
+ */
+export function reportServerEvent(msg: string, ext: Record<string, unknown> = {}): void {
+  _pushEvent(msg, ext)
+}
 const OUTPUT_AFTER_SUBMIT_WINDOW_MS = 2_000
 const MAX_OUTPUT_AFTER_SUBMIT_LOGS = 8
 const OUTPUT_AFTER_SUBMIT_MIN_LOG_INTERVAL_MS = 250

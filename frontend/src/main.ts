@@ -24,7 +24,17 @@ import '@terminal/portals/cli'
 import '@ce/portals/settings'
 import '@terminal/portals/settings/sections'
 
-configureRemoteSink()
+// This server requires the auth code on EVERY request (server.go authWrap: "no exceptions, no
+// heuristics"), telemetry included. Read per send, not captured once: the code is entered, rotated
+// and cleared during a session, and a stale copy would silently start 401ing. The storage key is
+// the same one useCliAuth owns — read directly because the sink is configured before any composable
+// exists, and a whole import of the auth module for one string would be the heavier coupling.
+configureRemoteSink({
+  headers: (): Record<string, string> => {
+    const code = localStorage.getItem('cli_auth_code') ?? ''
+    return code ? { 'X-CLI-Auth': code } : {}
+  },
+})
 const log = createLogger('main')
 const inputLog = createLogger('input-hit-test')
 

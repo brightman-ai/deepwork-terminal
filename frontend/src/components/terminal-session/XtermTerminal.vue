@@ -28,21 +28,26 @@
  * [Ref: CAP-terminal-io S2-3]
  */
 import { nextTick, ref, onMounted, onUnmounted, watch } from 'vue'
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
+import { WebglAddon } from '@xterm/addon-webgl'
 import type { TerminalFindOptions } from './terminalSearchOptions'
 import { canMeasureTerminal } from './terminalFit'
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
+  reportServerEvent,
   summarizeText,
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useXtermKeyboardFallback } from '@terminal/composables/cli/useXtermKeyboardFallback'
 import { clearXtermHelperTextareaValue } from '@terminal/composables/cli/useXtermHelperTextarea'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
-import 'xterm/css/xterm.css'
+import { createLogger } from '@ce/utils/obs'
+import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
+import { renderSyncEnabled, renderSyncOverride } from '@terminal/composables/cli/terminalRenderSync'
+import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
   /** Whether the terminal is active/visible */
@@ -80,6 +85,14 @@ const searchResultCount = ref(0)
 let terminal: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
+// Held so teardown can release the GPU context explicitly, and so a context loss can null it out.
+let webglAddon: WebglAddon | null = null
+// Client-side cost of the bytes this terminal receives. Created with the terminal so a summary is
+// always attributable to one surface, one renderer, one grid size.
+let renderMetrics: RenderMetrics | null = null
+// Whether this terminal forces full-grid repaints. Resolved once, when the renderer is known —
+// see terminalRenderSync for why it is the renderer that decides.
+let renderSyncOn = true
 let searchResultsSub: { dispose(): void } | null = null
 let resizeObserver: ResizeObserver | null = null
 let resizeDebounce: ReturnType<typeof setTimeout> | null = null
@@ -123,6 +136,30 @@ function focusTerminal() {
   terminal?.focus()
 }
 
+// The transcript is the screen-reader/e2e mirror of the terminal (sr-only, aria-live="polite").
+// Decoding must stay per-frame — `decoder` is stateful, so a multi-byte glyph split across two PTY
+// reads only survives if every frame passes through it in order — but the reactive WRITE is
+// batched, because that write is what costs:
+//
+//   every frame → new 24 000-char string → Vue patch → the browser re-lays-out a `white-space:
+//   pre-wrap` node inside a 1px-wide sr-only box, where 24 000 chars wrap into ~24 000 line boxes.
+//
+// At an agent TUI's frame rate that is the most expensive thing on the main thread per byte, and
+// none of it is visible to anyone. Coalescing to ~120ms keeps the mirror's CONTENT identical (same
+// bytes, same order, same cap) while collapsing many layouts into one — and a polite live region
+// is supposed to be announced in settled chunks anyway, so batching is also the correct a11y
+// behaviour, not a compromise of it.
+const transcriptFlushMs = 120
+let transcriptPending = ''
+let transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushTranscript() {
+  transcriptFlushTimer = null
+  if (!transcriptPending) return
+  transcript.value = (transcript.value + transcriptPending).slice(-transcriptLimit)
+  transcriptPending = ''
+}
+
 function appendTranscript(data: string | Uint8Array) {
   const raw = typeof data === 'string' ? data : decoder.decode(data, { stream: true })
   const clean = raw
@@ -130,7 +167,8 @@ function appendTranscript(data: string | Uint8Array) {
     .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
     .replace(/\r/g, '\n')
   if (!clean) return
-  transcript.value = (transcript.value + clean).slice(-transcriptLimit)
+  transcriptPending = (transcriptPending + clean).slice(-transcriptLimit)
+  if (!transcriptFlushTimer) transcriptFlushTimer = setTimeout(flushTranscript, transcriptFlushMs)
 }
 
 function dataLength(data: string | Uint8Array): number {
@@ -171,6 +209,11 @@ function shouldSyncRenderAfterWrite(data: string | Uint8Array): boolean {
 
 function refreshVisibleRows() {
   if (!terminal || terminal.rows <= 0) return
+  // Counted, because this is a WHOLE-GRID repaint on top of the damage-driven one xterm already
+  // did — and its trigger (see containsFullscreenRedrawSequence) matches a bare erase-line, which
+  // is in almost every frame a TUI emits. Whether that is worth its cost is a measurement, not an
+  // opinion; renderMetrics is where the answer accumulates.
+  renderMetrics?.noteForcedRepaint()
   terminal.refresh(0, terminal.rows - 1)
 }
 
@@ -295,6 +338,60 @@ function buildSearchOptions(options?: TerminalFindOptions): ISearchOptions {
   }
 }
 
+// GPU renderer. xterm.js's DEFAULT is the DOM renderer: one element per cell, restyled through the
+// browser's layout engine on every repaint. Measured on this app's own traffic shape — 200×50 grid,
+// agent-TUI cursor repaints, CJK, plus the full-screen resends a tmux window switch produces — the
+// DOM renderer does 3.0× the layouts and 3.45× the style recalcs of WebGL for the identical byte
+// stream. That cost lands exactly where it is felt: a window switch repaints the whole grid.
+//
+// Loaded AFTER open() because the addon takes over a live render service, and guarded so a machine
+// without WebGL2 is never left with a blank terminal:
+//   - construction/activation throws (no WebGL2, blocklisted driver) → stay on the DOM renderer;
+//   - context lost later (GPU reset, bfcache restore, driver update) → dispose, which drops xterm
+//     back to the DOM renderer for the rest of the session.
+// A failure is a console warning, never a throw: degraded rendering must not cost the user their
+// terminal, and an exception here would abort the rest of initTerminal.
+//
+// NOTE on versions: this needs the addon built for the SAME core. `xterm-addon-webgl@0.16` on the
+// old `xterm@5.3` core reaches for internals that moved — its dispose() throws
+// "Cannot read properties of undefined (reading 'onRequestRedraw')", which fires on component
+// teardown and on context loss, i.e. exactly the paths meant to keep things safe. That is why this
+// arrived together with the move to @xterm/xterm 6, not before it.
+// Which renderer a terminal ACTUALLY got is reported to the server log, not just the console.
+// "is the GPU renderer on?" decides how to read every latency complaint, and the honest answer
+// depends on the user's machine, driver and browser — not on what the code intends. Without this
+// the question can only be answered by asking the user to open DevTools, which is not a diagnostic
+// procedure, it is a guess with extra steps. One line per terminal mount; nothing periodic.
+const rendererLog = createLogger('cli-renderer')
+
+interface RendererChoice {
+  renderer: 'webgl' | 'dom'
+  /** Why the GPU renderer was declined. Absent when it was taken. */
+  reason?: string
+}
+
+// Decides and records the renderer; it deliberately does NOT report. The report belongs after the
+// initial fit — see initTerminal — because the grid size is half of what makes the report useful.
+function enableWebglRenderer(term: Terminal): RendererChoice {
+  try {
+    const addon = new WebglAddon()
+    addon.onContextLoss(() => {
+      const lost = { surface: props.diagnosticSurface ?? 'terminal' }
+      rendererLog.info('cli.renderer.context_lost', lost)
+      reportServerEvent('cli.renderer.context_lost', lost)
+      addon.dispose()
+      webglAddon = null
+    })
+    term.loadAddon(addon)
+    webglAddon = addon
+    return { renderer: 'webgl' }
+  } catch (err) {
+    // Not an error path for the user: the DOM renderer is a working terminal, just a slower one.
+    webglAddon = null
+    return { renderer: 'dom', reason: String(err instanceof Error ? err.message : err) }
+  }
+}
+
 function initTerminal() {
   if (terminal) return
   if (!terminalContainer.value) return
@@ -338,6 +435,18 @@ function initTerminal() {
   })
 
   terminal.open(terminalContainer.value)
+  const rendererChoice: RendererChoice = enableWebglRenderer(terminal)
+  renderSyncOn = renderSyncEnabled(rendererChoice.renderer, renderSyncOverride())
+  renderMetrics = createRenderMetrics((summary) => {
+    const facts = {
+      ...summary,
+      renderer: rendererChoice.renderer,
+      renderSync: renderSyncOn,
+      surface: props.diagnosticSurface ?? 'terminal',
+    }
+    rendererLog.info('cli.render.metrics', facts)
+    reportServerEvent('cli.render.metrics', facts)
+  })
   const helperTextarea = configureInputAnchor()
   diagnosticCleanups.push(attachXtermKeydownFallback(helperTextarea))
   diagnosticCleanups.push(
@@ -350,13 +459,29 @@ function initTerminal() {
   // Initial fit — only if this terminal is actually on screen. A terminal born inside a hidden
   // tab keeps xterm's 80×24 default until it is first shown; measuring it here would size it to
   // ~10×6 (see terminalFit.ts) and every replayed byte would wrap at 10 columns.
-  if (canMeasureTerminal(terminalContainer.value)) {
+  const measurable = canMeasureTerminal(terminalContainer.value)
+  if (measurable) {
     try {
       fitAddon.fit()
     } catch {
       // Container may not be visible yet.
     }
   }
+
+  // Reported AFTER the fit, and carrying `measured`, because the size is half the answer. Reporting
+  // inside enableWebglRenderer looked right and was useless: it ran before any fit, so every
+  // terminal claimed xterm's 80×24 default and a genuinely unfitted terminal — the case worth
+  // catching, since an 80-column grid makes a wide TUI reflow and repaint constantly — was
+  // indistinguishable from one simply measured too early. `measured: false` now says which.
+  const rendererFacts = {
+    ...rendererChoice,
+    surface: props.diagnosticSurface ?? 'terminal',
+    measured: measurable,
+    cols: terminal.cols,
+    rows: terminal.rows,
+  }
+  rendererLog.info('cli.renderer.active', rendererFacts)
+  reportServerEvent('cli.renderer.active', rendererFacts)
 
   // [TH-0501-m9j] Platform-aware input routing.
   // WKWebView's textarea input events intermittently fail to trigger xterm's onData
@@ -469,6 +594,18 @@ onUnmounted(() => {
   if (renderSyncTrailing) clearTimeout(renderSyncTrailing)
   if (renderSyncBurstReset) clearTimeout(renderSyncBurstReset)
   if (resizeObserver) resizeObserver.disconnect()
+  // Before terminal.dispose(): release the GPU context explicitly. A workbench opens and closes
+  // terminals freely and browsers cap live WebGL contexts (~16); silently losing them past that cap
+  // is how a long session ends up with every terminal back on the DOM renderer.
+  renderMetrics?.dispose()
+  renderMetrics = null
+  webglAddon?.dispose()
+  webglAddon = null
+  // Land whatever was still buffered so the mirror ends the session complete, not one batch short.
+  if (transcriptFlushTimer) {
+    clearTimeout(transcriptFlushTimer)
+    flushTranscript()
+  }
   if (terminal) terminal.dispose()
 })
 
@@ -478,8 +615,24 @@ onUnmounted(() => {
  */
 function write(data: string | Uint8Array) {
   initTerminal()
-  const shouldRefresh = shouldSyncRenderAfterWrite(data)
+  // Short-circuit, not just a guarded call: shouldSyncRenderAfterWrite fully TextDecoder's the
+  // frame and runs three regexes over it. With the forced repaint off, that scan has no consumer,
+  // and paying it on every frame to reach a branch that cannot be taken is pure waste.
+  const shouldRefresh = renderSyncOn && shouldSyncRenderAfterWrite(data)
+  // Two clocks, because they answer different questions: the write callback fires when the PARSER
+  // is done with this frame, while the next onRender fires when the screen actually changed. A
+  // terminal can be fast at one and slow at the other, and only the second is what a user sees.
+  const started = performance.now()
+  let renderSub: { dispose(): void } | null = null
+  if (terminal && renderMetrics) {
+    renderSub = terminal.onRender(() => {
+      renderSub?.dispose()
+      renderSub = null
+      renderMetrics?.noteRender(performance.now() - started)
+    })
+  }
   terminal?.write(data, () => {
+    renderMetrics?.noteFrame(dataLength(data), performance.now() - started)
     if (shouldRefresh) scheduleRenderSyncRefresh()
   })
   appendTranscript(data)
