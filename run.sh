@@ -82,7 +82,7 @@ CMD=(./dw-terminal -addr "$ADDR")
 if [ -n "$AUTH_CODE" ]; then
     CMD+=(-auth-code "$AUTH_CODE")
 fi
-CMD+=("${EXTRA_ARGS[@]}")
+CMD+=("${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}")
 
 echo "Addr: $ADDR"
 if [ -n "$AUTH_CODE" ]; then
