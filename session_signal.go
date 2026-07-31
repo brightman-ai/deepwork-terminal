@@ -377,5 +377,10 @@ func noteUserInput(sess *Session, data []byte) {
 	if bytes.IndexByte(data, 0x1b) >= 0 && len(bytes.TrimSpace(deviceReplyRe.ReplaceAll(data, nil))) == 0 {
 		return // nothing but terminal-generated replies
 	}
+	// This function already IS the answer to "did a human just act on a terminal" — it is the one
+	// place every input route converges and where terminal-generated replies have been filtered
+	// out. The tmux probe needs exactly that fact to know when to yield the (single-threaded) tmux
+	// server, so it is published from here rather than re-derived at each call site.
+	agentintel.NoteInteraction()
 	sess.ClearSignal()
 }

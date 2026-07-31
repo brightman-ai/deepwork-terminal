@@ -7,9 +7,16 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const tmuxFieldSep = "\t"
+
+// tmuxClientCacheRetention drops a shell's cached client identity once nothing has asked about it
+// for this long — the shell is gone, or is not a tmux one. Far above tmuxProbeTTL so it only ever
+// evicts the truly idle; it exists to bound the map, not to control freshness.
+const tmuxClientCacheRetention = 5 * time.Minute
 
 // TmuxPane represents a single tmux pane with its process info.
 type TmuxPane struct {
@@ -27,41 +34,61 @@ type TmuxPane struct {
 	LastActivityAt int64  // unix timestamp of last pane activity (from tmux)
 }
 
+// TmuxClient is the tmux client a shell is attached THROUGH — one identity, resolved once.
+//
+// It used to be three separate lookups (is there a client? what is its name? what session is it
+// on?), each re-deriving the same answer from its own `list-clients` call. They are facets of one
+// entity: the tty tmux is talking to on behalf of this shell. Modelling it as such is not tidiness
+// — every caller below is on a latency path the user feels (window switch, copy motion, redraw),
+// and each redundant lookup was another command queued on a tmux server that serves them one at a
+// time.
+type TmuxClient struct {
+	// PID of the tmux client process found inside the shell's process tree. Zero means the shell
+	// is not attached to tmux at all, which is the honest answer to all three questions at once.
+	PID int
+	// Name is the client's tty — the handle `-t` / `switch-client -c` expect.
+	Name string
+	// Session is the tmux session this client is currently attached to.
+	Session string
+}
+
+// Attached reports whether the shell is inside tmux. Reading it off the resolved client keeps
+// "is attached" and "which client" from ever disagreeing.
+func (c TmuxClient) Attached() bool { return c.PID != 0 }
+
+type clientCacheEntry struct {
+	client TmuxClient
+	at     time.Time
+}
+
 // TmuxProber performs zero-invasion tmux introspection via read-only commands.
 type TmuxProber struct {
 	inspector *ProcessInspector
+
+	// clientMu guards the per-shell client cache. Client identity only changes when someone
+	// attaches or detaches, so a sub-second TTL is generous — while the poll that reads it runs
+	// once a second per connection.
+	clientMu    sync.Mutex
+	clientCache map[int]clientCacheEntry
 }
 
 func NewTmuxProber(inspector *ProcessInspector) *TmuxProber {
-	return &TmuxProber{inspector: inspector}
+	return &TmuxProber{inspector: inspector, clientCache: map[int]clientCacheEntry{}}
 }
 
-// DetectTmux checks if tmux client is running as a child of shellPID.
-func (tp *TmuxProber) DetectTmux(ctx context.Context, shellPID int) bool {
-	procs := tp.inspector.processSnapshot(ctx)
-	for _, p := range processTreeIncludingRoot(procs, shellPID) {
-		if isTmuxClient(p.Command) {
-			return true
-		}
+// clientPIDFor finds the tmux client process inside shellPID's tree, off the shared ps snapshot.
+//
+// This stays SUBPROCESS-FREE on purpose, and the distinction is load-bearing: "is this shell in
+// tmux" is asked constantly (every session's status, every signal qualification), while "what is
+// that client called" is asked only when something is about to act on it. Answering the cheap
+// question through the expensive path — one `tmux list-clients` per call — turned a pure in-memory
+// lookup into a fork/exec storm that stalled the whole test suite. Cheap questions get cheap
+// answers; see ClientFor for the other half.
+func (tp *TmuxProber) clientPIDFor(ctx context.Context, shellPID int) int {
+	if shellPID <= 0 {
+		return 0
 	}
-	return false
-}
-
-// FindClientSession finds which tmux session the CLI session's tmux client is attached to.
-func (tp *TmuxProber) FindClientSession(ctx context.Context, shellPID int) string {
-	return tp.clientField(ctx, shellPID, "#{session_name}")
-}
-
-// FindClientName returns the tmux client name (its tty, the handle `switch-client -c` wants)
-// for the client in shellPID's child tree, "" when that shell is not attached to tmux.
-func (tp *TmuxProber) FindClientName(ctx context.Context, shellPID int) string {
-	return tp.clientField(ctx, shellPID, "#{client_name}")
-}
-
-// clientPIDForShell finds the tmux client process PID inside shellPID's child tree (0 if none).
-func (tp *TmuxProber) clientPIDForShell(ctx context.Context, shellPID int) int {
-	procs := tp.inspector.processSnapshot(ctx)
-	for _, p := range processTreeIncludingRoot(procs, shellPID) {
+	for _, p := range processTreeIncludingRoot(tp.inspector.processSnapshot(ctx), shellPID) {
 		if isTmuxClient(p.Command) {
 			return p.PID
 		}
@@ -69,31 +96,88 @@ func (tp *TmuxProber) clientPIDForShell(ctx context.Context, shellPID int) int {
 	return 0
 }
 
-// clientField resolves one tmux client format field for the client shellPID is attached
-// through, by matching the in-tree client PID against tmux list-clients.
-func (tp *TmuxProber) clientField(ctx context.Context, shellPID int, field string) string {
-	tmuxPID := tp.clientPIDForShell(ctx, shellPID)
+// ClientFor resolves the tmux client shellPID is attached through — THE single lookup behind every
+// question that needs the client's IDENTITY, not merely its existence (see TmuxClient).
+//
+// Two stages, cheapest first:
+//  1. clientPIDFor above — no subprocess. No client → done, no tmux command at all;
+//  2. ONE `list-clients` returning every field at once, matched by that PID. This replaces the
+//     previous shape, where name and session were two separate invocations of the same command
+//     that each re-derived the same client.
+//
+// Memoized per shell for tmuxProbeTTL: identity only changes on attach/detach, while callers ask
+// once a second per connection. A result derived under a failing ctx is not cached — see
+// topologySnapshot for why serving stale-empty is worse than re-probing.
+func (tp *TmuxProber) ClientFor(ctx context.Context, shellPID int) TmuxClient {
+	tmuxPID := tp.clientPIDFor(ctx, shellPID)
 	if tmuxPID == 0 {
-		return ""
+		return TmuxClient{}
 	}
-	out, err := tmuxCommandContext(ctx, "list-clients", "-F", "#{client_pid}"+tmuxFieldSep+field).Output()
+	tp.clientMu.Lock()
+	if e, ok := tp.clientCache[shellPID]; ok && e.client.PID == tmuxPID && time.Since(e.at) < tmuxProbeTTL {
+		tp.clientMu.Unlock()
+		return e.client
+	}
+	tp.clientMu.Unlock()
+
+	client := tp.resolveClientFields(ctx, tmuxPID)
+	if ctx.Err() == nil {
+		tp.clientMu.Lock()
+		tp.clientCache[shellPID] = clientCacheEntry{client: client, at: time.Now()}
+		// A workbench opens and closes shells all day; without this the map is a slow leak keyed
+		// by dead PIDs. Bounded by "shells that asked recently", pruned on the same clock.
+		for pid, e := range tp.clientCache {
+			if time.Since(e.at) > tmuxClientCacheRetention {
+				delete(tp.clientCache, pid)
+			}
+		}
+		tp.clientMu.Unlock()
+	}
+	return client
+}
+
+func (tp *TmuxProber) resolveClientFields(ctx context.Context, tmuxPID int) TmuxClient {
+	out, err := tmuxCommandContext(ctx, "list-clients",
+		"-F", "#{client_pid}"+tmuxFieldSep+"#{client_name}"+tmuxFieldSep+"#{session_name}").Output()
 	if err != nil {
-		return ""
+		// The client process exists, so the shell IS in tmux; only the extra fields are unknown.
+		// Saying otherwise would make Attached() flap on a transient command failure.
+		return TmuxClient{PID: tmuxPID}
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			continue
 		}
-		fields := strings.SplitN(line, tmuxFieldSep, 2)
-		if len(fields) != 2 {
+		fields := strings.SplitN(line, tmuxFieldSep, 3)
+		if len(fields) != 3 {
 			continue
 		}
 		if pid, _ := strconv.Atoi(fields[0]); pid == tmuxPID {
-			return strings.TrimSpace(fields[1])
+			return TmuxClient{
+				PID:     tmuxPID,
+				Name:    strings.TrimSpace(fields[1]),
+				Session: strings.TrimSpace(fields[2]),
+			}
 		}
 	}
-	return ""
+	return TmuxClient{PID: tmuxPID}
+}
+
+// DetectTmux checks if a tmux client is running as a child of shellPID. Subprocess-free.
+func (tp *TmuxProber) DetectTmux(ctx context.Context, shellPID int) bool {
+	return tp.clientPIDFor(ctx, shellPID) != 0
+}
+
+// FindClientSession finds which tmux session the CLI session's tmux client is attached to.
+func (tp *TmuxProber) FindClientSession(ctx context.Context, shellPID int) string {
+	return tp.ClientFor(ctx, shellPID).Session
+}
+
+// FindClientName returns the tmux client name (its tty, the handle `switch-client -c` wants)
+// for the client in shellPID's child tree, "" when that shell is not attached to tmux.
+func (tp *TmuxProber) FindClientName(ctx context.Context, shellPID int) string {
+	return tp.ClientFor(ctx, shellPID).Name
 }
 
 func processTreeIncludingRoot(procs []ProcessInfo, rootPID int) []ProcessInfo {

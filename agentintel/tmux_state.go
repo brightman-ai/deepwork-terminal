@@ -116,6 +116,22 @@ const (
 	tmuxInstalledTTL = 60 * time.Second
 	tmuxPrefixTTL    = 10 * time.Second
 	tmuxCmdTimeout   = 1500 * time.Millisecond
+
+	// tmuxProbeTTL is how long ANY tmux probe result stays authoritative — topology
+	// (topologySnapshot) and per-shell client identity (TmuxProber.ClientFor) alike. ONE number
+	// for one concept: "how stale may a tmux answer be". Just under the 1s poll interval, so a
+	// tick never reuses the previous tick's answer.
+	//
+	// Why memoize at all: a tmux server handles commands ONE AT A TIME, and every WebSocket
+	// connection used to run the full probe for itself, once a second. N clients therefore did not
+	// cost N× in parallel — they queued behind each other and each one's latency grew with N.
+	// Measured on a 6-pane server (scripts/diag/tmuxprobe): 72–172ms with nobody attached, 616ms–4.3s with
+	// the UI actually in use, and 8 concurrent callers at 515ms vs 75ms once shared. Same probe,
+	// made 10–60× slower purely by contention it created itself.
+	//
+	// Deliberately the same shape as sessions_overview's snapshot cache (see sessions_overview.go),
+	// for the same reason: the payload is global while the callers are per-connection.
+	tmuxProbeTTL = 900 * time.Millisecond
 )
 
 // TmuxStateService aggregates tmux topology + agent detection with light caching.
@@ -138,6 +154,16 @@ type TmuxStateService struct {
 	modeKeys         string
 	modeKeysAt       time.Time
 	modeKeysResolved bool
+
+	// topologyMu guards the shared topology snapshot AND serialises its rebuild: a caller that
+	// arrives while a rebuild is in flight waits for that result instead of starting a second
+	// probe against the same single-threaded tmux server (which is exactly the pile-up
+	// tmuxProbeTTL exists to end). Separate from mu so a cheap Prefix()/TmuxInstalled() lookup
+	// is never stuck behind a topology probe.
+	topologyMu   sync.Mutex
+	topology     TmuxState
+	topologyAt   time.Time
+	topologyRead bool
 }
 
 // NewTmuxStateService builds a service over the shared process inspector so it
@@ -316,17 +342,14 @@ func (s *TmuxStateService) SetOverviewActive(v bool) { s.overviewActive.Store(v)
 // It is non-blocking-friendly: every tmux/ps subprocess runs under a short
 // context timeout, and a missing server degrades gracefully to an empty
 // session list rather than an error.
+// The split below is the whole point: the CALLER-SPECIFIC half (Attached / AttachedSession — who
+// is asking) is computed per call, while the SHARED half (installed/prefix/mode-keys/topology —
+// what the tmux server looks like) comes from one memoized probe. See tmuxProbeTTL.
 func (s *TmuxStateService) State(ctx context.Context, shellPID int) TmuxState {
-	st := TmuxState{
-		Installed: s.TmuxInstalled(),
-		Prefix:    s.Prefix(ctx),
-		ModeKeys:  s.ModeKeys(ctx),
-	}
+	st := s.topologySnapshot(ctx)
 	if !st.Installed {
 		return st
 	}
-
-	st.ServerRunning = s.ServerRunning(ctx)
 	if shellPID > 0 {
 		st.Attached = s.Attached(ctx, shellPID)
 		if st.Attached {
@@ -335,32 +358,91 @@ func (s *TmuxStateService) State(ctx context.Context, shellPID int) TmuxState {
 			cancel()
 		}
 	}
-	if !st.ServerRunning {
-		return st
+	return st
+}
+
+// topologySnapshot returns the shellPID-independent half of the state, rebuilt at most once per
+// tmuxProbeTTL and shared by every concurrent caller.
+//
+// Returns by value, and Sessions is only ever REPLACED (never appended to) by a rebuild, so a
+// caller filling in its own Attached fields cannot mutate what the next caller reads.
+func (s *TmuxStateService) topologySnapshot(ctx context.Context) TmuxState {
+	s.topologyMu.Lock()
+	defer s.topologyMu.Unlock()
+	now := time.Now()
+	if s.topologyRead && now.Sub(s.topologyAt) < tmuxProbeTTL {
+		TmuxProbeServedTotal.Inc()
+		return s.topology
+	}
+	// The user is mid-keystroke: serve what we have rather than queue a dozen tmux commands ahead
+	// of their echo. See interaction.go — bounded, so this can defer but never starve.
+	if probeDeferredForInteraction(s.topologyAt, now) {
+		TmuxProbeDeferredTotal.Inc()
+		return s.topology
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
-	defer cancel()
-	panes, err := s.prober.ListPanes(cctx)
-	if err != nil || len(panes) == 0 {
-		return st
+	probeStart := now
+	st := TmuxState{
+		Installed: s.TmuxInstalled(),
+		Prefix:    s.Prefix(ctx),
+		ModeKeys:  s.ModeKeys(ctx),
+	}
+	if st.Installed {
+		// ONE list-sessions answers both "is a server up" and "which sessions have a client".
+		// They used to be two separate invocations of the same command — `ServerRunning` looked
+		// only at the exit code, `attachedSessions` only at the output — which is one more command
+		// queued on a single-threaded server for an answer already in hand.
+		attached, running := s.sessionAttachment(ctx)
+		st.ServerRunning = running
+		if running {
+			cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+			panes, err := s.prober.ListPanes(cctx)
+			if err == nil && len(panes) > 0 {
+				st.Sessions = s.buildSessions(cctx, panes, attached)
+			}
+			cancel()
+		}
 	}
 
-	attachedSessions := s.attachedSessions(ctx)
-	st.Sessions = s.buildSessions(cctx, panes, attachedSessions)
+	windows, panes := 0, 0
+	for _, sess := range st.Sessions {
+		windows += len(sess.Windows)
+		for _, w := range sess.Windows {
+			panes += len(w.Panes)
+		}
+	}
+	LogTmuxProbe(ctx, time.Since(probeStart), panes, windows)
+
+	// A probe cut short by a cancelled/expired ctx is NOT cached: caching it would pin an empty
+	// topology for the rest of the TTL and blank the UI's tab strip for a full second on every
+	// hiccup. Serve it once, let the next caller retry.
+	if ctx.Err() == nil {
+		s.topology = st
+		s.topologyAt = time.Now()
+		s.topologyRead = true
+	}
 	return st
 }
 
 // attachedSessions returns the set of session names that currently have a
 // client attached (from list-sessions #{session_attached}).
 func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool {
+	attached, _ := s.sessionAttachment(ctx)
+	return attached
+}
+
+// sessionAttachment is the single `list-sessions` behind both questions the caller has: which
+// sessions have a client attached, and whether a tmux server answered at all (it exits non-zero
+// with "no server running" when there is none). Splitting these into two commands cost an extra
+// round trip on a server that handles them one at a time.
+func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bool, bool) {
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
 	out, err := tmuxCommandContext(cctx,
 		"list-sessions", "-F", "#{session_name}"+tmuxFieldSep+"#{session_attached}",
 	).Output()
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	result := make(map[string]bool)
 	for _, line := range strings.Split(string(out), "\n") {
@@ -375,7 +457,7 @@ func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool
 		n, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
 		result[fields[0]] = n > 0
 	}
-	return result
+	return result, true
 }
 
 // buildSessions groups panes into sessions → windows → panes and runs per-pane

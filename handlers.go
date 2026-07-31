@@ -271,6 +271,54 @@ func (s *Server) handleHudLog(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleTelemetryLog handles POST /telemetry/log — the frontend's structured log sink.
+//
+// ── Why this exists ──────────────────────────────────────────────────────────────────────────
+// The shared frontend calls configureRemoteSink() at boot (main.ts) and every createLogger()
+// INFO-or-above line is batched to `/api/telemetry/log`. deepwork-pro serves that route
+// (internal/webui/metrics_routes.go); the standalone terminal never did — so on :8087 the entire
+// frontend log stream has been POSTing into a 404 and vanishing. Silently, because observability
+// "must never block user actions", so the client drops the failure on the floor by design.
+//
+// The cost is not abstract: a renderer/latency question that the browser could have answered in
+// one line instead required a throwaway benchmark, because the one channel built to carry that
+// answer was not connected at this end. Serving it here restores parity with pro for every
+// consumer of the shared frontend, not just the line that exposed the gap.
+//
+// Entries arrive as the CE envelope {entries: [{l,t,mod,msg,ext,...}]}. They are re-emitted to the
+// server's own log stream, tagged so a frontend line is never mistaken for a backend one.
+func (s *Server) handleTelemetryLog(w http.ResponseWriter, r *http.Request) {
+	var envelope struct {
+		Entries []struct {
+			Level   string          `json:"l"`
+			Time    string          `json:"t"`
+			Module  string          `json:"mod"`
+			Message string          `json:"msg"`
+			Stage   string          `json:"stg,omitempty"`
+			TraceID string          `json:"tid,omitempty"`
+			Ext     json.RawMessage `json:"ext,omitempty"`
+		} `json:"entries"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid telemetry payload"})
+		return
+	}
+	for _, e := range envelope.Entries {
+		args := []any{"level", e.Level, "mod", e.Module, "client_time", e.Time}
+		if e.Stage != "" {
+			args = append(args, "stage", e.Stage)
+		}
+		if e.TraceID != "" {
+			args = append(args, "trace_id", e.TraceID)
+		}
+		if len(e.Ext) > 0 {
+			args = append(args, "ext", string(e.Ext))
+		}
+		logger.Info("[frontend] "+e.Message, args...)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ingested": len(envelope.Entries)})
+}
+
 // handleVersion handles GET /version — returns the running binary's build version so the
 // UI can show it (the tab bar). Release builds inject it via ldflags; source builds report
 // "dev". Falls back to "dev" if the embedding host never set Config.Version.
@@ -422,25 +470,56 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	wsShellPID := sess.ShellPID()
 	sess.mu.Unlock()
 
-	// Light tmux-state poll: recompute on a ~1s tick, push only on change (diff).
-	// The provider call is time-boxed internally, so the tick stays cheap and the
-	// write loop is never blocked on tmux/ps subprocesses for long.
-	tmuxTicker := time.NewTicker(tmuxStatePollInterval)
-	defer tmuxTicker.Stop()
-	var lastTmuxState []byte
-	// Non-tmux Agent Overview feed — same ticker, same diff suppression, separate frame.
-	// See sessions_overview.go for why this rides the existing connection instead of polling.
-	var lastSessionsOverview []byte
-	// Explicit-signal feed (session_signal.go). Seeded with the EMPTY payload so a quiet
-	// machine pushes nothing, while a signal that is already pending at attach time is
-	// delivered on the first tick.
-	lastAgentSignals := emptyAgentSignals
-
-	// Start writer goroutine: PTY output → WS binary frames + agent state → WS control.
-	writerDone := make(chan struct{})
+	// Status frames (tmux topology / sessions overview / explicit signals) are produced on their
+	// OWN goroutine and handed to the writer already marshalled.
+	//
+	// ── Why they cannot be computed in the writer's select ───────────────────────────────────
+	// They used to be, on a 1s tick, under the assumption recorded here that "the provider call is
+	// time-boxed internally, so the tick stays cheap". On this developer's own machine that
+	// assumption is off by three orders of magnitude: one TmuxState() over a 6-pane server measures
+	// 0.6s–4.3s (scripts/diag/tmuxprobe — 397ms just for `ServerRunning`, 147ms for `list-panes`, and
+	// 40–554ms per window for the overview tail capture). Every one of those milliseconds was time
+	// the writer spent NOT reading dataCh, because a Go select serves one case at a time. The user
+	// sees exactly that: type two characters, watch them hang, then watch them all land at once
+	// when the tick finally returns — a full second of echo lag per second of wall clock, on a
+	// terminal whose whole job is to echo.
+	//
+	// Splitting the producer off makes the writer's cost independent of how slow tmux/ps/lsof are:
+	// the writer only ever marshals nothing and calls conn.Write. A slow probe now delays only the
+	// STATUS frame it belongs to — which is a 1s-resolution dashboard nobody is typing into.
+	//
+	// statusCh is capacity 1 and the producer DROPS rather than blocks: if a probe overruns its
+	// tick (routinely, per the numbers above) the next result supersedes the stale one, and the
+	// producer never accumulates a backlog of screens that have already changed. Diff suppression
+	// lives with the producer for the same reason it lived in the writer before — one owner of
+	// "what did this connection last see".
+	statusCh := make(chan []byte, 1)
 	go func() {
-		defer close(writerDone)
-		localAgentCh := agentCh // local copy for nil-safe select
+		tmuxTicker := time.NewTicker(tmuxStatePollInterval)
+		defer tmuxTicker.Stop()
+		var lastTmuxState []byte
+		// Non-tmux Agent Overview feed — same ticker, same diff suppression, separate frame.
+		// See sessions_overview.go for why this rides the existing connection instead of polling.
+		var lastSessionsOverview []byte
+		// Explicit-signal feed (session_signal.go). Seeded with the EMPTY payload so a quiet
+		// machine pushes nothing, while a signal that is already pending at attach time is
+		// delivered on the first tick.
+		lastAgentSignals := emptyAgentSignals
+
+		// offer hands one finished frame to the writer, or drops it if the writer still holds an
+		// undelivered one. Dropping is correct for every feed here: all three are full-state
+		// snapshots, so the newer frame says everything the dropped one would have.
+		offer := func(msg []byte) bool {
+			select {
+			case statusCh <- msg:
+			case <-ctx.Done():
+				return false
+			default:
+				terminalStatusFramesDroppedTotal.Inc()
+			}
+			return true
+		}
+
 		for {
 			select {
 			case <-tmuxTicker.C:
@@ -456,11 +535,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 							Type:    MsgTypeTmuxState,
 							Payload: raw,
 						})
-						writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-						err := conn.Write(writeCtx, websocket.MessageText, msg)
-						writeCancel()
-						if err != nil {
-							logger.Debug("ws tmux_state write failed", "id", id, "error", err)
+						if !offer(msg) {
 							return
 						}
 					}
@@ -471,11 +546,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 						Type:    MsgTypeSessionsOverview,
 						Payload: raw,
 					})
-					writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-					err := conn.Write(writeCtx, websocket.MessageText, msg)
-					writeCancel()
-					if err != nil {
-						logger.Debug("ws sessions_overview write failed", "id", id, "error", err)
+					if !offer(msg) {
 						return
 					}
 				}
@@ -489,13 +560,30 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 						Type:    MsgTypeAgentSignal,
 						Payload: raw,
 					})
-					writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-					err := conn.Write(writeCtx, websocket.MessageText, msg)
-					writeCancel()
-					if err != nil {
-						logger.Debug("ws agent_signal write failed", "id", id, "error", err)
+					if !offer(msg) {
 						return
 					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Start writer goroutine: PTY output → WS binary frames + agent state → WS control.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		localAgentCh := agentCh // local copy for nil-safe select
+		for {
+			select {
+			case msg := <-statusCh:
+				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
+				err := conn.Write(writeCtx, websocket.MessageText, msg)
+				writeCancel()
+				if err != nil {
+					logger.Debug("ws status frame write failed", "id", id, "error", err)
+					return
 				}
 			case data, ok := <-dataCh:
 				if !ok {

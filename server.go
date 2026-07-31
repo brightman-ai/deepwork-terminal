@@ -71,8 +71,8 @@ type Server struct {
 	overviewCacheMu sync.Mutex
 	overviewCache   overviewSnapshot
 	overviewCacheAt time.Time
-	agentUsage   *agentReporter
-	mu           sync.Mutex
+	agentUsage      *agentReporter
+	mu              sync.Mutex
 
 	// notifier is the background agent-waiting engine (agent_notifier.go): it polls tmux,
 	// detects a pane finishing a turn, and fans the event out through the coordinator to
@@ -317,6 +317,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /uploads/raw", wrap(s.handleUploadsRaw))
 	s.mux.HandleFunc("GET /inputs", wrap(s.handleInputs))
 	s.mux.HandleFunc("POST /debug/logs", wrap(s.handleHudLog))
+	// The shared frontend's structured log sink. pro serves the same path; without it here the
+	// standalone terminal silently 404s every frontend log line — see handleTelemetryLog.
+	s.mux.HandleFunc("POST /telemetry/log", wrap(s.handleTelemetryLog))
 	s.mux.HandleFunc("GET /version", wrap(s.handleVersion))
 	s.mux.HandleFunc("GET /settings", wrap(s.handleGetSettings))
 	s.mux.HandleFunc("POST /auth/rotate", wrap(s.handleRotateAuthCode))
