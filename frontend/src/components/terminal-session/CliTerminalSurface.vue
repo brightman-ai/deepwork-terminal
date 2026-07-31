@@ -383,7 +383,7 @@ let drawerWidthCssVarOwner: string | null = null
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, type Component } from 'vue'
 import { ArrowDownToLine, Copy, Search, Square } from 'lucide-vue-next'
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
@@ -414,7 +414,12 @@ import {
 } from '@terminal/components/terminal-session/surfaceActionBar'
 import { canMeasureTerminal } from '@terminal/components/terminal-session/terminalFit'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
-import { ghostRefreshWait } from '@terminal/composables/cli/ghostRefresh'
+import {
+  GHOST_ECHO_WINDOW,
+  ghostRefreshDeferredForTyping,
+  ghostRefreshSuppressed,
+  ghostRefreshWait,
+} from '@terminal/composables/cli/ghostRefresh'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -1156,7 +1161,8 @@ watch(drawerSqueezePx, () => {
     drawerReflowTimer = null
     nextTick(() => {
       robustFitAndResize()
-      scheduleGhostRefresh()
+      // force: a reflow really does change every cell's position — this is not the guard's echo.
+      scheduleGhostRefresh({ force: true })
     })
   }, 180)
 })
@@ -1293,7 +1299,9 @@ watch(wsStatus, (val) => {
     // cleared; for an alt-screen TUI that overlays stale frame fragments (garble). Once the resize
     // ladder above has re-asserted the size, force one clean full repaint (refresh-client) to
     // discard the replay residue. First connect starts from a blank screen, so it needs none.
-    if (wasReconnect) setTimeout(scheduleGhostRefresh, 1600)
+    // force: a reconnect replays a bounded tail into a fresh grid, so one authoritative resend is
+    // owed regardless of whatever echo window a pre-reconnect fire may have left open.
+    if (wasReconnect) setTimeout(() => scheduleGhostRefresh({ force: true }), 1600)
   } else if ((val === 'disconnected' || val === 'reconnecting') && props.isRemote && !everConnected) {
     void classifyFailure()
   }
@@ -1575,20 +1583,41 @@ let lastBufferType = ''
 // GHOST_REFRESH_MIN_INTERVAL fires again immediately. This bounds staleness from the LAST
 // correction instead of from burst start. A real per-call cost of ~15ms means the interval can be
 // small without approaching any request-cost ceiling. See ghostRefresh.ts for the math + test.
+//
+// SELF-FEEDING LOOP (v4, 2026-07-31): v3 was correct about WHEN to correct and wrong about what
+// counts as evidence. `refresh-client` resends every cell, those cells come back as output frames,
+// and this function treated them as "new output → maybe new residue → correct again". Idle pane,
+// nobody typing, measured: 7.7 fires/s and 15 KB/s of pure echo (scripts/diag/wsprobe A/B). The window
+// below closes that edge — see GHOST_ECHO_WINDOW for the numbers and why a longer minInterval
+// could never have fixed it.
 const GHOST_REFRESH_MIN_INTERVAL = 120
 let ghostRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let ghostLastFiredAt: number | null = null
-function scheduleGhostRefresh(): void {
+// End of the echo window opened by the last fire; output arriving before it is OUR redraw.
+let ghostEchoUntil: number | null = null
+// When the user last sent a keystroke — a correction defers while they are still typing. Set in
+// sendTerminalData, the single exit every input path funnels through (keys, paste, toolbar, IME),
+// so no route can bypass the deferral.
+let ghostLastInputAt: number | null = null
+// force: the caller has a real reason (reflow / reconnect / buffer switch), not an output frame.
+function scheduleGhostRefresh(opts?: { force?: boolean }): void {
   if (!tmux.attached.value) return
   const term = xtermRef.value?.terminal?.()
   if (!term || term.buffer.active.type !== 'alternate') return
+  const nowMs = Date.now()
+  if (!opts?.force && ghostRefreshSuppressed(ghostEchoUntil, nowMs)) return
+  if (!opts?.force && ghostRefreshDeferredForTyping(ghostLastInputAt, ghostLastFiredAt, nowMs)) return
   if (ghostRefreshTimer) return // a fire is already pending/cooling down — later frames in the same window are no-ops
   const wait = ghostRefreshWait(ghostLastFiredAt, Date.now(), GHOST_REFRESH_MIN_INTERVAL)
   ghostRefreshTimer = setTimeout(() => {
     ghostRefreshTimer = null
     ghostLastFiredAt = Date.now()
     const t = xtermRef.value?.terminal?.()
-    if (t && t.buffer.active.type === 'alternate') void tmux.runRefreshClient()
+    if (!t || t.buffer.active.type !== 'alternate') return
+    // Opened BEFORE the request, not after it resolves: the resent cells can reach the socket
+    // while the POST is still in flight, and those are exactly the frames that must not re-arm.
+    ghostEchoUntil = Date.now() + GHOST_ECHO_WINDOW
+    void tmux.runRefreshClient()
   }, wait)
 }
 
@@ -1702,6 +1731,9 @@ function onTerminalData(data: Uint8Array) {
 }
 
 function sendTerminalData(data: Uint8Array) {
+  // Every input route ends here, so this is where "the user is typing" is known. See
+  // GHOST_TYPING_QUIET: a keystroke buys the terminal quiet from full-screen resends.
+  ghostLastInputAt = Date.now()
   if (data.length === 1) {
     let byte = data[0]
     // Ctrl-sticky + v/V → real OS-clipboard paste (universal Ctrl+V muscle memory),

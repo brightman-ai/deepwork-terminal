@@ -22,10 +22,10 @@
  * [Ref: CAP-terminal-io, TH-0501-m9j 铁律 v2.0]
  */
 import { ref, watch, onMounted, onUnmounted, type Ref } from 'vue'
-import { Terminal } from 'xterm'
+import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import 'xterm/css/xterm.css'
+import '@xterm/xterm/css/xterm.css'
 import { useTerminalChannel } from '@terminal/composables/channel/useTerminalChannel'
 import type { AgentState } from '@terminal/types/terminal'
 
