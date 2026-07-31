@@ -35,4 +35,9 @@ var (
 	terminalWSConnectionsTotal      = obs.NewCounter("terminal_ws_connections_total")
 	terminalWSPreemptionsTotal      = obs.NewCounter("terminal_ws_preemptions_total")
 	terminalWSReplayBytesTotal      = obs.NewCounter("terminal_ws_replay_bytes_total")
+	// A status frame (tmux_state / sessions_overview / agent_signal) superseded before the writer
+	// could send it. Expected to be non-zero on a machine where the tmux probe overruns its 1s
+	// tick; alarming only if it climbs while the UI's dashboards look stale, which would mean the
+	// writer itself is stuck rather than the producer being fast.
+	terminalStatusFramesDroppedTotal = obs.NewCounter("terminal_status_frames_dropped_total")
 )
