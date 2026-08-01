@@ -73,8 +73,10 @@ export function summarize(
 }
 
 export interface RenderMetrics {
-  /** One arriving frame: its size, and how long the parser took. */
-  noteFrame(bytes: number, parseMs: number): void
+  /** One arriving frame: its size, and how long the parser took.
+   *  parseMs 省略 = 这一帧的耗时样本不可信（页面在后台 / 终端没有布局盒子，见 renderSampleGate）。
+   *  **帧数与字节数照记** —— 那是真实流量，与可见性无关；丢掉它们会让流量统计凭空缺一块。 */
+  noteFrame(bytes: number, parseMs?: number): void
   /** write() → repaint complete, for the frame that triggered it. */
   noteRender(renderMs: number): void
   /** A full-grid refresh() was forced (not xterm's own damage-driven repaint). */
@@ -113,7 +115,7 @@ export function createRenderMetrics(report: (summary: RenderMetricsSummary) => v
     noteFrame(b, parseMs) {
       frames++
       bytes += b
-      push(parse, parseMs)
+      if (parseMs !== undefined) push(parse, parseMs)
     },
     noteRender(renderMs) {
       push(render, renderMs)
