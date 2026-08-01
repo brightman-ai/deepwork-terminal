@@ -378,6 +378,10 @@ func (s *Server) registerRoutes() {
 	// Session overview metrics (CHG-017): turn/summary breakdown of the CURRENT claude
 	// transcript for the session cwd. Feeds the shared @ce OverviewPanel.
 	s.mux.HandleFunc("GET /sessions/{id}/overview", wrap(s.handleSessionOverview))
+	// One-shot agent-state snapshot the page fetches on mount, before the WS starts
+	// pushing. pro serves the same URL; without it here a fresh session showed no agent
+	// state until the next change — see handleAgentStateSnapshot.
+	s.mux.HandleFunc("GET /sessions/{id}/agent-state", wrap(s.handleAgentStateSnapshot))
 	// WeChat iLink channel (channel B): scan-code login + status + logout.
 	s.mux.HandleFunc("GET /ilink/status", wrap(s.handleIlinkStatus))
 	s.mux.HandleFunc("POST /ilink/login", wrap(s.handleIlinkLogin))
