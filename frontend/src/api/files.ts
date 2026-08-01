@@ -416,6 +416,14 @@ export interface UploadLimitInfo {
   defaultMb: number
   ceilingMb: number
   floorMb: number
+  /**
+   * 本次调用者实际能传的上限。同机（浏览器与服务端同一台）时高于 maxMb：限额是为"过网络"
+   * 设的，同机不过网络。与 maxMb 分开两个字段——maxMb 是 ⚙ 里编辑、PUT 写回的配置值，
+   * 合并会让本机用户看到 1024 并顺手保存，把远程限额也一起放开。老服务端不返回此字段。
+   */
+  effectiveMb?: number
+  /** 服务端判定的"同机"结果（经隧道/反代的访问者不算，见 localclient.go）。 */
+  sameMachine?: boolean
 }
 export async function getUploadLimit(): Promise<UploadLimitInfo | null> {
   const { cliFetch } = useCliAuth()

@@ -25,6 +25,23 @@ const (
 	uploadLimitFloorMB   = 1    // hard floor: never allow a cap below 1 MB
 	uploadLimitCeilingMB = 1024 // hard ceiling: never allow an unbounded cap (1 GB)
 	uploadLimitFileName  = "upload-limit.json"
+
+	// localUploadLimitMB is the cap for a client on THIS machine.
+	//
+	// The 10 MB default exists because an upload crosses a network: a phone on hotel wifi
+	// pushing a 156 MB recording is a stall the user cannot cancel and a queue the server
+	// cannot drain. On loopback there is no network — the "upload" is a disk copy of a file
+	// that is already on this disk — so the reason for the small number is simply absent,
+	// and enforcing it anyway is how a purely local paste came back as "file exceeds the
+	// 10 MB limit". (The better local answer is not to copy at all: clipboard_native.go
+	// injects the path instead. This is the floor under the cases that miss it — bytes
+	// dragged out of another app, a browser download, a non-macOS desktop.)
+	//
+	// It is the CEILING rather than "unlimited" because the resource argument survives the
+	// network argument: the bytes still land on this disk and still pass through this
+	// process. What makes that safe at this size is that the upload path streams — nothing
+	// here is ever held whole in memory (see stageClipboardUpload).
+	localUploadLimitMB = uploadLimitCeilingMB
 )
 
 // uploadLimitBytes is the current EFFECTIVE upload cap, in bytes. Initialized to
@@ -59,6 +76,35 @@ type uploadLimitFile struct {
 // use it directly in place of the const.
 func UploadLimitBytes() int64 {
 	return uploadLimitBytes.Load()
+}
+
+// uploadLimitBytesFor returns the cap that applies to THIS request: the configured one
+// for a client across the network, the local one (localUploadLimitMB) for a client on
+// this machine — see requestIsSameMachine for how "this machine" is decided and why a
+// tunnel visitor does not qualify.
+//
+// It returns the LARGER of the two for a local client rather than the local constant
+// outright, so that raising the configured cap can never LOWER what a local paste is
+// allowed to do. Otherwise "I set the limit higher" would quietly mean "…except locally".
+func uploadLimitBytesFor(r *http.Request) int64 {
+	configured := UploadLimitBytes()
+	if !requestIsSameMachine(r) {
+		return configured
+	}
+	if local := int64(localUploadLimitMB) << 20; local > configured {
+		return local
+	}
+	return configured
+}
+
+// LocalUploadLimitBytes is the cap for an upload that never crosses a network — the HTTP
+// loopback case above, and the in-process (Wails desktop) path in service_inproc.go, which
+// is same-machine by construction and has no request to inspect.
+func LocalUploadLimitBytes() int64 {
+	if local := int64(localUploadLimitMB) << 20; local > UploadLimitBytes() {
+		return local
+	}
+	return UploadLimitBytes()
 }
 
 // clampUploadLimitMB clamps mb into [uploadLimitFloorMB, uploadLimitCeilingMB].
@@ -150,12 +196,20 @@ func writeUploadLimitFile(dataDir string, mb int) error {
 // handleUploadLimitGet handles GET /files/upload-limit: current effective cap plus
 // the fixed default/floor/ceiling so the frontend can render a slider/input without
 // hardcoding any of the three (SSOT stays server-side).
+//
+// maxMb and effectiveMb are deliberately two fields, not one. maxMb is the CONFIGURED
+// value — what the ⚙ input edits and what PUT writes back; effectiveMb is what THIS
+// caller will actually be allowed to send, which is larger when the caller is on this
+// machine. Collapsing them would put "1024" in the settings box for every local user and
+// invite them to "save" it, silently raising the cap for every phone on the internet.
 func (s *Server) handleUploadLimitGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"maxMb":     UploadLimitBytes() >> 20,
-		"defaultMb": ClipboardMaxUploadSize >> 20,
-		"ceilingMb": uploadLimitCeilingMB,
-		"floorMb":   uploadLimitFloorMB,
+		"maxMb":       UploadLimitBytes() >> 20,
+		"defaultMb":   ClipboardMaxUploadSize >> 20,
+		"ceilingMb":   uploadLimitCeilingMB,
+		"floorMb":     uploadLimitFloorMB,
+		"effectiveMb": uploadLimitBytesFor(r) >> 20,
+		"sameMachine": requestIsSameMachine(r),
 	})
 }
 

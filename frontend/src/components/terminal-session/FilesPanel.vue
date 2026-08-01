@@ -578,7 +578,7 @@ const CHEATS: { k: string; d: string }[] = [
 ]
 
 // ── 上传限额 ⚙ 快调（服务端可配，全局设置）──
-const { uploadMaxMb, bounds: uploadBounds, load: loadUploadLimit, save: saveUploadLimit } = useUploadLimit()
+const { uploadMaxMb, effectiveMaxMb, sameMachine: uploadSameMachine, bounds: uploadBounds, load: loadUploadLimit, save: saveUploadLimit } = useUploadLimit()
 const showSettings = ref(false)
 const settingsMb = ref<number>(uploadMaxMb.value)
 const settingsBusy = ref(false)
@@ -1305,6 +1305,9 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           >保存</button>
         </div>
         <p class="mt-1.5 text-[0.6rem] text-muted-foreground/70">可调 {{ uploadBounds.floorMb }}–{{ uploadBounds.ceilingMb }} MB（硬顶 1GB）。改后服务端按此放行，超限仍返 413（可压缩成 zip）。</p>
+        <!-- 这条只对同机用户出现：限额是为"过网络"设的，本机上传只是磁盘拷贝，不受它约束。
+             不显示会让本机用户以为 10MB 也管着自己，转头去改这个全局值（那会把远程也放开）。-->
+        <p v-if="uploadSameMachine" class="mt-1 text-[0.6rem] text-emerald-600/90 dark:text-emerald-400/80">本机访问不受此限：当前可传 {{ effectiveMaxMb }} MB。上面的值只管远程访问。</p>
       </div>
     </div>
 

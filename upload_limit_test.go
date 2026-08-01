@@ -2,6 +2,8 @@ package terminal
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -163,5 +165,93 @@ func TestUploadLimitSetWithoutLoadAppliesInMemory(t *testing.T) {
 	}
 	if got, want := UploadLimitBytes(), int64(42)<<20; got != want {
 		t.Fatalf("UploadLimitBytes() = %d, want %d", got, want)
+	}
+}
+
+// TestUploadLimitBytesFor_LocalIsNotBoundByTheNetworkCap covers the split introduced when
+// a purely local paste — files already on this disk, pushed to a server on this disk —
+// came back as "file exceeds the 10 MB limit". The cap bounds what crosses a network; a
+// same-machine client crosses none, so the number that exists for the network does not
+// apply to it.
+func TestUploadLimitBytesFor_LocalIsNotBoundByTheNetworkCap(t *testing.T) {
+	resetUploadLimitState(t)
+
+	local := httptest.NewRequest(http.MethodPost, "/sessions/x/paste-upload", nil)
+	local.RemoteAddr = "127.0.0.1:51000"
+	remote := httptest.NewRequest(http.MethodPost, "/sessions/x/paste-upload", nil)
+	remote.RemoteAddr = "203.0.113.7:443"
+
+	if got, want := uploadLimitBytesFor(remote), int64(ClipboardMaxUploadSize); got != want {
+		t.Fatalf("remote caller: uploadLimitBytesFor = %d, want the configured cap %d", got, want)
+	}
+	if got, want := uploadLimitBytesFor(local), int64(localUploadLimitMB)<<20; got != want {
+		t.Fatalf("local caller: uploadLimitBytesFor = %d, want the local cap %d", got, want)
+	}
+}
+
+// TestUploadLimitBytesFor_NeverBelowTheConfiguredCap: raising the configured limit must
+// never LOWER what a local client may send. Otherwise "I set the limit to 1024" would
+// quietly mean "…and made local pastes worse", which is the opposite of what was asked.
+func TestUploadLimitBytesFor_NeverBelowTheConfiguredCap(t *testing.T) {
+	resetUploadLimitState(t)
+	if _, err := SetUploadLimitMB(uploadLimitCeilingMB); err != nil {
+		t.Fatalf("SetUploadLimitMB: %v", err)
+	}
+
+	local := httptest.NewRequest(http.MethodPost, "/sessions/x/paste-upload", nil)
+	local.RemoteAddr = "127.0.0.1:51000"
+
+	if got, want := uploadLimitBytesFor(local), int64(uploadLimitCeilingMB)<<20; got != want {
+		t.Fatalf("uploadLimitBytesFor = %d, want at least the configured cap %d", got, want)
+	}
+	if got, want := LocalUploadLimitBytes(), int64(uploadLimitCeilingMB)<<20; got != want {
+		t.Fatalf("LocalUploadLimitBytes = %d, want at least the configured cap %d", got, want)
+	}
+}
+
+// TestUploadLimitGet_ReportsBothNumbers pins the two-field response. maxMb is what the ⚙
+// input edits and PUT writes back; effectiveMb is what THIS caller may actually send.
+// Collapsing them into one would show "1024" to every local user and invite a save that
+// raises the cap for every phone on the internet.
+func TestUploadLimitGet_ReportsBothNumbers(t *testing.T) {
+	resetUploadLimitState(t)
+	srv := &Server{}
+
+	for _, tc := range []struct {
+		name            string
+		headers         map[string]string
+		wantEffectiveMb int64
+		wantSameMachine bool
+	}{
+		{name: "same machine", wantEffectiveMb: localUploadLimitMB, wantSameMachine: true},
+		{
+			name:            "through a tunnel",
+			headers:         map[string]string{"CF-Connecting-IP": "203.0.113.7"},
+			wantEffectiveMb: ClipboardMaxUploadSize >> 20,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/files/upload-limit", nil)
+			r.RemoteAddr = "127.0.0.1:51000"
+			for k, v := range tc.headers {
+				r.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			srv.handleUploadLimitGet(w, r)
+
+			var body map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got, want := body["maxMb"], float64(ClipboardMaxUploadSize>>20); got != want {
+				t.Fatalf("maxMb = %v, want the CONFIGURED cap %v regardless of who asks", got, want)
+			}
+			if got, want := body["effectiveMb"], float64(tc.wantEffectiveMb); got != want {
+				t.Fatalf("effectiveMb = %v, want %v", got, want)
+			}
+			if got := body["sameMachine"]; got != tc.wantSameMachine {
+				t.Fatalf("sameMachine = %v, want %v", got, tc.wantSameMachine)
+			}
+		})
 	}
 }

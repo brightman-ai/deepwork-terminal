@@ -16,6 +16,17 @@ import (
 // the /files/{mkdir,create,rename,delete} write endpoints, which read session/cwd/
 // operands via r.FormValue.
 func httpPostForm(rawURL string, form url.Values, authToken string) (*http.Response, error) {
+	return httpPostFormAuth(rawURL, form, authToken, nil)
+}
+
+// httpPostFormWith posts with extra headers and the default auth code. Its reason to exist
+// is requestIsSameMachine: an httptest server is always reached over loopback, so "a caller
+// somewhere else" can only be expressed by the forwarding header a proxy would add.
+func httpPostFormWith(rawURL string, form url.Values, headers map[string]string) (*http.Response, error) {
+	return httpPostFormAuth(rawURL, form, "", headers)
+}
+
+func httpPostFormAuth(rawURL string, form url.Values, authToken string, headers map[string]string) (*http.Response, error) {
 	if authToken == "" {
 		authToken = testAuthCode
 	}
@@ -26,6 +37,9 @@ func httpPostForm(rawURL string, form url.Values, authToken string) (*http.Respo
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if authToken != "" {
 		req.Header.Set("X-CLI-Auth", authToken)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	return http.DefaultClient.Do(req)
 }
