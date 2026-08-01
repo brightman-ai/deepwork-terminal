@@ -20,6 +20,15 @@ import (
 // "not OK". Returns the status and the decoded body.
 func postPasteUploadRaw(t *testing.T, serverURL, sessID, cwd, filename, mime string, data []byte) (int, map[string]any) {
 	t.Helper()
+	return postPasteUploadWith(t, serverURL, sessID, cwd, filename, mime, data, nil)
+}
+
+// postPasteUploadWith is postPasteUploadRaw plus extra request headers. It exists because
+// an httptest server can only ever be dialled over loopback, so "a client somewhere else"
+// cannot be expressed by an address — the only honest way to reach the remote branch of
+// requestIsSameMachine from a test is the forwarding header a real proxy would set.
+func postPasteUploadWith(t *testing.T, serverURL, sessID, cwd, filename, mime string, data []byte, headers map[string]string) (int, map[string]any) {
+	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	fw, err := mw.CreateFormFile("file", filename)
@@ -34,6 +43,9 @@ func postPasteUploadRaw(t *testing.T, serverURL, sessID, cwd, filename, mime str
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("X-CLI-Auth", testAuthCode)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -102,6 +114,11 @@ func TestClipboardUpload_NoMIMEGate(t *testing.T) {
 // pins it to a status the client can act on. 413 (not 400) is what tells the frontend the
 // failure is deterministic — i.e. hide 重试, since replaying the same bytes cannot help —
 // and limit_mb travels with it so the client never hardcodes the number.
+//
+// The X-Forwarded-For is what makes this request REMOTE. It is not decoration: the cap
+// exists to bound what crosses a network, so it is only this caller — one that reached us
+// through something — who is subject to it. The same bytes from the same machine are the
+// next test, and they must NOT be rejected.
 func TestClipboardUpload_TooLargeIs413(t *testing.T) {
 	server, sm, _ := newDrawerTestServer(t)
 	dir := t.TempDir()
@@ -109,11 +126,48 @@ func TestClipboardUpload_TooLargeIs413(t *testing.T) {
 	require.NoError(t, err)
 	sess := sessionByName(t, sm, "clip")
 
-	oversized := bytes.Repeat([]byte("x"), ClipboardMaxUploadSize+1024)
-	status, body := postPasteUploadRaw(t, server.URL, sess.ID, dir, "huge.bin", "application/octet-stream", oversized)
+	// Drive the cap DOWN rather than building a payload above the shipped default: the test
+	// is about the boundary, not about the number, and materialising 100 MB in a test
+	// process to prove it costs real seconds on every run for nothing.
+	resetUploadLimitState(t)
+	_, err = SetUploadLimitMB(1)
+	require.NoError(t, err)
+
+	oversized := bytes.Repeat([]byte("x"), int(UploadLimitBytes())+1024)
+	status, body := postPasteUploadWith(t, server.URL, sess.ID, dir, "huge.bin", "application/octet-stream", oversized,
+		map[string]string{"X-Forwarded-For": "203.0.113.7"})
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, status, "an oversized upload must be 413, not a generic 400")
-	assert.EqualValues(t, ClipboardMaxUploadSize>>20, body["limit_mb"], "the limit must travel with the error")
+	assert.EqualValues(t, UploadLimitBytes()>>20, body["limit_mb"], "the limit must travel with the error")
+}
+
+// TestClipboardUpload_SameMachineIsNotBoundByTheNetworkCap is the fix for what a user hit
+// pasting local recordings into localhost:8087: five files, five 413s, "file exceeds the
+// 10 MB limit" — for bytes that never left the disk they were already on.
+//
+// It asserts the bytes ROUND-TRIP rather than just the status, because the streaming save
+// path this rides on is exactly where an off-by-a-buffer would land: a truncated file is a
+// 200 with the wrong contents, which is worse than the 413 it replaced.
+func TestClipboardUpload_SameMachineIsNotBoundByTheNetworkCap(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	dir := t.TempDir()
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "clip", CWD: dir})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "clip")
+
+	resetUploadLimitState(t)
+	_, err = SetUploadLimitMB(1)
+	require.NoError(t, err)
+
+	oversized := bytes.Repeat([]byte("x"), int(UploadLimitBytes())+1024)
+	status, body := postPasteUploadRaw(t, server.URL, sess.ID, dir, "huge.bin", "application/octet-stream", oversized)
+
+	require.Equal(t, http.StatusOK, status, "a same-machine upload is not crossing a network, so the network cap must not apply")
+	saved, _ := body["path"].(string)
+	require.NotEmpty(t, saved)
+	onDisk, err := os.ReadFile(saved)
+	require.NoError(t, err)
+	assert.Len(t, onDisk, len(oversized), "every byte must land — a partial save would read as success")
 }
 
 // TestSanitizeClipboardFilename_RejectsTraversal: with the MIME gate gone, name sanitation is

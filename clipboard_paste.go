@@ -31,7 +31,15 @@ const (
 	// LimitReader) call UploadLimitBytes(), not this const directly. Keep this const's
 	// value as the shipped default — pro and any caller that never touches upload_limit.go
 	// must keep seeing exactly this number.
-	ClipboardMaxUploadSize = 10 << 20 // 10 MB
+	//
+	// 10 → 100 MB: the old number was set when an upload was read whole into memory, so the
+	// cap was really a memory budget wearing a network argument's clothes. The upload path
+	// now streams (stageClipboardUpload) and paces itself against terminal traffic
+	// (uploadPacer), so what is left to bound is genuinely the network: 100 MB is roughly a
+	// minute on a decent uplink, still short enough that a stuck transfer is noticed rather
+	// than endured. Same-machine clients are not subject to this at all — see
+	// uploadLimitBytesFor.
+	ClipboardMaxUploadSize = 100 << 20 // 100 MB
 	clipboardTmpDir        = "tmp/clipboard"
 	clipboardTTL           = 24 * time.Hour
 )
@@ -66,11 +74,21 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// limit is read ONCE up front so the MaxBytesReader gate and the 413 message it can
 	// produce a few lines later always agree, even if a concurrent SetUploadLimitMB
 	// changes the effective cap mid-request (upload_limit.go is the runtime SSOT;
-	// ClipboardMaxUploadSize is only its compile-time default).
-	limit := UploadLimitBytes()
-	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	// ClipboardMaxUploadSize is only its compile-time default). It is per-REQUEST because
+	// the cap is a network argument and a same-machine client has no network — see
+	// uploadLimitBytesFor.
+	limit := uploadLimitBytesFor(r)
+	// Order matters: MaxBytesReader OUTSIDE the pacer, so the cap is enforced on the real byte
+	// count and a client cannot buy a bigger allowance by being slow. The pacer inside then makes
+	// this whole request — including net/http's spill of a large part to a temp file, which can
+	// only write as fast as it reads — yield to a user who is typing. See upload_pacing.go.
+	r.Body = paceUploadBody(http.MaxBytesReader(w, r.Body, limit))
 
-	if err := r.ParseMultipartForm(limit); err != nil {
+	// maxMemory is NOT the limit. ParseMultipartForm buffers up to maxMemory in RAM and
+	// spills the rest to disk, so passing the cap here would mean a local 1 GB paste is a
+	// 1 GB allocation. The cap is enforced by MaxBytesReader above (which is what produces
+	// the *http.MaxBytesError below); this number only decides where the bytes wait.
+	if err := r.ParseMultipartForm(clipboardStageMaxMemory); err != nil {
 		terminalClipboardUploadErrors.Inc()
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -181,8 +199,11 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		go cleanupOldClipboardFiles(sessionDir, clipboardTTL)
 	}
 
-	// Read file into memory for hash dedup
-	data, err := io.ReadAll(file)
+	// Stream the upload straight to disk, hashing on the way past. Nothing is held whole in
+	// memory: the previous io.ReadAll made peak RSS equal to the file size, which was
+	// survivable only because the cap was 10 MB — it is what would have turned the raised
+	// local cap into an OOM instead of a fix.
+	stagedPath, written, hashHex, err := stageClipboardUpload(sessionDir, file)
 	if err != nil {
 		terminalClipboardUploadErrors.Inc()
 		terminalLogger.Warn(logCtx, "cli clipboard upload failed",
@@ -195,11 +216,12 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
 		return
 	}
+	// Every path below either renames the staged file into place or is an error/dedup exit;
+	// this makes "we did not keep it" unconditional rather than one branch's responsibility.
+	defer os.Remove(stagedPath)
 
-	// Hash dedup: if identical to the most recent file, return existing path
-	hash := sha256.Sum256(data)
-	hashHex := hex.EncodeToString(hash[:8]) // short hash for comparison
-	if existing := findDuplicateClipboard(sessionDir, hashHex, data); existing != "" {
+	// Hash dedup: if identical to a file already here, return the existing path
+	if existing := findDuplicateClipboard(sessionDir, hashHex, written); existing != "" {
 		// Resolve the dedup path against the SAME base as the fresh-save branch below
 		// (the live active-pane `cwd`), NOT the session's static launch dir. A PC paste
 		// uploads the same bytes twice — once saved, once deduped — and if the two
@@ -214,20 +236,20 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		// lists this file with the session's name even on the dedup path.
 		s.recordUpload(sess, existing, isImage)
 		terminalClipboardUploadsTotal.Inc()
-		terminalClipboardUploadBytes.Add(uint64(len(data)))
+		terminalClipboardUploadBytes.Add(uint64(written))
 		terminalClipboardUploadDuration.Observe(time.Since(start).Seconds())
 		terminalLogger.Info(logCtx, "cli clipboard upload deduped",
 			"session_id", id,
 			"kind", clipboardKindLabel(isImage),
 			"mime", mime,
-			"size", len(data),
+			"size", written,
 			"rel_path", relPath,
 			"filename", filepath.Base(existing),
 			"elapsed_ms", time.Since(start).Milliseconds())
 		writeJSON(w, http.StatusOK, map[string]any{
 			"path":     existing,
 			"relPath":  relPath,
-			"size":     len(data),
+			"size":     written,
 			"filename": filepath.Base(existing),
 			"dedup":    true,
 		})
@@ -253,22 +275,10 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	}
 	savePath := filepath.Join(sessionDir, filename)
 
-	// Save atomically
-	tmpPath := savePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		terminalClipboardUploadErrors.Inc()
-		terminalLogger.Warn(logCtx, "cli clipboard upload failed",
-			"reason", "write_failed",
-			"session_id", id,
-			"mime", mime,
-			"filename", filename,
-			"elapsed_ms", time.Since(start).Milliseconds(),
-			"error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "write failed"})
-		return
-	}
-	if err := os.Rename(tmpPath, savePath); err != nil {
-		os.Remove(tmpPath)
+	// Publish atomically: the staged file already holds every byte, so the last step is a
+	// same-directory rename — a reader either sees the complete file or no file at all,
+	// never a growing one.
+	if err := os.Rename(stagedPath, savePath); err != nil {
 		terminalClipboardUploadErrors.Inc()
 		terminalLogger.Warn(logCtx, "cli clipboard upload failed",
 			"reason", "rename_failed",
@@ -280,7 +290,6 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rename failed"})
 		return
 	}
-	written := int64(len(data))
 
 	// Compute relative path from CWD for short @reference
 	relPath, _ := filepath.Rel(cwd, savePath)
@@ -415,6 +424,44 @@ func nextClipboardSeq(sessionID string) int64 {
 	return counter.Add(1)
 }
 
+// clipboardStageMaxMemory is how much of a multipart upload net/http may hold in RAM
+// before it spills the remainder to a temp file. It is a BUFFER SIZE, never a limit —
+// the limit is MaxBytesReader's (see handleClipboardPasteUpload). 8 MB keeps the common
+// case (a screenshot) entirely in memory while making a 1 GB local paste cost 8 MB of
+// RSS instead of 1 GB.
+const clipboardStageMaxMemory = 8 << 20
+
+// stageClipboardUpload writes src into a temp file INSIDE dir and returns that path, the
+// byte count, and the short content hash — computed in the same pass, because reading the
+// bytes twice to hash them would double the cost of the very uploads this exists for.
+//
+// The temp file lives in the destination directory (not os.TempDir) for two reasons: the
+// final step is then a same-filesystem rename, which is atomic and free, and a crash
+// leaves the debris next to where it was going. Its name ends in ".tmp", which is what
+// findDuplicateClipboard skips, so a half-written upload can never be handed back as a
+// dedup hit. The caller owns cleanup (defer os.Remove) — after a successful rename that
+// Remove is a harmless no-op on a name nothing holds.
+func stageClipboardUpload(dir string, src io.Reader) (path string, size int64, hashHex string, err error) {
+	f, err := os.CreateTemp(dir, ".upload-*.tmp") // 0600 by construction
+	if err != nil {
+		return "", 0, "", err
+	}
+	path = f.Name()
+	h := sha256.New()
+	// paceUpload here covers the second half of the transfer — the copy out of net/http's spill
+	// file into the session directory — and every caller at once, including the in-process Wails
+	// path that has no HTTP body to wrap. It is a no-op on a reader that is already paced.
+	size, err = io.Copy(io.MultiWriter(f, h), paceUpload(src))
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(path)
+		return "", 0, "", err
+	}
+	return path, size, hex.EncodeToString(h.Sum(nil)[:8]), nil
+}
+
 // findDuplicateClipboard checks if a file with the same content already exists in
 // the directory, returning its path (or "" if none). Content-based, NOT purely
 // filename-based: a synthetic image name embeds the hash ({HHmm}{seq}-{hash8}.{ext})
@@ -422,7 +469,12 @@ func nextClipboardSeq(sessionID string) int64 {
 // does not — so we fall back to comparing by size then full content hash. Without
 // this, a single PC paste (which uploads the same bytes twice) would fail to dedup a
 // named file and inject two @references for one image.
-func findDuplicateClipboard(dir string, hashHex string, data []byte) string {
+//
+// It takes the SIZE rather than the bytes: the candidate it is comparing against may be
+// hundreds of megabytes, and holding either side whole in memory is exactly what the
+// streaming upload path removed. Size stays the pre-filter (one stat), and only a size
+// match pays for a hash.
+func findDuplicateClipboard(dir string, hashHex string, size int64) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
@@ -442,19 +494,30 @@ func findDuplicateClipboard(dir string, hashHex string, data []byte) string {
 		}
 		// Content path (preserved original names): size pre-filter, then hash.
 		info, err := entries[i].Info()
-		if err != nil || info.Size() != int64(len(data)) {
+		if err != nil || info.Size() != size {
 			continue
 		}
-		existing, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		h := sha256.Sum256(existing)
-		if hex.EncodeToString(h[:8]) == hashHex {
-			return filepath.Join(dir, name)
+		candidate := filepath.Join(dir, name)
+		if existing, err := fileShortHash(candidate); err == nil && existing == hashHex {
+			return candidate
 		}
 	}
 	return ""
+}
+
+// fileShortHash returns a file's content hash in the same truncated form the upload path
+// produces, streaming so that a large candidate costs a buffer rather than its own size.
+func fileShortHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8]), nil
 }
 
 // recordUpload writes an entry into the cross-session upload index for a freshly

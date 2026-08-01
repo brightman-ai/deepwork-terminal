@@ -230,10 +230,12 @@ func (s *Server) handleChunkUploadInit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "size must be a non-negative integer"})
 		return
 	}
-	// Same cap as the single-shot path, read once from the runtime SSOT (upload_limit.go). A
-	// deterministic 413 carrying limit_mb lets the client say "文件超过 N MB 上限" without
-	// hardcoding the number — identical contract to handleClipboardPasteUpload.
-	if limit := UploadLimitBytes(); size > limit {
+	// Same cap as the single-shot path, read once from the runtime SSOT (upload_limit.go), and
+	// per-REQUEST for the same reason: a client on this machine is not crossing the network the
+	// cap exists to bound. If this one stayed global, the ⚙ tree upload would still refuse a
+	// local 156 MB file that paste now accepts — one product, two answers. A deterministic 413
+	// carrying limit_mb lets the client say "文件超过 N MB 上限" without hardcoding the number.
+	if limit := uploadLimitBytesFor(r); size > limit {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
 			"error":    fmt.Sprintf("file exceeds the %d MB limit", limit>>20),
 			"limit_mb": limit >> 20,
@@ -305,7 +307,10 @@ func (s *Server) handleChunkUploadChunk(w http.ResponseWriter, r *http.Request) 
 
 	// Bound the body at one chunk plus a little slack — a single slice can never legitimately
 	// exceed chunkSize, so anything larger is a malformed/hostile request, not a valid chunk.
-	r.Body = http.MaxBytesReader(w, r.Body, meta.ChunkSize+4096)
+	// Paced inside the cap for the same reason the single-shot path is: a tree upload of a large
+	// file is a wall of back-to-back 8 MiB chunks, which is the same firehose wearing a different
+	// shape. See upload_pacing.go.
+	r.Body = paceUploadBody(http.MaxBytesReader(w, r.Body, meta.ChunkSize+4096))
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -408,7 +413,10 @@ func (s *Server) handleChunkUploadComplete(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot read chunk"})
 			return
 		}
-		n, cerr := io.Copy(sink, part)
+		// Assembly is disk→disk at full device speed, uninterrupted, for the whole file — the
+		// single busiest moment of a chunked upload and the one furthest from any network that
+		// would otherwise slow it down. So it yields to the user like every other leg does.
+		n, cerr := io.Copy(sink, paceUpload(part))
 		part.Close()
 		if cerr != nil {
 			tmpFile.Close()

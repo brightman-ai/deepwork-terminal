@@ -208,6 +208,12 @@ func TestChunkUploadResume(t *testing.T) {
 }
 
 // TC-CHK-03: init with size over the effective cap → 413 carrying limit_mb (default 10).
+//
+// The X-Forwarded-For is what makes the caller REMOTE, and it is load-bearing: the cap
+// bounds what crosses a network, so a same-machine client is not subject to it (next test).
+// An httptest server only ever answers on loopback, so the header is the only way to reach
+// the remote branch — and it is not a contrivance, it is exactly what the cloudflared tunnel
+// in front of a published terminal sets.
 func TestChunkUploadOversizeInit(t *testing.T) {
 	server, sm, _ := newDrawerTestServer(t)
 	cwd := t.TempDir()
@@ -216,8 +222,9 @@ func TestChunkUploadOversizeInit(t *testing.T) {
 	sess := sessionByName(t, sm, "chunk-big")
 
 	over := int(UploadLimitBytes()) + 1
-	resp, err := httpPostForm(formatURL(server, "/files/upload/init"),
-		url.Values{"session": {sess.ID}, "cwd": {cwd}, "name": {"huge.bin"}, "size": {strconv.Itoa(over)}}, "")
+	resp, err := httpPostFormWith(formatURL(server, "/files/upload/init"),
+		url.Values{"session": {sess.ID}, "cwd": {cwd}, "name": {"huge.bin"}, "size": {strconv.Itoa(over)}},
+		map[string]string{"X-Forwarded-For": "203.0.113.7"})
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
@@ -226,6 +233,25 @@ func TestChunkUploadOversizeInit(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	assert.Equal(t, UploadLimitBytes()>>20, body.LimitMB)
+}
+
+// TC-CHK-03b: the same oversized init from THIS machine is accepted. Paste and the tree's
+// upload button must agree — one product cannot answer "too large" to a file the other just
+// took, and both now ask uploadLimitBytesFor rather than the global number.
+func TestChunkUploadOversizeInit_SameMachineIsAllowed(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "chunk-local", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "chunk-local")
+
+	over := int(UploadLimitBytes()) + 1
+	resp, err := httpPostForm(formatURL(server, "/files/upload/init"),
+		url.Values{"session": {sess.ID}, "cwd": {cwd}, "name": {"huge.bin"}, "size": {strconv.Itoa(over)}}, "")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode,
+		"a local file is not crossing the network the cap exists for")
 }
 
 // TC-CHK-04: complete before every chunk arrives → 409 with the missing set, no target written.

@@ -2,8 +2,6 @@ package terminal
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -156,23 +154,32 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 		return "", fmt.Errorf("cannot create clipboard dir: %w", err)
 	}
 
-	// Read content for hash dedup. UploadLimitBytes() is the runtime-configurable SSOT
-	// (upload_limit.go), not the compile-time ClipboardMaxUploadSize const directly —
-	// keeps this in-proc (Wails) path in sync with a runtime SetUploadLimitMB the same
-	// way the HTTP path (clipboard_paste.go) already is.
-	data, err := io.ReadAll(io.LimitReader(content, UploadLimitBytes()))
+	// LocalUploadLimitBytes, not UploadLimitBytes: this path IS the desktop app pasting into
+	// its own embedded terminal, so it is same-machine by construction and the small default
+	// — which exists to bound what crosses a network — has nothing to bound here. The HTTP
+	// path reaches the same conclusion per-request via uploadLimitBytesFor.
+	limit := LocalUploadLimitBytes()
+
+	// Stream to disk, hashing on the way past — shared with the HTTP path so the two can
+	// never drift on dedup or on what "atomically saved" means. Reading limit+1 is how the
+	// cap becomes an ERROR instead of silent truncation: io.LimitReader alone would have
+	// saved the first N bytes of an oversized paste as if it were the whole file, producing
+	// a corrupt attachment that looks successful right up until the agent opens it.
+	stagedPath, written, hashHex, err := stageClipboardUpload(hourDir, io.LimitReader(content, limit+1))
 	if err != nil {
 		terminalClipboardUploadErrors.Inc()
 		return "", fmt.Errorf("read content: %w", err)
 	}
-
-	hash := sha256.Sum256(data)
-	hashHex := hex.EncodeToString(hash[:8])
+	defer os.Remove(stagedPath)
+	if written > limit {
+		terminalClipboardUploadErrors.Inc()
+		return "", fmt.Errorf("file exceeds the %d MB limit", limit>>20)
+	}
 
 	// Dedup check.
-	if existing := findDuplicateClipboard(hourDir, hashHex, data); existing != "" {
+	if existing := findDuplicateClipboard(hourDir, hashHex, written); existing != "" {
 		terminalClipboardUploadsTotal.Inc()
-		terminalClipboardUploadBytes.Add(uint64(len(data)))
+		terminalClipboardUploadBytes.Add(uint64(written))
 		terminalClipboardUploadDuration.Observe(time.Since(start).Seconds())
 		return existing, nil
 	}
@@ -199,19 +206,13 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 	}
 
 	savePath := filepath.Join(hourDir, saveName)
-	tmpPath := savePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		terminalClipboardUploadErrors.Inc()
-		return "", fmt.Errorf("write temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, savePath); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := os.Rename(stagedPath, savePath); err != nil {
 		terminalClipboardUploadErrors.Inc()
 		return "", fmt.Errorf("rename: %w", err)
 	}
 
 	terminalClipboardUploadsTotal.Inc()
-	terminalClipboardUploadBytes.Add(uint64(len(data)))
+	terminalClipboardUploadBytes.Add(uint64(written))
 	terminalClipboardUploadDuration.Observe(time.Since(start).Seconds())
 	return savePath, nil
 }
