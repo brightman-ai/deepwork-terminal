@@ -35,6 +35,7 @@ import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
 import type { TerminalFindOptions } from './terminalSearchOptions'
 import { canMeasureTerminal } from './terminalFit'
+import { noteRenderer, noteContextLost, noteRenderMetrics } from '@terminal/composables/cli/renderHealth'
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
@@ -379,6 +380,9 @@ function enableWebglRenderer(term: Terminal): RendererChoice {
       const lost = { surface: props.diagnosticSurface ?? 'terminal' }
       rendererLog.info('cli.renderer.context_lost', lost)
       reportServerEvent('cli.renderer.context_lost', lost)
+      // 同一个事实也留一份给用户看得见的地方（「关于」面板）——这一档刷新就能修，
+      // 而在此之前它只进服务端日志，用户完全不知道自己已经掉回 CPU 渲染。
+      noteContextLost()
       addon.dispose()
       webglAddon = null
     })
@@ -446,6 +450,7 @@ function initTerminal() {
     }
     rendererLog.info('cli.render.metrics', facts)
     reportServerEvent('cli.render.metrics', facts)
+    noteRenderMetrics(summary)
   })
   const helperTextarea = configureInputAnchor()
   diagnosticCleanups.push(attachXtermKeydownFallback(helperTextarea))
@@ -482,6 +487,7 @@ function initTerminal() {
   }
   rendererLog.info('cli.renderer.active', rendererFacts)
   reportServerEvent('cli.renderer.active', rendererFacts)
+  noteRenderer(rendererChoice.renderer, rendererChoice.reason)
 
   // [TH-0501-m9j] Platform-aware input routing.
   // WKWebView's textarea input events intermittently fail to trigger xterm's onData

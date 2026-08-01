@@ -30,6 +30,7 @@ import { Copy, Check, ExternalLink, RefreshCw } from 'lucide-vue-next'
 import { useBuildVersionLabel } from '@terminal/composables/cli/useBuildVersionLabel'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { pageLine, programLine, badgeNeedsAttention } from '@terminal/composables/cli/versionPanel'
+import { useRenderHealth, rendererLine, metricsLine } from '@terminal/composables/cli/renderHealth'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 /** 面板标题里的产品名 —— 两壳各自传，其余一切共享。 */
@@ -66,9 +67,19 @@ function toggle(): void {
   if (open.value) void nextTick(placePanel)
 }
 
+// 渲染：这个页面此刻怎么把字画到屏幕上。收录理由见 renderHealth.ts —— 界面上看不见、会改变你对
+// "卡不卡"的解读、且一旦静默降级没有别的东西会告诉你。数据全部来自**已经在跑**的上报路径。
+const { renderer, declineReason, contextLost, metrics } = useRenderHealth()
+const render = computed(() => rendererLine(renderer.value, contextLost.value, declineReason.value))
+const renderMetrics = computed(() => metricsLine(metrics.value))
+
 const page = computed(() => pageLine(updateAvailable.value))
 const program = computed(() => programLine(releaseState.value, latest.value, latestUrl.value))
-const needsAttention = computed(() => badgeNeedsAttention(updateAvailable.value, releaseState.value))
+// 小圆点：页面旧了 / 程序旧了 / GPU 掉了 —— 三者都是"需要你做点什么"。渲染降级同样一次刷新就能
+// 修，把它排除在提醒之外，就等于让人继续用一个慢一半的终端而不自知。
+const needsAttention = computed(
+  () => badgeNeedsAttention(updateAvailable.value, releaseState.value) || contextLost.value,
+)
 
 async function copyVersion(): Promise<void> {
   if (await copyTextToClipboard(full.value)) {
@@ -81,6 +92,8 @@ function runAction(line: { action?: { kind: string; href?: string } }): void {
   const a = line.action
   if (!a) return
   if (a.kind === 'refresh') { applyUpdate(); return }
+  // 普通重载即可拿回 GPU 上下文 —— 不必走 applyUpdate 那套清缓存的重活，那是给"页面旧了"用的。
+  if (a.kind === 'reload') { window.location.reload(); return }
   if (a.kind === 'open' && a.href) window.open(a.href, '_blank', 'noopener,noreferrer')
 }
 
@@ -157,6 +170,18 @@ onUnmounted(() => {
       </div>
 
       <div class="vb-block">
+        <div class="vb-block-title">渲染</div>
+        <div class="vb-row">
+          <span class="vb-line" :class="`t-${render.tone}`" data-testid="version-panel-render">{{ render.text }}</span>
+          <button v-if="render.action" class="vb-act" type="button" data-testid="version-panel-render-action" @click="runAction(render)">
+            <RefreshCw :size="12" /><span>{{ render.action.label }}</span>
+          </button>
+        </div>
+        <div v-if="render.detail" class="vb-sub" data-testid="version-panel-render-detail">{{ render.detail }}</div>
+        <div v-if="renderMetrics" class="vb-sub" data-testid="version-panel-render-metrics">{{ renderMetrics }}</div>
+      </div>
+
+      <div class="vb-block">
         <div class="vb-block-title">服务端程序</div>
         <div class="vb-row">
           <span class="vb-line" :class="`t-${program.tone}`" data-testid="version-panel-program">{{ program.text }}</span>
@@ -213,6 +238,8 @@ onUnmounted(() => {
 .vb-block { padding-top: 9px; }
 .vb-block-title { color: hsl(var(--muted-foreground)); font-size: 11px; margin-bottom: 4px; }
 .vb-line { flex: 1; min-width: 0; }
+/* 补充说明 / 指标：比正文更轻，属于"想深究时才读"的层级，不与主结论争注意力。 */
+.vb-sub { margin-top: 2px; font-size: 11px; line-height: 1.45; color: hsl(var(--muted-foreground)); }
 /* 三档语气：确认 / 要你做点什么 / 无从判断。unknown 刻意不是绿色 —— 它不是一句好消息。 */
 .t-ok { color: #4ade80; }
 .t-warn { color: #f59e0b; }
