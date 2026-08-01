@@ -311,6 +311,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /sessions/{id}/input", wrap(s.handleInput))
 	s.mux.HandleFunc("GET /sessions/{id}/ws", wrap(s.handleWebSocket))
 	s.mux.HandleFunc("POST /sessions/{id}/paste-upload", wrap(s.handleClipboardPasteUpload))
+	// The zero-copy half of paste: the shared resolver asks for the file paths on the
+	// server's own clipboard BEFORE it uploads anything, and injects `@path` if it gets
+	// them. pro serves the same URL; without it here a local paste of local files went
+	// through the upload cap instead of costing nothing — see clipboard_native.go.
+	s.mux.HandleFunc("GET /browser/clipboard/files", wrap(s.handleClipboardFilePaths))
 	// Cross-session resource drawer (WS5): global, top-level, not session-scoped.
 	// Uploads come from the persisted index; inputs from claude/codex transcripts.
 	s.mux.HandleFunc("GET /uploads", wrap(s.handleUploadsList))
