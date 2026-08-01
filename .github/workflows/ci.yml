@@ -27,3 +27,11 @@ jobs:
 
       - name: Build binary
         run: ./build.sh --skip-frontend
+
+      # The executable half of the shared-frontend contract (scripts/check-shared-frontend-deps.mjs).
+      # It is here rather than only in deepwork-pro's build because two of the three halves are
+      # about THIS repo: an import with no declared package, and — the one that has bitten twice —
+      # an API endpoint the frontend calls that this server never routes. Both fail silently at
+      # runtime, so a machine has to be the one that notices. Node only; nothing to install.
+      - name: Shared frontend contract
+        run: node scripts/check-shared-frontend-deps.mjs
