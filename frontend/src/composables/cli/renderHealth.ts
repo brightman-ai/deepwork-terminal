@@ -31,7 +31,7 @@
  * 这个模块不测量任何东西，只是把已经算出来的事实留一份在客户端。
  */
 import { ref, type Ref } from 'vue'
-import type { RenderMetricsSummary } from '@terminal/composables/cli/terminalRenderMetrics'
+import { SLOW_FRAME_MS, type RenderMetricsSummary } from '@terminal/composables/cli/terminalRenderMetrics'
 
 export type RendererKind = 'webgl' | 'dom' | 'unknown'
 
@@ -124,16 +124,31 @@ export function rendererLine(
  * 指标那一行。
  *
  * **刻意不报"帧率"。** 终端不是游戏循环——它只在有字节到达时才画，空闲时一帧都不画。把"每秒 3 帧"
- * 摆给用户看，只会让一个完全正常的空闲终端显得像坏了。真正能回答"卡不卡"的是**单帧渲染耗时**，
- * 而且要看分位数：一个 90% 时间正常、每次重绘卡 200ms 的终端，在均值上是"正常"，在人眼里是坏的
- * （terminalRenderMetrics 的注释原话）。
+ * 摆给用户看，只会让一个完全正常的空闲终端显得像坏了。真正能回答"卡不卡"的是**单帧渲染耗时**。
  *
- * 另外报 forcedRepaints —— 那个模块自己点名它是"最值得盯的数字"：它意味着整屏重绘，而触发条件
- * 宽松到几乎任何输出都可能命中。
+ * **分位数 + 最慢一帧 + 超阈帧数**，三者缺一不可，因为它们回答的是三个不同的问题：
+ *
+ *   · P50/P95 —— 平常什么手感。（均值不行：90% 时间正常、每次重绘卡 200ms 的终端，均值是"正常"，
+ *     人眼里是坏的。）
+ *   · 最慢一帧 —— **卡顿活在尾巴上**。15 秒窗口跑 200 帧，一次 800ms 僵直落在 P99.5，P95 完全
+ *     看不见它，而那偏偏是用户唯一感觉到的那一帧（Human 提出的正是这一点）。
+ *   · 超阈帧数 —— 幅度分不出"偶发"和"持续"。一次 400ms 可能是 GC 或窗口 resize；十次 400ms 才叫卡。
+ *
+ * **为什么不列 Top5**：五个数字没有频次语境，反而比"最慢 + 几次"更难判断；而且这个面板只有 268px，
+ * 五个数会把这一行挤成两行还读不出结论。要逐帧取证是服务端遥测的事，不是一眼看的面板的事。
+ *
+ * 另外报 forcedRepaints —— terminalRenderMetrics 自己点名它是"最值得盯的数字"：它意味着整屏重绘，
+ * 而触发条件宽松到几乎任何输出都可能命中。
+ *
+ * ⚠️ 最慢值能被显示出来，前提是采样闸门（renderSampleGate）先存在：max 是**最容易被坏样本毁掉**
+ * 的统计量——闸门之前，这里会赫然写着"最慢 177556ms"。
  */
 export function metricsLine(m: RenderMetricsSummary | null): string {
   if (!m || m.frames === 0) return ''
   const parts = [`单帧 ${Math.round(m.renderP50)}/${Math.round(m.renderP95)}ms (P50/P95)`]
+  if (m.renderMax > 0) parts.push(`最慢 ${Math.round(m.renderMax)}ms`)
+  // 只在真有超阈帧时才说 —— 没有卡顿时多一句"0 帧"是噪音。
+  if (m.renderSlow > 0) parts.push(`${m.renderSlow} 帧 >${SLOW_FRAME_MS}ms`)
   if (m.forcedRepaints > 0) parts.push(`整屏重绘 ${m.forcedRepaints}`)
   return parts.join(' · ')
 }

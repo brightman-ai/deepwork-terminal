@@ -21,12 +21,28 @@
  * Percentiles, not averages: a terminal that is fine 90% of the time and stalls 200ms on every
  * repaint reads as "fine" on an average and as broken to the person using it.
  *
+ * And percentiles are not enough on their own. P95 describes the BULK; stutter lives in the tail.
+ * Over a 15s window of 200 frames, one 800ms freeze sits around P99.5 and is invisible at P95 —
+ * yet it is the only frame the user actually felt. So the summary also carries the worst frame and
+ * HOW MANY crossed the "you would feel that" line: magnitude alone can't tell a one-off GC pause
+ * from real stutter, and a count alone can't tell 110ms from 900ms. Two numbers, one question.
+ *
  * Cost of measuring: two timestamps and an array push per frame, and one report per interval —
  * deliberately cheaper than the thing it measures, and silent when the terminal is idle.
  */
 
 /** How often a summary is emitted. Long enough that the report is never itself the load. */
 const REPORT_INTERVAL_MS = 15_000
+
+/**
+ * A repaint past this is a hitch you can feel, not a slow frame you can't.
+ *
+ * 16.7ms is one frame at 60Hz — too tight to be interesting here, since a terminal paints on byte
+ * arrival, not on a display clock. 100ms is the long-standing "feels instantaneous" boundary, and
+ * it sits comfortably above what this app measures in normal operation (P95 was 6ms on an idle
+ * workbench and 59ms on a busy one), so crossing it means something actually happened.
+ */
+export const SLOW_FRAME_MS = 100
 
 /** Samples kept per window. Beyond this the oldest are dropped — percentiles stay representative
  *  without the array growing without bound during a flood. */
@@ -42,6 +58,8 @@ export interface RenderMetricsSummary {
   renderP50: number
   renderP95: number
   renderMax: number
+  /** Frames whose repaint crossed SLOW_FRAME_MS — the frequency half of "is it stuttering". */
+  renderSlow: number
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -69,6 +87,7 @@ export function summarize(
     renderP50: percentile(r, 0.5),
     renderP95: percentile(r, 0.95),
     renderMax: r.length ? Math.round(r[r.length - 1] * 10) / 10 : 0,
+    renderSlow: r.reduce((n, ms) => (ms > SLOW_FRAME_MS ? n + 1 : n), 0),
   }
 }
 

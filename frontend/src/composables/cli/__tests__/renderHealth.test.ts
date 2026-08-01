@@ -39,7 +39,7 @@ describe('metricsLine', () => {
   const base = {
     frames: 10, bytes: 1000, forcedRepaints: 0,
     parseP50: 1, parseP95: 2, parseMax: 3,
-    renderP50: 11.7, renderP95: 59.1, renderMax: 60.3,
+    renderP50: 11.7, renderP95: 59.1, renderMax: 60.3, renderSlow: 0,
   }
 
   it('报单帧耗时的分位数，不报帧率', () => {
@@ -48,6 +48,21 @@ describe('metricsLine', () => {
     expect(s).toMatch(/P50\/P95/)
     // 终端只在有字节时才画，"帧率"对空闲终端毫无意义且会显得像坏了。
     expect(s).not.toMatch(/fps|帧率/)
+  })
+
+  // 卡顿活在尾巴上：200 帧里一次 800ms 落在 P99.5，P95 完全看不见它。
+  it('报最慢一帧 —— 分位数描述"大多数时候"，看不见单次僵直', () => {
+    const s = metricsLine({ ...base, renderMax: 812.4 })
+    expect(s).toContain('最慢 812ms')
+  })
+
+  it('超阈帧数把"偶发"和"持续"分开（一次 400ms 是 GC，十次才叫卡）', () => {
+    expect(metricsLine({ ...base, renderMax: 412, renderSlow: 1 })).toContain('1 帧 >100ms')
+    expect(metricsLine({ ...base, renderMax: 412, renderSlow: 12 })).toContain('12 帧 >100ms')
+  })
+
+  it('没有超阈帧就不提它 —— 多一句"0 帧"是噪音', () => {
+    expect(metricsLine(base)).not.toContain('>100ms')
   })
 
   it('有整屏重绘才报它（模块自己点名的"最值得盯的数字"）', () => {
@@ -79,7 +94,7 @@ describe('页面级状态', () => {
   })
 
   it('指标写入即可读', () => {
-    noteRenderMetrics({ frames: 5, bytes: 1, forcedRepaints: 0, parseP50: 0, parseP95: 0, parseMax: 0, renderP50: 8, renderP95: 9, renderMax: 9 })
+    noteRenderMetrics({ frames: 5, bytes: 1, forcedRepaints: 0, parseP50: 0, parseP95: 0, parseMax: 0, renderP50: 8, renderP95: 9, renderMax: 9, renderSlow: 0 })
     expect(useRenderHealth().metrics.value?.renderP50).toBe(8)
   })
 })

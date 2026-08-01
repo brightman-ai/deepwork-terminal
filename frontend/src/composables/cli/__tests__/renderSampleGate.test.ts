@@ -27,3 +27,16 @@ describe('isRenderSampleTrustworthy', () => {
     expect(isRenderSampleTrustworthy(good)).toBe(true) // 无论这次耗时是 4ms 还是 2000ms
   })
 })
+
+// summarize 的超阈计数：它是"卡不卡"的频次一半，必须只数真正越线的样本。
+import { summarize, SLOW_FRAME_MS } from '../terminalRenderMetrics'
+
+describe('summarize.renderSlow', () => {
+  it('只数严格超过阈值的帧', () => {
+    const r = [10, 99, SLOW_FRAME_MS, 101, 500]
+    expect(summarize(5, 0, 0, [], r).renderSlow).toBe(2) // 101 与 500
+  })
+  it('没有样本时为 0，不为 NaN', () => {
+    expect(summarize(0, 0, 0, [], []).renderSlow).toBe(0)
+  })
+})
