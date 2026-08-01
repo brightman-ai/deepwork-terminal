@@ -50,6 +50,29 @@ func NoteInteraction() {
 	lastInteraction.Store(time.Now().UnixNano())
 }
 
+// InteractedWithin reports whether a human acted on a terminal within the last d.
+//
+// Exported because the tmux probe is no longer the only background worker that should step
+// aside: a file upload streaming through this process competes for the same CPU and disk as
+// the PTY it is streaming past (see the terminal package's uploadPacer). Both need the same
+// fact, and it must come from the same clock — two "is the user busy" answers that can differ
+// is how one of them ends up subtly wrong and nobody notices.
+//
+// A zero d, or a process where no input has ever arrived, is false: never-interacted is not
+// "interacting right now".
+func InteractedWithin(d time.Duration) bool {
+	nanos := lastInteraction.Load()
+	if nanos == 0 || d <= 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, nanos)) < d
+}
+
+// InteractionQuiet is the window that counts as "the user is acting right now" — long enough
+// to cover the gap between keystrokes at speed plus the redraw each one causes. Exported so a
+// second yielding worker uses the SAME definition rather than picking its own number.
+func InteractionQuiet() time.Duration { return interactionQuiet }
+
 // probeDeferredForInteraction reports whether a rebuild should yield to a recent interaction.
 //
 // lastBuiltAt is when the cached snapshot was built (zero = never). Never-built is treated as
