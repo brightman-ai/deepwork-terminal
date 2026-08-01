@@ -36,6 +36,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import type { TerminalFindOptions } from './terminalSearchOptions'
 import { canMeasureTerminal } from './terminalFit'
 import { noteRenderer, noteContextLost, noteRenderMetrics } from '@terminal/composables/cli/renderHealth'
+import { currentVisibilityEpoch, isRenderSampleTrustworthy } from '@terminal/composables/cli/renderSampleGate'
 import {
   attachCliInputDiagnostics,
   reportCliInputDiagnostic,
@@ -629,16 +630,31 @@ function write(data: string | Uint8Array) {
   // is done with this frame, while the next onRender fires when the screen actually changed. A
   // terminal can be fast at one and slow at the other, and only the second is what a user sees.
   const started = performance.now()
+  // 采样闸门的取证时刻就是现在：写入发生时页面可见吗、这个终端有盒子吗。判定见 renderSampleGate —
+  // onRender 由 rAF 驱动，标签页转入后台时 rAF 被挂起，那次回调可能几分钟后才来，中间的闲置时间
+  // 会整段算进"单帧耗时"（实测出现过 177556ms）。这类样本必须丢掉，而不是截断。
+  const epochAtWrite = currentVisibilityEpoch()
+  const laidOutAtWrite = canMeasureTerminal(terminalContainer.value)
+  const sampleTrustworthy = (): boolean => isRenderSampleTrustworthy({
+    epochAtWrite,
+    epochNow: currentVisibilityEpoch(),
+    hiddenNow: typeof document !== 'undefined' && document.hidden,
+    laidOutAtWrite,
+  })
   let renderSub: { dispose(): void } | null = null
   if (terminal && renderMetrics) {
     renderSub = terminal.onRender(() => {
       renderSub?.dispose()
       renderSub = null
-      renderMetrics?.noteRender(performance.now() - started)
+      if (sampleTrustworthy()) renderMetrics?.noteRender(performance.now() - started)
     })
   }
   terminal?.write(data, () => {
-    renderMetrics?.noteFrame(dataLength(data), performance.now() - started)
+    // 帧数与字节数**永远**记录（那是真实流量，与可见性无关）；只有耗时样本受闸门约束。
+    renderMetrics?.noteFrame(
+      dataLength(data),
+      sampleTrustworthy() ? performance.now() - started : undefined,
+    )
     if (shouldRefresh) scheduleRenderSyncRefresh()
   })
   appendTranscript(data)
