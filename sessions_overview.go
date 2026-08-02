@@ -55,14 +55,23 @@ type SessionOverviewEntry struct {
 	AwaitingUser    bool   `json:"awaitingUser,omitempty"`
 	AwaitingSince   string `json:"awaitingSince,omitempty"`
 	EndedOnQuestion bool   `json:"endedOnQuestion,omitempty"`
-	// StatusRule / StatusEvidence explain WHY this session is asking for the user: the single
-	// rule behind the verdict ("screen.approval", "transcript.turn_end", "signal.notify"…) and,
-	// for a screen-derived one, the line that matched — scrubbed and truncated. Present only
-	// while the session is waiting/awaiting: those are the decisions that can be wrong in a way
-	// the user feels, and confining the fields to them keeps a merely-running session's payload
-	// byte-identical between ticks (this frame is diff-suppressed). Diagnostic only — nothing
-	// renders them; they exist so a wrong red/amber dot can be TRACED rather than re-argued.
-	// See agentintel/status_decision.go.
+	// StatusRule explains WHY this session has the status it has — the single rule behind the
+	// verdict ("transcript.running", "screen.approval", "signal.notify"…). Present on EVERY
+	// decision, including a plain green one.
+	//
+	// It used to ride only on waiting/awaiting, reasoning that those are the verdicts that can be
+	// wrong in a way the user feels. They are not the only ones: a session stuck GREEN while its
+	// agent waits is the failure nobody is told about, and it left no trace at all — five separate
+	// rules can return Running, so the question "why is it green" had no answer but a guess.
+	// Shipping the rule unconditionally is free here because it is stable while the status is, and
+	// this frame is diff-suppressed: it only changes when the REASON changes.
+	//
+	// StatusEvidence is the screen line that matched, scrubbed and truncated — and stays confined
+	// to attention decisions, because it churns on every tick (spinner frames, token counters) and
+	// would defeat that suppression for no gain: on a green session the rule already says it all.
+	//
+	// Diagnostic only — nothing renders them; they exist so a wrong dot can be TRACED rather than
+	// re-argued. See agentintel/status_decision.go.
 	StatusRule     string `json:"statusRule,omitempty"`
 	StatusEvidence string `json:"statusEvidence,omitempty"`
 	// Exited marks a dead PTY. Kept explicit rather than inferred from an empty tail: a live shell
@@ -133,8 +142,15 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 			entry.AwaitingUser = agent.AwaitingUser
 			entry.AwaitingSince = agent.AwaitingSince
 			entry.EndedOnQuestion = agent.EndedOnQuestion
+			// Same split as the tmux pane payload, and deliberately kept identical to it: the
+			// RULE rides on every decision (a green session that should be amber is the silent
+			// failure, and it used to leave no trace at all), the EVIDENCE only on the ones
+			// asking for the user (it is a live screen line — it churns every tick and would
+			// defeat this frame's diff suppression). See tmux_state.go for the full reasoning;
+			// these two paths must not drift, or "why is it green" gets two different answers
+			// depending on whether you run tmux.
+			entry.StatusRule = string(agent.Decision.Rule)
 			if agent.Decision.IsAttention() {
-				entry.StatusRule = string(agent.Decision.Rule)
 				entry.StatusEvidence = agent.Decision.Evidence
 			}
 		} else if s.hooks.AgentDetect != nil && sess.ShellPID() > 0 {
