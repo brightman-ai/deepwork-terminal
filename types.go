@@ -6,12 +6,14 @@ package terminal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/ansisignal"
+	"github.com/creack/pty"
 )
 
 // SessionStatus represents the lifecycle state of a terminal session.
@@ -59,6 +61,24 @@ type Session struct {
 	// [Ref: BUG-6, DDC-13]
 	TmuxDetected bool `json:"tmuxDetected"`
 
+	// ptyCols/ptyRows are the PTY's CURRENT window size — the size the program on the other
+	// end believes it is drawing into. Seeded from spawnPTY's initial winsize and updated by
+	// SetPTYSize on every resize.
+	//
+	// Why the session has to remember this at all: the Agent Overview reconstructs each card's
+	// preview by REPLAYING the PTY byte stream onto a character grid (screen.go). A TUI paints
+	// by absolute cursor addressing, so that grid must be the SAME SIZE as the real terminal or
+	// the replay is not a reconstruction — it's a different screen. It used to be a hardcoded
+	// 48x200 while the PTY was born 50x220 and then resized to whatever the browser was: every
+	// row past 48 got clamped onto the last row and OVERWROTE whatever was already there, so the
+	// bottom of a card was several unrelated screen rows mashed into one ("Debug" surviving as
+	// "ebug" after another row ate its D — observed live), and any line longer than 200 columns
+	// wrapped here but not in reality, shifting every row below it.
+	//
+	// Protected by mu.
+	ptyCols int
+	ptyRows int
+
 	// lastSignal is the most recent UNANSWERED explicit signal from the program in this
 	// session — a BEL or an OSC desktop notification (see ansisignal). It is deliberately
 	// sticky: unlike a transient event it stays until the user actually responds (any input
@@ -71,7 +91,47 @@ type Session struct {
 	// NEW one" rather than the same one still standing.
 	lastSignalSeq uint64
 
-	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*
+	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*, ptyCols/ptyRows
+}
+
+// SetPTYSize resizes the PTY **and** records the new size on the session.
+//
+// The two halves are one operation on purpose. Every resize path used to call pty.Setsize
+// directly and drop the numbers on the floor (three call sites: the REST handler, the WS
+// control message, and InProcessService.Resize), which is how the screen replay ended up
+// guessing. Making the setter own both means a fourth resize path cannot forget the second
+// half — there is no way to change the PTY's size without the session learning it.
+//
+// Bounds are the caller's business (all three already reject <1 or >500); this only refuses
+// obvious nonsense so a bad value can't poison the replay grid.
+func (s *Session) SetPTYSize(cols, rows int) error {
+	if cols < 1 || rows < 1 {
+		return fmt.Errorf("pty size: cols/rows must be positive (%d×%d)", cols, rows)
+	}
+	s.mu.Lock()
+	ptyFile := s.PTY
+	s.mu.Unlock()
+	if ptyFile == nil {
+		return fmt.Errorf("session %s has no PTY", s.ID)
+	}
+	if err := pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.ptyCols, s.ptyRows = cols, rows
+	s.mu.Unlock()
+	return nil
+}
+
+// PTYSize returns the PTY's current window size. Falls back to the spawn size when a session
+// predates any resize — never zero, because the replay grid must always have dimensions.
+func (s *Session) PTYSize() (cols, rows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ptyCols > 0 && s.ptyRows > 0 {
+		return s.ptyCols, s.ptyRows
+	}
+	return spawnCols, spawnRows
 }
 
 // RecordSignal stores an explicit out-of-band signal as this session's pending

@@ -34,7 +34,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
 import type { TerminalFindOptions } from './terminalSearchOptions'
-import { canMeasureTerminal } from './terminalFit'
+import { canMeasureTerminal, rememberGridSize, lastGoodGridSize } from './terminalFit'
 import { noteRenderer, noteContextLost, noteRenderMetrics } from '@terminal/composables/cli/renderHealth'
 import { currentVisibilityEpoch, isRenderSampleTrustworthy } from '@terminal/composables/cli/renderSampleGate'
 import {
@@ -49,6 +49,12 @@ import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection
 import { createLogger } from '@ce/utils/obs'
 import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
 import { renderSyncEnabled, renderSyncOverride } from '@terminal/composables/cli/terminalRenderSync'
+import {
+  rendererOverride,
+  resolveRenderer,
+  rendererDeclineReason,
+  type RendererKind,
+} from '@terminal/composables/cli/terminalRenderer'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -372,9 +378,18 @@ interface RendererChoice {
   reason?: string
 }
 
-// Decides and records the renderer; it deliberately does NOT report. The report belongs after the
-// initial fit — see initTerminal — because the grid size is half of what makes the report useful.
-function enableWebglRenderer(term: Terminal): RendererChoice {
+// Which renderer this terminal is SUPPOSED to be on. Not the same question as "is webglAddon
+// non-null": while the tab is hidden we deliberately release the GPU context (see below), so the
+// addon is null even though this terminal's renderer is 'webgl'.
+let rendererInUse: RendererKind = 'dom'
+
+/**
+ * Creates + wires + loads a WebglAddon, or null if the GPU path is unavailable.
+ *
+ * Split out from the decision because it is called TWICE now: once at init, and again every time
+ * this terminal becomes visible after having released its context.
+ */
+function attachWebglAddon(term: Terminal): { addon: WebglAddon } | { error: string } {
   try {
     const addon = new WebglAddon()
     addon.onContextLoss(() => {
@@ -389,12 +404,85 @@ function enableWebglRenderer(term: Terminal): RendererChoice {
     })
     term.loadAddon(addon)
     webglAddon = addon
-    return { renderer: 'webgl' }
+    // The atlas is rasterised from the fonts available AT THE MOMENT each glyph is first drawn.
+    // If a font in the stack is still loading when the terminal opens, every glyph cached before
+    // it arrives was rasterised from a DIFFERENT font — with different metrics — and the atlas
+    // keeps serving those stale cells afterwards. document.fonts.ready is the one moment we can
+    // know that set has stopped changing, so the atlas is dropped once, there, and rebuilt lazily
+    // from the final fonts. Cheap (one clear, no repaint scheduled by us) and it fires whether or
+    // not any font was pending.
+    void document.fonts?.ready?.then(() => {
+      try {
+        addon.clearTextureAtlas()
+      } catch {
+        // Disposed between open and font-ready — nothing to clear, nothing to report.
+      }
+    })
+    return { addon }
   } catch (err) {
-    // Not an error path for the user: the DOM renderer is a working terminal, just a slower one.
     webglAddon = null
-    return { renderer: 'dom', reason: String(err instanceof Error ? err.message : err) }
+    return { error: String(err instanceof Error ? err.message : err) }
   }
+}
+
+/**
+ * Hidden tab → give the GPU context back.
+ *
+ * ── Why, concretely ──────────────────────────────────────────────────────────────────────────
+ * CliTerminalView mounts ONE surface per tab (v-for + v-show) and never unmounts them, because
+ * xterm is bound to a long-lived process. So every tab you have visited used to hold its own live
+ * WebGL context, forever. That is wrong in two compounding ways:
+ *
+ *   1. Browsers cap concurrent contexts. The cap is ~16 on desktop and MUCH lower on mobile
+ *      Safari, which additionally reclaims GPU memory for hidden canvases under pressure — and a
+ *      v-show'd tab is `display: none`, i.e. first in line for exactly that.
+ *   2. When the OS reclaims the TEXTURE but leaves the CONTEXT alive, nothing tells us. No
+ *      context-loss event fires, draw calls keep succeeding, and the glyph atlas now samples
+ *      recycled memory — which renders with perfect geometry and WRONG PIXELS. That is precisely
+ *      the reported symptom: cell positions, indentation and background blocks all exact, while
+ *      letters came out as fragments of unrelated CJK glyphs ('e' drawn as 'ョ'). A lost context
+ *      would have blanked the terminal; a missing font would have drawn tofu boxes. Only
+ *      "texture gone, still drawing" explains all three at once.
+ *
+ * Releasing on hide bounds live contexts to the visible terminal, and re-attaching on show gets a
+ * FRESH atlas every time — so a purge that happened while hidden cannot survive into what you see.
+ * xterm drops back to its DOM renderer in the meantime, which keeps a background tab rendering
+ * correctly (it still receives output) at no GPU cost.
+ */
+function releaseWebglWhileHidden(): void {
+  if (!webglAddon) return
+  webglAddon.dispose()
+  webglAddon = null
+}
+
+/** Visible again → take a fresh context + atlas, but only if this terminal is a WebGL one. */
+function reacquireWebglRenderer(): void {
+  if (rendererInUse !== 'webgl' || !terminal || webglAddon) return
+  attachWebglAddon(terminal)
+}
+
+// Decides and records the renderer; it deliberately does NOT report. The report belongs after the
+// initial fit — see initTerminal — because the grid size is half of what makes the report useful.
+function enableWebglRenderer(term: Terminal): RendererChoice {
+  // Ask the policy FIRST. Until now this function was called unconditionally and the only way to
+  // end up on the DOM renderer was for WebGL to fail — so when the GPU path rendered WRONG rather
+  // than not at all (mobile atlas corruption: 'e' painted as 'ョ'), there was no way out but a
+  // rebuild. See terminalRenderer.ts for the rule and for the ?renderer= escape hatch.
+  const override = rendererOverride()
+  const policy = { override, isMobile: isMobile.value }
+  if (resolveRenderer(policy) === 'dom') {
+    webglAddon = null
+    rendererInUse = 'dom'
+    return { renderer: 'dom', reason: rendererDeclineReason(policy) }
+  }
+  const attached = attachWebglAddon(term)
+  if ('addon' in attached) {
+    rendererInUse = 'webgl'
+    return { renderer: 'webgl' }
+  }
+  // Not an error path for the user: the DOM renderer is a working terminal, just a slower one.
+  rendererInUse = 'dom'
+  return { renderer: 'dom', reason: attached.error }
 }
 
 function initTerminal() {
@@ -469,9 +557,14 @@ function initTerminal() {
   if (measurable) {
     try {
       fitAddon.fit()
+      rememberGridSize(terminal.cols, terminal.rows)
     } catch {
       // Container may not be visible yet.
     }
+  } else {
+    // 见 fit()：同一个槽位里别的终端量准的尺寸，比 xterm 的 80×24 默认值近得多。
+    const good = lastGoodGridSize()
+    if (good) terminal.resize(good.cols, good.rows)
   }
 
   // Reported AFTER the fit, and carrying `measured`, because the size is half the answer. Reporting
@@ -673,8 +766,18 @@ function fit() {
     initTerminal()
     if (!terminal) return
   }
-  if (!canMeasureTerminal(terminalContainer.value)) return
+  if (!canMeasureTerminal(terminalContainer.value)) {
+    // 量不到 ≠ 没有正确答案。所有终端共用同一个布局槽位，所以"别的终端刚量准的尺寸"就是这个
+    // 终端可见时会拿到的尺寸——用它，而不是把这个标签的进程晾在 xterm 默认的 80×24 上排版。
+    // 见 terminalFit.ts：这是那条不变量一直缺的后半句。
+    const good = lastGoodGridSize()
+    if (good && (terminal.cols !== good.cols || terminal.rows !== good.rows)) {
+      terminal.resize(good.cols, good.rows)
+    }
+    return
+  }
   fitAddon?.fit()
+  rememberGridSize(terminal.cols, terminal.rows)
 }
 
 /** Search forward for `term` from the current position (wraps). Empty term is a no-op clear —
@@ -709,7 +812,12 @@ function clearSearch(): void {
 
 watch(() => props.active, (active) => {
   if (active) {
+    // 先接回 GPU 上下文（新 context = 新图集，隐藏期间被系统回收的纹理不可能残留到你眼前），
+    // 再 fit。顺序有意义：fit 会触发重绘，要重绘在新渲染器上发生。
+    reacquireWebglRenderer()
     void nextTick(() => setTimeout(() => fit(), 50))
+  } else {
+    releaseWebglWhileHidden()
   }
 })
 

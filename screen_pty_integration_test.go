@@ -38,7 +38,7 @@ func TestRenderScreen_RealPTY_FullScreenTUI(t *testing.T) {
 	if raw == "" {
 		t.Skip("no PTY output captured in this environment")
 	}
-	lines := renderScreen(raw)
+	lines := renderScreen(raw, testRows, testCols)
 	joined := strings.Join(lines, "\n")
 
 	// 1. No escape residue reaches the card.

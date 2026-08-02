@@ -15,13 +15,23 @@ import (
 
 var ptyLogger = log.Module("terminal.pty")
 
+// spawnCols/spawnRows are the window size every PTY is born with, before a client attaches and
+// resizes it to its real viewport. Exported within the package as named constants because the
+// Agent Overview's screen replay needs the SAME number (Session.PTYSize falls back to these):
+// a session that never resized still has to be replayed onto a grid of its actual size, and a
+// second hardcoded guess elsewhere is exactly how that replay drifted before (see Session.ptyRows).
+const (
+	spawnCols = 220
+	spawnRows = 50
+)
+
 // spawnPTY 启动 PTY 进程，绑定 rootDir 作为 cwd。
 // shellCmd 为可配置的 shell 命令字符串（如 "/bin/bash --login"），空字符串使用默认值。
 // 返回 PTY master fd 和 exec.Cmd。[T5 §4 step 2]
 func spawnPTY(ctx context.Context, rootDir string, shellCmd string) (*os.File, *spawnedCmd, error) {
 	_ = ctx // reserved for future timeout propagation
 	cmd := newShellCmd(rootDir, shellCmd)
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 220, Rows: 50})
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: spawnCols, Rows: spawnRows})
 	if err != nil {
 		return nil, nil, err
 	}

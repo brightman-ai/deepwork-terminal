@@ -432,11 +432,15 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
 .ao-active {
   display: grid;
   grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
-  /* 卡高 SSOT。保底值不是拍脑袋：后端每张卡固定发 sessionTailLines=8 行
-     （sessions_overview.go / tmux overviewTailLines），大卡 tail 是 0.72rem×1.55 ≈ 18px/行，
-     8 行 ≈ 143px，加 tail 内边距 18 + 头部 22 + cwd 16 + 间距/卡内边距 ≈ 100 → 约 300px 才
-     刚好把「发过来的东西全看见」。原来的 208px 会把一半行数裁掉——预览框显得太矮的直接原因，
-     而且是纯浪费：那些行已经在 payload 里了。1fr 让空间富裕时继续长高。 */
+  /* 卡高 SSOT。两个值分工不同，别混：
+     · 300px 保底 = **最少要读得出内容**。大卡 tail 是 0.72rem×1.55 ≈ 18px/行，扣掉 tail 内边距
+       18 + 头部 22 + cwd 16 + 间距/卡内边距 ≈ 100，300px ≈ 11 行。再矮（原来是 208px）就只剩
+       五六行，预览框显得太矮、认不出这个终端在干嘛。
+     · 1fr = **有多高长多高**。上界不在这里，在后端 agentintel.OverviewTailLines（40 行，tmux 与
+       非 tmux 共用同一个常量）；卡片底对齐 + 从顶部裁剪，所以行数由卡实际拿到的高度决定。
+     注：这里曾写「后端每张卡固定发 8 行，300px 刚好全看见」。那句话两处都错——tmux 一直发 40 行，
+     非 tmux 发 8 行（已修，见 OverviewTailLines 注释），而且卡高本来就不该由 payload 行数倒推：
+     它是「这一格能给多少空间」，不是「一屏正好装下多少行」。 */
   grid-auto-rows: minmax(300px, 1fr);
   gap: 14px;
   align-items: stretch;

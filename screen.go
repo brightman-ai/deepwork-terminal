@@ -26,25 +26,47 @@ import (
 // per escape sequence. It runs once per second per connected client, over a capped slice of the
 // ring buffer.
 
+// maxScreenRows/maxScreenCols bound what a caller may ask for, so a bogus resize can't make the
+// replay allocate an absurd grid. Well above any real terminal (the resize paths already reject
+// >500), and only a ceiling — the ACTUAL size comes from the session's PTY.
 const (
-	// screenRows/screenCols bound the emulated viewport. A card shows ~8-16 lines, and agent TUIs
-	// pin ~12 lines of chrome to the bottom that must be stripped from a FULL screen, so the grid
-	// has to be at least a plausible terminal. Anything beyond scrolls off, exactly like a real one.
-	screenRows = 48
-	screenCols = 200
+	maxScreenRows = 500
+	maxScreenCols = 1000
 )
 
-// screen is a fixed-size character grid the PTY stream is replayed onto.
+// screen is a character grid the PTY stream is replayed onto, sized to the REAL terminal.
+//
+// The size is not a tuning knob, it is a correctness requirement. A TUI paints by absolute
+// cursor addressing — "put the status line at row 49" — so replaying onto a grid of a different
+// height does not produce a smaller version of the screen, it produces a WRONG one: every row
+// past the end is clamped onto the last row and overwrites what was already there. That is
+// literally what the user saw — a status line, a mode line and a tmux status bar mashed into one
+// row, with "Debug" surviving as "ebug" because another clamped row ate its D. Same for columns:
+// a line longer than the grid wraps here but not in reality, shifting every row below it.
 type screen struct {
 	cells [][]rune
+	rows  int
+	cols  int
 	row   int
 	col   int
 }
 
-func newScreen() *screen {
-	s := &screen{cells: make([][]rune, screenRows)}
+func newScreen(rows, cols int) *screen {
+	if rows < 1 {
+		rows = spawnRows
+	}
+	if cols < 1 {
+		cols = spawnCols
+	}
+	if rows > maxScreenRows {
+		rows = maxScreenRows
+	}
+	if cols > maxScreenCols {
+		cols = maxScreenCols
+	}
+	s := &screen{cells: make([][]rune, rows), rows: rows, cols: cols}
 	for i := range s.cells {
-		s.cells[i] = make([]rune, screenCols)
+		s.cells[i] = make([]rune, cols)
 		for j := range s.cells[i] {
 			s.cells[i][j] = ' '
 		}
@@ -56,8 +78,8 @@ func (s *screen) clampRow(r int) int {
 	if r < 0 {
 		return 0
 	}
-	if r >= screenRows {
-		return screenRows - 1
+	if r >= s.rows {
+		return s.rows - 1
 	}
 	return r
 }
@@ -66,8 +88,8 @@ func (s *screen) clampCol(c int) int {
 	if c < 0 {
 		return 0
 	}
-	if c >= screenCols {
-		return screenCols - 1
+	if c >= s.cols {
+		return s.cols - 1
 	}
 	return c
 }
@@ -76,23 +98,23 @@ func (s *screen) clampCol(c int) int {
 // Without it a long-running shell would keep overwriting the bottom line forever.
 func (s *screen) scrollUp() {
 	copy(s.cells, s.cells[1:])
-	last := make([]rune, screenCols)
+	last := make([]rune, s.cols)
 	for i := range last {
 		last[i] = ' '
 	}
-	s.cells[screenRows-1] = last
+	s.cells[s.rows-1] = last
 }
 
 func (s *screen) newline() {
 	s.row++
-	if s.row >= screenRows {
-		s.row = screenRows - 1
+	if s.row >= s.rows {
+		s.row = s.rows - 1
 		s.scrollUp()
 	}
 }
 
 func (s *screen) put(r rune) {
-	if s.col >= screenCols {
+	if s.col >= s.cols {
 		// Line wrap — the next glyph belongs on the following row, like a real terminal.
 		s.col = 0
 		s.newline()
@@ -102,15 +124,15 @@ func (s *screen) put(r rune) {
 }
 
 func (s *screen) clearRegion(fromRow, fromCol, toRow, toCol int) {
-	for r := fromRow; r <= toRow && r < screenRows; r++ {
-		start, end := 0, screenCols-1
+	for r := fromRow; r <= toRow && r < s.rows; r++ {
+		start, end := 0, s.cols-1
 		if r == fromRow {
 			start = fromCol
 		}
 		if r == toRow {
 			end = toCol
 		}
-		for c := start; c <= end && c < screenCols; c++ {
+		for c := start; c <= end && c < s.cols; c++ {
 			if c >= 0 {
 				s.cells[r][c] = ' '
 			}
@@ -118,15 +140,19 @@ func (s *screen) clearRegion(fromRow, fromCol, toRow, toCol int) {
 	}
 }
 
-// renderScreen replays raw PTY bytes onto a grid and returns the visible lines with trailing
-// blank rows and trailing spaces removed.
+// renderScreen replays raw PTY bytes onto a grid of the given size and returns the visible lines
+// with trailing blank rows and trailing spaces removed.
+//
+// rows/cols MUST be the size of the PTY that produced `raw` (Session.PTYSize) — see the screen
+// type's doc for why a mismatch corrupts the result rather than merely truncating it. Non-positive
+// values fall back to the spawn size.
 //
 // Handled (the operations that move text around): CSI cursor positioning (H/f), relative moves
 // (A/B/C/D), column/row absolute (G/d), erase in display (J) and line (K), CR, LF, backspace, tab,
 // and line wrap. Everything else — SGR colors, private mode sets, OSC titles, charset selects —
 // is consumed and dropped, which is correct for a plain-text preview.
-func renderScreen(raw string) []string {
-	s := newScreen()
+func renderScreen(raw string, rows, cols int) []string {
+	s := newScreen(rows, cols)
 	i := 0
 	for i < len(raw) {
 		c := raw[i]
@@ -260,20 +286,20 @@ func (s *screen) consumeCSI(raw string, i int) int {
 	case 'J': // erase in display
 		switch p(0, 0) {
 		case 0:
-			s.clearRegion(s.row, s.col, screenRows-1, screenCols-1)
+			s.clearRegion(s.row, s.col, s.rows-1, s.cols-1)
 		case 1:
 			s.clearRegion(0, 0, s.row, s.col)
 		default:
-			s.clearRegion(0, 0, screenRows-1, screenCols-1)
+			s.clearRegion(0, 0, s.rows-1, s.cols-1)
 		}
 	case 'K': // erase in line
 		switch p(0, 0) {
 		case 0:
-			s.clearRegion(s.row, s.col, s.row, screenCols-1)
+			s.clearRegion(s.row, s.col, s.row, s.cols-1)
 		case 1:
 			s.clearRegion(s.row, 0, s.row, s.col)
 		default:
-			s.clearRegion(s.row, 0, s.row, screenCols-1)
+			s.clearRegion(s.row, 0, s.row, s.cols-1)
 		}
 	}
 	return end
@@ -306,7 +332,7 @@ func parseCSIParams(body string) []int {
 
 // lines reads the grid back as text: trailing spaces trimmed per row, trailing blank rows dropped.
 func (s *screen) lines() []string {
-	out := make([]string, 0, screenRows)
+	out := make([]string, 0, s.rows)
 	for _, row := range s.cells {
 		out = append(out, strings.TrimRight(string(row), " "))
 	}

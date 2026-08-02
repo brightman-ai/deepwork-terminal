@@ -61,3 +61,50 @@ export function canMeasureTerminal(el: {
   if (!el) return false
   return (el.offsetWidth ?? 0) > 0 && (el.offsetHeight ?? 0) > 0
 }
+
+/**
+ * ## 上面那条不变量的后半句，之前没实现
+ *
+ * 文件开头写着「**它上一次量准的尺寸继续有效**，直到它重新可见」。但闸门只做了前半句——
+ * 跳过错误测量——**"上一次量准的尺寸"从来没被存在任何地方**。后果是一个还没可见过的标签
+ * 停在 xterm 的默认 **80×24**，它的 PTY 停在 spawn 的 **220×50**（pty_manager.go），
+ * 而用户屏幕上是 52×47：三个数字，没有一个对。跑在那个标签里的程序就按错的宽度排版，
+ * 等你切过去才 SIGWINCH 重画——**已经写进 scrollback 的换行救不回来**。
+ *
+ * 修法基于一个此处成立的事实：**CLI portal 里所有终端共用同一个布局槽位**（CliTerminalView
+ * 的 v-for + v-show，同一个 flex 容器）。所以"任意一个终端最近一次量准的尺寸"对其余终端不是
+ * 猜测，是**同一个盒子的尺寸**。存一份、共用，比让每个终端各自守着一个假值要准得多。
+ *
+ * 它只在**量不到**的时候用。量得到就以真实测量为准，并顺手更新这份缓存。
+ */
+export interface GridSize {
+  cols: number
+  rows: number
+}
+
+let lastGood: GridSize | null = null
+
+/** 一次量准的结果。只接受站得住的数字：fit 出 2×1 这种（隐藏元素的算术产物）不配当基准。 */
+export function rememberGridSize(cols: number, rows: number): void {
+  if (!isPlausibleGrid(cols, rows)) return
+  lastGood = { cols, rows }
+}
+
+/** 最近一次量准的尺寸；从没量准过则 null（调用方此时只能沿用 xterm 默认，没有更好的选择）。 */
+export function lastGoodGridSize(): GridSize | null {
+  return lastGood
+}
+
+/** 仅测试用：清掉模块级缓存，免得用例之间互相污染。 */
+export function resetGridSizeMemo(): void {
+  lastGood = null
+}
+
+/**
+ * 一个尺寸"像不像真的"。下界卡在 20×5：真实终端再窄也不会比这更小，而隐藏元素算出来的
+ * 恰恰是 10×6 那一档（见文件头的实测表）——所以这道闸同时挡住了"隐藏时量出的垃圾被存成基准"
+ * 这个会把 bug 永久化的场景。
+ */
+export function isPlausibleGrid(cols: number, rows: number): boolean {
+  return Number.isFinite(cols) && Number.isFinite(rows) && cols >= 20 && rows >= 5
+}

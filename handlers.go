@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/creack/pty"
 	"github.com/google/uuid"
 
 	"github.com/brightman-ai/kit/obs"
@@ -185,17 +184,9 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess.mu.Lock()
-	ptyFile := sess.PTY
-	sess.mu.Unlock()
-	if ptyFile == nil {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "session has no PTY"})
-		return
-	}
-	if err := pty.Setsize(ptyFile, &pty.Winsize{
-		Cols: uint16(req.Cols),
-		Rows: uint16(req.Rows),
-	}); err != nil {
+	// SetPTYSize, not pty.Setsize: the session must RECORD the size, because the Agent
+	// Overview replays this session's bytes onto a grid of exactly that size (screen.go).
+	if err := sess.SetPTYSize(req.Cols, req.Rows); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -711,16 +702,8 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 			logger.Debug("resize out of bounds", "id", sess.ID, "cols", payload.Cols, "rows", payload.Rows)
 			return
 		}
-		sess.mu.Lock()
-		ptyFile := sess.PTY
-		sess.mu.Unlock()
-		if ptyFile != nil {
-			if err := pty.Setsize(ptyFile, &pty.Winsize{
-				Cols: uint16(payload.Cols),
-				Rows: uint16(payload.Rows),
-			}); err != nil {
-				logger.Debug("pty setsize failed", "id", sess.ID, "error", err)
-			}
+		if err := sess.SetPTYSize(payload.Cols, payload.Rows); err != nil {
+			logger.Debug("pty setsize failed", "id", sess.ID, "error", err)
 		}
 
 	case MsgTypeHeartbeat:
