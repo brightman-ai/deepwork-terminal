@@ -49,10 +49,21 @@ func makeUserRow() map[string]any {
 	}
 }
 
+// testTurnAt is the completion time every fixture turn carries, and it is RECENT on purpose.
+//
+// AwaitingUser has a shelf life (ExpireStaleAwaiting): a completion stops claiming attention once
+// it is old enough that you have obviously moved on. A frozen calendar date in a fixture therefore
+// does not stay neutral — it ages, and the day it crosses the shelf life every test below starts
+// asserting the OPPOSITE of its own name, with a green suite. Relative keeps each test testing the
+// claim it is named after: "a FINISHED turn is needs-you", not "a month-old one is".
+var testTurnAt = time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+
+func testTurnTS() string { return testTurnAt.Format(time.RFC3339Nano) }
+
 func makeAssistantTextRow(msgID, text string) map[string]any {
 	return map[string]any{
 		"type":      "assistant",
-		"timestamp": "2026-07-08T10:00:00Z",
+		"timestamp": testTurnTS(),
 		"message": map[string]any{
 			"id": msgID, "model": "claude", "stop_reason": "end_turn",
 			"content": []any{map[string]any{"type": "text", "text": text}},
@@ -136,7 +147,7 @@ func TestClaudeDriver_ElicitationStaysBlocked(t *testing.T) {
 // SAME value (not time.Now), and replying clears it to zero.
 func TestClaudeDriver_AwaitingSince(t *testing.T) {
 	s := makeAssistantTextRow("m1", "已完成并提交，无需你操作。") // finished turn (statement) → awaiting
-	want, _ := time.Parse(time.RFC3339Nano, "2026-07-08T10:00:00Z")
+	want := testTurnAt                               // the fixture's own completion time — see testTurnAt on why it is relative
 
 	d := NewClaudeDriver(writeJSONL(t, []map[string]any{s}), "s1")
 	if err := d.Update(); err != nil {

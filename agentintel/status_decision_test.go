@@ -3,6 +3,7 @@ package agentintel
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The point of the provenance layer is that a WRONG verdict can be traced afterwards. These
@@ -257,4 +258,60 @@ func TestAnalyzeOutput_BottomAnchoredMenuStillWaiting(t *testing.T) {
 	if v.State != PromptNeedsPermission {
 		t.Fatalf("classic plan-mode menu regressed: %v (rule %q)", v.State, v.Rule)
 	}
+}
+
+// ── A completed turn stops asking for attention once it is no longer news ────────────────────
+//
+// Observed live: opening the workbench showed amber "finished, unread" dots for panes whose turns
+// had ended 3.2 and 3.3 DAYS earlier, sitting next to genuine ones from 0.9h and 2.2h ago. The
+// old dots were not lying — nobody had looked — but a permanent amber dot devalues the fresh ones
+// beside it, which is the only way this signal can fail.
+func TestExpireStaleAwaiting(t *testing.T) {
+	now := time.Now()
+	mk := func(status AgentStatus, age time.Duration, ended bool) AgentState {
+		return AgentState{
+			Status:          status,
+			AwaitingUser:    true,
+			EndedOnQuestion: ended,
+			AwaitingSince:   now.Add(-age),
+		}
+	}
+
+	t.Run("fresh completion keeps its dot", func(t *testing.T) {
+		for _, age := range []time.Duration{time.Minute, 2 * time.Hour, 23 * time.Hour} {
+			if got := ExpireStaleAwaiting(mk(StatusIdle, age, false), now); !got.AwaitingUser {
+				t.Errorf("age %s: dot withdrawn too early", age)
+			}
+		}
+	})
+
+	t.Run("three-day-old completion is no longer news", func(t *testing.T) {
+		got := ExpireStaleAwaiting(mk(StatusIdle, 3*24*time.Hour, true), now)
+		if got.AwaitingUser {
+			t.Error("a 3-day-old completion must stop claiming attention")
+		}
+		if got.EndedOnQuestion {
+			t.Error("EndedOnQuestion labelled the withdrawn dot; it must not outlive it")
+		}
+		if got.AwaitingSince.IsZero() {
+			t.Error("the completion TIME is still a fact — only the claim expires")
+		}
+	})
+
+	// A blocked agent is blocked no matter how long: nothing resolved itself while you were away,
+	// and the moment you look there is something to do. Age says a completion is stale; it says
+	// nothing about a block.
+	t.Run("a blocked agent never expires", func(t *testing.T) {
+		got := ExpireStaleAwaiting(mk(StatusWaiting, 30*24*time.Hour, false), now)
+		if !got.AwaitingUser {
+			t.Error("StatusWaiting must survive any age — it is still blocked")
+		}
+	})
+
+	t.Run("an undatable completion is left alone", func(t *testing.T) {
+		s := AgentState{Status: StatusIdle, AwaitingUser: true} // zero AwaitingSince
+		if got := ExpireStaleAwaiting(s, now); !got.AwaitingUser {
+			t.Error("no timestamp is not evidence of an OLD timestamp")
+		}
+	})
 }

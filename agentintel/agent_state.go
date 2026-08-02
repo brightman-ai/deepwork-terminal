@@ -100,3 +100,51 @@ type AgentIntelResponse struct {
 	// Includes panes from non-active windows. Empty if no panes need input.
 	Notifications []AgentState `json:"notifications"`
 }
+
+// ── "Your move" has a shelf life ─────────────────────────────────────────────────────────────
+
+// awaitingShelfLife is how long a COMPLETED turn stays worth a dot.
+//
+// AwaitingUser means "an agent finished and you have not looked". It used to be true forever:
+// a pane whose turn ended three days ago still reported needs-you, so opening the workbench
+// showed a row of amber dots for sessions that had been sitting untouched for days (observed
+// live: two panes at 3.2 and 3.3 DAYS, alongside genuine ones at 0.9h and 2.2h).
+//
+// The dot is not wrong in a literal sense — nobody did look. It is wrong in the sense that
+// matters: an alert whose job is "come see, something finished" stops doing that job once the
+// thing finished long enough ago that you have obviously moved on. And it does damage while it
+// sits there, because a permanent amber dot devalues the fresh ones next to it. The failure of a
+// notifier is not that it is silent, it is that you learn to ignore it.
+//
+// 24 hours, because that is where the two cases separate. "It finished while I slept" is real and
+// worth keeping. "It finished last Tuesday" is not something anyone is about to act on — and if
+// they do go looking, the overview card still shows the session and its tail. Only the CLAIM ON
+// YOUR ATTENTION is withdrawn, never the information.
+const awaitingShelfLife = 24 * time.Hour
+
+// ExpireStaleAwaiting withdraws a needs-you flag whose completion is older than the shelf life.
+//
+// Deliberately confined to a COMPLETED turn. A blocked agent (StatusWaiting — the red dot) is
+// still blocked no matter how long it has been blocked: nothing has resolved, and the moment you
+// look at it there is something to do. Age says a completion is no longer news; it says nothing
+// at all about a block.
+//
+// A zero AwaitingSince means the driver could not date the completion, so there is nothing to
+// judge and the flag is left alone — an undatable completion is not evidence of an old one.
+//
+// `now` is a parameter so the rule is testable without sleeping, and so both drivers share ONE
+// definition of "too old" rather than each growing their own (they already compute AwaitingUser
+// separately, which is exactly how the two paths drift).
+func ExpireStaleAwaiting(as AgentState, now time.Time) AgentState {
+	if !as.AwaitingUser || as.Status == StatusWaiting {
+		return as
+	}
+	if as.AwaitingSince.IsZero() || now.Sub(as.AwaitingSince) <= awaitingShelfLife {
+		return as
+	}
+	as.AwaitingUser = false
+	// EndedOnQuestion only ever labelled the dot we just withdrew ("有提问" instead of "已完成");
+	// leaving it set would describe a dot that is no longer there.
+	as.EndedOnQuestion = false
+	return as
+}
