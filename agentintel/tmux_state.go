@@ -42,12 +42,22 @@ type TmuxPaneState struct {
 	// needs-you dot's label ("有提问" vs "已完成") — it never raises its severity, because an
 	// agent at an empty prompt is not blocked. See AgentState.EndedOnQuestion.
 	EndedOnQuestion bool `json:"endedOnQuestion,omitempty"`
-	// StatusRule / StatusEvidence explain WHY this pane is asking for the user: the single
-	// rule that produced the verdict (StatusRule, e.g. "screen.approval") and the screen line
-	// that matched it, scrubbed and truncated. Present only while AwaitingUser holds — a
-	// running pane accuses nobody, so it needs no defence. Diagnostic fields: nothing renders
-	// them, they exist so a wrong red dot can be traced instead of re-argued. See
-	// status_decision.go.
+	// StatusRule is the single rule that produced this pane's verdict ("transcript.running",
+	// "screen.approval", …), present on EVERY decision — green included.
+	//
+	// It used to be gated on AwaitingUser, on the reasoning that "a running pane accuses nobody,
+	// so it needs no defence". A pane stuck green while its agent waits accuses nobody and gets
+	// nobody's attention either — that is the failure mode you cannot even notice, and it was
+	// undiagnosable by construction, since five different rules return Running and none of them
+	// left a mark. The rule is stable while the status is, and this frame is diff-suppressed, so
+	// shipping it always costs nothing between polls.
+	//
+	// StatusEvidence — the matched screen line, scrubbed and truncated — stays confined to
+	// attention decisions: it changes every poll (spinner frames), which would defeat the
+	// suppression, and on a green pane the rule alone answers the question.
+	//
+	// Diagnostic fields: nothing renders them, they exist so a wrong dot can be traced instead of
+	// re-argued. See status_decision.go.
 	StatusRule     string `json:"statusRule,omitempty"`
 	StatusEvidence string `json:"statusEvidence,omitempty"`
 }
@@ -561,16 +571,32 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			if ps.AwaitingUser {
 				ps.AwaitingSince = snap.AwaitingSince
 				ps.EndedOnQuestion = snap.EndedOnQuestion
-				// Provenance rides ONLY on the decisions that ask something of the user: those
-				// are the ones that can be wrong in a way the user feels, and confining the
-				// fields to them keeps a merely-running pane's payload byte-identical between
-				// polls (the whole tmux_state frame is diff-suppressed — see handlers).
-				ps.StatusRule = string(decision.Rule)
+			}
+			// WHY this pane has the status it has — on EVERY decision now, not only the ones
+			// that ask something of the user.
+			//
+			// Provenance used to be confined to attention states, reasoning that "a running pane
+			// accuses nobody, so it needs no defence". Two reports in one hour falsified that. A
+			// pane stuck GREEN while its agent waits is the SILENT failure — nobody tells you, so
+			// you sit there — which is strictly worse than a false amber you glance at and
+			// dismiss. And it was untraceable BY CONSTRUCTION: FIVE rules can return Running
+			// (transcript.running / transcript.writing / transcript.unlocatable / screen.spinner /
+			// a screen veto), and none of them left a mark in the payload or the log, so "why is
+			// it green" could only ever be answered by guessing at the source.
+			//
+			// The RULE is safe to ship unconditionally precisely because it is stable while the
+			// state is: this frame is diff-suppressed, and a string that changes only when the
+			// REASON changes costs nothing between polls — and that change is exactly the moment
+			// worth pushing. EVIDENCE stays gated, because it carries a live screen line that
+			// differs on every poll (spinner frames, token counters) and would defeat the
+			// suppression for no diagnostic gain: for a green pane the rule already says it all.
+			ps.StatusRule = string(decision.Rule)
+			if decision.IsAttention() {
 				ps.StatusEvidence = decision.Evidence
 			}
-			if decision.IsAttention() {
-				LogStatusDecision(ctx, "tmux", fmt.Sprintf("%s.%d", p.SessionWindow, p.PaneIndex), tool, decision)
-			}
+			// Logged for every decision too, same reason. Volume is already bounded: the
+			// coalescer emits on CHANGE and at most once per 30s while a decision stands.
+			LogStatusDecision(ctx, "tmux", fmt.Sprintf("%s.%d", p.SessionWindow, p.PaneIndex), tool, decision)
 			agentKeys[paneKey(p)] = true
 		}
 		winPanes[wk] = append(winPanes[wk], ps)
