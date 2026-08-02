@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/creack/pty"
 )
 
 // InProcessService wraps SessionManager and implements TerminalSessionService.
@@ -68,16 +66,8 @@ func (s *InProcessService) Resize(_ context.Context, id string, cols, rows int) 
 	if err != nil {
 		return err
 	}
-	sess.mu.Lock()
-	ptyFile := sess.PTY
-	sess.mu.Unlock()
-	if ptyFile == nil {
-		return fmt.Errorf("session %s has no PTY", id)
-	}
-	return pty.Setsize(ptyFile, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
-	})
+	// SetPTYSize also records the size on the session — the overview's screen replay reads it.
+	return sess.SetPTYSize(cols, rows)
 }
 
 // Input implements TerminalSessionService.

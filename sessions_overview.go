@@ -24,10 +24,6 @@ import (
 // 铁律 v2.0 Rule 1+2]) while giving both tmux and non-tmux users the same live-preview overview.
 
 const (
-	// sessionTailLines is how many lines of real output a card shows. Matches the tmux overview's
-	// card so both render at the same height.
-	sessionTailLines = 8
-
 	// sessionScreenScanBytes is how much of the ring is replayed to reconstruct the screen. It has
 	// to cover at least a full repaint cycle — a TUI redrawing an 48×200 grid with colour codes
 	// runs tens of KB — or the replay starts mid-frame and the top of the card looks torn. Bounded
@@ -117,9 +113,14 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// That distinction is the whole feature: an agent TUI repaints by moving the cursor,
 		// so stripping the positioning concatenates every frame into one unreadable line
 		// (observed on 8087). Replaying reconstructs what the terminal actually shows.
+		//
+		// The grid is sized to THIS session's PTY, not to a constant. A TUI addresses rows
+		// absolutely, so replaying a 52-row screen onto a 48-row grid doesn't crop it — rows
+		// 49-52 all clamp onto row 48 and overwrite each other into one mashed line.
+		cols, rows := sess.PTYSize()
 		var screen []string
 		if buf != nil {
-			screen = renderScreen(string(buf.ReadTail(sessionScreenScanBytes)))
+			screen = renderScreen(string(buf.ReadTail(sessionScreenScanBytes)), rows, cols)
 		}
 
 		// One screen, two readers: the tracker inspects the RAW screen because a permission
@@ -174,9 +175,13 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 
 		if screen != nil {
 			// TailFromLines removes the agent's pinned chrome exactly as the tmux overview
-			// does, so both previews look like one feature.
+			// does, and OverviewTailLines is literally the tmux overview's cap — the two feeds
+			// land in the same card grid at the same height, so "how many lines a card carries"
+			// is ONE decision, not two that agree by convention. (They didn't: this used to be a
+			// local `sessionTailLines = 8`, so a non-tmux card showed 8 lines in a box sized for
+			// ~40 and the rest was blank. See agentintel.OverviewTailLines.)
 			entry.Tail = agentintel.TailFromLines(
-				screen, agentintel.AgentTool(entry.AgentTool), sessionTailLines)
+				screen, agentintel.AgentTool(entry.AgentTool), agentintel.OverviewTailLines)
 		}
 		out = append(out, entry)
 	}

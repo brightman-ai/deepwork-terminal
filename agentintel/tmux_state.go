@@ -66,12 +66,20 @@ type TmuxWindowState struct {
 	Tail []string `json:"tail,omitempty"`
 }
 
-// overviewTailLines caps how many trailing lines each window's Agent-Overview tail carries.
+// OverviewTailLines caps how many trailing lines each Agent-Overview card's tail carries.
 // The PC overview's active cards grow to fill the viewport, so the tail must carry enough real
 // output to fill a tall card (not leave it padded/empty) — the card then bottom-aligns + clips
 // to whatever height it actually gets. The whole screen is captured regardless (CaptureWindowTail),
-// so this only widens the post-strip cap; it's still naturally bounded by the source pane's height.
-const overviewTailLines = 40
+// so this only widens the post-strip cap; it's still naturally bounded by the source screen's height.
+//
+// EXPORTED because it is the cap for BOTH overview feeds — the tmux one below and the non-tmux one
+// in sessions_overview.go, which renders into the SAME card grid at the SAME height. That was
+// previously two constants: this one at 40, and a `sessionTailLines = 8` whose comment claimed
+// "matches the tmux overview's card so both render at the same height" while being 5x smaller. The
+// claim was false the day it was written (this had been 40 for 24 days), and the symptom was
+// visible: a non-tmux card showed ~8 lines in a ~60-line-tall box, the rest blank. One constant is
+// the only way that sentence stays true — a comment cannot hold two numbers equal, a symbol can.
+const OverviewTailLines = 40
 
 // overviewTailTimeout bounds each per-window tail capture. It is well under tmuxCmdTimeout so N
 // windows' tails can't monopolise the poll's budget or starve the status captures.
@@ -510,7 +518,7 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			// the window's active pane (background windows included, no switch needed).
 			if s.overviewActive.Load() {
 				tctx, tcancel := context.WithTimeout(ctx, overviewTailTimeout)
-				if tail, terr := s.prober.CaptureWindowTail(tctx, p.SessionWindow, winTool[wk], overviewTailLines); terr == nil {
+				if tail, terr := s.prober.CaptureWindowTail(tctx, p.SessionWindow, winTool[wk], OverviewTailLines); terr == nil {
 					m.Tail = tail
 				}
 				tcancel()
