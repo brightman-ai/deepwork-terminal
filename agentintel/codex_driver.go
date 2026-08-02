@@ -130,5 +130,6 @@ func (cd *CodexDriver) AgentState() AgentState {
 	if s.Awaiting {
 		as.AwaitingSince = s.LastTurnAt
 	}
-	return as
+	// Same shelf life as the Claude driver, from the same helper — see ExpireStaleAwaiting.
+	return ExpireStaleAwaiting(as, time.Now())
 }

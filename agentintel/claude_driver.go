@@ -307,7 +307,10 @@ func (cd *ClaudeDriver) AgentState() AgentState {
 	if awaiting {
 		as.AwaitingSince = s.LastAssistAt
 	}
-	return as
+	// A completion has a shelf life: past it, the needs-you dot is withdrawn (the session and its
+	// tail stay on the card — only the claim on your attention expires). Shared with the Codex
+	// driver so "too old to be news" is ONE definition. See ExpireStaleAwaiting.
+	return ExpireStaleAwaiting(as, time.Now())
 }
 
 // parseTime extracts a timestamp from a JSONL row.
