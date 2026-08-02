@@ -32,12 +32,53 @@ var approvalPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bApprove\b`),
 }
 
+// How far up the screen each family of prompt evidence is worth looking. They are DIFFERENT
+// numbers on purpose — this is where "don't miss it" and "don't cry wolf" pull apart.
+const (
+	// promptTailLines bounds the one-liner patterns below (approval + interactive). They are
+	// bottom-anchored by nature — "[Y/n]" renders ON the input line — and the vocabulary is
+	// dangerously ordinary: `\bAllow\b` and `\bApprove\b` match "Allow me to explain" and
+	// "Approve the PR" in any agent's prose. Scanning those wide would light up the amber dot
+	// (and fire a notification) on text that is merely being written. So: stays narrow.
+	promptTailLines = 5
+
+	// menuScanLines bounds the numbered-menu scan. A RENDERED menu is tall, and Claude Code's
+	// AskUserQuestion got taller still when it gained a preview panel: the option list ends up
+	// above the preview box, "Notes: press n to add notes", the "Chat about this" line, the input
+	// box and the bottom chrome. Measured on the reported pane: the options sat **18 lines above
+	// the bottom**, so a 5-line window could not see them and the "confirm against the pane" veto
+	// in paneDecision — which exists precisely to catch a blocked agent — never fired. The pane
+	// stayed green while Claude waited for an answer.
+	//
+	// Widening is only safe because the menu rule carries its own discriminator (see
+	// selectionCursorPattern): a numbered list Claude PRINTS has no selection cursor, a menu it is
+	// DISPLAYING always does.
+	menuScanLines = 24
+
+	// paneScanLines is how many lines the tmux pane capture must fetch for the above to be
+	// answerable. One constant, because the capture used to be 14 while the menu needs 24 — a cap
+	// upstream of the analysis silently truncates the evidence the analysis is looking for.
+	paneScanLines = menuScanLines
+)
+
 // choiceListPattern detects numbered choice prompts like Claude's plan mode:
-//   "1. Yes, auto-accept edits"
-//   "❯ 1. Yes, auto-accept edits"
-//   "  2. Yes, manually approve edits"
-//   "  3. Tell Claude what to change"
+//
+//	"1. Yes, auto-accept edits"
+//	"❯ 1. Yes, auto-accept edits"
+//	"  2. Yes, manually approve edits"
+//	"  3. Tell Claude what to change"
 var choiceListPattern = regexp.MustCompile(`^\s*[❯›>]?\s*[1-9]\.\s+\S`)
+
+// selectionCursorPattern matches a numbered item carrying a TUI selection cursor: "❯ 1. …".
+//
+// This is what separates a menu from a list. `choiceListPattern` alone answers "are there
+// numbered items on screen", which over a 24-line window is also true of any plan, checklist or
+// enumerated answer the agent just wrote — exactly the "crying wolf" failure the wider window
+// would otherwise buy. A cursor is drawn by the widget rendering the menu; prose never has one.
+//
+// Deliberately NOT including '>': markdown blockquotes ("> 1. first step") are everywhere in
+// agent output, and treating one as a live menu is the false positive this guard exists to stop.
+var selectionCursorPattern = regexp.MustCompile(`^\s*[❯›]\s*[1-9]\.\s+\S`)
 
 // interactivePromptPatterns detects text prompts that ask the user to make a decision.
 var interactivePromptPatterns = []*regexp.Regexp{
@@ -90,12 +131,9 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 		return OutputVerdict{State: PromptUnknown, Rule: RuleScreenQuiet}
 	}
 
-	// 1. Check last 5 lines for approval/permission/choice prompts.
-	checkLines := lines
-	if len(checkLines) > 5 {
-		checkLines = lines[len(lines)-5:]
-	}
-	for _, line := range checkLines {
+	// 1. One-liner approval / interactive prompts. Bottom-anchored — see promptTailLines for why
+	//    this window stays narrow while the menu scan below does not.
+	for _, line := range tailLines(lines, promptTailLines) {
 		for _, pat := range approvalPatterns {
 			if pat.MatchString(line) {
 				return OutputVerdict{PromptNeedsPermission, RuleScreenApproval, truncEvidence(line)}
@@ -108,19 +146,30 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 		}
 	}
 
-	// 1b. Check for numbered choice list (e.g., "1. Yes, auto-accept" / "2. Yes, manually").
-	// Need ≥2 consecutive numbered items in last 5 lines to confirm it's a choice menu.
-	choiceCount := 0
+	// 1b. Numbered choice menu ("❯ 1. Yes, auto-accept" / "  2. Yes, manually").
+	//
+	// TWO conditions, and both carry weight:
+	//   · ≥2 numbered items — one "1." is a sentence, two is a list. NOT required to be adjacent:
+	//     a long option wraps, and Claude's preview layout puts the preview box's border between
+	//     them, so "consecutive" would fail on exactly the screens this is for.
+	//   · ≥1 of them under a selection cursor — the difference between a menu being DISPLAYED and
+	//     a list being PRINTED. Without it, widening the window to 24 lines would classify every
+	//     enumerated answer the agent writes as "waiting for you".
+	choiceCount, cursorSeen := 0, false
 	choiceLine := ""
-	for _, line := range checkLines {
-		if choiceListPattern.MatchString(line) {
-			choiceCount++
-			if choiceLine == "" {
-				choiceLine = line // the first item identifies the menu; the rest are its siblings
-			}
+	for _, line := range tailLines(lines, menuScanLines) {
+		if !choiceListPattern.MatchString(line) {
+			continue
+		}
+		choiceCount++
+		if selectionCursorPattern.MatchString(line) {
+			cursorSeen = true
+			choiceLine = line // the cursor line is the best evidence: it names the menu AND proves it live
+		} else if choiceLine == "" {
+			choiceLine = line
 		}
 	}
-	if choiceCount >= 2 {
+	if choiceCount >= 2 && cursorSeen {
 		return OutputVerdict{PromptNeedsPermission, RuleScreenChoiceList, truncEvidence(choiceLine)}
 	}
 
@@ -162,6 +211,16 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 	}
 
 	return OutputVerdict{PromptLikelyIdle, RuleScreenPromptLikely, truncEvidence(lastNonEmpty)}
+}
+
+// tailLines returns the last n lines (all of them when there are fewer). One helper so the two
+// windows above are visibly the SAME operation with different bounds, not two open-coded slices
+// that can drift apart.
+func tailLines(lines []string, n int) []string {
+	if len(lines) <= n {
+		return lines
+	}
+	return lines[len(lines)-n:]
 }
 
 // isShellPrompt returns true if the line looks like a shell/CLI prompt:
