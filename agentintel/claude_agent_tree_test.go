@@ -87,10 +87,17 @@ func makeEndTurnRow(ts string) map[string]any {
 // still-running background subagent must read RUNNING (not a needs-you idle); once every subagent
 // has completed, the finished main turn is a genuine idle+awaiting again.
 func TestClaudeStatus_MainIdleButSubagentRunning(t *testing.T) {
+	// Timestamps are RELATIVE on purpose. The claim under test is "a subagent that is still
+	// running pins the pane", and a subagent only speaks for the pane while it is plausibly alive
+	// (subagentPinTTL — an unfinished node used to pin it forever). A frozen calendar date would
+	// make this test assert the opposite of its own name the moment the TTL was introduced.
+	ts := func(offset time.Duration) string {
+		return time.Now().Add(-time.Minute + offset).UTC().Format("2006-01-02T15:04:05.000Z")
+	}
 	base := []map[string]any{
-		makeAgentSpawnRow("2026-07-12T00:00:00.000Z", "toolu_1", "Explore", "scan"),
-		makeAgentResolveRow("2026-07-12T00:00:01.000Z", "toolu_1", "agent_abc"),
-		makeEndTurnRow("2026-07-12T00:00:02.000Z"),
+		makeAgentSpawnRow(ts(0), "toolu_1", "Explore", "scan"),
+		makeAgentResolveRow(ts(time.Second), "toolu_1", "agent_abc"),
+		makeEndTurnRow(ts(2 * time.Second)),
 	}
 	d := NewClaudeDriver(writeJSONL(t, base), "sess-sub")
 	if err := d.Update(); err != nil {
@@ -105,7 +112,7 @@ func TestClaudeStatus_MainIdleButSubagentRunning(t *testing.T) {
 
 	// Subagent completes (root-file <task-notification>, channel a) → nothing running → the
 	// finished main turn is now a real idle+awaiting.
-	done := append(base, makeTaskNotificationQueueOpRow("2026-07-12T00:00:05.000Z", "agent_abc", "toolu_1", "completed", "done"))
+	done := append(base, makeTaskNotificationQueueOpRow(ts(5*time.Second), "agent_abc", "toolu_1", "completed", "done"))
 	d2 := NewClaudeDriver(writeJSONL(t, done), "sess-sub2")
 	if err := d2.Update(); err != nil {
 		t.Fatal(err)
@@ -1024,5 +1031,41 @@ func appendJSONL(t *testing.T, path string, rows []map[string]any) {
 		if err := enc.Encode(r); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A subagent whose completion notification never arrives used to pin the pane GREEN forever —
+// and, because that branch also clears AwaitingUser, the "your turn finished" dot never appeared
+// either. Silent by construction: exactly the shape of "why has this pane been green for hours".
+// subagentPinTTL bounds it, without touching the node's own honest status.
+func TestSubagentStopsPinningThePaneAfterTTL(t *testing.T) {
+	old := func(offset time.Duration) string {
+		return time.Now().Add(-2*time.Hour + offset).UTC().Format("2006-01-02T15:04:05.000Z")
+	}
+	rows := []map[string]any{
+		makeAgentSpawnRow(old(0), "toolu_1", "Explore", "scan"),
+		makeAgentResolveRow(old(time.Second), "toolu_1", "agent_abc"),
+		makeEndTurnRow(old(2 * time.Second)),
+		// …and then nothing. No completion notification ever lands.
+	}
+	d := NewClaudeDriver(writeJSONL(t, rows), "sess-stale")
+	if err := d.Update(); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.State().Status; got != StatusIdle {
+		t.Errorf("a subagent silent for 2h must stop pinning the pane: got %q, want %q", got, StatusIdle)
+	}
+	if !d.AgentState().AwaitingUser {
+		t.Error("the finished main turn must surface its needs-you dot once the stale pin is released")
+	}
+	// The node itself keeps telling the truth — this is a display bound, not a rewrite of history.
+	var running int
+	for _, n := range d.AgentTree() {
+		if n.Status == AgentRunning {
+			running++
+		}
+	}
+	if running != 1 {
+		t.Errorf("the subagent's own status must stay AgentRunning (got %d running nodes)", running)
 	}
 }

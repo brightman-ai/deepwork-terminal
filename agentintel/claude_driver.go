@@ -269,7 +269,7 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 	// reflects the live subagent tree (spawns minus their <task-notification> completions), which
 	// Update() refreshed just before State() was called. This also clears AwaitingUser (a Running
 	// status is neither Waiting nor Idle), so no false needs-you dot while subagents churn.
-	if s.Status == StatusIdle && cd.agentTree.anyRunning() {
+	if s.Status == StatusIdle && cd.agentTree.anyRunning(time.Now()) {
 		s.Status = StatusRunning
 		s.WaitReason = WaitNone
 	}
