@@ -157,3 +157,104 @@ func TestStatusDecisionIsAttention(t *testing.T) {
 		t.Fatal("a fresh idle agent has not asked for anything")
 	}
 }
+
+// ── The reported defect: a tall AskUserQuestion read as "running" ───────────────────────────
+//
+// Claude Code's AskUserQuestion gained a PREVIEW panel, which pushes the option list far up the
+// screen: above the preview box, "Notes: press n to add notes", the "Chat about this" line, the
+// input box and the bottom chrome. Measured on the reported pane: 18 lines above the bottom.
+//
+// Two caps then hid it — the pane capture fetched 14 lines, and the analyzer only scanned the
+// last 5 of those — so the "confirm against the pane" veto in paneDecision never saw a prompt
+// and the pane stayed GREEN while Claude waited for an answer.
+func askUserQuestionScreen() []string {
+	return []string{
+		`  □ 重排范围`,
+		``,
+		`  MCP 重写时加了一个新框，没被手拖过的那些框要不要跟着重新排？`,
+		``,
+		`❯ 1. 只安置新框，其余一律不动          ┌──────────────────────────────┐`,
+		`     （推荐）                          │ MCP 加了 node "gpt2"          │`,
+		`  2. 没 pin 的全重排                   │                              │`,
+		`     只保留手拖过的                    │ 前          后               │`,
+		`  3. 模板说了算：按模板分开定          │ ┌A┐ ┌B┐    ┌A┐ ┌B┐          │`,
+		`                                       │ ┌C┐        ┌C┐ ┌gpt2┐        │`,
+		`                                       │ A/B/C 坐标逐像素不变          │`,
+		`                                       └──────────────────────────────┘`,
+		``,
+		`        Notes: press n to add notes`,
+		``,
+		`  Chat about this`,
+		`──────────────────────────────────────────────────────────────────`,
+		`❯ `,
+		`──────────────────────────────────────────────────────────────────`,
+		`  🗓 Opus 5 | 💰 $668.52 | 🌐 157.6K(16%) | main`,
+		`  ⏵⏵ bypass permissions on (shift+tab to cycle)`,
+	}
+}
+
+func TestAnalyzeOutput_TallAskUserQuestionIsWaiting(t *testing.T) {
+	v := AnalyzeOutputDetail(askUserQuestionScreen())
+	if v.State != PromptNeedsPermission {
+		t.Fatalf("a menu awaiting an answer must read as needs-permission, got %v (rule %q)", v.State, v.Rule)
+	}
+	if v.Rule != RuleScreenChoiceList {
+		t.Errorf("rule = %q, want %q", v.Rule, RuleScreenChoiceList)
+	}
+}
+
+// The capture bound is part of the answer, not an implementation detail: paneScanLines must be
+// large enough to CONTAIN the menu, or widening the analyzer's window buys nothing.
+func TestPaneScanLinesCoversATallMenu(t *testing.T) {
+	screen := askUserQuestionScreen()
+	captured := tailLines(screen, paneScanLines) // same helper the pane path uses
+	if v := AnalyzeOutputDetail(captured); v.State != PromptNeedsPermission {
+		t.Fatalf("paneScanLines=%d truncates the menu away: got %v (rule %q)", paneScanLines, v.State, v.Rule)
+	}
+}
+
+// ── "不要乱误": the wider window must not turn ordinary output into a fake "waiting" ─────────
+func TestAnalyzeOutput_PrintedListIsNotAMenu(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+	}{
+		{"a plan the agent just wrote", []string{
+			`I'll do this in three steps:`, ``,
+			`1. Read the analyzer and find the window`,
+			`2. Widen it, but only for menus`,
+			`3. Add a regression test`, ``,
+			`Starting now.`, `⠹ working…`,
+		}},
+		{"a markdown blockquote with a numbered list", []string{
+			`The docs say:`, ``,
+			`> 1. Install the binary`,
+			`> 2. Run it with --help`, ``,
+			`Done reading.`,
+		}},
+		{"numbered items with no cursor anywhere", []string{
+			`Findings:`,
+			`  1. the cap was 8`,
+			`  2. the comment claimed otherwise`,
+			`  3. both are fixed`,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if v := AnalyzeOutputDetail(c.lines); v.State == PromptNeedsPermission {
+				t.Fatalf("printed list misread as a live menu (rule %q, line %q)", v.Rule, v.Line)
+			}
+		})
+	}
+}
+
+// And the one that must NOT regress: a real menu is still caught when it sits right above the
+// input box (the old plan-mode shape the 5-line window was calibrated for).
+func TestAnalyzeOutput_BottomAnchoredMenuStillWaiting(t *testing.T) {
+	v := AnalyzeOutputDetail([]string{
+		`Ready to code?`, `❯ 1. Yes, auto-accept edits`, `  2. Yes, manually approve`, `  3. No, keep planning`,
+	})
+	if v.State != PromptNeedsPermission {
+		t.Fatalf("classic plan-mode menu regressed: %v (rule %q)", v.State, v.Rule)
+	}
+}

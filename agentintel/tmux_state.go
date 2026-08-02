@@ -612,7 +612,7 @@ func paneKey(p TmuxPane) string {
 func (s *TmuxStateService) panePromptVerdict(ctx context.Context, p TmuxPane) OutputVerdict {
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
-	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
+	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
 	if err != nil {
 		return OutputVerdict{State: PromptUnknown, Rule: RuleNone}
 	}
@@ -683,7 +683,7 @@ func (s *TmuxStateService) paneDecision(ctx context.Context, p TmuxPane, agent D
 	}
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
-	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, 14)
+	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
 	if err != nil {
 		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptUnlocatable}
 	}
