@@ -137,13 +137,47 @@ import (
 // which live flat under one <sessionDir>/subagents/ directory regardless of
 // depth, plus correlating root notifications and child end_turn fallback facts.
 
+// subagentPinTTL bounds how long ONE unfinished subagent may keep a pane reading "running"
+// after the main turn ended.
+//
+// Without a bound this latch never releases. A subagent is marked running at its spawn row and
+// cleared by its completion notification, so if that notification never lands — the session was
+// killed or restarted, the harness crashed, the row was lost — the node stays AgentRunning
+// forever, and with it the pane stays GREEN forever. Worse than a wrong colour: the same branch
+// also clears AwaitingUser, so the "your turn finished" dot never appears either. The failure is
+// silent by construction, which is exactly the shape of "why has this pane been green for hours".
+//
+// One hour, deliberately generous: a background subagent that legitimately runs that long is rare,
+// and being wrong in the two directions is not symmetric. Expiring too early shows a done-unseen
+// dot while work continues — you glance, see the agent tree still listed on the card, move on.
+// Never expiring hides a completed turn indefinitely — you are not told, so you wait. Per the
+// standing rule that missing something beats crying wolf, the bounded side wins.
+//
+// This is a DISPLAY bound only: the node keeps its AgentRunning status (the overview still lists
+// it honestly), it just stops pinning the pane's colour once we can no longer vouch for it.
+const subagentPinTTL = time.Hour
+
 // anyRunning reports whether ANY spawned subagent is still running (spawned, no
-// completion/failure notification yet). This is what lets the driver keep a pane READING as
-// "running" after the main turn's end_turn while background subagents (run_in_background) are
-// still working — otherwise the finished main turn alone would flip it to a needs-you idle.
-func (t *claudeAgentTree) anyRunning() bool {
+// completion/failure notification yet) recently enough to still speak for the pane.
+//
+// This is what lets the driver keep a pane READING as "running" after the main turn's end_turn
+// while background subagents (run_in_background) are still working — otherwise the finished main
+// turn alone would flip it to a needs-you idle. `now` is passed in rather than read here so the
+// bound is testable without sleeping.
+func (t *claudeAgentTree) anyRunning(now time.Time) bool {
 	for _, n := range t.nodes {
-		if n.Status == AgentRunning {
+		if n.Status != AgentRunning {
+			continue
+		}
+		// ActiveSince advances on resume, so a subagent that keeps being worked on keeps
+		// speaking for the pane; only one that has been silent past the TTL stops. Zero means
+		// we never saw an activation — fall back to the spawn row so an unstarted node cannot
+		// pin the pane forever either.
+		since := n.ActiveSince
+		if since.IsZero() {
+			since = n.StartedAt
+		}
+		if since.IsZero() || now.Sub(since) < subagentPinTTL {
 			return true
 		}
 	}
