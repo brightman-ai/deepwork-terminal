@@ -60,6 +60,15 @@ type TmuxPaneState struct {
 	// re-argued. See status_decision.go.
 	StatusRule     string `json:"statusRule,omitempty"`
 	StatusEvidence string `json:"statusEvidence,omitempty"`
+	// ActivityAt is when this pane's agent last WROTE to its transcript — not when the server
+	// last looked. It is the age of the evidence behind AgentStatus, and it is shipped because
+	// a status with no age cannot be sanity-checked by the person reading it.
+	//
+	// The bug that put it here: a pane read "running" for ten hours off a transcript nothing had
+	// touched since the night before. Every layer was individually plausible, and the one fact
+	// that would have made it obvious at a glance — "运行中 · 10 小时前" — was the one fact the UI
+	// did not have. Freshness is not a debug detail; it is half the meaning of a status.
+	ActivityAt time.Time `json:"activityAt,omitempty"`
 }
 
 // TmuxWindowState is one window with its panes.
@@ -562,6 +571,9 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			// only if the driver says a turn actually completed (not fresh-idle). Snapshot()
 			// reuses the driver Status() just updated, so no extra transcript read.
 			snap := s.paneMonitor.Snapshot(paneKey(p))
+			// How old the evidence is. Read AFTER paneDecision so the pane is bound this cycle;
+			// cache-only, so it costs one stat and never a directory scan.
+			ps.ActivityAt = s.paneMonitor.TranscriptWrittenAt(paneKey(p))
 			ps.AwaitingUser = ps.AgentStatus == StatusWaiting ||
 				(ps.AgentStatus == StatusIdle && snap.AwaitingUser)
 			decision.Awaiting = ps.AwaitingUser

@@ -7,6 +7,7 @@ import {
   windowTool,
   windowAgentSignals,
   windowAwaitingSince,
+  windowActivityAt,
   overviewCardTitle,
   overviewColumns,
   STATUS_COLOR,
@@ -99,6 +100,29 @@ describe('windowRawStatus / cwd / tool / awaitingSince', () => {
     expect(windowAwaitingSince(win(1, { awaiting: true, since: T1 }))).toBe(T1)
     expect(windowAwaitingSince(win(1, { status: 'idle' }))).toBe('') // not awaiting
     expect(windowAwaitingSince(win(1, { awaiting: true, since: TZERO }))).toBe('') // undated
+  })
+  // 证据的年龄。加它是因为一个 pane 曾经"运行中"了十个小时——状态本身没有年龄时，真的在跑
+  // 和十小时前那条没人再写的 transcript，在屏幕上长得一模一样。
+  it('windowActivityAt takes the newest agent pane, and is 0 when nothing can be dated', () => {
+    const older = '2026-08-03T01:00:00.000Z'
+    const newer = '2026-08-03T02:00:00.000Z'
+    const w = win(9, { tool: 'claude', status: 'running' })
+    w.panes[0].activityAt = older
+    w.panes.push({ index: 1, active: false, agentTool: 'codex', agentStatus: 'running', activityAt: newer } as never)
+    expect(windowActivityAt(w)).toBe(Date.parse(newer))
+
+    // 没有 agent 的 pane 不算数：它的 transcript 时间根本不存在，别拿它冒充活跃度。
+    const bare = win(10, {})
+    bare.panes[0].activityAt = newer
+    expect(windowActivityAt(bare)).toBe(0)
+
+    expect(windowActivityAt(win(11, { tool: 'claude' }))).toBe(0) // 有 agent 但没时间戳
+
+    // Go 的零时间不会被 omitempty 吃掉，会原样序列化成 0001-01-01 —— 定位不到 transcript 的
+    // pane 就是这样过来的。不挡住，提示框里会出现"17755921 小时前"这种东西。
+    const undated = win(12, { tool: 'codex', status: 'running' })
+    undated.panes[0].activityAt = '0001-01-01T00:00:00Z'
+    expect(windowActivityAt(undated)).toBe(0)
   })
   it('attributes a split window to its active runtime and explains every pane signal', () => {
     const w = win(5, { tool: 'claude', status: 'waiting' })
