@@ -30,7 +30,8 @@ import AgentReportDetail from './AgentReportDetail.vue'
 import { fmtTokens, fmtCost, fmtCredits } from './cost'
 import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
-import { usageMoneyPresentation } from './usageBillingPresentation'
+import { usageMoneyPresentation, type UsageMoneySemantics } from './usageBillingPresentation'
+import { groupByVendor, type UsageVendorGroup } from './usageVendorGroups'
 import { groupPresentation } from './quotaStaleness'
 
 defineProps<{ showDetail?: boolean }>()
@@ -49,7 +50,14 @@ let timer: ReturnType<typeof setInterval> | undefined
 let placementFrame = 0
 let placementObserver: ResizeObserver | null = null
 
+// The CALLER's name. Deliberately a lookup with a passthrough default, NOT an enum: a runtime we
+// have never heard of (pro's whale, tomorrow's agent) renders under its own id rather than being
+// dropped or shown as「其他」. The axis is data-driven; only the prettier spellings are listed.
 const runtimeLabel = (r: string) => (r === 'claude' ? 'Claude' : r === 'codex' ? 'Codex' : r === 'gemini' ? 'Gemini' : r)
+// In the 官方订阅 tab, the CLI name IS the vendor's name — that is what the tab means. Saying
+// 「官方」out loud is the whole rename: once the same CLI can also call Kimi, a bare「Codex」no
+// longer tells you whose bill you are looking at.
+const officialLabel = (r: string) => `${runtimeLabel(r)} 官方`
 const kindLabel = (k: string) => (k === '5h' ? '5小时' : k === '7d' ? '7天' : k)
 
 // ── 花费区: 4 windows prefetched in PARALLEL, each into its OWN useUsageReport() instance
@@ -81,9 +89,6 @@ const agentReport = computed(() => agentByWindow[activeWindow.value].report.valu
 const agentLoading = computed(() => agentByWindow[activeWindow.value].loading.value)
 const agentError = computed(() => agentByWindow[activeWindow.value].error.value)
 const agentDetailOpen = ref(false)
-// Honest: cost_complete===false (some model in the window had no price) → the number is an
-// under-count; fmtCost prefixes «≈». A specific runtime's cost===null already renders «—».
-const costApprox = computed(() => activeReport.value?.summary?.cost_complete === false)
 const providersFor = (w: ReportWindow = activeWindow.value) => reportByWindow[w].report.value?.providers ?? []
 
 // ── tabs ─────────────────────────────────────────────────────────────────────────────────
@@ -108,23 +113,64 @@ function pickTab(t: Tab) {
 const currentSubscriptionRuntimes = computed<ReadonlySet<string>>(() => new Set(
   quotas.value.filter((quota) => quota.billing === 'subscription').map((quota) => quota.runtime),
 ))
-const costProviders = computed<UsageProviderRow[]>(() => providersFor().filter((provider) =>
-  usageMoneyPresentation(provider, currentSubscriptionRuntimes.value)?.tab === tab.value,
-))
-const costHeading = computed(() => (tab.value === 'sub' ? '用量 / ≈等价' : '用量 / 实付'))
-// What KIND of money this row is. The badge is the whole point of the split, so it is rendered
-// per row rather than implied by which tab you happen to be on.
-function billingBadge(p: UsageProviderRow): { text: string; cls: string; title: string } {
-  const placement = usageMoneyPresentation(p, currentSubscriptionRuntimes.value)
-  if (placement?.semantics === 'api_paid') {
-    return { text: '实付', cls: 'api', title: '按量付费 · 这是真实应付成本' }
-  }
-  return {
+const rowsInTab = (rows: UsageProviderRow[], which: 'sub' | 'api') =>
+  rows.filter((row) => usageMoneyPresentation(row, currentSubscriptionRuntimes.value).tab === which)
+
+// ── 官方订阅 tab: grain = the CLI, because in this tab the CLI IS the vendor ────────────────────
+// Nothing else can reach here — usageMoneyPresentation requires a first-party (vendor, runtime)
+// pair, so a third-party vendor is structurally excluded rather than merely absent today.
+const subProviders = computed<UsageProviderRow[]>(() => rowsInTab(providersFor(), 'sub'))
+
+// ── API 计费 tab: grain = the VENDOR, with the callers beneath ─────────────────────────────────
+// 「我欠谁钱」is the main row; 「谁替我花的」is the detail. Grouping happens over the rows already
+// placed in THIS tab, so subscription tokens can never leak into an API total.
+const apiVendors = computed<UsageVendorGroup[]>(() => groupByVendor(rowsInTab(providersFor(), 'api')))
+
+const costHeading = computed(() => (tab.value === 'sub' ? '用量 / ≈等价' : '用量 / 估算'))
+const tabHasRows = computed(() => (tab.value === 'sub' ? subProviders.value.length > 0 : apiVendors.value.length > 0))
+
+// Approximation is a property of what you are LOOKING AT, not of the window. Reading it off the
+// window summary meant an unpriced model in the API tab put a「≈」on the subscription tab's number,
+// which is a confession about the wrong number.
+const rowIncomplete = (r: UsageProviderRow) => (r.requests ?? 0) > 0 && (r.priced_requests ?? 0) < (r.requests ?? 0)
+
+// A vendor with no name is not「其他」— it is a specific gap, and which gap it is decides whether
+// the user can do anything about it. Observed on a live machine, both kinds exist at once:
+//
+//   model id present but unrecognised → actionable: the id can be added to the vendor table.
+//   model id absent from the transcript → not actionable here: the CLI never recorded it (a
+//                                         resumed codex session whose turn_context scrolled past).
+//
+// Collapsing them into one「未知厂商」sends the user looking for a model id that was never written.
+const vendorLabel = (g: UsageVendorGroup) => g.display || '未知厂商'
+const vendorTitle = (g: UsageVendorGroup) => {
+  if (g.display) return `厂商：${g.display}`
+  return g.topModel
+    ? `model「${g.topModel}」不在内置厂商表里，因此无法判断计费主体，也不估算金额。`
+    : '这些请求的 transcript 没有记录 model id（多见于续跑的会话），因此既认不出厂商也无法定价。token 用量仍是实测的。'
+}
+
+// What KIND of money this is. The badge is the whole point of the split, so it is rendered per row
+// rather than implied by whichever tab you happen to be on.
+const BADGES: Record<UsageMoneySemantics, { text: string; cls: string; title: string }> = {
+  api_paid: { text: '实付', cls: 'api', title: '逐请求证据表明这是按量付费 · 真实应付成本' },
+  api_equivalent: {
     text: '≈等价', cls: 'eq',
-    title: placement?.evidence === 'current_subscription_fallback'
-      ? '当前 runtime 为官方订阅；窗口用量按 API 价折算，仅作等价值，不是 API 账单，也不改写历史请求归属'
-      : '包月实付；此为按 API 价折算的等价值，不是账单',
-  }
+    title: '包月已付；此为按 API 价折算的等价值，不是账单，也不改写历史请求归属',
+  },
+  api_estimated: {
+    text: '估算', cls: 'est',
+    title: 'transcript 未记录计费方式。这不是官方订阅，所以按厂商标价估算——既不能称「实付」，也不是「等价」',
+  },
+}
+function semanticsOf(row: UsageProviderRow): UsageMoneySemantics {
+  return usageMoneyPresentation(row, currentSubscriptionRuntimes.value).semantics
+}
+// A vendor group inherits its callers' semantics only when they agree; a mix means the honest
+// label is the weaker one (估算), since part of the number is unproven.
+function vendorSemantics(g: UsageVendorGroup): UsageMoneySemantics {
+  const kinds = new Set(g.rows.map(semanticsOf))
+  return kinds.size === 1 ? [...kinds][0] : 'api_estimated'
 }
 
 // ── pill ─────────────────────────────────────────────────────────────────────────────────
@@ -136,25 +182,26 @@ const level = computed(() => {
   if (p < 40) return 'warn'
   return 'ok'
 })
-// API-only users have no quota % to show, so the pill carries today's REAL spend instead
-// (「API ¥1.23」). Unknown cost → just 「API」. Never a fabricated percentage.
-const todayApiCost = computed(() => {
+// API-only users have no quota % to show, so the pill carries today's spend instead («API $1.23»).
+// It sums the SAME rows the API tab shows — pill and tab reading different sets is how a user
+// learns to distrust both. Mixed currencies have no sum, so the pill drops to a bare「API」rather
+// than adding dollars to yuan.
+const todayApi = computed<{ cost: number | null; currency: string }>(() => {
   let total: number | null = null
   let currency = ''
-  for (const provider of providersFor('24h')) {
-    if (provider.billing_mode !== 'api' || typeof provider.cost !== 'number') continue
-    if (currency && provider.currency !== currency) return null
-    currency = provider.currency ?? ''
-    total = (total ?? 0) + provider.cost
+  for (const row of rowsInTab(providersFor('24h'), 'api')) {
+    if (typeof row.cost !== 'number') continue
+    if (currency && row.currency !== currency) return { cost: null, currency: '' }
+    currency = row.currency ?? ''
+    total = (total ?? 0) + row.cost
   }
-  return total
+  return { cost: total, currency }
 })
 const pillText = computed(() => {
   if (pct.value !== null) return `${pct.value}%`
   if (hasApi.value) {
-    const c = todayApiCost.value
-    const currency = providersFor('24h').find((p) => p.billing_mode === 'api' && typeof p.cost === 'number')?.currency
-    return c === null ? 'API' : `API ${fmtCost(c, currency)}`
+    const { cost, currency } = todayApi.value
+    return cost === null ? 'API' : `API ${fmtCost(cost, currency)}`
   }
   return '—' // present, but no reading we can stand behind — the popover explains why
 })
@@ -252,9 +299,11 @@ function healthLabel(q: RuntimeQuota): string {
     default: return 'CLI 状态未知'
   }
 }
-function cacheHitRate(p: UsageProviderRow): string {
-  const read = p.cache_read_tokens ?? 0
-  const denom = read + (p.input_tokens ?? 0)
+// Takes the two counts rather than a row, so one caller row and a whole vendor group are measured
+// by the same function — a second copy for the grouped case is a second chance to get it wrong.
+function cacheHitRate(cacheRead?: number, freshInput?: number): string {
+  const read = cacheRead ?? 0
+  const denom = read + (freshInput ?? 0)
   if (denom <= 0) return '—'
   const raw = (read / denom) * 100
   // Show 100% ONLY when it is truly all-cache. With prompt caching, cache_read dwarfs fresh
@@ -473,7 +522,7 @@ onUnmounted(() => {
         <template v-if="tab === 'sub'">
           <div v-for="q in subscriptions" :key="q.runtime" class="uchip-rt">
             <div class="uchip-rt-head">
-              <span>{{ runtimeLabel(q.runtime) }}</span>
+              <span>{{ officialLabel(q.runtime) }}</span>
               <span v-if="q.plan" class="uchip-plan">{{ q.plan }}</span>
               <span v-if="healthLabel(q)" class="uchip-badge warn" :title="q.health?.reason">{{ healthLabel(q) }}</span>
             </div>
@@ -547,29 +596,75 @@ onUnmounted(() => {
 
         <div v-if="activeLoading && !activeReport" class="uchip-dim uchip-loading">加载中…</div>
         <template v-else-if="activeReport?.available">
-          <div v-for="provider in costProviders" :key="`${provider.runtime}:${provider.billing_mode}`" class="uchip-prov">
-            <div class="uchip-prov-head">
-              <span class="uchip-prov-name">{{ runtimeLabel(provider.runtime) }}</span>
-              <span class="uchip-badge" :class="billingBadge(provider).cls" :title="billingBadge(provider).title">{{ billingBadge(provider).text }}</span>
+          <!-- ── 官方订阅：一行一个官方 CLI。这里的 CLI 名就是厂商名，所以不再叠一层厂商轴 ── -->
+          <template v-if="tab === 'sub'">
+            <div v-for="row in subProviders" :key="`${row.runtime}:${row.billing_mode}`" class="uchip-prov">
+              <div class="uchip-prov-head">
+                <span class="uchip-prov-name">{{ officialLabel(row.runtime) }}</span>
+                <span class="uchip-badge" :class="BADGES[semanticsOf(row)].cls" :title="BADGES[semanticsOf(row)].title">{{ BADGES[semanticsOf(row)].text }}</span>
+              </div>
+              <div class="uchip-prov-glance">
+                <span class="uchip-prov-cost">{{ fmtCost(row.cost, row.currency, rowIncomplete(row)) }}</span>
+                <span class="uchip-prov-tok">{{ fmtTokens(row.total_tokens) }} tok</span>
+                <span class="uchip-prov-hit">缓存命中 {{ cacheHitRate(row.cache_read_tokens, row.input_tokens) }}</span>
+              </div>
+              <div class="uchip-prov-bd">
+                <span>↓{{ fmtTokens(row.input_tokens) }} / ↑{{ fmtTokens(row.output_tokens) }}</span>
+                <span>缓存读{{ fmtTokens(row.cache_read_tokens) }} / 写{{ fmtTokens(row.cache_create_tokens) }}</span>
+              </div>
+              <div class="uchip-prov-ctx">
+                <span class="uchip-prov-model">{{ row.top_model || '—' }}</span>
+                <Spark :bars="row.spark ?? []" />
+              </div>
             </div>
-            <div class="uchip-prov-glance">
-              <span class="uchip-prov-cost">{{ fmtCost(provider.cost, provider.currency, costApprox) }}</span>
-              <span class="uchip-prov-tok">{{ fmtTokens(provider.total_tokens) }} tok</span>
-              <span class="uchip-prov-hit">缓存命中 {{ cacheHitRate(provider) }}</span>
+          </template>
+
+          <!-- ── API 计费：主行=厂商（欠谁钱），子行=调用方（谁替我花的）── -->
+          <template v-else>
+            <div v-for="group in apiVendors" :key="group.vendor || '__unknown__'" class="uchip-prov">
+              <div class="uchip-prov-head">
+                <span class="uchip-prov-name" :class="{ 'is-unknown': !group.vendor }" :title="vendorTitle(group)">{{ vendorLabel(group) }}</span>
+                <!-- 单一调用方时就地说明「经由谁」；多个才值得展开成子行（展开一行等于把主行抄一遍）。 -->
+                <span v-if="group.rows.length === 1" class="uchip-prov-via">经由 {{ runtimeLabel(group.rows[0].runtime) }}</span>
+                <!-- 钱的「种类」徽标只在真有钱时才成立。一行金额是「—」却挂着「估算」，是在声称一个
+                     并不存在的估算——旁边的「无价表」已经把这件事说完了。一个事实一个信号。 -->
+                <span v-if="group.pricedRequests > 0" class="uchip-badge" :class="BADGES[vendorSemantics(group)].cls" :title="BADGES[vendorSemantics(group)].title">{{ BADGES[vendorSemantics(group)].text }}</span>
+              </div>
+              <div class="uchip-prov-glance">
+                <span class="uchip-prov-cost">{{ fmtCost(group.cost, group.currency, !group.costComplete) }}</span>
+                <!-- 「—」旁边必须有一句解释。不解释的空值，用户只会当成坏了。 -->
+                <span v-if="group.pricedRequests === 0" class="uchip-prov-noprice" title="这些 model 不在内置价表里。宁可不给数字，也不拿同厂商的近似单价蒙一个——静默错数比空值糟。">无价表</span>
+                <span class="uchip-prov-tok">{{ fmtTokens(group.totalTokens) }} tok</span>
+                <span class="uchip-prov-hit">缓存命中 {{ cacheHitRate(group.cacheReadTokens, group.inputTokens) }}</span>
+              </div>
+              <div class="uchip-prov-bd">
+                <span>↓{{ fmtTokens(group.inputTokens) }} / ↑{{ fmtTokens(group.outputTokens) }}</span>
+                <span>缓存读{{ fmtTokens(group.cacheReadTokens) }} / 写{{ fmtTokens(group.cacheCreateTokens) }}</span>
+              </div>
+              <div v-if="group.rows.length > 1" class="uchip-callers">
+                <div v-for="row in group.rows" :key="`${row.runtime}:${row.billing_mode}`" class="uchip-caller">
+                  <span class="uchip-caller-name">{{ runtimeLabel(row.runtime) }}</span>
+                  <span class="uchip-caller-tok">{{ fmtTokens(row.total_tokens) }} tok</span>
+                  <span class="uchip-caller-cost">{{ fmtCost(row.cost, row.currency, rowIncomplete(row)) }}</span>
+                </div>
+              </div>
+              <div class="uchip-prov-ctx">
+                <!-- 认不出厂商时，这一格是用户唯一能动手的地方：要么给出 model id（可以去查、可以
+                     加进厂商表），要么说清 model id 压根没被记下来。一个「—」两种含义，等于没说。 -->
+                <span class="uchip-prov-model" :class="{ 'is-note': !group.topModel }">{{ group.topModel || 'model id 未记录' }}</span>
+                <Spark :bars="group.spark" />
+              </div>
+              <!-- 价格会变，内置表不会自己知道。所以它公布自己的年龄——这是读的人唯一的防线。 -->
+              <div v-if="group.priceVerifiedAt" class="uchip-dim uchip-priceage" title="内置价表最后一次与厂商价目页核对的日期（取本行最旧的一条）。此后厂商若调价，这个数字会偏。">
+                价表核对于 {{ group.priceVerifiedAt }}
+              </div>
             </div>
-            <div class="uchip-prov-bd">
-              <span>↓{{ fmtTokens(provider.input_tokens) }} / ↑{{ fmtTokens(provider.output_tokens) }}</span>
-              <span>缓存读{{ fmtTokens(provider.cache_read_tokens) }} / 写{{ fmtTokens(provider.cache_create_tokens) }}</span>
-            </div>
-            <div class="uchip-prov-ctx">
-              <span class="uchip-prov-model">{{ provider.top_model || '—' }}</span>
-              <Spark :bars="provider.spark ?? []" />
-            </div>
+          </template>
+
+          <div v-if="!tabHasRows" class="uchip-dim uchip-empty">
+            {{ tab === 'sub' ? '该窗口暂无官方订阅用量' : '本窗口没有 API 计费用量' }}
           </div>
-          <div v-if="!costProviders.length" class="uchip-dim uchip-empty">
-            {{ tab === 'sub' ? '该窗口暂无订阅用量' : '窗口内无可证明的 API 实付费用' }}
-          </div>
-          <div v-else-if="tab === 'api'" class="uchip-foot">只统计逐请求明确为 API 的真实实付；订阅与未分类用量不计入。</div>
+          <div v-else-if="tab === 'api'" class="uchip-foot">按内置价表估算，不是厂商账单。经中转/合约价使用时，实际单价可能与厂商标价不同。</div>
           <div v-else class="uchip-foot">按 API 价折算订阅窗口用量，仅表示等价值，不是 API 账单。</div>
         </template>
         <div v-else class="uchip-dim uchip-loading">{{ activeReport?.reason || '用量数据不可用' }}</div>
@@ -784,6 +879,11 @@ onUnmounted(() => {
 .uchip-badge.warn { color: #f59e0b; background: rgba(245,158,11,0.12); }
 .uchip-badge.stale { color: #9aa0aa; background: rgba(154,160,170,0.12); }
 .uchip-badge.api { color: #4ade80; background: rgba(74,222,128,0.12); }
+/* 「估算」= 这笔钱真的花了，但 transcript 没记计费方式。它比「实付」弱、比「≈等价」强，所以既不能
+   借绿色（那是「已证实付」），也不能借琥珀色（那在这套配色里是「需要你处理」）。中性灰=「读数本身
+   有保留」，与 .stale 同一族语义，正确。 */
+.uchip-badge.est { color: #9aa0aa; background: rgba(154,160,170,0.12); }
+.uchip-badge.eq { color: #a5b4fc; background: rgba(165,180,252,0.12); }
 .uchip-badge.unknown { color: #9aa0aa; background: rgba(154,160,170,0.12); }
 
 .uchip-win { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #c9cdd5; margin: 2px 0; }
@@ -862,6 +962,31 @@ onUnmounted(() => {
   font-size: 9.5px; color: #7f858f; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; max-width: 140px;
 }
+
+/* ── 厂商主行 / 调用方子行 ─────────────────────────────────────────────────────
+   子行的字号与灰度**必须**低于主行：视线该先落在「欠谁钱」，再往下看「谁花的」。
+   把它做得跟主行一样重，等于又把两个轴压回一个平面——正是这次要修的东西。 */
+.uchip-prov-via { font-size: 9.5px; color: #7f858f; }
+/* 未知厂商不是错误，是一个待回答的问题：中性色 + 说明性 tooltip，不用红。 */
+.uchip-prov-name.is-unknown { color: #9aa0aa; font-weight: 500; cursor: help; }
+/* 「无价表」紧贴在「—」右边——解释必须挨着被解释的东西，隔一段就没人把它们连起来读。 */
+/* 「model id 未记录」是一句说明，不是一个 model 名——排版上要看得出区别，否则会被当成模型叫这个。 */
+.uchip-prov-model.is-note { font-style: italic; color: #6f757f; }
+.uchip-prov-noprice {
+  font-size: 9.5px; color: #8b909a; background: rgba(154,160,170,0.12);
+  border-radius: 4px; padding: 1px 5px; cursor: help; align-self: center;
+}
+.uchip-callers {
+  display: grid; gap: 2px; margin: 1px 0 5px; padding-left: 8px;
+  border-left: 1px solid #262a32;
+}
+.uchip-caller {
+  display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 8px;
+  align-items: baseline; font-size: 10px; color: #8b909a; font-variant-numeric: tabular-nums;
+}
+.uchip-caller-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.uchip-caller-cost { color: #c9cdd5; min-width: 52px; text-align: right; }
+.uchip-priceage { font-size: 9px; margin-top: 3px; cursor: help; }
 
 /* ── Agent 效能: status → time → runtime → evidence, no decorative score ── */
 .uchip-agent-status { font-size: 12px; color: #cbd5e1; padding: 2px 0 1px; }
