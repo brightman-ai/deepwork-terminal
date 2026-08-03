@@ -33,8 +33,20 @@ export interface UsageReportRow {
   cost?: number | null
   currency?: string
 }
+/**
+ * One (vendor, caller, billing) slice of a window — kit's `usage.ProviderRow`.
+ *
+ * The two money questions live on separate fields because they have different answers:
+ * `vendor` is WHO IS OWED (derived from the model id), `runtime` is WHO SPENT IT (the CLI).
+ * They were one field until a codex pane talking to DeepSeek produced a row labelled OpenAI
+ * that landed under an OpenAI subscription — an impossible bill.
+ */
 export interface UsageProviderRow {
-  provider: string
+  /** Canonical vendor id ('anthropic'|'openai'|'moonshot'|'deepseek'|…). '' = unresolved model id. */
+  vendor: string
+  /** The vendor's name as it appears on an invoice ('Kimi'). Empty exactly when `vendor` is. */
+  vendor_display?: string
+  /** The CLI that made the request ('claude'|'codex'|'whale'|…). Data-driven, never an enum. */
   runtime: string
   billing_mode?: 'subscription' | 'api' | 'unknown'
   billing_coverage?: 'complete' | 'partial' | 'missing'
@@ -45,6 +57,13 @@ export interface UsageProviderRow {
   total_tokens: number
   cost?: number | null
   currency?: string
+  /** Lossless per-currency money. `cost` is populated only when there is exactly one currency. */
+  costs?: Record<string, number>
+  /** This row's OWN price completeness — so a「≈」here is never caused by a model in another tab. */
+  requests?: number
+  priced_requests?: number
+  /** YYYY-MM-DD: the OLDEST price-rule verification date behind this row's money (staleness bound). */
+  price_verified_at?: string
   top_model?: string
   spark?: number[]
 }
