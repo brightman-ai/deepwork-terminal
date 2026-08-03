@@ -23,29 +23,31 @@ import (
 )
 
 const agentReportCacheTTL = 60 * time.Second
-const agentReportIndexSchema = "agent-report-index.v10"
+const agentReportIndexSchema = "agent-report-index.v12"
 
 type agentFileProjection struct {
-	size         int64
-	modUnixNano  int64
-	generation   string
-	runtime      string
-	sessionID    string
-	codexCursor  transcript.CodexRequestCursor
-	claudeCursor transcript.ClaudeRequestCursor
-	dataset      agentanalytics.ActivityDataset
+	size           int64
+	modUnixNano    int64
+	generation     string
+	runtime        string
+	sessionID      string
+	codexCursor    transcript.CodexRequestCursor
+	claudeCursor   transcript.ClaudeRequestCursor
+	deepworkCursor transcript.DeepworkRequestCursor
+	dataset        agentanalytics.ActivityDataset
 }
 
 // agentReporter is a rebuildable materialized view over provider transcripts.
 // Unchanged files are never reparsed. A malformed file contributes a stable
 // diagnostic without deleting the last-good facts from other runtimes.
 type agentReporter struct {
-	mu        sync.Mutex
-	files     map[string]agentFileProjection
-	reports   map[string]agentReportCacheEntry
-	now       func() time.Time
-	indexPath string
-	drivers   map[string]reportAgentTreeDriver
+	mu           sync.Mutex
+	files        map[string]agentFileProjection
+	reports      map[string]agentReportCacheEntry
+	now          func() time.Time
+	indexPath    string
+	deepworkRoot string
+	drivers      map[string]reportAgentTreeDriver
 }
 
 type reportAgentTreeDriver interface {
@@ -61,7 +63,8 @@ type agentReportCacheEntry struct {
 func newAgentReporter(dataDir ...string) *agentReporter {
 	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
 	if len(dataDir) > 0 && strings.TrimSpace(dataDir[0]) != "" {
-		a.indexPath = filepath.Join(dataDir[0], "agent-report-index-v10.json")
+		a.indexPath = filepath.Join(dataDir[0], "agent-report-index-v12.json")
+		a.deepworkRoot = filepath.Join(dataDir[0], "transcripts", "sessions")
 		a.loadIndex()
 	}
 	return a
@@ -95,7 +98,7 @@ func (a *agentReporter) Detail(ctx context.Context, window, timezone string, fil
 }
 
 func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) agentanalytics.ActivityDataset {
-	paths := recentAgentTranscriptFiles(cutoff)
+	paths := recentAgentTranscriptFiles(cutoff, a.deepworkRoot)
 	live := make(map[string]struct{}, len(paths))
 	hadProjection := len(a.files) > 0
 	changedFiles := 0
@@ -203,14 +206,15 @@ type persistedAgentIndex struct {
 }
 
 type persistedAgentFileProjection struct {
-	Size         int64                          `json:"size"`
-	ModUnixNano  int64                          `json:"mod_unix_nano"`
-	Generation   string                         `json:"generation"`
-	Runtime      string                         `json:"runtime"`
-	SessionID    string                         `json:"session_id"`
-	CodexCursor  transcript.CodexRequestCursor  `json:"codex_cursor"`
-	ClaudeCursor transcript.ClaudeRequestCursor `json:"claude_cursor"`
-	Dataset      agentanalytics.ActivityDataset `json:"dataset"`
+	Size           int64                            `json:"size"`
+	ModUnixNano    int64                            `json:"mod_unix_nano"`
+	Generation     string                           `json:"generation"`
+	Runtime        string                           `json:"runtime"`
+	SessionID      string                           `json:"session_id"`
+	CodexCursor    transcript.CodexRequestCursor    `json:"codex_cursor"`
+	ClaudeCursor   transcript.ClaudeRequestCursor   `json:"claude_cursor"`
+	DeepworkCursor transcript.DeepworkRequestCursor `json:"deepwork_cursor"`
+	Dataset        agentanalytics.ActivityDataset   `json:"dataset"`
 }
 
 func (a *agentReporter) loadIndex() {
@@ -226,7 +230,7 @@ func (a *agentReporter) loadIndex() {
 		a.files[path] = agentFileProjection{
 			size: file.Size, modUnixNano: file.ModUnixNano, generation: file.Generation,
 			runtime: file.Runtime, sessionID: file.SessionID, codexCursor: file.CodexCursor,
-			claudeCursor: file.ClaudeCursor, dataset: file.Dataset,
+			claudeCursor: file.ClaudeCursor, deepworkCursor: file.DeepworkCursor, dataset: file.Dataset,
 		}
 	}
 }
@@ -240,7 +244,7 @@ func (a *agentReporter) saveIndexLocked() {
 		persisted.Files[path] = persistedAgentFileProjection{
 			Size: file.size, ModUnixNano: file.modUnixNano, Generation: file.generation,
 			Runtime: file.runtime, SessionID: file.sessionID, CodexCursor: file.codexCursor,
-			ClaudeCursor: file.claudeCursor, Dataset: file.dataset,
+			ClaudeCursor: file.claudeCursor, DeepworkCursor: file.deepworkCursor, Dataset: file.dataset,
 		}
 	}
 	body, err := json.Marshal(persisted)
@@ -266,12 +270,18 @@ func appendUniqueString(values []string, value string) []string {
 	return append(values, value)
 }
 
-func recentAgentTranscriptFiles(cutoff time.Time) []string {
+func recentAgentTranscriptFiles(cutoff time.Time, deepworkRoot string) []string {
 	roots := []string{transcript.ClaudeProjectsRoot(), transcript.CodexSessionsRoot()}
+	if strings.TrimSpace(deepworkRoot) != "" {
+		roots = append(roots, deepworkRoot)
+	}
 	var paths []string
 	for _, root := range roots {
 		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil || entry == nil || entry.IsDir() || filepath.Ext(path) != transcript.JSONLSuffix {
+				return nil
+			}
+			if root == deepworkRoot && !strings.HasPrefix(filepath.Base(path), "dw-") {
 				return nil
 			}
 			if info, statErr := entry.Info(); statErr == nil && !info.ModTime().Before(cutoff) {
@@ -302,6 +312,19 @@ func inspectAgentFile(path string) (agentFileIdentity, error) {
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	if !sc.Scan() {
 		return agentFileIdentity{}, sc.Err()
+	}
+	var native struct {
+		Format    string `json:"format"`
+		Runtime   string `json:"runtime"`
+		SessionID string `json:"sessionId"`
+		CWD       string `json:"cwd"`
+	}
+	if json.Unmarshal(sc.Bytes(), &native) == nil && strings.HasPrefix(native.Format, "deepwork.native_transcript.") {
+		id := strings.TrimSpace(native.SessionID)
+		if id == "" {
+			id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		}
+		return agentFileIdentity{runtime: transcript.KindDeepwork, sessionID: id, project: native.CWD, root: true}, nil
 	}
 	if pathWithinRoot(path, transcript.CodexSessionsRoot()) {
 		var row struct {
@@ -515,7 +538,7 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 	var runs []transcript.AgentRun
 	generation := identity.sessionID
 	var err error
-	if identity.root {
+	if identity.root && identity.runtime != transcript.KindDeepwork {
 		runs, generation, _, err = loadAgentRunTail(ctx, path, identity, cutoff, nil, "")
 		if err != nil {
 			return agentFileProjection{}, err
@@ -541,13 +564,15 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 		facts, projection.codexCursor, err = transcript.ScanCodexRequestUsageIncremental(path, cursor)
 	case transcript.KindClaude:
 		facts, projection.claudeCursor, err = transcript.ScanClaudeRequestUsageIncremental(path, transcript.ClaudeRequestCursor{})
+	case transcript.KindDeepwork:
+		facts, projection.deepworkCursor, err = transcript.ScanDeepworkRequestUsageIncremental(path, transcript.DeepworkRequestCursor{})
 	}
 	if err != nil {
 		return agentFileProjection{}, err
 	}
 	projection.dataset = projectAgentDataset(identity, path, runs)
 	projection.dataset.RequestFacts = facts
-	if projection.codexCursor.MalformedLines > 0 || projection.claudeCursor.MalformedLines > 0 {
+	if projection.codexCursor.MalformedLines > 0 || projection.claudeCursor.MalformedLines > 0 || projection.deepworkCursor.MalformedLines > 0 {
 		projection.dataset.IngestDiagnostics = append(projection.dataset.IngestDiagnostics, "transcript_malformed:"+filepath.Base(path))
 	}
 	rebuildEconomicRequests(&projection.dataset)
@@ -622,7 +647,7 @@ func appendAgentFileProjection(ctx context.Context, path string, identity agentF
 	var runs []transcript.AgentRun
 	generation, reset := cached.generation, false
 	var err error
-	if identity.root {
+	if identity.root && identity.runtime != transcript.KindDeepwork {
 		runs, generation, reset, err = loadAgentRunTail(ctx, path, identity, cutoff, stopIDs, cached.generation)
 		if err != nil || reset {
 			return agentFileProjection{}, reset, err
@@ -637,14 +662,19 @@ func appendAgentFileProjection(ctx context.Context, path string, identity agentF
 		appended, updated.codexCursor, err = transcript.ScanCodexRequestUsageIncremental(path, cached.codexCursor)
 	case transcript.KindClaude:
 		appended, updated.claudeCursor, err = transcript.ScanClaudeRequestUsageIncremental(path, cached.claudeCursor)
+	case transcript.KindDeepwork:
+		appended, updated.deepworkCursor, err = transcript.ScanDeepworkRequestUsageIncremental(path, cached.deepworkCursor)
 	}
 	if err != nil {
 		return agentFileProjection{}, false, err
 	}
 	tail := projectAgentDataset(identity, path, runs)
 	updated.dataset = mergeAgentRunDataset(cached.dataset, tail)
-	updated.dataset.RequestFacts = mergeRequestFacts(cached.dataset.RequestFacts, appended)
-	if updated.codexCursor.MalformedLines > cached.codexCursor.MalformedLines || updated.claudeCursor.MalformedLines > cached.claudeCursor.MalformedLines {
+	updated.dataset.RequestFacts, err = mergeRequestFacts(cached.dataset.RequestFacts, appended)
+	if err != nil {
+		return agentFileProjection{}, false, err
+	}
+	if updated.codexCursor.MalformedLines > cached.codexCursor.MalformedLines || updated.claudeCursor.MalformedLines > cached.claudeCursor.MalformedLines || updated.deepworkCursor.MalformedLines > cached.deepworkCursor.MalformedLines {
 		updated.dataset.IngestDiagnostics = appendUniqueString(updated.dataset.IngestDiagnostics, "transcript_malformed:"+filepath.Base(path))
 	}
 	rebuildEconomicRequests(&updated.dataset)
@@ -1077,13 +1107,19 @@ func activityWorkTime(work agentanalytics.ActivityWorkItem) time.Time {
 	return time.Time{}
 }
 
-func mergeRequestFacts(base, appended []transcript.ModelRequestUsage) []transcript.ModelRequestUsage {
+func mergeRequestFacts(base, appended []transcript.ModelRequestUsage) ([]transcript.ModelRequestUsage, error) {
 	byID := make(map[string]transcript.ModelRequestUsage, len(base)+len(appended))
 	for _, fact := range base {
 		byID[fact.ID] = fact
 	}
 	for _, fact := range appended {
 		if prior, ok := byID[fact.ID]; ok {
+			if strings.HasPrefix(fact.ID, "deepwork:") {
+				if !sameDeepworkRequestFact(prior, fact) {
+					return nil, fmt.Errorf("deepwork_request_fact_conflict: %s", fact.ID)
+				}
+				continue
+			}
 			byID[fact.ID] = mergeRequestFact(prior, fact)
 		} else {
 			byID[fact.ID] = fact
@@ -1099,7 +1135,31 @@ func mergeRequestFacts(base, appended []transcript.ModelRequestUsage) []transcri
 		}
 		return merged[i].At.Before(merged[j].At)
 	})
-	return merged
+	return merged, nil
+}
+
+func sameDeepworkRequestFact(left, right transcript.ModelRequestUsage) bool {
+	leftDuration, leftTimed := requestFactDuration(left)
+	rightDuration, rightTimed := requestFactDuration(right)
+	if leftTimed != rightTimed || leftDuration != rightDuration {
+		return false
+	}
+	left.At, right.At = time.Time{}, time.Time{}
+	left.StartedAt, right.StartedAt = nil, nil
+	left.FirstObservedAt, right.FirstObservedAt = nil, nil
+	left.FirstTokenAt, right.FirstTokenAt = nil, nil
+	left.EndedAt, right.EndedAt = nil, nil
+	left.SourceOffset, right.SourceOffset = 0, 0
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
+
+func requestFactDuration(fact transcript.ModelRequestUsage) (time.Duration, bool) {
+	if fact.StartedAt == nil || fact.EndedAt == nil {
+		return 0, false
+	}
+	return fact.EndedAt.Sub(*fact.StartedAt), true
 }
 
 func mergeRequestFact(prior, next transcript.ModelRequestUsage) transcript.ModelRequestUsage {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -383,7 +384,7 @@ func TestAgentReporterIndexRoundTripAndSchemaGate(t *testing.T) {
 	if !ok || got.size != 42 || got.generation != "gen" || got.codexCursor.Offset != 42 || got.codexCursor.Model != "gpt-5.6-sol" || len(got.dataset.WorkItems) != 1 || got.dataset.WorkItems[0].ID != "w1" {
 		t.Fatalf("index round trip=%+v ok=%v", got, ok)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "agent-report-index-v10.json"), []byte(`{"schema":"future","files":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(a.indexPath, []byte(`{"schema":"future","files":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if stale := newAgentReporter(dir); len(stale.files) != 0 {
@@ -539,5 +540,127 @@ func TestProjectAgentTreeResumeAddsAssignmentNotInstance(t *testing.T) {
 	}
 	if dataset.Assignments[1].AgentInstanceID != dataset.Assignments[2].AgentInstanceID || dataset.Assignments[1].Attempt != 1 || dataset.Assignments[2].Attempt != 2 {
 		t.Fatalf("resume assignments=%+v", dataset.Assignments)
+	}
+}
+
+func TestAgentReporterIncludesDeepworkMainAndLifecycleIncrementally(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(dataDir, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, ".claude", "projects"))
+	root := filepath.Join(dataDir, "transcripts", "sessions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "dw-42.jsonl")
+	main := `{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"assistant","sessionId":"dw-42","deepworkTurnId":1,"timestamp":"2026-08-03T01:00:00Z","requestId":"req-main","message":{"id":"msg-main","role":"assistant","model":"deepseek-chat","content":[],"usage":{"input_tokens":100,"output_tokens":20},"invocation":{"runtime_id":"whale-agent","provider_key":"deepseek","resolved_model":"deepseek-chat"}}}` + "\n"
+	title := `{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":"dw-42","deepworkTurnId":1,"timestamp":"2026-08-03T01:00:01Z","attempt":{"id":"inv-title","purpose":"auto_title","status":"success","usage":{"input_tokens":10,"output_tokens":2},"invocation":{"runtime_id":"whale-agent","provider_key":"deepseek","resolved_model":"deepseek-chat"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(main+title), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reporter := newAgentReporter(dataDir)
+	first := reporter.Dataset(context.Background(), "7d")
+	if len(first.RequestFacts) != 2 {
+		t.Fatalf("first facts=%+v", first.RequestFacts)
+	}
+	second := reporter.Dataset(context.Background(), "7d")
+	if len(second.RequestFacts) != 2 {
+		t.Fatalf("unchanged refresh double-counted: %+v", second.RequestFacts)
+	}
+
+	handoff := `{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":"dw-42","deepworkTurnId":1,"timestamp":"2026-08-03T01:00:02Z","attempt":{"id":"inv-handoff","purpose":"runtime_handoff","status":"success","usage":{"input_tokens":12,"output_tokens":3},"invocation":{"runtime_id":"whale-agent","provider_key":"deepseek","resolved_model":"deepseek-chat"}}}` + "\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(handoff); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third := reporter.Dataset(context.Background(), "7d")
+	if len(third.RequestFacts) != 3 {
+		t.Fatalf("incremental lifecycle append facts=%+v", third.RequestFacts)
+	}
+
+	reloaded := newAgentReporter(dataDir)
+	afterRestart := reloaded.Dataset(context.Background(), "7d")
+	if len(afterRestart.RequestFacts) != 3 {
+		t.Fatalf("persisted index double-count/loss: %+v", afterRestart.RequestFacts)
+	}
+	identity, err := inspectAgentFile(path)
+	if err != nil || identity.runtime != transcript.KindDeepwork || identity.sessionID != "dw-42" {
+		t.Fatalf("deepwork identity=%+v err=%v", identity, err)
+	}
+}
+
+func TestAgentReporterCountsUsageLessFailedDeepworkAttemptExactlyOnce(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(dataDir, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, ".claude", "projects"))
+	root := filepath.Join(dataDir, "transcripts", "sessions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "dw-43.jsonl")
+	failed := `{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":"dw-43","deepworkTurnId":1,"timestamp":"2026-08-03T01:00:00Z","attempt":{"id":"inv-failed","purpose":"auto_title","status":"error","error":"timeout","invocation":{"runtime_id":"whale-agent","provider_key":"deepseek","requested_model":"deepseek-chat"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(failed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reporter := newAgentReporter(dataDir)
+	first := reporter.Dataset(context.Background(), "7d")
+	if len(first.RequestFacts) != 1 || first.RequestFacts[0].Coverage.Tokens != transcript.CoverageMissing {
+		t.Fatalf("usage-less failure disappeared or claimed zero: %+v", first.RequestFacts)
+	}
+	if again := reporter.Dataset(context.Background(), "7d"); len(again.RequestFacts) != 1 {
+		t.Fatalf("unchanged failure double-counted: %+v", again.RequestFacts)
+	}
+	if reloaded := newAgentReporter(dataDir).Dataset(context.Background(), "7d"); len(reloaded.RequestFacts) != 1 {
+		t.Fatalf("restart lost/doubled usage-less failure: %+v", reloaded.RequestFacts)
+	}
+}
+
+func TestAgentReporterRejectsCrossCursorDeepworkConflictAndPreservesLastGood(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(dataDir, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, ".claude", "projects"))
+	root := filepath.Join(dataDir, "transcripts", "sessions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "dw-44.jsonl")
+	firstLine := `{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":"dw-44","deepworkTurnId":1,"timestamp":"2026-08-03T01:00:00Z","attempt":{"id":"inv-same","purpose":"auto_title","status":"success","usage":{"output_tokens":1},"invocation":{"runtime_id":"whale-agent"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(firstLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reporter := newAgentReporter(dataDir)
+	first := reporter.Dataset(context.Background(), "7d")
+	if len(first.RequestFacts) != 1 || first.RequestFacts[0].OutputTokens != 1 {
+		t.Fatalf("initial facts=%+v", first.RequestFacts)
+	}
+	conflict := `{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":"dw-44","deepworkTurnId":1,"timestamp":"2026-08-03T01:00:01Z","attempt":{"id":"inv-same","purpose":"auto_title","status":"success","usage":{"output_tokens":2},"invocation":{"runtime_id":"whale-agent"}}}` + "\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.WriteString(conflict)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("append conflict: write=%v close=%v", writeErr, closeErr)
+	}
+	after := reporter.Dataset(context.Background(), "7d")
+	if len(after.RequestFacts) != 1 || after.RequestFacts[0].OutputTokens != 1 {
+		t.Fatalf("conflict synthesized a merged fact: %+v", after.RequestFacts)
+	}
+	foundDiagnostic := false
+	for _, diagnostic := range after.IngestDiagnostics {
+		if strings.Contains(diagnostic, "transcript_parse_failed:dw-44.jsonl") {
+			foundDiagnostic = true
+		}
+	}
+	if !foundDiagnostic {
+		t.Fatalf("conflict was not observable: %+v", after.IngestDiagnostics)
 	}
 }
