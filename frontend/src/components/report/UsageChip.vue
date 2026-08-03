@@ -32,6 +32,7 @@ import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
 import { usageMoneyPresentation, type UsageMoneySemantics } from './usageBillingPresentation'
 import { groupByVendor, type UsageVendorGroup } from './usageVendorGroups'
+import type { UsageRateCard } from './useUsageReport'
 import { groupPresentation } from './quotaStaleness'
 
 defineProps<{ showDetail?: boolean }>()
@@ -166,6 +167,35 @@ const BADGES: Record<UsageMoneySemantics, { text: string; cls: string; title: st
 function semanticsOf(row: UsageProviderRow): UsageMoneySemantics {
   return usageMoneyPresentation(row, currentSubscriptionRuntimes.value).semantics
 }
+// The unit price, spelled out. A currency SYMBOL is not evidence: Moonshot sells k3 at both ¥20/M
+// and $3.00/M — the same price at its own 6.67 conversion — so「$85.93」alone cannot be checked, and
+// being wrong by 6.67× looks entirely plausible. Printing the rate the money was computed FROM is
+// what makes the total falsifiable.
+//
+// Both cards are vendor-published numbers. Nothing here converts between them; this codebase holds
+// no exchange rate, because an FX rate is a third fact with its own source and its own staleness.
+const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', CNY: '¥' }
+const rateSymbol = (c: string) => CURRENCY_SYMBOL[c] ?? `${c} `
+function rateLabel(card: UsageRateCard): string {
+  const s = rateSymbol(card.currency)
+  return `${s}${card.input_per_m}/${s}${card.output_per_m} 每 1M`
+}
+function unitPriceLine(g: UsageVendorGroup): string {
+  const [primary, ...rest] = g.unitPrices
+  if (!primary) return ''
+  const others = rest.map((c) => `${rateSymbol(c.currency)}${c.input_per_m}/${rateSymbol(c.currency)}${c.output_per_m}`)
+  return others.length ? `${rateLabel(primary)}（另一官方价 ${others.join(' · ')}）` : rateLabel(primary)
+}
+function unitPriceTitle(g: UsageVendorGroup): string {
+  const lines = g.unitPrices.map((c) => {
+    const s = rateSymbol(c.currency)
+    const which = c.primary ? '本行金额按此价计算' : '厂商另一平台的官方价，仅供对照'
+    return `${c.currency}：输入 ${s}${c.input_per_m} / 输出 ${s}${c.output_per_m} / 缓存读 ${s}${c.cache_read_per_m} 每 1M —— ${which}`
+  })
+  lines.push('两套都是厂商公布的标价，不是汇率换算——本系统不持有任何汇率。')
+  return `${g.topModel}\n${lines.join('\n')}`
+}
+
 // A vendor group inherits its callers' semantics only when they agree; a mix means the honest
 // label is the weaker one (估算), since part of the number is unproven.
 function vendorSemantics(g: UsageVendorGroup): UsageMoneySemantics {
@@ -655,6 +685,10 @@ onUnmounted(() => {
                 <Spark :bars="group.spark" />
               </div>
               <!-- 价格会变，内置表不会自己知道。所以它公布自己的年龄——这是读的人唯一的防线。 -->
+              <!-- 单价写出来，金额才可被核对。厂商有两套官方价时并列，绝不做汇率换算。 -->
+              <div v-if="unitPriceLine(group)" class="uchip-dim uchip-unitprice" :title="unitPriceTitle(group)">
+                {{ unitPriceLine(group) }}
+              </div>
               <div v-if="group.priceVerifiedAt" class="uchip-dim uchip-priceage" title="内置价表最后一次与厂商价目页核对的日期（取本行最旧的一条）。此后厂商若调价，这个数字会偏。">
                 价表核对于 {{ group.priceVerifiedAt }}
               </div>
@@ -987,6 +1021,8 @@ onUnmounted(() => {
 .uchip-caller-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .uchip-caller-cost { color: #c9cdd5; min-width: 52px; text-align: right; }
 .uchip-priceage { font-size: 9px; margin-top: 3px; cursor: help; }
+/* 单价比「价表核对于」重要一档——它是让上面那个金额可被核对的东西，所以给它稍高的对比度。 */
+.uchip-unitprice { font-size: 9.5px; margin-top: 4px; color: #8b909a; cursor: help; font-variant-numeric: tabular-nums; }
 
 /* ── Agent 效能: status → time → runtime → evidence, no decorative score ── */
 .uchip-agent-status { font-size: 12px; color: #cbd5e1; padding: 2px 0 1px; }

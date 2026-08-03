@@ -1,4 +1,4 @@
-import type { UsageProviderRow } from './useUsageReport'
+import type { UsageProviderRow, UsageRateCard } from './useUsageReport'
 
 // ── rolling the caller rows up under the vendor they owe ──────────────────────────────────────
 //
@@ -40,6 +40,9 @@ export interface UsageVendorGroup {
   costComplete: boolean
   /** YYYY-MM-DD, the OLDEST price verification behind this money. '' when nothing was priced. */
   priceVerifiedAt: string
+  /** Published rate cards for `topModel` — taken from the biggest caller row, not merged, because
+   *  a unit price belongs to a model and averaging two models' rates would describe neither. */
+  unitPrices: UsageRateCard[]
   /** The biggest single contributor's top model — a label for 主要消耗, not a claim that every
    *  request here used it. */
   topModel: string
@@ -73,7 +76,7 @@ export function groupByVendor(rows: UsageProviderRow[]): UsageVendorGroup[] {
         vendor: row.vendor, display: row.vendor_display ?? '', rows: [],
         inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, totalTokens: 0,
         costs: {}, cost: null, currency: '', requests: 0, pricedRequests: 0,
-        costComplete: true, priceVerifiedAt: '', topModel: '', spark: [],
+        costComplete: true, priceVerifiedAt: '', topModel: '', unitPrices: [], spark: [],
       }
       byVendor.set(row.vendor, group)
     }
@@ -103,6 +106,7 @@ export function groupByVendor(rows: UsageProviderRow[]): UsageVendorGroup[] {
   for (const group of byVendor.values()) {
     group.rows.sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
     group.topModel = group.rows[0]?.top_model ?? ''
+    group.unitPrices = group.rows[0]?.unit_prices ?? []
     group.costComplete = group.requests > 0 && group.pricedRequests === group.requests
     const currencies = Object.keys(group.costs)
     if (currencies.length === 1) {
