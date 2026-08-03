@@ -1,15 +1,23 @@
 package agentintel
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // CodexSessionState tracks the state derived from Codex JSONL parsing.
 type CodexSessionState struct {
-	SessionID    string
-	Model        string
-	CWD          string
-	Status       AgentStatus
-	Awaiting     bool      // a turn completed (task_complete) and no new turn started since = needs-you
-	LastTurnAt   time.Time // transcript time of the last task_complete — the reload-proof "completed at" behind Awaiting
+	SessionID  string
+	Model      string
+	CWD        string
+	Status     AgentStatus
+	Awaiting   bool      // a turn completed (task_complete) and no new turn started since = needs-you
+	LastTurnAt time.Time // transcript time of the last task_complete — the reload-proof "completed at" behind Awaiting
+	// LastEventAt is the transcript time of the newest row of ANY kind. Running is asserted by
+	// events (task_started / response_item) and only ever retracted by another event, so without
+	// a "when was that asserted" there is no way to tell a turn in progress from a turn that
+	// stopped existing — a killed CLI, an Esc, a machine that slept. See staleRun.
+	LastEventAt  time.Time
 	InputTokens  int
 	OutputTokens int
 	CachedTokens int
@@ -19,6 +27,7 @@ type CodexSessionState struct {
 
 // CodexDriver parses a Codex CLI JSONL rollout file and derives session state.
 type CodexDriver struct {
+	jsonlPath string // kept for staleRun: "has anything been written since" needs the file, not just its parsed rows
 	reader    *JSONLReader
 	state     CodexSessionState
 	agentTree codexAgentTree
@@ -26,10 +35,31 @@ type CodexDriver struct {
 
 func NewCodexDriver(jsonlPath string) *CodexDriver {
 	return &CodexDriver{
+		jsonlPath: jsonlPath,
 		reader:    NewJSONLReader(jsonlPath),
 		state:     CodexSessionState{Status: StatusIdle},
 		agentTree: newCodexAgentTree(jsonlPath),
 	}
+}
+
+// staleRun reports whether a Running verdict has outlived its evidence: the newest event is
+// older than pendingReplyWindow AND nothing has been appended to the rollout since.
+//
+// Codex asserts Running on task_started / response_item and retracts it only on task_complete.
+// That completion is a row that must be WRITTEN — so anything that stops the CLI before it
+// (Esc, a crash, a killed pane, a laptop lid) leaves the last word as "running" and no one ever
+// comes back to correct it. This is the same defect the claude driver had through a different
+// rule, and it is bounded the same way: both halves must hold, because a genuinely working
+// agent writes continuously and the clock alone would cut off a long tool call.
+func (cd *CodexDriver) staleRun(now time.Time) bool {
+	if cd.state.LastEventAt.IsZero() || now.Sub(cd.state.LastEventAt) <= pendingReplyWindow {
+		return false
+	}
+	info, err := os.Stat(cd.jsonlPath)
+	if err != nil {
+		return false
+	}
+	return now.Sub(info.ModTime()) > pendingReplyWindow
 }
 
 // Update reads new JSONL lines and updates state.
@@ -95,6 +125,9 @@ func (cd *CodexDriver) Update() error {
 			cd.state.Awaiting = false
 		}
 
+		if at := parseTime(row); at.After(cd.state.LastEventAt) {
+			cd.state.LastEventAt = at
+		}
 		cd.state.UpdatedAt = time.Now()
 		return true
 	})
@@ -129,6 +162,13 @@ func (cd *CodexDriver) AgentState() AgentState {
 	}
 	if s.Awaiting {
 		as.AwaitingSince = s.LastTurnAt
+	}
+	// A turn that stopped without ever writing its completion is not a turn in progress. Idle
+	// rather than Awaiting: nothing announced itself finished, so there is no result waiting to
+	// be read, and raising a needs-you here would page the user about a session that simply died.
+	if as.Status == StatusRunning && cd.staleRun(time.Now()) {
+		as.Status = StatusIdle
+		as.AwaitingUser = false
 	}
 	// Same shelf life as the Claude driver, from the same helper — see ExpireStaleAwaiting.
 	return ExpireStaleAwaiting(as, time.Now())

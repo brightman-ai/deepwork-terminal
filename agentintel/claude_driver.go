@@ -1,6 +1,7 @@
 package agentintel
 
 import (
+	"os"
 	"strings"
 	"time"
 )
@@ -16,8 +17,29 @@ type ClaudeSessionState struct {
 	StopReason      string
 	PendingTool     string // name of the unresolved tool_use (for elicitation detection); "" when none
 	LastMsgQuestion bool   // the last assistant turn ended on a free-text question (heuristic)
-	UpdatedAt       time.Time
+	// LastUserInterrupt marks the newest user row as an INTERRUPT (Esc), not a prompt. It is
+	// the difference between "you asked something and the agent is thinking" and "you stopped
+	// the agent" — two states that are indistinguishable by row order alone, since both leave a
+	// user row after the last assistant row. Cleared by the next real user or assistant row.
+	LastUserInterrupt bool
+	UpdatedAt         time.Time
 }
+
+// pendingReplyWindow bounds how long "your prompt is newer than the agent's last word" may be
+// read as RUNNING.
+//
+// That rule has no corroborating signal — unlike a pending tool_use (a named tool), a fresh
+// mtime (the writing gate) or a spinner (the pane). It is pure row order, so a turn that never
+// got a reply stays running forever: a killed CLI, a crashed session, a machine that slept
+// mid-turn. Ten hours of green was the observed case.
+//
+// The window is generous on purpose — extended thinking before the first assistant token is
+// real, and cutting a working agent to idle would fire a false "done". It is also only half the
+// test: staleness ALONE never downgrades anything. The transcript must additionally have gone
+// untouched for this long (see State), and a working agent writes continuously — thinking
+// blocks, tool calls, results. So the only thing that trips this is a transcript nothing is
+// writing to, which is not a running agent by any definition.
+const pendingReplyWindow = 15 * time.Minute
 
 // textEndsQuestion is a best-effort "did the agent ASK the user something" heuristic for a
 // free-text turn end — the transcript can't otherwise tell a plain-language question from a
@@ -52,6 +74,7 @@ func isElicitationTool(name string) bool { return elicitationTools[name] }
 // ClaudeDriver parses a Claude Code JSONL transcript and derives session state.
 type ClaudeDriver struct {
 	sessionID string
+	jsonlPath string // kept for pendingReplyStale: "has anything been written since" needs the file, not just its parsed rows
 	reader    *JSONLReader
 	usage     *UsageAccumulator
 	state     ClaudeSessionState
@@ -63,11 +86,28 @@ type ClaudeDriver struct {
 func NewClaudeDriver(jsonlPath, sessionID string) *ClaudeDriver {
 	return &ClaudeDriver{
 		sessionID: sessionID,
+		jsonlPath: jsonlPath,
 		reader:    NewJSONLReader(jsonlPath),
 		usage:     NewUsageAccumulator(),
 		state:     ClaudeSessionState{Status: StatusIdle},
 		agentTree: newClaudeAgentTree(jsonlPath),
 	}
+}
+
+// pendingReplyStale reports whether a prompt that never got an answer has gone cold: older
+// than pendingReplyWindow AND with nothing appended to the transcript since. Both halves are
+// required — the clock alone would cut off a long think, while the file alone says nothing
+// about whose turn it is. A transcript that cannot be stat'd is treated as NOT stale: an
+// unreadable file is a reason to keep the last known reading, not to invent a new one.
+func (cd *ClaudeDriver) pendingReplyStale(now time.Time) bool {
+	if cd.state.LastUserAt.IsZero() || now.Sub(cd.state.LastUserAt) <= pendingReplyWindow {
+		return false
+	}
+	info, err := os.Stat(cd.jsonlPath)
+	if err != nil {
+		return false
+	}
+	return now.Sub(info.ModTime()) > pendingReplyWindow
 }
 
 // Update reads new JSONL lines and updates state.
@@ -87,6 +127,21 @@ func (cd *ClaudeDriver) Update() error {
 			cd.state.WaitReason = WaitNone
 			cd.state.PendingTool = ""        // tool result arrived → no tool pending
 			cd.state.LastMsgQuestion = false // you replied → the prior question is answered
+			// An Esc at the prompt writes a user row like any other, and by row order alone it
+			// reads as "the user just spoke, the agent must be thinking" — the exact opposite of
+			// what happened. claude marks the row structurally (interruptedMessageId names the
+			// assistant message that was cut off), so the fact is read rather than inferred from
+			// the "[Request interrupted by user]" text it also carries; the text is a UI string
+			// and would drift with wording or locale, the field is part of the record's shape.
+			_, interruptedRow := row["interruptedMessageId"]
+			cd.state.LastUserInterrupt = interruptedRow
+			if interruptedRow {
+				// Nothing is running and nothing is blocked: the CLI is back at an empty prompt
+				// because you put it there. Idle, and NOT awaiting — a needs-you badge for an
+				// interrupt you performed yourself is noise, and would page you about your own
+				// keystroke.
+				cd.state.Status = StatusIdle
+			}
 			// Check for interrupted tool use result.
 			if msg, ok := row["message"].(map[string]any); ok {
 				if content, ok := msg["content"].([]any); ok {
@@ -108,6 +163,7 @@ func (cd *ClaudeDriver) Update() error {
 			if ts.After(cd.state.LastAssistAt) {
 				cd.state.LastAssistAt = ts
 			}
+			cd.state.LastUserInterrupt = false // the agent spoke again; whatever was cut off is over
 			cd.state.Status = StatusRunning
 			cd.state.WaitReason = WaitNone
 			cd.state.PendingTool = "" // recomputed below from this turn's tool_use blocks
@@ -259,7 +315,16 @@ func (cd *ClaudeDriver) State() ClaudeSessionState {
 		s.Status = StatusWaiting
 		s.WaitReason = WaitQuestion
 	} else if s.Status != StatusWaiting && !cd.state.LastUserAt.IsZero() && cd.state.LastUserAt.After(cd.state.LastAssistAt) {
-		s.Status = StatusRunning
+		// A user row newer than the agent's last word normally means "your prompt landed, the
+		// reply is coming". Two cases where it does not, and both used to read as running:
+		// you INTERRUPTED the turn (Esc — you stopped it, nothing is coming), or the reply
+		// never arrived at all and never will (a killed CLI, a crashed session, a machine that
+		// slept). Neither is an agent at work, so neither should hold a pane green.
+		if cd.state.LastUserInterrupt || cd.pendingReplyStale(time.Now()) {
+			s.Status = StatusIdle
+		} else {
+			s.Status = StatusRunning
+		}
 		s.WaitReason = WaitNone
 	}
 	// A finished main turn is NOT idle if it left background subagents still running: the agent
@@ -286,11 +351,11 @@ func (cd *ClaudeDriver) AgentState() AgentState {
 	awaiting := s.Status == StatusWaiting ||
 		(s.Status == StatusIdle && s.LastAssistAt.After(s.LastUserAt))
 	as := AgentState{
-		Tool:              ToolClaude,
-		Model:             s.Model,
-		Status:            s.Status,
-		WaitReason:        s.WaitReason,
-		AwaitingUser:      awaiting,
+		Tool:         ToolClaude,
+		Model:        s.Model,
+		Status:       s.Status,
+		WaitReason:   s.WaitReason,
+		AwaitingUser: awaiting,
 		// Refines the needs-you signal without changing its severity: a turn that ended on a
 		// question is still "your move", just phrased as a question rather than a report.
 		EndedOnQuestion:   awaiting && s.LastMsgQuestion,
