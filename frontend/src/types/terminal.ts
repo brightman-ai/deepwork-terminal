@@ -52,6 +52,10 @@ export interface TmuxPaneState {
    *  agent sits at an empty prompt, so nothing is blocked. Escalating this to a red `waiting` is
    *  what used to paint undismissable red dots on idle agents. */
   endedOnQuestion?: boolean
+  /** 这个 pane 的 agent 最后一次写 transcript 的时刻（ISO），不是服务端最后一次查看的时刻——
+   *  后者永远是「刚刚」，读的人得不到任何信息。它是 agentStatus 这条结论的**证据年龄**：
+   *  一个「运行中」配上「10 小时前」，不用看日志就知道有问题。缺省 = 没有 transcript 可问。 */
+  activityAt?: string
 }
 export interface TmuxWindowState {
   index: number

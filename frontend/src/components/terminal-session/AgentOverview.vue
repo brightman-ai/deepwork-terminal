@@ -62,6 +62,7 @@
             <span class="ao-idx">{{ w.index }}</span>
             <span class="ao-card-name">{{ overviewCardTitle(w) }}</span>
             <span class="ao-card-badge" :class="unitBadge(w, g.status).cls">{{ unitBadge(w, g.status).text }}</span>
+            <span v-if="unitAge(w)" class="ao-card-age" :title="unitAgeExact(w)">{{ unitAge(w) }}</span>
             <span v-if="w.tool" class="ao-card-tool">{{ w.tool }}</span>
           </div>
           <!-- agent 的原话（显式 BEL/OSC 信号才有）。排在徽章之下、预览之上：它是这张卡上唯一
@@ -102,6 +103,11 @@
               <span class="ao-idx">{{ a.w.index }}</span>
               <span class="ao-card-name">{{ overviewCardTitle(a.w) }}</span>
               <span class="ao-card-badge" :class="unitBadge(a.w, a.status).cls">{{ unitBadge(a.w, a.status).text }}</span>
+              <!-- 证据的年龄，只贴在「运行中」旁边：那是它唯一能改变判断的地方。
+                   一个十小时没人再写的 transcript 撑出来的「运行中」，和真的在跑，卡面上一模一样——
+                   把年龄放在**它所限定的那句话**旁边（而不是卡片底部），是因为读的人要的是这两个词连读。
+                   已完成/空闲不显示：那两种状态旧一点是常态，加上去只是噪音。 -->
+              <span v-if="unitAge(a.w)" class="ao-card-age" :title="unitAgeExact(a.w)">{{ unitAge(a.w) }}</span>
               <span v-if="a.w.tool" class="ao-card-tool">{{ a.w.tool }}</span>
             </div>
             <div v-if="a.w.agentSaid" class="ao-card-said">{{ a.w.agentSaid }}</div>
@@ -161,6 +167,7 @@ import {
 } from '@terminal/composables/cli/useAgentOverview'
 // 第二个轴：这张卡背后还有没有活着的进程。词与色都取自 SSOT，不在本文件另造。
 import { LIVENESS_COLOR, LIVENESS_LABEL } from '@terminal/composables/cli/tabLiveness'
+import { relativeFromMs } from '@terminal/utils/time'
 
 const props = defineProps<{
   /** 已按状态分组 + 紧急度排序好的单元（tmux window 或非 tmux session，同一形状）。 */
@@ -187,7 +194,15 @@ function onKeyDown(e: KeyboardEvent): void {
   }
 }
 onMounted(() => { document.addEventListener('keydown', onKeyDown, true) })
-onBeforeUnmount(() => { document.removeEventListener('keydown', onKeyDown, true) })
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeyDown, true)
+  if (ageTick) { clearInterval(ageTick); ageTick = null }
+})
+
+// 相对时间是会腐坏的量：算一次就钉住，等于对着人说「刚刚」直到天荒地老（同 UsageChip 的教训）。
+// 秒针只在概览开着时走 —— 这个组件本身只在展开时挂载，所以跟随生命周期即可，不另设开关。
+const ageNow = ref(Date.now())
+let ageTick: ReturnType<typeof setInterval> | null = setInterval(() => { ageNow.value = Date.now() }, 1000)
 
 /** 状态徽章/分组头文案。 */
 const STATUS_LABEL: Record<EffectiveStatus, string> = {
@@ -216,6 +231,19 @@ function unitBadge(w: OverviewUnit, status: EffectiveStatus): { text: string; cl
  *  badge. (tmux: a split window's panes; cli: always a single agent, so this stays empty.) */
 function agentSummary(w: OverviewUnit): string {
   return w.signals.length > 1 ? w.signals.join(' · ') : ''
+}
+
+/**
+ * 「运行中」这条结论的年龄。只对 running 出：那是年龄唯一能改变判断的地方（久未落笔 = 别信这个读数），
+ * 而 idle/已完成 旧一点本来就正常，标上去只是噪音。ageNow 让它在卡片开着时继续走——相对时间是会腐坏的量。
+ */
+function unitAge(u: OverviewUnit): string {
+  void ageNow.value
+  if (u.rawStatus !== 'running' || !u.activityAt) return ''
+  return relativeFromMs(u.activityAt)
+}
+function unitAgeExact(u: OverviewUnit): string {
+  return u.activityAt ? new Date(u.activityAt).toLocaleString('zh-CN') : ''
 }
 
 /** roll-up 段定义 —— 顺序即紧急度（idle 不进摘要行）。 */
@@ -660,6 +688,8 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
   font-weight: 600;
 }
 
+/* 证据年龄：贴在徽章右边，比徽章弱一档。它是限定语不是主张——抢过徽章就本末倒置了。 */
+.ao-card-age { font-size: 0.62rem; color: var(--muted-foreground, #8a8a99); white-space: nowrap; }
 .ao-card-agents {
   overflow: hidden;
   color: #9a8ab8;

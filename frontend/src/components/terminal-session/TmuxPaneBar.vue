@@ -90,6 +90,13 @@
     >
       <div class="tpb-tip-row"><span class="tpb-tip-k">目录</span><span class="tpb-tip-v tpb-tip-cwd">{{ tipCwd }}</span></div>
       <div class="tpb-tip-row"><span class="tpb-tip-k">状态</span><span class="tpb-tip-v">{{ tipStatus }}</span></div>
+      <!-- 状态的年龄。没有它，「运行中」和「十小时前那条没人再写的 transcript」在屏幕上一模一样。
+           叫「最后活动」不叫「最近更新」：后者会被读成「这个面板刷新于」——那个值永远是「刚刚」，
+           对读的人没有任何信息量，而且正好是这一行特意避开的那个含义。 -->
+      <div v-if="tipActivity" class="tpb-tip-row">
+        <span class="tpb-tip-k">最后活动</span>
+        <span class="tpb-tip-v" :title="tipActivityExact">{{ tipActivity }}<span v-if="tipStale" class="tpb-tip-note"> · 状态可能已过期</span></span>
+      </div>
     </div>
   </Teleport>
 </template>
@@ -98,7 +105,8 @@
 import { computed, ref } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-import { windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { windowActivityAt, windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { relativeFromMs } from '@terminal/utils/time'
 
 const props = defineProps<{
   sessionId: string
@@ -175,6 +183,10 @@ function winStatusLabel(w: TmuxWindowState): string {
 
 const tipWin = ref<number | null>(null)
 const tipPos = ref({ left: 0, top: 0 })
+// 提示框开着期间的秒针。只在开着的时候跑，关掉就停——一个常驻定时器为了一个几秒的浮层每秒
+// 唤醒整个组件，正是这个仓库刚花力气从渲染链路上拆掉的那类开销。
+const tipNow = ref(Date.now())
+let tipTick: ReturnType<typeof setInterval> | null = null
 let touched = false // set on touchstart so we can tell a tap (auto-dismiss) from a hover
 let tipTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -185,15 +197,36 @@ const tipStatus = computed(() => {
   return windowAgentSignals(tipWindow.value).join(' · ') || winStatusLabel(tipWindow.value)
 })
 
+// 证据的年龄。用已有的 relativeFromMs（不另造一套「刚刚/N分钟前」），tipNow 让这个值在提示框
+// 开着的时候继续走——相对时间是会腐坏的量：算一次就钉住，等于对着人说「刚刚」直到天荒地老。
+const tipActivityMs = computed(() => (tipWindow.value ? windowActivityAt(tipWindow.value) : 0))
+const tipActivity = computed(() => {
+  void tipNow.value
+  return tipActivityMs.value ? relativeFromMs(tipActivityMs.value) : ''
+})
+const tipActivityExact = computed(() =>
+  tipActivityMs.value ? new Date(tipActivityMs.value).toLocaleString('zh-CN') : '',
+)
+// 「运行中」却很久没写过东西，就是那个自己不会喊的故障。把它标出来，靠人一眼看见，
+// 而不是靠人去翻日志。阈值取得宽：真在跑的 agent 每几秒就落一行。
+const tipStale = computed(() => {
+  void tipNow.value
+  if (!tipActivityMs.value || !tipWindow.value) return false
+  return windowRawStatus(tipWindow.value) === 'running' && Date.now() - tipActivityMs.value > 5 * 60_000
+})
+
 function showTip(w: TmuxWindowState, el: HTMLElement): void {
   if (!windowCwd(w)) return // no cwd yet → don't pop an empty tip
   const r = el.getBoundingClientRect()
   const width = 240
   tipPos.value = { left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)), top: r.bottom + 6 }
   tipWin.value = w.index
+  tipNow.value = Date.now()
+  if (!tipTick) tipTick = setInterval(() => { tipNow.value = Date.now() }, 1000)
 }
 function hideTip(): void {
   tipWin.value = null
+  if (tipTick) { clearInterval(tipTick); tipTick = null }
   if (tipTimer) { clearTimeout(tipTimer); tipTimer = null }
 }
 function onWinHover(w: TmuxWindowState, e: MouseEvent): void {
@@ -393,4 +426,9 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   font-family: var(--dw-mono, ui-monospace, monospace);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 「运行中」但久未落笔 —— 用一句话，不用颜色。
+   琥珀(--status-done / #e3b341)在这套配色里已经占了「需要你看一眼」的意思；而「证据过期」说的是
+   **别信这个读数**，不是**按这个读数行动**。同一个信号扛两个意思，结果是两个都学不会。提示框本来
+   就是读的、不是扫的，文字比再造一个色码更准，也不多花一个颜色。 */
+.tpb-tip-note { color: #8a76a8; }
 </style>

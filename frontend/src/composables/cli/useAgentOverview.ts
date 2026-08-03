@@ -141,6 +141,26 @@ export function windowCwd(w: TmuxWindowState): string {
   return (panes.find((p) => p.active) ?? panes[0])?.cwd ?? ''
 }
 
+/**
+ * 这个窗口里 agent 最后一次动的时刻（epoch ms；0 = 无从得知）。
+ *
+ * 取所有 agent pane 里最新的一个：一个窗口里只要还有 agent 在写，这个窗口就不是"陈的"。
+ * 它服务于一件事——让状态可被人**证伪**。状态本身没有年龄时，「运行中」这三个字既可能是
+ * 真的在跑，也可能是十小时前某条没人再写的 transcript 留下的，而这两者在屏幕上长得一模一样。
+ */
+export function windowActivityAt(w: TmuxWindowState): number {
+  let newest = 0
+  for (const p of w.panes ?? []) {
+    // isDatedSince 是本仓库对「Go 的零时间会被序列化成 0001-01-01，不会被 omitempty 吃掉」
+    // 这件事的既有共识（awaitingSince 一路都这么过滤）。一个定位不到 transcript 的 pane 正是
+    // 会带着零时间过来，不挡住就会在提示框里显示"17755921 小时前"。
+    if (!p.agentTool || !isDatedSince(p.activityAt)) continue
+    const ms = Date.parse(p.activityAt)
+    if (Number.isFinite(ms) && ms > newest) newest = ms
+  }
+  return newest
+}
+
 /** The window's active agent tool, if any (claude/codex badge). */
 export function windowTool(w: TmuxWindowState): string {
   const panes = w.panes ?? []
@@ -282,6 +302,15 @@ export interface OverviewUnit {
    * 这条路径并不知道），所以 tmux 那侧留空而不是猜一个。
    */
   agentSaid?: string
+  /**
+   * 这个单元的 agent 最后一次**写 transcript** 的时刻（epoch ms）。省略/0 = 无从得知。
+   *
+   * 它是 rawStatus 这条结论的**证据年龄**。放进 OverviewUnit 而不是只放在 tmux 那侧，是因为
+   * 「一个没有年龄的状态无法被证伪」对两种来源同样成立：一条十小时没人再写的 transcript 撑出来的
+   * 「运行中」，和真的在跑，在屏幕上长得一模一样。非 tmux 来源暂时给不出这个值 → 省略，卡片就不显示，
+   * 而不是编一个「刚刚」。
+   */
+  activityAt?: number
   /** Last few lines of REAL output (agent chrome already stripped, server-side). */
   tail: string[]
   /**
@@ -310,6 +339,7 @@ export function tmuxWindowsToUnits(windows: TmuxWindowState[]): OverviewUnit[] {
     awaiting: windowAwaiting(w),
     awaitingSince: windowAwaitingSince(w),
     signals: windowAgentSignals(w),
+    activityAt: windowActivityAt(w),
     tail: w.tail ?? [],
   }))
 }
