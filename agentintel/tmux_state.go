@@ -635,6 +635,20 @@ func paneKey(p TmuxPane) string {
 // working — so it is the tiebreaker whenever the transcript-derived status may be stale or (Claude,
 // cwd-located) mis-attributed. Returns PromptUnknown on any capture error, so an ambiguous read
 // never overrides the transcript.
+// paneTailLines is the raw form of the same capture panePromptVerdict classifies. It exists for
+// the transcript tiebreak, which needs the TEXT rather than a verdict about it — see
+// matchPaneToTranscript. An error yields nil, and nil simply means "no evidence": the caller then
+// falls back to the mtime guess it would have made anyway.
+func (s *TmuxStateService) paneTailLines(ctx context.Context, p TmuxPane) []string {
+	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	defer cancel()
+	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
+	if err != nil {
+		return nil
+	}
+	return lines
+}
+
 func (s *TmuxStateService) panePromptVerdict(ctx context.Context, p TmuxPane) OutputVerdict {
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
 	defer cancel()
@@ -668,7 +682,12 @@ func (s *TmuxStateService) paneDecision(ctx context.Context, p TmuxPane, agent D
 	// use the driver; a Running result is still confirmed against the pane for a
 	// terminal-only permission prompt.
 	if tool == ToolClaude || tool == ToolCodex {
-		if st, ok := s.paneMonitor.Status(paneKey(p), p.PaneCWD, tool, agent.ProcessPID); ok {
+		// The tail closure is the ONLY new cost here and it is almost never paid: the monitor
+		// invokes it exclusively when a claude pane's identity lookup missed AND two or more
+		// transcripts in this cwd are still unclaimed — the ambiguity that used to be settled by
+		// mtime order, i.e. by luck. Everything else keeps the cached binding and captures nothing.
+		tail := func() []string { return s.paneTailLines(ctx, p) }
+		if st, ok := s.paneMonitor.StatusWithTail(paneKey(p), p.PaneCWD, tool, tail, agent.ProcessPID); ok {
 			switch st {
 			case StatusRunning:
 				// A pending tool may instead be blocked on a permission [Y/n] — that prompt

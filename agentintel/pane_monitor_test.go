@@ -91,8 +91,8 @@ func TestPaneMonitorMutualExclusion(t *testing.T) {
 	m := NewPaneAgentMonitor(nil)
 
 	m.mu.Lock()
-	p1 := m.entryLocked("p1", cwd, ToolClaude, 1).path
-	p2 := m.entryLocked("p2", cwd, ToolClaude, 2).path
+	p1 := m.entryLocked("p1", cwd, ToolClaude, nil, 1).path
+	p2 := m.entryLocked("p2", cwd, ToolClaude, nil, 2).path
 	m.mu.Unlock()
 
 	if p1 == "" || p2 == "" {
@@ -116,7 +116,7 @@ func TestPaneMonitorSinglePaneNewest(t *testing.T) {
 	defer writeClaudeSessions(t, cwd, "sess-newest", "sess-older")()
 	m := NewPaneAgentMonitor(nil)
 	m.mu.Lock()
-	p := m.entryLocked("solo", cwd, ToolClaude, 1).path
+	p := m.entryLocked("solo", cwd, ToolClaude, nil, 1).path
 	m.mu.Unlock()
 	if !strings.HasSuffix(p, "sess-newest.jsonl") {
 		t.Errorf("lone pane should take the newest, got %q", p)
@@ -133,7 +133,7 @@ func TestPaneMonitorSticky(t *testing.T) {
 	m := NewPaneAgentMonitor(nil)
 
 	m.mu.Lock()
-	first := m.entryLocked("p1", cwd, ToolClaude, 1).path
+	first := m.entryLocked("p1", cwd, ToolClaude, nil, 1).path
 	// Simulate the relocate window having elapsed.
 	m.cache["p1"].locatedAt = time.Now().Add(-pathRelocateAfter - time.Second)
 	m.mu.Unlock()
@@ -142,7 +142,7 @@ func TestPaneMonitorSticky(t *testing.T) {
 	defer writeClaudeSessions(t, cwd, "sess-newer")()
 
 	m.mu.Lock()
-	after := m.entryLocked("p1", cwd, ToolClaude, 1).path
+	after := m.entryLocked("p1", cwd, ToolClaude, nil, 1).path
 	m.mu.Unlock()
 
 	if after != first {

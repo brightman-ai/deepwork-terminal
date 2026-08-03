@@ -71,7 +71,7 @@ func (m *PaneAgentMonitor) Active(key, cwd string, tool AgentTool, processPID ..
 		return true
 	}
 	m.mu.Lock()
-	path := m.entryLocked(key, cwd, tool, processPID...).path
+	path := m.entryLocked(key, cwd, tool, nil, processPID...).path
 	m.mu.Unlock()
 	if path == "" {
 		return true // can't locate yet → assume busy, don't read the terminal as a prompt
@@ -104,12 +104,24 @@ func (m *PaneAgentMonitor) Prune(keep map[string]bool) {
 // cannot tell them apart. ok is false when the transcript isn't locatable yet (the
 // caller then falls back to the terminal read).
 func (m *PaneAgentMonitor) Status(key, cwd string, tool AgentTool, processPID ...int) (AgentStatus, bool) {
+	return m.statusWith(key, cwd, tool, nil, processPID...)
+}
+
+// StatusWithTail is Status plus a way to READ the pane, used only to settle which transcript
+// belongs to this pane when nothing cheaper can (see locate). Callers that hold the pane — the
+// tmux scan — should prefer it; callers that don't (the per-session agent tap) keep Status and
+// simply lose the tiebreak, which leaves them exactly where they were.
+func (m *PaneAgentMonitor) StatusWithTail(key, cwd string, tool AgentTool, tail PaneTailFunc, processPID ...int) (AgentStatus, bool) {
+	return m.statusWith(key, cwd, tool, tail, processPID...)
+}
+
+func (m *PaneAgentMonitor) statusWith(key, cwd string, tool AgentTool, tail PaneTailFunc, processPID ...int) (AgentStatus, bool) {
 	if m == nil || tool == ToolNone || key == "" {
 		return StatusNone, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pt := m.entryLocked(key, cwd, tool, processPID...)
+	pt := m.entryLocked(key, cwd, tool, tail, processPID...)
 	if pt.path == "" {
 		return StatusNone, false
 	}
@@ -147,9 +159,43 @@ func (m *PaneAgentMonitor) Snapshot(key string) AgentState {
 	return pt.driver.AgentState()
 }
 
+// TranscriptWrittenAt returns when the pane's bound transcript was last written, or the zero
+// time when there is no transcript to ask about. This is the AGE OF THE EVIDENCE behind the
+// pane's status — the number that lets a human see "running · 10 小时前" and know something is
+// wrong without reading a log.
+//
+// Deliberately the file's mtime rather than "when the server last polled": the poll time is
+// always now and would reassure the reader about nothing. Cheap and cache-only — it never
+// locates, so it must be called after Status()/Active() have bound the pane this cycle.
+func (m *PaneAgentMonitor) TranscriptWrittenAt(key string) time.Time {
+	if m == nil || key == "" {
+		return time.Time{}
+	}
+	m.mu.Lock()
+	pt := m.cache[key]
+	path := ""
+	if pt != nil {
+		path = pt.path
+	}
+	m.mu.Unlock()
+	if path == "" {
+		return time.Time{}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+// PaneTailFunc lazily yields the pane's last visible lines. A closure, not the lines themselves,
+// because reading a pane costs a tmux command on a single-threaded server and the disambiguation
+// that needs it almost never runs — see matchPaneToTranscript.
+type PaneTailFunc func() []string
+
 // entryLocked returns the pane's cache entry, (re)locating the transcript path
 // periodically (a path change drops the now-stale driver). m.mu MUST be held.
-func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, processPID ...int) *paneTranscript {
+func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, tail PaneTailFunc, processPID ...int) *paneTranscript {
 	pt, ok := m.cache[key]
 	pid := 0
 	if len(processPID) > 0 {
@@ -172,7 +218,7 @@ func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, processP
 			return pt
 		}
 	}
-	resolved := m.locate(cwd, tool, pid, m.boundElsewhereLocked(key))
+	resolved := m.locate(cwd, tool, pid, m.boundElsewhereLocked(key), tail)
 	if pt == nil {
 		pt = &paneTranscript{}
 		m.cache[key] = pt
@@ -207,19 +253,43 @@ func (m *PaneAgentMonitor) boundElsewhereLocked(selfKey string) map[string]bool 
 	return out
 }
 
-func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool, processPID int, boundElsewhere map[string]bool) string {
+func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool, processPID int, boundElsewhere map[string]bool, tail PaneTailFunc) string {
 	switch tool {
 	case ToolClaude:
-		// Claude doesn't hold its transcript fd open (unlike Codex) and the process exposes no
-		// session id — so a pane can only be located by cwd, which is AMBIGUOUS when two Claude
-		// panes share a repo. Newest-first, SKIPPING any file already owned by another pane, makes
-		// the shared-cwd case collision-free: each pane keeps its own session file instead of
-		// snapping to whichever sibling most recently wrote.
+		// Identity first. claude publishes its own PID → sessionId record, and a pane already
+		// knows the PID, so ownership is a lookup rather than a guess. This is what the cwd scan
+		// below cannot do: with two claude panes in one repo it can only keep them DISTINCT, not
+		// correct, and observed on a live machine it handed a helper pane the main pane's
+		// transcript — which had been interrupted mid-turn, so the helper sat green for ten hours
+		// with an idle prompt on its own screen.
+		if p, err := m.locator.ClaudeSessionForProcess(processPID, cwd); err == nil && p != "" {
+			return p
+		}
+		// Fallback: claude doesn't hold its transcript fd open (unlike Codex), so without that
+		// record a pane can only be located by cwd, which is AMBIGUOUS when two claude panes share
+		// a repo. Reached by a claude too old to write the record, or before its transcript exists.
 		if files, err := m.locator.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
+			free := make([]string, 0, len(files))
 			for _, f := range files {
 				if !boundElsewhere[f] {
-					return f
+					free = append(free, f)
 				}
+			}
+			// Ask the pane. ONLY with a real ambiguity to settle (two or more candidates still
+			// free) and a way to read it — so the common case pays nothing, and the expensive
+			// case is the one that was previously decided by a coin flip. tail is a closure for
+			// exactly that reason: nothing is captured unless this line is reached.
+			if len(free) > 1 && tail != nil {
+				if p := matchPaneToTranscript(tail(), free); p != "" {
+					return p
+				}
+			}
+			// Newest-first, SKIPPING any file already owned by another pane. This keeps the
+			// shared-cwd case collision-free — each pane keeps its own session file instead of
+			// snapping to whichever sibling most recently wrote — but collision-free is not the
+			// same as correct, which is why the pane is consulted first when it can be.
+			if len(free) > 0 {
+				return free[0]
 			}
 			// Every candidate is already claimed by a sibling — this pane's own file is among them
 			// but indistinguishable; the newest degrades better than "unknown" (and the PTY-spinner

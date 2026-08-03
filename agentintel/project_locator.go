@@ -56,6 +56,70 @@ func (pl *ProjectLocator) ClaudeProjectsRoot() string {
 	return transcript.ClaudeProjectsRoot()
 }
 
+// claudeSessionIndex is claude's own PID → session record, written at
+// <ClaudeHome>/sessions/<pid>.json when the CLI starts. Only the fields we rely on are
+// named; the file carries more (name, status, version) that is deliberately NOT read —
+// status in particular, because a second opinion about whether an agent is busy is how
+// two sources of truth start disagreeing. The transcript stays the authority on state;
+// this file answers WHICH transcript, and nothing else.
+type claudeSessionIndex struct {
+	PID       int    `json:"pid"`
+	SessionID string `json:"sessionId"`
+	CWD       string `json:"cwd"`
+}
+
+// ClaudeSessionForProcess maps a live claude PID to the transcript that process is writing.
+//
+// This exists because cwd is NOT an identity. A repo with two claude panes open (a main
+// session and a helper, say) has two transcripts in one project shard, and picking among
+// them by mtime — even while skipping the files siblings already claimed — decides ownership
+// by whoever resolved first. Observed on a live machine: the helper pane bound the MAIN
+// pane's transcript, inherited its interrupted turn, and sat green for ten hours while its
+// own screen showed an idle prompt. Distinctness was never the missing property; correctness
+// was.
+//
+// claude publishes the mapping itself, keyed by PID, which is exactly the identity a pane
+// already has (tmux → pane_pid → the agent process). So this is a lookup, not a heuristic —
+// the same shape CodexSessionForProcess has had all along, and the reason Codex panes never
+// showed this bug.
+//
+// Every failure is a miss, never a wrong answer: a claude too old to write the file, a
+// CLAUDE_CONFIG_DIR the caller cannot read, a session whose transcript has not appeared yet.
+// The caller falls back to the cwd scan, which is where this started — no worse than before,
+// and no pretending.
+func (pl *ProjectLocator) ClaudeSessionForProcess(processPID int, projectPath string) (string, error) {
+	if processPID <= 0 {
+		return "", os.ErrNotExist
+	}
+	raw, err := os.ReadFile(filepath.Join(transcript.ClaudeHome(), "sessions", strconv.Itoa(processPID)+".json"))
+	if err != nil {
+		return "", err
+	}
+	var idx claudeSessionIndex
+	if err := json.Unmarshal(raw, &idx); err != nil {
+		return "", err
+	}
+	if idx.SessionID == "" {
+		return "", os.ErrNotExist
+	}
+	// PID reuse is the one way this record can lie, and it is largely self-healing: every
+	// claude writes this file at startup, so a live claude PID's record is that claude's own.
+	// The residual case — the PID inherited by something that never rewrites it — is caught by
+	// the two checks below: the recorded cwd must still be the pane's, and the transcript it
+	// names must exist. A record that fails either is treated as absent.
+	dir := idx.CWD
+	if dir == "" {
+		dir = projectPath
+	} else if projectPath != "" && canonicalPath(dir) != canonicalPath(projectPath) {
+		return "", os.ErrNotExist
+	}
+	path := filepath.Join(pl.ClaudeProjectDir(dir), idx.SessionID+transcript.JSONLSuffix)
+	if _, err := os.Stat(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // ClaudeAllSessionFiles returns every .jsonl across ALL Claude projects, newest first.
 // Used by the cross-project input drawer. Missing root → empty slice.
 func (pl *ProjectLocator) ClaudeAllSessionFiles() []string {
