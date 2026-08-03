@@ -65,7 +65,27 @@ export interface UsageProviderRow {
   /** YYYY-MM-DD: the OLDEST price-rule verification date behind this row's money (staleness bound). */
   price_verified_at?: string
   top_model?: string
+  /**
+   * Published rate cards for `top_model`, the one the money was computed with first.
+   *
+   * A currency SYMBOL is not evidence. Moonshot sells kimi-k3 at both ¥20/M and $3.00/M — the
+   * same price at its own 6.67 conversion — so a bare「$85.93」leaves no way to tell which list
+   * produced it, while being wrong by 6.67× still looks entirely plausible. Showing the unit
+   * price settles it without anyone holding an exchange rate.
+   */
+  unit_prices?: UsageRateCard[]
   spark?: number[]
+}
+
+/** One vendor-published rate card. Never a converted one — see `unit_prices`. */
+export interface UsageRateCard {
+  currency: string
+  input_per_m: number
+  output_per_m: number
+  cache_read_per_m: number
+  source_url?: string
+  /** The card this row's money was actually computed with. Others are context. */
+  primary?: boolean
 }
 export interface UsageReportData {
   window: string
