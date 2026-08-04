@@ -549,16 +549,15 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 	case transcript.KindCodex:
 		cursor := transcript.CodexRequestCursor{}
 		if !identity.root {
-			// Codex may materialize a fork by copying the complete parent rollout
-			// after the child's session_meta. Those rows are context, not new child
-			// requests. Start at the child's own task_started event so parent token
-			// facts are never charged twice.
-			cursor.Offset, err = codexSubagentOwnStartOffset(path, identity.sessionID)
+			// Codex materializes a fork by copying the parent rollout in after the child's
+			// session_meta. Those rows are context, not new child requests — but the SETTINGS
+			// among them are inherited, and for a forked or resumed thread they are the only
+			// record of the billing tier there will ever be. kit returns a cursor that starts
+			// past the parent's spend while carrying the parent's configuration.
+			cursor, err = transcript.CodexOwnStart(path, identity.sessionID)
 			if err != nil {
 				return agentFileProjection{}, err
 			}
-			cursor.SessionID = identity.sessionID
-			cursor.Provider = "openai"
 		}
 		facts, projection.codexCursor, err = transcript.ScanCodexRequestUsageIncremental(path, cursor)
 	case transcript.KindClaude:
@@ -576,20 +575,6 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 	}
 	rebuildEconomicRequests(&projection.dataset)
 	return projection, nil
-}
-
-// codexSubagentOwnStartOffset returns the first byte owned by the child
-// session. A direct child rollout has no embedded session_meta and starts at
-// byte zero. A fork snapshot has a second session_meta followed by inherited
-// parent events; the child's own UUIDv7 task is the authoritative boundary.
-// codexSubagentOwnStartOffset delegates to kit, which owns this boundary now.
-//
-// It used to live here, and kit's own whole-file reader did not know about it — so every other
-// consumer of ScanCodexRequestUsage (the pricecov probe, most obviously) read forks from byte 0
-// and counted the copied parent history as the child's own work. The rule belongs next to the
-// parser that has to honour it, not next to one of its callers.
-func codexSubagentOwnStartOffset(path, sessionID string) (int64, error) {
-	return transcript.CodexOwnStartOffset(path, sessionID)
 }
 
 func appendAgentFileProjection(ctx context.Context, path string, identity agentFileIdentity, cached agentFileProjection, cutoff time.Time) (agentFileProjection, bool, error) {
