@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -583,60 +582,14 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 // session. A direct child rollout has no embedded session_meta and starts at
 // byte zero. A fork snapshot has a second session_meta followed by inherited
 // parent events; the child's own UUIDv7 task is the authoritative boundary.
+// codexSubagentOwnStartOffset delegates to kit, which owns this boundary now.
+//
+// It used to live here, and kit's own whole-file reader did not know about it — so every other
+// consumer of ScanCodexRequestUsage (the pricecov probe, most obviously) read forks from byte 0
+// and counted the copied parent history as the child's own work. The rule belongs next to the
+// parser that has to honour it, not next to one of its callers.
 func codexSubagentOwnStartOffset(path, sessionID string) (int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	sessionMillis, validSessionID := uuidV7Millis(sessionID)
-	reader := bufio.NewReader(f)
-	var offset int64
-	inherited := false
-	for {
-		lineStart := offset
-		line, readErr := reader.ReadBytes('\n')
-		offset += int64(len(line))
-		if len(line) > 0 {
-			var row struct {
-				Type    string `json:"type"`
-				Payload struct {
-					Type   string `json:"type"`
-					ID     string `json:"id"`
-					TurnID string `json:"turn_id"`
-				} `json:"payload"`
-			}
-			if json.Unmarshal(line, &row) == nil {
-				if row.Type == "session_meta" && row.Payload.ID != "" && row.Payload.ID != sessionID {
-					inherited = true
-				}
-				if inherited && row.Type == "event_msg" && row.Payload.Type == "task_started" && validSessionID {
-					if taskMillis, ok := uuidV7Millis(row.Payload.TurnID); ok && taskMillis >= sessionMillis && taskMillis-sessionMillis <= int64((10*time.Minute)/time.Millisecond) {
-						return lineStart, nil
-					}
-				}
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			return 0, readErr
-		}
-	}
-	if !inherited {
-		return 0, nil
-	}
-	return 0, fmt.Errorf("codex child boundary not found: %s", filepath.Base(path))
-}
-
-func uuidV7Millis(value string) (int64, bool) {
-	hex := strings.ReplaceAll(strings.TrimSpace(value), "-", "")
-	if len(hex) < 12 {
-		return 0, false
-	}
-	millis, err := strconv.ParseInt(hex[:12], 16, 64)
-	return millis, err == nil
+	return transcript.CodexOwnStartOffset(path, sessionID)
 }
 
 func appendAgentFileProjection(ctx context.Context, path string, identity agentFileIdentity, cached agentFileProjection, cutoff time.Time) (agentFileProjection, bool, error) {

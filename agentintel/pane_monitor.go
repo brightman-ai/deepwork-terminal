@@ -146,6 +146,23 @@ func (m *PaneAgentMonitor) statusWith(key, cwd string, tool AgentTool, tail Pane
 // One accessor rather than one method per field: every caller wants the same consistent view of
 // ONE driver read, and three getters made it possible to mix a fresh AwaitingUser with a stale
 // AwaitingSince — a real hazard now that the frontend dismisses dots by timestamp.
+// Located reports whether this pane currently has a transcript bound to it.
+//
+// Cache-only, and deliberately so: it answers "do we know which file this pane writes", not "go
+// find one". Callers use it to separate two states Active() flattens into a single true — a
+// transcript that was just written (evidence of work) from one that could not be found at all
+// (no evidence of anything). Reporting both as「transcript.writing」names a file that does not
+// exist, which is the kind of claim that sends the reader looking for a bug in the wrong place.
+func (m *PaneAgentMonitor) Located(key string) bool {
+	if m == nil || key == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pt := m.cache[key]
+	return pt != nil && pt.path != ""
+}
+
 func (m *PaneAgentMonitor) Snapshot(key string) AgentState {
 	if m == nil || key == "" {
 		return AgentState{}

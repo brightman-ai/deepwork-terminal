@@ -736,6 +736,15 @@ func (s *TmuxStateService) paneDecision(ctx context.Context, p TmuxPane, agent D
 	// is the one arm where the SCREEN ALONE can declare Waiting — there is no transcript
 	// opinion to confirm — so its decisions carry the screen rule and the line that matched.
 	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) {
+		// Active() answers true for two different reasons and only one of them is evidence: the
+		// transcript was written recently, OR it could not be located at all (in which case it
+		// assumes busy rather than misreading a starting agent's screen as an idle prompt).
+		// Reporting both as「transcript.writing」claims a file is being written when there is no
+		// file — the green pane that started this had exactly that rule and no transcript, so the
+		// rule sent every reader looking in the wrong place.
+		if !s.paneMonitor.Located(paneKey(p)) {
+			return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptUnlocatable}
+		}
 		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptWriting}
 	}
 	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
