@@ -61,13 +61,22 @@ type agentFileProjection struct {
 // Unchanged files are never reparsed. A malformed file contributes a stable
 // diagnostic without deleting the last-good facts from other runtimes.
 type agentReporter struct {
-	mu           sync.Mutex
-	files        map[string]agentFileProjection
-	reports      map[string]agentReportCacheEntry
+	mu      sync.Mutex
+	files   map[string]agentFileProjection
+	reports map[string]agentReportCacheEntry
+	// revision counts changes to the file projections. It is the identity of the fact set:
+	// a window combined at revision N is still exactly right at revision N.
+	revision     uint64
+	datasets     map[string]datasetMemo
 	now          func() time.Time
 	index        *agentIndexStore
 	deepworkRoot string
 	drivers      map[string]reportAgentTreeDriver
+}
+
+type datasetMemo struct {
+	revision uint64
+	dataset  agentanalytics.ActivityDataset
 }
 
 type reportAgentTreeDriver interface {
@@ -81,7 +90,7 @@ type agentReportCacheEntry struct {
 }
 
 func newAgentReporter(dataDir ...string) *agentReporter {
-	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
+	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), datasets: make(map[string]datasetMemo), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
 	if len(dataDir) > 0 && strings.TrimSpace(dataDir[0]) != "" {
 		a.index = newAgentIndexStore(dataDir[0], agentReportIndexVersion)
 		a.deepworkRoot = filepath.Join(dataDir[0], "transcripts", "sessions")
@@ -98,7 +107,7 @@ func (a *agentReporter) Report(ctx context.Context, window, timezone string, for
 	if cached, ok := a.reports[key]; !forced && ok && a.now().Sub(cached.builtAt) < agentReportCacheTTL {
 		return cached.report
 	}
-	dataset := a.refreshLocked(ctx, reportCutoff(a.now(), window))
+	dataset := a.refreshLocked(ctx, window)
 	report := agentanalytics.BuildActivityReport(dataset, window, timezone, a.now())
 	a.reports[key] = agentReportCacheEntry{report: report, builtAt: a.now()}
 	return report
@@ -107,25 +116,31 @@ func (a *agentReporter) Report(ctx context.Context, window, timezone string, for
 func (a *agentReporter) Dataset(ctx context.Context, window string) agentanalytics.ActivityDataset {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.refreshLocked(ctx, reportCutoff(a.now(), window))
+	return a.refreshLocked(ctx, window)
 }
 
 func (a *agentReporter) Detail(ctx context.Context, window, timezone string, filter agentanalytics.DetailFilter) agentanalytics.ActivityDetailReport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	dataset := a.refreshLocked(ctx, reportCutoff(a.now(), window))
+	dataset := a.refreshLocked(ctx, window)
 	return agentanalytics.BuildActivityDetail(dataset, window, timezone, a.now(), filter)
 }
 
-func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) agentanalytics.ActivityDataset {
+func (a *agentReporter) refreshLocked(ctx context.Context, window string) agentanalytics.ActivityDataset {
+	cutoff := reportCutoff(a.now(), window)
 	paths := recentAgentTranscriptFiles(cutoff, a.deepworkRoot)
 	live := make(map[string]struct{}, len(paths))
 	hadProjection := len(a.files) > 0
 	changedFiles := 0
 	var sourceHighWatermark time.Time
-	// Only these paths get written back. A refresh that re-projects one appended rollout
-	// must cost one shard write, not a rewrite of every projection on disk.
+	// Two different questions, deliberately not one flag. `restated` is which shards need
+	// WRITING — a refresh that re-projects one appended rollout must cost one shard write,
+	// not a rewrite of every projection on disk. `dirty` is whether the fact set MOVED at
+	// all, which is what invalidates the combined-dataset memos; a projection can change
+	// without earning a write (a parse diagnostic is re-derived next refresh), and treating
+	// the two as the same flag is how a diagnostic goes invisible behind a stale memo.
 	var restated []string
+	dirty := false
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			break
@@ -149,6 +164,7 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 				// not erase last-good history.
 				cached.dataset.IngestDiagnostics = appendUniqueString(cached.dataset.IngestDiagnostics, "transcript_parse_failed:"+filepath.Base(path))
 				a.files[path] = cached
+				dirty = true
 				continue
 			}
 			projection.dataset.IngestDiagnostics = append(projection.dataset.IngestDiagnostics, "transcript_parse_failed:"+filepath.Base(path))
@@ -157,9 +173,26 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 		projection.modUnixNano = info.ModTime().UnixNano()
 		a.files[path] = projection
 		restated = append(restated, path)
+		dirty = true
 		changedFiles++
 	}
+	if dirty {
+		a.revision++
+	}
+	// The combine below is a pure function of the projections it reads, so a window whose
+	// projections have not moved since it was last combined has nothing to recompute.
+	//
+	// Without this, four windows prefetched in parallel each rebuilt the same ~90k-row
+	// dataset, one after another behind this mutex. That queue — not the size of any window
+	// — is why「7天很快、14天很慢」: 14d is third in the fixed prefetch order and waited out
+	// the two ahead of it. Firing the same four in reverse moved the slowness to 24h, which
+	// is the cheapest window there is.
+	if memo, ok := a.datasets[window]; ok && memo.revision == a.revision {
+		return a.stampProjection(memo.dataset, len(live), changedFiles, hadProjection, sourceHighWatermark)
+	}
+
 	var combined agentanalytics.ActivityDataset
+	repriced := false
 	for path := range live {
 		cached, ok := a.files[path]
 		if !ok {
@@ -175,6 +208,7 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 			cached.reprice()
 			a.files[path] = cached
 			restated = append(restated, path)
+			repriced = true
 		}
 		combined.WorkItems = append(combined.WorkItems, cached.dataset.WorkItems...)
 		combined.Assignments = append(combined.Assignments, cached.dataset.Assignments...)
@@ -189,6 +223,20 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 		a.index.save(path, a.files[path])
 	}
 	sort.Strings(combined.IngestDiagnostics)
+	if repriced {
+		// A new price table invalidates every window, not just this one — the memos the
+		// other three are holding were combined from the prices this pass just replaced.
+		a.revision++
+	}
+	a.datasets[window] = datasetMemo{revision: a.revision, dataset: combined}
+	return a.stampProjection(combined, len(live), changedFiles, hadProjection, sourceHighWatermark)
+}
+
+// stampProjection describes THIS refresh, not the one that built the dataset. Freshness is a
+// property of the call — a memo hit still just walked every source file and found nothing new,
+// and must say so — while the facts underneath are shared, read-only, and unchanged. The
+// dataset is taken by value, so only the small observability header is rewritten.
+func (a *agentReporter) stampProjection(dataset agentanalytics.ActivityDataset, sourceFiles, changedFiles int, hadProjection bool, highWatermark time.Time) agentanalytics.ActivityDataset {
 	mode := "cached"
 	if changedFiles > 0 {
 		mode = "incremental"
@@ -196,21 +244,21 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 			mode = "full_rebuild"
 		}
 	}
-	projectionState := "complete"
-	if len(combined.IngestDiagnostics) > 0 {
-		projectionState = "partial"
+	state := "complete"
+	if len(dataset.IngestDiagnostics) > 0 {
+		state = "partial"
 	}
-	combined.Projection = agentanalytics.ProjectionObservability{
-		State: projectionState, Mode: mode, RefreshedAt: a.now(), SourceFiles: len(live), ChangedFiles: changedFiles,
-		Diagnostics: append([]string(nil), combined.IngestDiagnostics...),
+	dataset.Projection = agentanalytics.ProjectionObservability{
+		State: state, Mode: mode, RefreshedAt: a.now(), SourceFiles: sourceFiles, ChangedFiles: changedFiles,
+		Diagnostics: append([]string(nil), dataset.IngestDiagnostics...),
 	}
-	if !sourceHighWatermark.IsZero() {
-		combined.Projection.SourceHighWatermark = &sourceHighWatermark
+	if !highWatermark.IsZero() {
+		dataset.Projection.SourceHighWatermark = &highWatermark
 	}
 	if a.index != nil {
-		combined.Projection.IndexSchema = agentReportIndexSchema
+		dataset.Projection.IndexSchema = agentReportIndexSchema
 	}
-	return combined
+	return dataset
 }
 
 func reportCutoff(now time.Time, window string) time.Time {
