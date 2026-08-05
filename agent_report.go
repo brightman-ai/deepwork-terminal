@@ -47,7 +47,14 @@ type agentFileProjection struct {
 	// pricedWith is the pricing snapshot the economic projection was built against, and it is
 	// persisted with the projection. A day already priced under the current price table is
 	// never priced again — not on the next call, not after a restart.
-	pricedWith     string
+	pricedWith string
+	// daily is this file's facts folded by local calendar day, and dailyZone the timezone
+	// whose calendar was used. Held per FILE rather than per window because that is the grain
+	// at which it goes stale: an appended rollout re-folds its own days and every window
+	// re-reads the rest. Not persisted — it is one pass over facts already in memory, and it
+	// depends on a timezone the index has no business remembering.
+	daily          map[string]kitusage.DailyUsage
+	dailyZone      string
 	generation     string
 	runtime        string
 	sessionID      string
@@ -68,6 +75,7 @@ type agentReporter struct {
 	// a window combined at revision N is still exactly right at revision N.
 	revision     uint64
 	datasets     map[string]datasetMemo
+	usageReports map[string]usageReportMemo
 	now          func() time.Time
 	index        *agentIndexStore
 	deepworkRoot string
@@ -77,6 +85,11 @@ type agentReporter struct {
 type datasetMemo struct {
 	revision uint64
 	dataset  agentanalytics.ActivityDataset
+}
+
+type usageReportMemo struct {
+	revision uint64
+	report   kitusage.UsageReport
 }
 
 type reportAgentTreeDriver interface {
@@ -90,7 +103,7 @@ type agentReportCacheEntry struct {
 }
 
 func newAgentReporter(dataDir ...string) *agentReporter {
-	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), datasets: make(map[string]datasetMemo), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
+	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), datasets: make(map[string]datasetMemo), usageReports: make(map[string]usageReportMemo), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
 	if len(dataDir) > 0 && strings.TrimSpace(dataDir[0]) != "" {
 		a.index = newAgentIndexStore(dataDir[0], agentReportIndexVersion)
 		a.deepworkRoot = filepath.Join(dataDir[0], "transcripts", "sessions")
@@ -126,32 +139,42 @@ func (a *agentReporter) Detail(ctx context.Context, window, timezone string, fil
 	return agentanalytics.BuildActivityDetail(dataset, window, timezone, a.now(), filter)
 }
 
-func (a *agentReporter) refreshLocked(ctx context.Context, window string) agentanalytics.ActivityDataset {
+// refreshScan is what one pass over the source files established: which files are live, how
+// many moved, and how fresh the newest of them is. It is deliberately separate from any
+// combined result — the file pass is what every consumer needs, the combine is what only
+// some of them do.
+type refreshScan struct {
+	live          map[string]struct{}
+	changedFiles  int
+	hadProjection bool
+	highWatermark time.Time
+}
+
+// scanLocked brings the projections up to date with the files and returns what it saw. It
+// bumps the revision whenever anything moved, which is what every memo downstream keys on.
+func (a *agentReporter) scanLocked(ctx context.Context, window string) refreshScan {
 	cutoff := reportCutoff(a.now(), window)
 	paths := recentAgentTranscriptFiles(cutoff, a.deepworkRoot)
-	live := make(map[string]struct{}, len(paths))
-	hadProjection := len(a.files) > 0
-	changedFiles := 0
-	var sourceHighWatermark time.Time
+	scan := refreshScan{live: make(map[string]struct{}, len(paths)), hadProjection: len(a.files) > 0}
 	// Two different questions, deliberately not one flag. `restated` is which shards need
 	// WRITING — a refresh that re-projects one appended rollout must cost one shard write,
 	// not a rewrite of every projection on disk. `dirty` is whether the fact set MOVED at
-	// all, which is what invalidates the combined-dataset memos; a projection can change
-	// without earning a write (a parse diagnostic is re-derived next refresh), and treating
-	// the two as the same flag is how a diagnostic goes invisible behind a stale memo.
+	// all, which is what invalidates every memo downstream; a projection can change without
+	// earning a write (a parse diagnostic is re-derived next refresh), and treating the two
+	// as the same flag is how a diagnostic goes invisible behind a stale memo.
 	var restated []string
 	dirty := false
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		live[path] = struct{}{}
+		scan.live[path] = struct{}{}
 		info, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
-		if info.ModTime().After(sourceHighWatermark) {
-			sourceHighWatermark = info.ModTime()
+		if info.ModTime().After(scan.highWatermark) {
+			scan.highWatermark = info.ModTime()
 		}
 		cached, ok := a.files[path]
 		if ok && cached.size == info.Size() && cached.modUnixNano == info.ModTime().UnixNano() {
@@ -174,11 +197,35 @@ func (a *agentReporter) refreshLocked(ctx context.Context, window string) agenta
 		a.files[path] = projection
 		restated = append(restated, path)
 		dirty = true
-		changedFiles++
+		scan.changedFiles++
+	}
+	// RequestFacts are the durable evidence. Everything money-shaped — the economic requests
+	// and the daily fold — is a projection over them at a given pricing snapshot, so the
+	// snapshot, not the transcript, is what makes those stale. Re-pricing on a snapshot CHANGE
+	// is required (a corrected price must reach the history it applies to); re-pricing a day
+	// already priced under the same snapshot is pure waste, and because pricedWith is persisted
+	// alongside the projection, a restart under an unchanged table re-prices nothing at all.
+	for path := range scan.live {
+		cached, ok := a.files[path]
+		if !ok || cached.pricedWith == pricingSnapshot {
+			continue
+		}
+		cached.reprice()
+		a.files[path] = cached
+		restated = append(restated, path)
+		dirty = true
 	}
 	if dirty {
 		a.revision++
 	}
+	for _, path := range restated {
+		a.index.save(path, a.files[path])
+	}
+	return scan
+}
+
+func (a *agentReporter) refreshLocked(ctx context.Context, window string) agentanalytics.ActivityDataset {
+	scan := a.scanLocked(ctx, window)
 	// The combine below is a pure function of the projections it reads, so a window whose
 	// projections have not moved since it was last combined has nothing to recompute.
 	//
@@ -188,27 +235,13 @@ func (a *agentReporter) refreshLocked(ctx context.Context, window string) agenta
 	// the two ahead of it. Firing the same four in reverse moved the slowness to 24h, which
 	// is the cheapest window there is.
 	if memo, ok := a.datasets[window]; ok && memo.revision == a.revision {
-		return a.stampProjection(memo.dataset, len(live), changedFiles, hadProjection, sourceHighWatermark)
+		return a.stampProjection(memo.dataset, scan)
 	}
-
 	var combined agentanalytics.ActivityDataset
-	repriced := false
-	for path := range live {
+	for path := range scan.live {
 		cached, ok := a.files[path]
 		if !ok {
 			continue
-		}
-		// RequestFacts are the durable evidence. Economic Requests are a projection over them at
-		// a given pricing snapshot, so the snapshot — not the transcript — is what makes them
-		// stale. Re-pricing on a snapshot CHANGE is required (a corrected price must reach the
-		// history it applies to); re-pricing a day already priced under the same snapshot is
-		// pure waste, and because pricedWith is persisted alongside the projection, a restart
-		// with an unchanged price table re-prices nothing at all.
-		if cached.pricedWith != pricingSnapshot {
-			cached.reprice()
-			a.files[path] = cached
-			restated = append(restated, path)
-			repriced = true
 		}
 		combined.WorkItems = append(combined.WorkItems, cached.dataset.WorkItems...)
 		combined.Assignments = append(combined.Assignments, cached.dataset.Assignments...)
@@ -219,28 +252,50 @@ func (a *agentReporter) refreshLocked(ctx context.Context, window string) agenta
 		combined.Tools = append(combined.Tools, cached.dataset.Tools...)
 		combined.IngestDiagnostics = append(combined.IngestDiagnostics, cached.dataset.IngestDiagnostics...)
 	}
-	for _, path := range restated {
-		a.index.save(path, a.files[path])
-	}
 	sort.Strings(combined.IngestDiagnostics)
-	if repriced {
-		// A new price table invalidates every window, not just this one — the memos the
-		// other three are holding were combined from the prices this pass just replaced.
-		a.revision++
-	}
 	a.datasets[window] = datasetMemo{revision: a.revision, dataset: combined}
-	return a.stampProjection(combined, len(live), changedFiles, hadProjection, sourceHighWatermark)
+	return a.stampProjection(combined, scan)
+}
+
+// UsageReport answers /usage/report WITHOUT materializing the window's facts.
+//
+// The money report is a fold over calendar days, and a day that has ended cannot change. So
+// each file keeps its own facts folded by day, and a window is the sum of the days it covers
+// — a 30-day report stops walking 90,000 facts to re-derive 29 days whose answer was already
+// known. It also means this path never builds the combined dataset at all: that structure
+// exists for the agent report, and copying ~90k rows per window to hand this one a slice it
+// only ever folded was the cost of asking the wrong question.
+func (a *agentReporter) UsageReport(ctx context.Context, window, timezone string) kitusage.UsageReport {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	scan := a.scanLocked(ctx, window)
+	key := window + "|" + timezone
+	if memo, ok := a.usageReports[key]; ok && memo.revision == a.revision {
+		return memo.report
+	}
+	sources := make([]map[string]kitusage.DailyUsage, 0, len(scan.live))
+	for path := range scan.live {
+		cached, ok := a.files[path]
+		if !ok {
+			continue
+		}
+		sources = append(sources, cached.dailyUsage(timezone))
+		a.files[path] = cached // dailyUsage memoizes onto the projection
+	}
+	report := kitusage.BuildRequestReportFromDaily(kitusage.WindowKind(window), timezone, a.now(), sources)
+	a.usageReports[key] = usageReportMemo{revision: a.revision, report: report}
+	return report
 }
 
 // stampProjection describes THIS refresh, not the one that built the dataset. Freshness is a
 // property of the call — a memo hit still just walked every source file and found nothing new,
 // and must say so — while the facts underneath are shared, read-only, and unchanged. The
 // dataset is taken by value, so only the small observability header is rewritten.
-func (a *agentReporter) stampProjection(dataset agentanalytics.ActivityDataset, sourceFiles, changedFiles int, hadProjection bool, highWatermark time.Time) agentanalytics.ActivityDataset {
+func (a *agentReporter) stampProjection(dataset agentanalytics.ActivityDataset, scan refreshScan) agentanalytics.ActivityDataset {
 	mode := "cached"
-	if changedFiles > 0 {
+	if scan.changedFiles > 0 {
 		mode = "incremental"
-		if !hadProjection {
+		if !scan.hadProjection {
 			mode = "full_rebuild"
 		}
 	}
@@ -249,11 +304,11 @@ func (a *agentReporter) stampProjection(dataset agentanalytics.ActivityDataset, 
 		state = "partial"
 	}
 	dataset.Projection = agentanalytics.ProjectionObservability{
-		State: state, Mode: mode, RefreshedAt: a.now(), SourceFiles: sourceFiles, ChangedFiles: changedFiles,
+		State: state, Mode: mode, RefreshedAt: a.now(), SourceFiles: len(scan.live), ChangedFiles: scan.changedFiles,
 		Diagnostics: append([]string(nil), dataset.IngestDiagnostics...),
 	}
-	if !highWatermark.IsZero() {
-		dataset.Projection.SourceHighWatermark = &highWatermark
+	if !scan.highWatermark.IsZero() {
+		dataset.Projection.SourceHighWatermark = &scan.highWatermark
 	}
 	if a.index != nil {
 		dataset.Projection.IndexSchema = agentReportIndexSchema
@@ -994,6 +1049,21 @@ func activityWorkItemID(identity agentFileIdentity, run transcript.AgentRun) str
 func (p *agentFileProjection) reprice() {
 	rebuildEconomicRequests(&p.dataset)
 	p.pricedWith = pricingSnapshot
+	// The daily fold carries money, so it is exactly as stale as the prices are. Dropping it
+	// here rather than rebuilding it keeps the timezone question where it belongs — with the
+	// caller that has one.
+	p.daily, p.dailyZone = nil, ""
+}
+
+// dailyUsage folds this file's facts by the given timezone's calendar, reusing the last fold
+// when the question has not changed. Facts and prices invalidate it through reprice(); the
+// timezone invalidates it here.
+func (p *agentFileProjection) dailyUsage(timezone string) map[string]kitusage.DailyUsage {
+	if p.daily == nil || p.dailyZone != timezone {
+		p.daily = kitusage.AggregateDaily(timezone, p.dataset.RequestFacts)
+		p.dailyZone = timezone
+	}
+	return p.daily
 }
 
 func rebuildEconomicRequests(dataset *agentanalytics.ActivityDataset) {

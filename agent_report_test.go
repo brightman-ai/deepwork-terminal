@@ -18,6 +18,7 @@ import (
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 	"github.com/brightman-ai/kit/agentanalytics"
 	"github.com/brightman-ai/kit/transcript"
+	"github.com/brightman-ai/kit/usage"
 )
 
 func TestProjectAgentFileCodexRequestJoinsWorkItem(t *testing.T) {
@@ -796,6 +797,55 @@ func TestAgentReporterDatasetMemoIsReusedButNeverStale(t *testing.T) {
 	}
 	if got := rows("30d"); len(got) != 2 {
 		t.Fatalf("another window served a memo from before the change: %d facts, want 2", len(got))
+	}
+}
+
+// /usage/report is now folded from per-file daily aggregates instead of from the window's
+// facts, so it never walks 90k rows to re-derive days that ended. That is only allowed to be
+// a speed change: this pins the money, byte for byte, against the fact-by-fact answer — in
+// every window, and after the calendar the days are keyed by has changed underneath it.
+func TestAgentReporterUsageReportEqualsTheFactByFactAnswer(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(dataDir, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, ".claude", "projects"))
+	root := filepath.Join(dataDir, "transcripts", "sessions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	turn := func(session, id string, at time.Time, out int) string {
+		return fmt.Sprintf(`{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":%q,"deepworkTurnId":1,"timestamp":%q,"attempt":{"id":%q,"purpose":"auto_title","status":"success","usage":{"input_tokens":100,"output_tokens":%d},"invocation":{"runtime_id":"whale-agent"}}}`,
+			session, at.Format(time.RFC3339), id, out) + "\n"
+	}
+	// Two files whose facts overlap in days — the fold has to add across sources, not pick one.
+	for i, spread := range [][]int{{0, 1, 3}, {1, 2, 3}} {
+		session := fmt.Sprintf("dw-fold-%d", i)
+		var body string
+		for _, back := range spread {
+			at := now.AddDate(0, 0, -back).Add(time.Duration(i) * time.Hour)
+			body += turn(session, fmt.Sprintf("%s-%d", session, back), at, 10+back)
+		}
+		if err := os.WriteFile(filepath.Join(root, session+".jsonl"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reporter := newAgentReporter(dataDir)
+	reporter.now = func() time.Time { return now }
+	ctx := context.Background()
+	for _, timezone := range []string{"Asia/Shanghai", "America/New_York"} {
+		for _, window := range []string{"24h", "7d", "14d", "30d"} {
+			want := usage.BuildRequestReport(usage.WindowKind(window), timezone, now,
+				reporter.Dataset(ctx, window).RequestFacts)
+			got := reporter.UsageReport(ctx, window, timezone)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s/%s folded report disagrees with the fact-by-fact one\n got=%+v\nwant=%+v", timezone, window, got, want)
+			}
+			// And the second ask reuses it rather than folding again.
+			if again := reporter.UsageReport(ctx, window, timezone); !reflect.DeepEqual(again, want) {
+				t.Fatalf("%s/%s second ask changed the answer", timezone, window)
+			}
+		}
 	}
 }
 
