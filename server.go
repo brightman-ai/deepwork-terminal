@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brightman-ai/deepwork-terminal/agentintel"
 	"github.com/brightman-ai/deepwork-terminal/internal/spa"
 	"github.com/brightman-ai/deepwork-terminal/notify"
 	"github.com/brightman-ai/kit/authgate"
@@ -116,6 +117,10 @@ func NewServer(opts ...Option) (*Server, error) {
 	// Usage/cost/quota reporter (kit/usage SSOT). Cheap to build — sources only
 	// resolve their roots here; no disk walk until a report is requested.
 	s.usage = newUsageReporter()
+	// Before any driver is built: the Codex subagent index is shared per sessions root and
+	// loads its cache the first time one asks for it. Told where to persist, a restart reads
+	// only what was appended instead of re-deriving the tree from every rollout on disk.
+	agentintel.SetAgentIndexCacheDir(s.config.DataDir)
 	s.agentUsage = newAgentReporter(s.config.DataDir)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Explicit-signal tap: a terminal program saying "I need you" out loud (BEL / OSC
