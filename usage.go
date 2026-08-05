@@ -97,9 +97,14 @@ func (s *Server) handleUsageQuotaRefresh(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// handleUsageReport → GET /api/usage/report?window=24h|7d|14d|30d. Per-provider
-// token + cost breakdown, served from a short-TTL cache so repeated hits don't
-// re-walk ~/.claude/projects/** and ~/.codex/sessions/** every time.
+// handleUsageReport → GET /api/usage/report?window=24h|7d|14d|30d. Per-provider token + cost
+// breakdown.
+//
+// The UI prefetches all four windows at once, so this is answered four times per open. It is
+// served from a revision-keyed cache rather than a timed one: a report is reused exactly
+// while the facts behind it have not moved, so nothing is recomputed and nothing goes stale
+// waiting for a TTL. (This comment used to promise a short-TTL cache that a July refactor had
+// already removed, which is how four uncached full refreshes ended up queueing on one mutex.)
 func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
 	window := parseUsageWindow(r.URL.Query().Get("window"))
 	// New servers share the exact ModelRequestUsage materialized facts with the
@@ -115,9 +120,7 @@ func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timezone"})
 			return
 		}
-		dataset := s.agentUsage.Dataset(r.Context(), string(window))
-		report := usage.BuildRequestReport(window, timezone, time.Now(), dataset.RequestFacts)
-		writeJSON(w, http.StatusOK, report)
+		writeJSON(w, http.StatusOK, s.agentUsage.UsageReport(r.Context(), string(window), timezone))
 		return
 	}
 
