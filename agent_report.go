@@ -22,7 +22,15 @@ import (
 )
 
 const agentReportCacheTTL = 60 * time.Second
-const agentReportIndexSchema = "agent-report-index.v12"
+
+// agentReportIndexSchema gates the persisted materialized view. BUMP IT whenever the transcript
+// parsers change what a fact MEANS, not just when this file's shape changes.
+//
+// v13: codex fork/lineage handling. Facts projected by the previous parser were missing the
+// service_tier a thread inherited from its ancestors and carried a defaulted provider, and a
+// projection is only recomputed when its file changes — so without a bump the fix would have
+// reached nobody whose rollouts had gone quiet, while looking applied.
+const agentReportIndexSchema = "agent-report-index.v13"
 
 type agentFileProjection struct {
 	size           int64
