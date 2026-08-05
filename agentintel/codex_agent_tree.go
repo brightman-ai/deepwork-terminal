@@ -52,6 +52,7 @@ type codexAgentIndex struct {
 	mu            sync.Mutex
 	sessionsRoot  string
 	lastDiscovery time.Time
+	lastSave      time.Time
 	files         map[string]*codexAgentFile // rollout path → incremental state
 	seen          map[string]struct{}        // every inspected rollout, including non-subagents
 	spawnReaders  map[string]*JSONLReader    // root/child path → incremental spawn parser
@@ -86,6 +87,7 @@ func sharedCodexAgentIndex(sessionsRoot string) *codexAgentIndex {
 		files:        make(map[string]*codexAgentFile), seen: make(map[string]struct{}),
 		spawnReaders: make(map[string]*JSONLReader), descriptions: make(map[string]string),
 	}
+	idx.loadLocked() // exclusive: nothing else can reach idx until it is in the registry
 	codexIndexRegistry.byRoot[sessionsRoot] = idx
 	return idx
 }
@@ -137,6 +139,7 @@ func (t *codexAgentTree) update(rootThreadID string, rootActive bool, rootEndedA
 		idx.scanSpawnDescriptions(f.meta.Path, f.meta.ID)
 		f.update()
 	}
+	idx.saveLocked(now)
 }
 
 func (idx *codexAgentIndex) discover() {
