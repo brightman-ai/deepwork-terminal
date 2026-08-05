@@ -228,7 +228,10 @@ func (idx *codexAgentIndex) scanSpawnDescriptions(path, ownerThreadID string) {
 		r = NewJSONLReader(path)
 		idx.spawnReaders[path] = r
 	}
-	_ = r.ReadNewFunc(func(row map[string]any) bool {
+	// A spawn call is encoded as `"name":"spawn_agent"`, so a row worth decoding always
+	// carries those bytes — and a rollout's OTHER response_items (the assistant text that
+	// is most of the file) never reach the decoder.
+	_ = r.ReadNewFiltered(RowContains("spawn_agent"), func(row map[string]any) bool {
 		if stringValue(row["type"]) != "response_item" {
 			return true
 		}
@@ -253,7 +256,9 @@ func (idx *codexAgentIndex) scanSpawnDescriptions(path, ownerThreadID string) {
 }
 
 func (f *codexAgentFile) update() {
-	err := f.reader.ReadNewFunc(func(row map[string]any) bool {
+	// Lifecycle and token totals live exclusively on `"type":"event_msg"` rows. Everything
+	// else in a child rollout is transcript body — skipped before the JSON decoder sees it.
+	err := f.reader.ReadNewFiltered(RowContains("event_msg"), func(row map[string]any) bool {
 		if stringValue(row["type"]) != "event_msg" {
 			return true
 		}

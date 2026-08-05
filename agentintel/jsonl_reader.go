@@ -33,10 +33,51 @@ func (r *JSONLReader) ReadNew() ([]map[string]any, error) {
 	return rows, err
 }
 
+// RowFilter is a cheap byte-level test applied to a raw JSONL line BEFORE it is decoded.
+//
+// It must be a NECESSARY condition of what the consumer wants, never merely a sufficient
+// one. Admitting a row the consumer goes on to discard costs one wasted decode; rejecting
+// a row the consumer wanted loses data silently, which is unfixable downstream.
+type RowFilter func(line []byte) bool
+
+// RowContains builds a RowFilter admitting lines that contain every marker.
+//
+// Row-type discriminators and tool names are the intended markers: a row encoded as
+// `"type":"event_msg"` necessarily contains the bytes `event_msg`, so a consumer that
+// wants exactly those rows cannot lose one. Free-text values are NOT valid markers — the
+// producer is free to encode them differently (escapes, key order) and the filter would
+// then drop real rows.
+func RowContains(markers ...string) RowFilter {
+	needles := make([][]byte, 0, len(markers))
+	for _, marker := range markers {
+		needles = append(needles, []byte(marker))
+	}
+	return func(line []byte) bool {
+		for _, needle := range needles {
+			if !bytes.Contains(line, needle) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
 // ReadNewFunc calls fn for each new complete line. Stops if fn returns false.
 // Incomplete lines (no trailing \n at EOF) are left unconsumed so they can
 // be re-read when the writer finishes flushing.
 func (r *JSONLReader) ReadNewFunc(fn func(row map[string]any) bool) error {
+	return r.ReadNewFiltered(nil, fn)
+}
+
+// ReadNewFiltered is ReadNewFunc restricted to the lines a filter admits, with the decode
+// of every other line skipped. The offset still advances over skipped lines, so the reader
+// stays incremental.
+//
+// This is not a micro-optimisation. A Codex rollout is overwhelmingly `response_item`
+// payload text; a consumer wanting only `event_msg` rows was paying map[string]any decoding
+// for all of it. Across ~4 GB of rollouts that is 19 seconds on the first pass — spent
+// inside the report lock, on the request path.
+func (r *JSONLReader) ReadNewFiltered(filter RowFilter, fn func(row map[string]any) bool) error {
 	f, err := os.Open(r.path)
 	if err != nil {
 		return err
@@ -71,7 +112,7 @@ func (r *JSONLReader) ReadNewFunc(fn func(row map[string]any) bool) error {
 		}
 
 		trimmed := bytes.TrimRight(line, "\r\n")
-		if len(trimmed) == 0 {
+		if len(trimmed) == 0 || (filter != nil && !filter(trimmed)) {
 			r.offset += int64(len(line))
 			continue
 		}
