@@ -23,14 +23,14 @@
  */
 import { nextTick, onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { Gauge } from 'lucide-vue-next'
-import { useUsageQuota, quotaGroupsFor, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
+import { useUsageQuota, quotaGroupsFor, findTightestQuota, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
 import { useUsageReport, type UsageProviderRow } from './useUsageReport'
 import { useAgentReport } from './useAgentReport'
 import AgentReportDetail from './AgentReportDetail.vue'
 import { fmtTokens, fmtCost, fmtCredits } from './cost'
 import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
-import { usageMoneyPresentation, type UsageMoneySemantics } from './usageBillingPresentation'
+import { usageMoneyPresentation, isFirstPartyPair, type UsageMoneySemantics } from './usageBillingPresentation'
 import { groupByVendor, type UsageVendorGroup } from './usageVendorGroups'
 import type { UsageRateCard } from './useUsageReport'
 import { groupPresentation } from './quotaStaleness'
@@ -204,7 +204,41 @@ function vendorSemantics(g: UsageVendorGroup): UsageMoneySemantics {
 }
 
 // ── pill ─────────────────────────────────────────────────────────────────────────────────
-const pct = computed(() => (tightest.value ? Math.round(tightest.value.window.remaining_percent) : null))
+// ── which subscription the pill speaks for ────────────────────────────────────────────────────
+//
+// The pill used to headline the TIGHTEST quota across every subscription, which is safety-first
+// and, with more than one, wrong about the question being asked. Observed here: a codex premium
+// window at 0%, a claude window at 98%, and the chrome reading「0%」all day — while the codex CLI
+// was in fact busy sending every one of its tokens to Moonshot and DeepSeek. Not one of them
+// touched the OpenAI subscription the 0% was about.
+//
+// So relevance is spend, not membership: a subscription speaks for the pill when there is recent
+// usage on its OWN first-party pair. isFirstPartyPair is the same predicate that decides tab
+// placement, so「what counts as spending against this subscription」has one definition.
+//
+// Nothing is hidden by this. A quota that loses the headline keeps its bar, its percentage and its
+// reset time in 官方订阅, and the tooltip below names it whenever it is the tighter one — an
+// exhausted window you are not using today is still exhausted tomorrow, and must stay one glance
+// away rather than one discovery away.
+const spendingSubscriptions = computed<ReadonlySet<string>>(() => new Set(
+  providersFor('24h')
+    .filter((row) => isFirstPartyPair(row.vendor, row.runtime) && (row.total_tokens ?? 0) > 0)
+    .map((row) => row.runtime),
+))
+// Falls back to every subscription when none has first-party spend today — a quiet day should show
+// the same reading it always did, not go blank.
+const headline = computed(() => {
+  const spending = quotas.value.filter((q) => spendingSubscriptions.value.has(q.runtime))
+  return findTightestQuota(spending.length ? spending : quotas.value)
+})
+// The tightest overall, kept only to warn about a subscription the headline is not speaking for.
+const overshadowed = computed(() => {
+  const h = headline.value
+  const t = tightest.value
+  if (!h || !t || t.runtime === h.runtime) return null
+  return t.window.remaining_percent < h.window.remaining_percent ? t : null
+})
+const pct = computed(() => (headline.value ? Math.round(headline.value.window.remaining_percent) : null))
 const level = computed(() => {
   const p = pct.value
   if (p === null) return 'none'
@@ -238,8 +272,8 @@ const todayApi = computed<{ cost: number | null; currency: string }>(() => {
 // exhausted window you are not using today is still exhausted tomorrow.
 const pillText = computed(() => {
   if (pct.value !== null) {
-    const owner = subscriptions.value.length > 1 && tightest.value
-      ? `${runtimeLabel(tightest.value.runtime)} ` : ''
+    const owner = subscriptions.value.length > 1 && headline.value
+      ? `${runtimeLabel(headline.value.runtime)} ` : ''
     return `${owner}${pct.value}%`
   }
   if (hasApi.value) {
@@ -250,10 +284,19 @@ const pillText = computed(() => {
 })
 const pillTitle = computed(() => {
   if (pct.value === null) return hasApi.value ? 'API 计费 · 今日实付 · 点开明细' : '用量 · 点开明细'
-  const t = tightest.value
-  if (!t) return '订阅额度剩余 · 点开明细'
+  const h = headline.value
+  if (!h) return '订阅额度剩余 · 点开明细'
   // Say whose window this is and which window, so the number can be checked rather than trusted.
-  return `${runtimeLabel(t.runtime)} ${kindLabel(t.window.kind)}额度剩余 ${pct.value}% · 所有订阅里最紧的一个 · 点开明细`
+  let text = `${runtimeLabel(h.runtime)} ${kindLabel(h.window.kind)}额度剩余 ${pct.value}%`
+  if (spendingSubscriptions.value.has(h.runtime)) text += '（近 24h 你在花的就是它）'
+  // The louder number never disappears — it just stops being the headline for something you are
+  // not spending against.
+  const other = overshadowed.value
+  if (other) {
+    text += ` · 另有 ${runtimeLabel(other.runtime)} ${kindLabel(other.window.kind)}仅剩 `
+      + `${Math.round(other.window.remaining_percent)}%，但近 24h 没有走它的用量`
+  }
+  return `${text} · 点开明细`
 })
 
 // ── formatting ───────────────────────────────────────────────────────────────────────────
