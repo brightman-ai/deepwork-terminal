@@ -17,11 +17,17 @@ import (
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 	"github.com/brightman-ai/kit/agentanalytics"
+	"github.com/brightman-ai/kit/pricing"
 	"github.com/brightman-ai/kit/transcript"
 	kitusage "github.com/brightman-ai/kit/usage"
 )
 
 const agentReportCacheTTL = 60 * time.Second
+
+// pricingSnapshot identifies everything that can change a price without the transcript changing:
+// the hand-authored catalog and the generated upstream table. An economic projection built under
+// one is reused until it differs, which is the whole point of recording it.
+var pricingSnapshot = pricing.CatalogVersion + "+" + pricing.GeneratedSnapshot
 
 // agentReportIndexSchema gates the persisted materialized view. BUMP IT whenever the transcript
 // parsers change what a fact MEANS, not just when this file's shape changes.
@@ -30,11 +36,18 @@ const agentReportCacheTTL = 60 * time.Second
 // service_tier a thread inherited from its ancestors and carried a defaulted provider, and a
 // projection is only recomputed when its file changes — so without a bump the fix would have
 // reached nobody whose rollouts had gone quiet, while looking applied.
-const agentReportIndexSchema = "agent-report-index.v13"
+const (
+	agentReportIndexVersion = "v13"
+	agentReportIndexSchema  = "agent-report-index." + agentReportIndexVersion
+)
 
 type agentFileProjection struct {
-	size           int64
-	modUnixNano    int64
+	size        int64
+	modUnixNano int64
+	// pricedWith is the pricing snapshot the economic projection was built against, and it is
+	// persisted with the projection. A day already priced under the current price table is
+	// never priced again — not on the next call, not after a restart.
+	pricedWith     string
 	generation     string
 	runtime        string
 	sessionID      string
@@ -52,7 +65,7 @@ type agentReporter struct {
 	files        map[string]agentFileProjection
 	reports      map[string]agentReportCacheEntry
 	now          func() time.Time
-	indexPath    string
+	index        *agentIndexStore
 	deepworkRoot string
 	drivers      map[string]reportAgentTreeDriver
 }
@@ -70,9 +83,9 @@ type agentReportCacheEntry struct {
 func newAgentReporter(dataDir ...string) *agentReporter {
 	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
 	if len(dataDir) > 0 && strings.TrimSpace(dataDir[0]) != "" {
-		a.indexPath = filepath.Join(dataDir[0], "agent-report-index-v12.json")
+		a.index = newAgentIndexStore(dataDir[0], agentReportIndexVersion)
 		a.deepworkRoot = filepath.Join(dataDir[0], "transcripts", "sessions")
-		a.loadIndex()
+		a.files = a.index.load()
 	}
 	return a
 }
@@ -110,7 +123,9 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 	hadProjection := len(a.files) > 0
 	changedFiles := 0
 	var sourceHighWatermark time.Time
-	changed := false
+	// Only these paths get written back. A refresh that re-projects one appended rollout
+	// must cost one shard write, not a rewrite of every projection on disk.
+	var restated []string
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			break
@@ -141,11 +156,8 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 		projection.size = info.Size()
 		projection.modUnixNano = info.ModTime().UnixNano()
 		a.files[path] = projection
-		changed = true
+		restated = append(restated, path)
 		changedFiles++
-	}
-	if changed {
-		a.saveIndexLocked()
 	}
 	var combined agentanalytics.ActivityDataset
 	for path := range live {
@@ -153,13 +165,17 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 		if !ok {
 			continue
 		}
-		// RequestFacts are the durable evidence. Economic Requests are a
-		// catalog-versioned projection and must be rebuilt even when the source
-		// transcript is unchanged; otherwise a newly published exact price stays
-		// invisible until that transcript happens to be appended or the whole
-		// materialized index is deleted.
-		rebuildEconomicRequests(&cached.dataset)
-		a.files[path] = cached
+		// RequestFacts are the durable evidence. Economic Requests are a projection over them at
+		// a given pricing snapshot, so the snapshot — not the transcript — is what makes them
+		// stale. Re-pricing on a snapshot CHANGE is required (a corrected price must reach the
+		// history it applies to); re-pricing a day already priced under the same snapshot is
+		// pure waste, and because pricedWith is persisted alongside the projection, a restart
+		// with an unchanged price table re-prices nothing at all.
+		if cached.pricedWith != pricingSnapshot {
+			cached.reprice()
+			a.files[path] = cached
+			restated = append(restated, path)
+		}
 		combined.WorkItems = append(combined.WorkItems, cached.dataset.WorkItems...)
 		combined.Assignments = append(combined.Assignments, cached.dataset.Assignments...)
 		combined.Instances = append(combined.Instances, cached.dataset.Instances...)
@@ -168,6 +184,9 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 		combined.Artifacts = append(combined.Artifacts, cached.dataset.Artifacts...)
 		combined.Tools = append(combined.Tools, cached.dataset.Tools...)
 		combined.IngestDiagnostics = append(combined.IngestDiagnostics, cached.dataset.IngestDiagnostics...)
+	}
+	for _, path := range restated {
+		a.index.save(path, a.files[path])
 	}
 	sort.Strings(combined.IngestDiagnostics)
 	mode := "cached"
@@ -188,7 +207,7 @@ func (a *agentReporter) refreshLocked(ctx context.Context, cutoff time.Time) age
 	if !sourceHighWatermark.IsZero() {
 		combined.Projection.SourceHighWatermark = &sourceHighWatermark
 	}
-	if a.indexPath != "" {
+	if a.index != nil {
 		combined.Projection.IndexSchema = agentReportIndexSchema
 	}
 	return combined
@@ -207,14 +226,10 @@ func reportCutoff(now time.Time, window string) time.Time {
 	return now.AddDate(0, 0, -days)
 }
 
-type persistedAgentIndex struct {
-	Schema string                                  `json:"schema"`
-	Files  map[string]persistedAgentFileProjection `json:"files"`
-}
-
 type persistedAgentFileProjection struct {
 	Size           int64                            `json:"size"`
 	ModUnixNano    int64                            `json:"mod_unix_nano"`
+	PricedWith     string                           `json:"priced_with"`
 	Generation     string                           `json:"generation"`
 	Runtime        string                           `json:"runtime"`
 	SessionID      string                           `json:"session_id"`
@@ -222,50 +237,6 @@ type persistedAgentFileProjection struct {
 	ClaudeCursor   transcript.ClaudeRequestCursor   `json:"claude_cursor"`
 	DeepworkCursor transcript.DeepworkRequestCursor `json:"deepwork_cursor"`
 	Dataset        agentanalytics.ActivityDataset   `json:"dataset"`
-}
-
-func (a *agentReporter) loadIndex() {
-	body, err := os.ReadFile(a.indexPath)
-	if err != nil {
-		return
-	}
-	var persisted persistedAgentIndex
-	if json.Unmarshal(body, &persisted) != nil || persisted.Schema != agentReportIndexSchema {
-		return
-	}
-	for path, file := range persisted.Files {
-		a.files[path] = agentFileProjection{
-			size: file.Size, modUnixNano: file.ModUnixNano, generation: file.Generation,
-			runtime: file.Runtime, sessionID: file.SessionID, codexCursor: file.CodexCursor,
-			claudeCursor: file.ClaudeCursor, deepworkCursor: file.DeepworkCursor, dataset: file.Dataset,
-		}
-	}
-}
-
-func (a *agentReporter) saveIndexLocked() {
-	if a.indexPath == "" {
-		return
-	}
-	persisted := persistedAgentIndex{Schema: agentReportIndexSchema, Files: make(map[string]persistedAgentFileProjection, len(a.files))}
-	for path, file := range a.files {
-		persisted.Files[path] = persistedAgentFileProjection{
-			Size: file.size, ModUnixNano: file.modUnixNano, Generation: file.generation,
-			Runtime: file.runtime, SessionID: file.sessionID, CodexCursor: file.codexCursor,
-			ClaudeCursor: file.claudeCursor, DeepworkCursor: file.deepworkCursor, Dataset: file.dataset,
-		}
-	}
-	body, err := json.Marshal(persisted)
-	if err != nil {
-		return
-	}
-	if os.MkdirAll(filepath.Dir(a.indexPath), 0o700) != nil {
-		return
-	}
-	tmp := a.indexPath + ".tmp"
-	if os.WriteFile(tmp, body, 0o600) != nil {
-		return
-	}
-	_ = os.Rename(tmp, a.indexPath)
 }
 
 func appendUniqueString(values []string, value string) []string {
@@ -581,7 +552,7 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 	if projection.codexCursor.MalformedLines > 0 || projection.claudeCursor.MalformedLines > 0 || projection.deepworkCursor.MalformedLines > 0 {
 		projection.dataset.IngestDiagnostics = append(projection.dataset.IngestDiagnostics, "transcript_malformed:"+filepath.Base(path))
 	}
-	rebuildEconomicRequests(&projection.dataset)
+	projection.reprice()
 	return projection, nil
 }
 
@@ -623,17 +594,34 @@ func appendAgentFileProjection(ctx context.Context, path string, identity agentF
 	if updated.codexCursor.MalformedLines > cached.codexCursor.MalformedLines || updated.claudeCursor.MalformedLines > cached.claudeCursor.MalformedLines || updated.deepworkCursor.MalformedLines > cached.deepworkCursor.MalformedLines {
 		updated.dataset.IngestDiagnostics = appendUniqueString(updated.dataset.IngestDiagnostics, "transcript_malformed:"+filepath.Base(path))
 	}
-	rebuildEconomicRequests(&updated.dataset)
+	updated.reprice()
 	return updated, false, nil
 }
+
+// Page sizes for the backward run walk. A catch-up refresh asks for very little and grows
+// only if that was not enough; a cold projection has no overlap to find and starts wide.
+const (
+	agentRunTailCatchUpPage = 3
+	agentRunTailFullPage    = 50
+)
 
 func loadAgentRunTail(ctx context.Context, path string, identity agentFileIdentity, cutoff time.Time, stopIDs map[string]struct{}, generation string) ([]transcript.AgentRun, string, bool, error) {
 	var before *int64
 	byID := make(map[string]transcript.AgentRun)
 	currentGeneration := generation
 	reset := false
+	// The window source resolves a page by scanning BACKWARD for that many run boundaries,
+	// so the page size is a byte budget, not just a row count. Asking for 50 runs on a
+	// session that has fewer re-reads the whole rollout — 30 MB re-parsed to notice a
+	// one-line append, on every refresh, inside the report lock. With a stop set we expect
+	// the overlap in the newest few runs, so start there and quadruple only if it was not
+	// found; without one there is nothing to overlap with, so page wide from the start.
+	limit := agentRunTailCatchUpPage
+	if len(stopIDs) == 0 {
+		limit = agentRunTailFullPage
+	}
 	for {
-		req := transcript.WindowRequest{Before: before, Limit: 50, Generation: currentGeneration}
+		req := transcript.WindowRequest{Before: before, Limit: limit, Generation: currentGeneration}
 		var window *transcript.WindowResult
 		var err error
 		switch identity.runtime {
@@ -675,6 +663,9 @@ func loadAgentRunTail(ctx context.Context, path string, identity agentFileIdenti
 		}
 		next := window.Before
 		before = &next
+		if limit *= 4; limit > agentRunTailFullPage {
+			limit = agentRunTailFullPage
+		}
 	}
 	runs := make([]transcript.AgentRun, 0, len(byID))
 	for _, run := range byID {
@@ -947,6 +938,14 @@ func activityWorkItemID(identity agentFileIdentity, run transcript.AgentRun) str
 		return fmt.Sprintf("%s:%s:work:%s:%x", identity.runtime, identity.sessionID, run.ID, sum[:6])
 	}
 	return fmt.Sprintf("%s:%s:work:%d:%x", identity.runtime, identity.sessionID, at.UnixNano(), sum[:6])
+}
+
+// reprice rebuilds the economic projection AND records the snapshot it was built against.
+// It is the only way pricedWith is ever set, so the recorded snapshot cannot disagree with
+// the prices in the projection.
+func (p *agentFileProjection) reprice() {
+	rebuildEconomicRequests(&p.dataset)
+	p.pricedWith = pricingSnapshot
 }
 
 func rebuildEconomicRequests(dataset *agentanalytics.ActivityDataset) {

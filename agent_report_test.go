@@ -3,10 +3,13 @@ package terminal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -369,26 +372,57 @@ func TestAgentReporterRealDataObservabilityProbe(t *testing.T) {
 
 func TestAgentReporterIndexRoundTripAndSchemaGate(t *testing.T) {
 	dir := t.TempDir()
+	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(rollout, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	a := newAgentReporter(dir)
-	a.files["/tmp/rollout.jsonl"] = agentFileProjection{
-		size: 42, modUnixNano: 99, generation: "gen", runtime: "codex", sessionID: "s1",
+	projection := agentFileProjection{
+		size: 42, modUnixNano: 99, pricedWith: pricingSnapshot, generation: "gen", runtime: "codex", sessionID: "s1",
 		codexCursor: transcript.CodexRequestCursor{Offset: 42, SessionID: "s1", Model: "gpt-5.6-sol"},
 		dataset:     agentanalytics.ActivityDataset{WorkItems: []agentanalytics.ActivityWorkItem{{ID: "w1", Runtime: "codex"}}},
 	}
-	a.mu.Lock()
-	a.saveIndexLocked()
-	a.mu.Unlock()
+	a.files[rollout] = projection
+	a.index.save(rollout, projection)
 
 	reloaded := newAgentReporter(dir)
-	got, ok := reloaded.files["/tmp/rollout.jsonl"]
+	got, ok := reloaded.files[rollout]
 	if !ok || got.size != 42 || got.generation != "gen" || got.codexCursor.Offset != 42 || got.codexCursor.Model != "gpt-5.6-sol" || len(got.dataset.WorkItems) != 1 || got.dataset.WorkItems[0].ID != "w1" {
 		t.Fatalf("index round trip=%+v ok=%v", got, ok)
 	}
-	if err := os.WriteFile(a.indexPath, []byte(`{"schema":"future","files":{}}`), 0o600); err != nil {
+	// The pricing snapshot survives the round trip. Without it a restart would re-price
+	// every historical day against a table that has not moved.
+	if got.pricedWith != pricingSnapshot {
+		t.Fatalf("pricedWith=%q want %q", got.pricedWith, pricingSnapshot)
+	}
+
+	// A projection written by a different parser generation is neither loaded nor left to
+	// rot: the schema is the directory, so the previous generation is evicted on open.
+	stalePath := filepath.Join(dir, agentIndexDirPrefix+"agent-report-index.vFUTURE")
+	if err := os.MkdirAll(stalePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if stale := newAgentReporter(dir); len(stale.files) != 0 {
-		t.Fatalf("future schema was loaded: %+v", stale.files)
+	if err := os.WriteFile(filepath.Join(stalePath, "dead.json"), []byte(`{"path":"/tmp/x.jsonl"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := newAgentReporter(dir)
+	if _, leaked := stale.files["/tmp/x.jsonl"]; leaked {
+		t.Fatalf("another schema's shard was loaded: %+v", stale.files)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("superseded index generation was left on disk: %v", err)
+	}
+
+	// A shard whose transcript was deleted is dropped, not carried forever.
+	if err := os.Remove(rollout); err != nil {
+		t.Fatal(err)
+	}
+	pruned := newAgentIndexStore(dir, agentReportIndexVersion)
+	if files := pruned.load(); len(files) != 0 {
+		t.Fatalf("shard for a deleted transcript survived: %+v", files)
+	}
+	if entries, err := os.ReadDir(pruned.dir); err != nil || len(entries) != 0 {
+		t.Fatalf("shard file left on disk: %v %v", entries, err)
 	}
 }
 
@@ -460,6 +494,90 @@ func TestAgentReporterAppendProjectionKeepsIdentityAndScansOnlyNewRequests(t *te
 	}
 	if second.codexCursor.Offset <= first.codexCursor.Offset {
 		t.Fatalf("cursor did not advance: before=%+v after=%+v", first.codexCursor, second.codexCursor)
+	}
+}
+
+// A catch-up refresh walks the rollout BACKWARD one small page at a time and stops at the
+// first run it already knows. The page size is therefore a correctness parameter, not just
+// a speed one: too small and a burst of new runs is silently truncated. This pins the
+// contract — however many runs arrived, the incremental projection equals the cold one.
+func TestAgentReporterCatchUpPagingMatchesFullProjection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(home, ".codex"))
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "15")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-catchup.jsonl")
+
+	run := func(minute int, text string) string {
+		at := func(second int) string {
+			return fmt.Sprintf("2026-07-15T02:%02d:%02dZ", minute, second)
+		}
+		return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"task_started"}}`, at(0)) + "\n" +
+			fmt.Sprintf(`{"timestamp":%q,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}}`, at(1), text) + "\n" +
+			fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}`, at(2)) + "\n" +
+			fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"task_complete"}}`, at(3)) + "\n"
+	}
+
+	body := `{"timestamp":"2026-07-15T02:00:00Z","type":"session_meta","payload":{"id":"catchup-1","cwd":"/project","source":"cli"}}` + "\n" +
+		`{"timestamp":"2026-07-15T02:00:01Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-5.6-sol","service_tier":"standard","reasoning_effort":"high"}}}` + "\n"
+	for i := 1; i <= 8; i++ {
+		body += run(i, fmt.Sprintf("turn-%d", i))
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := inspectAgentFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := projectAgentFileProjection(context.Background(), path, identity, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// More new runs than one catch-up page holds, so the walk MUST page further back.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 9; i <= 13; i++ {
+		if _, err := f.WriteString(run(i, fmt.Sprintf("turn-%d", i))); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	incremental, reset, err := appendAgentFileProjection(context.Background(), path, identity, cached, time.Time{})
+	if err != nil || reset {
+		t.Fatalf("append reset=%v err=%v", reset, err)
+	}
+	full, err := projectAgentFileProjection(context.Background(), path, identity, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ids := func(projection agentFileProjection) []string {
+		out := make([]string, 0, len(projection.dataset.WorkItems))
+		for _, item := range projection.dataset.WorkItems {
+			out = append(out, item.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+	got, want := ids(incremental), ids(full)
+	if len(want) != 13 {
+		t.Fatalf("fixture produced %d runs, want 13", len(want))
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("catch-up lost runs:\n got=%v\nwant=%v", got, want)
+	}
+	if len(incremental.dataset.RequestFacts) != len(full.dataset.RequestFacts) {
+		t.Fatalf("facts incremental=%d full=%d", len(incremental.dataset.RequestFacts), len(full.dataset.RequestFacts))
 	}
 }
 
