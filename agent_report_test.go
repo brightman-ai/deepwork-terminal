@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -737,6 +738,64 @@ func TestAgentReporterCountsUsageLessFailedDeepworkAttemptExactlyOnce(t *testing
 	}
 	if reloaded := newAgentReporter(dataDir).Dataset(context.Background(), "7d"); len(reloaded.RequestFacts) != 1 {
 		t.Fatalf("restart lost/doubled usage-less failure: %+v", reloaded.RequestFacts)
+	}
+}
+
+// The combined dataset is memoized per window so four windows prefetched in parallel do not
+// each rebuild the same rows behind the report lock. That is only safe while the memo is
+// impossible to serve after the facts moved — including for a window that was not the one
+// that noticed the change. This pins both halves: reuse when nothing moved, and no window
+// left holding yesterday's rows when something did.
+func TestAgentReporterDatasetMemoIsReusedButNeverStale(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(dataDir, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, ".claude", "projects"))
+	root := filepath.Join(dataDir, "transcripts", "sessions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "dw-memo.jsonl")
+	turn := func(id string, at string, out int) string {
+		return fmt.Sprintf(`{"format":"deepwork.native_transcript.v1.4","runtime":"whale-agent","type":"invocation","sessionId":"dw-memo","deepworkTurnId":1,"timestamp":%q,"attempt":{"id":%q,"purpose":"auto_title","status":"success","usage":{"output_tokens":%d},"invocation":{"runtime_id":"whale-agent"}}}`, at, id, out) + "\n"
+	}
+	if err := os.WriteFile(path, []byte(turn("inv-1", "2026-08-03T01:00:00Z", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reporter := newAgentReporter(dataDir)
+	rows := func(window string) []transcript.ModelRequestUsage {
+		return reporter.Dataset(context.Background(), window).RequestFacts
+	}
+	if got := rows("7d"); len(got) != 1 {
+		t.Fatalf("initial 7d facts=%d", len(got))
+	}
+	first30 := rows("30d")
+	if len(first30) != 1 {
+		t.Fatalf("initial 30d facts=%d", len(first30))
+	}
+	// Nothing moved: the same rows come back, not a fresh copy of them.
+	if again := rows("30d"); reflect.ValueOf(again).Pointer() != reflect.ValueOf(first30).Pointer() {
+		t.Fatal("an unchanged window recombined its dataset instead of reusing it")
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(turn("inv-2", "2026-08-03T01:00:05Z", 2)); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7d is the window that notices the append. 30d must not keep serving its memo.
+	if got := rows("7d"); len(got) != 2 {
+		t.Fatalf("window that saw the change reported %d facts, want 2", len(got))
+	}
+	if got := rows("30d"); len(got) != 2 {
+		t.Fatalf("another window served a memo from before the change: %d facts, want 2", len(got))
 	}
 }
 
