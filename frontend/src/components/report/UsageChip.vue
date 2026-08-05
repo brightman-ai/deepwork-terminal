@@ -227,17 +227,34 @@ const todayApi = computed<{ cost: number | null; currency: string }>(() => {
   }
   return { cost: total, currency }
 })
+// A percentage needs a SUBJECT. The pill shows the tightest quota across runtimes, so with more
+// than one subscription a bare「0%」names nothing — and 0% is exactly the reading that makes
+// someone stop what they are doing. Observed: a codex premium window ran out, the user moved to
+// another vendor entirely, and the chrome kept headlining 0% for the subscription they had
+// deliberately stopped using, with nothing on screen to say which one it was.
+//
+// Naming it costs four characters and turns「0%」into a fact you can act on or dismiss. The
+// SELECTION rule is untouched: the tightest quota is still the one worth surfacing, because an
+// exhausted window you are not using today is still exhausted tomorrow.
 const pillText = computed(() => {
-  if (pct.value !== null) return `${pct.value}%`
+  if (pct.value !== null) {
+    const owner = subscriptions.value.length > 1 && tightest.value
+      ? `${runtimeLabel(tightest.value.runtime)} ` : ''
+    return `${owner}${pct.value}%`
+  }
   if (hasApi.value) {
     const { cost, currency } = todayApi.value
     return cost === null ? 'API' : `API ${fmtCost(cost, currency)}`
   }
   return '—' // present, but no reading we can stand behind — the popover explains why
 })
-const pillTitle = computed(() =>
-  pct.value !== null ? '订阅额度剩余 · 点开明细' : hasApi.value ? 'API 计费 · 今日实付 · 点开明细' : '用量 · 点开明细',
-)
+const pillTitle = computed(() => {
+  if (pct.value === null) return hasApi.value ? 'API 计费 · 今日实付 · 点开明细' : '用量 · 点开明细'
+  const t = tightest.value
+  if (!t) return '订阅额度剩余 · 点开明细'
+  // Say whose window this is and which window, so the number can be checked rather than trusted.
+  return `${runtimeLabel(t.runtime)} ${kindLabel(t.window.kind)}额度剩余 ${pct.value}% · 所有订阅里最紧的一个 · 点开明细`
+})
 
 // ── formatting ───────────────────────────────────────────────────────────────────────────
 // EVERY time in this popover is an absolute wall clock. Never a countdown, never an age.
