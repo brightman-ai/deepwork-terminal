@@ -12,8 +12,12 @@ import (
 // dir the same way ClaudeProjectDir does and returns the cwd to query with.
 func writeSyntheticClaudeTranscript(t *testing.T, home, cwd, jsonl string) {
 	t.Helper()
-	encoded := strings.NewReplacer("/", "-", ".", "-").Replace(cwd)
-	dir := filepath.Join(home, ".claude", "projects", encoded)
+	// Ask PRODUCTION where this transcript belongs rather than re-deriving it. The hand-copy
+	// this replaces knew about '/' and '.' but not '_', and not about resolving symlinks —
+	// so once the real encoder learned that '_' is replaced too, fixtures landed in a
+	// directory nothing would ever read. Every t.TempDir() path carries the test's own name,
+	// underscores included, and on macOS is a symlink besides.
+	dir := NewProjectLocator().ClaudeProjectDir(cwd)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}

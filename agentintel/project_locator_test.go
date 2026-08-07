@@ -40,7 +40,13 @@ func TestClaudeProjectDir_encoding(t *testing.T) {
 }
 
 func TestSelectCodexRootRollout_ProcessIdentityBeatsSameCWDNewest(t *testing.T) {
-	home := t.TempDir()
+	// EvalSymlinks because production resolves the paths it returns, and on macOS t.TempDir()
+	// hands back /var/... for a directory that really lives at /private/var/.... Comparing the
+	// unresolved string made this fail on one platform for a reason the test is not about.
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "14")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
