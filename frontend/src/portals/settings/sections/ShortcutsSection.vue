@@ -69,7 +69,6 @@ const GROUPS: { title: string; sub: string; rows: ShortcutRow[] }[] = [
       { key: 'nextTab', label: '下一个标签', hint: '' },
       { key: 'newTab', label: '新建标签', hint: '' },
       { key: 'closeTab', label: '关闭当前标签', hint: '' },
-      { key: 'renameTab', label: '重命名当前标签', hint: '' },
     ],
   },
   {
@@ -197,7 +196,7 @@ onMounted(() => { void load() })
 
       <div class="sc-actions">
         <button type="button" class="sc-reset" data-testid="shortcuts-reset" @click="resetToDefaults">恢复默认</button>
-        <span class="sc-default-note">默认前缀 Alt · 数字键切换 · N 新建 · W 关闭 · R 重命名 · 搜索 {{ IS_MAC ? 'Cmd + F' : 'Ctrl + Shift + F' }}</span>
+        <span class="sc-default-note">默认前缀 Alt · 数字键切换 · N 新建 · W 关闭 · 重命名双击标签 · 搜索 {{ IS_MAC ? 'Cmd + F' : 'Ctrl + Shift + F' }}</span>
       </div>
       <p class="ssec-hint">
         快捷键按<b>物理按键</b>识别，因此 macOS 上 Option+W 打出 “∑”、或使用非拉丁键盘布局时，一样能触发。

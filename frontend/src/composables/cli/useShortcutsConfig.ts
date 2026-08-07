@@ -21,7 +21,7 @@ import { useServerStore } from './useServerStore'
  *  part of that prefix family — see its default binding below — but shares the same persistence/
  *  override machinery so it is configured and stored the same way. */
 export type ShortcutAction =
-  | 'switchTab' | 'prevTab' | 'nextTab' | 'newTab' | 'closeTab' | 'renameTab'
+  | 'switchTab' | 'prevTab' | 'nextTab' | 'newTab' | 'closeTab'
   | 'findInTerminal'
 
 /**
@@ -45,8 +45,13 @@ export const ACTION_CODES: Record<Exclude<ShortcutAction, 'switchTab' | 'findInT
   nextTab: 'ArrowDown',
   newTab: 'KeyN',
   closeTab: 'KeyW',
-  renameTab: 'KeyR',
 }
+
+// Renaming a tab has NO binding, deliberately. It is a rare action, and any key it took would be
+// taken from the shell underneath: with prefix=Ctrl the derived binding was Ctrl+R, which is
+// readline's reverse-i-search — every user of it, every day, losing history search so that a
+// once-a-week rename could have a shortcut. Rename stays where a rare action belongs: double-click
+// the tab, or its context menu. The same trade decided findInTerminal's default below.
 
 // findInTerminal's default is deliberately NOT `prefix + code`: it must match the OS/browser's
 // idiomatic "find" gesture (Cmd+F on macOS) regardless of whatever prefix the user picked for tab
@@ -55,7 +60,7 @@ export const ACTION_CODES: Record<Exclude<ShortcutAction, 'switchTab' | 'findInT
 // Shift so a bare Ctrl+F always reaches the PTY untouched.
 const IS_MAC_PLATFORM = typeof navigator !== 'undefined'
   && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '')
-const DEFAULT_FIND_IN_TERMINAL_BINDING = IS_MAC_PLATFORM ? 'Meta+KeyF' : 'Ctrl+Shift+KeyF'
+export const DEFAULT_FIND_IN_TERMINAL_BINDING = IS_MAC_PLATFORM ? 'Meta+KeyF' : 'Ctrl+Shift+KeyF'
 
 export interface ShortcutsConfig {
   /** The one modifier every non-overridden action uses. */

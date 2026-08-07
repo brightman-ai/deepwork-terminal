@@ -73,10 +73,18 @@ describe('resolveShortcutAction', () => {
       .toEqual({ type: 'select', id: 't3' })
   })
 
-  it('new/close/rename resolve from their bindings', () => {
+  it('new/close resolve from their bindings', () => {
     expect(resolveShortcutAction(key({ code: 'KeyN', altKey: true }), cfg, ids, 't1')).toEqual({ type: 'new' })
     expect(resolveShortcutAction(key({ code: 'KeyW', altKey: true }), cfg, ids, 't1')).toEqual({ type: 'close' })
-    expect(resolveShortcutAction(key({ code: 'KeyR', altKey: true }), cfg, ids, 't1')).toEqual({ type: 'rename' })
+  })
+
+  // Rename has no binding at all, so the key it used to hold reaches the terminal untouched. With
+  // prefix=Ctrl that key was Ctrl+R — readline's reverse-i-search — spent on a once-a-week action.
+  it('the key rename used to hold is left to the terminal', () => {
+    for (const cfgUnder of [cfg, { prefix: 'Ctrl' as const, overrides: {} }]) {
+      expect(resolveShortcutAction(key({ code: 'KeyR', altKey: true }), cfgUnder, ids, 't1')).toBeNull()
+      expect(resolveShortcutAction(key({ code: 'KeyR', ctrlKey: true }), cfgUnder, ids, 't1')).toBeNull()
+    }
   })
 
   it('plain typing is never swallowed', () => {
@@ -88,9 +96,8 @@ describe('resolveShortcutAction', () => {
     expect(resolveShortcutAction(key({ code: 'Digit9', altKey: true }), cfg, ids, 't1')).toBeNull()
   })
 
-  it('close/rename with no active tab resolve to nothing', () => {
+  it('close with no active tab resolves to nothing', () => {
     expect(resolveShortcutAction(key({ code: 'KeyW', altKey: true }), cfg, ids, undefined)).toBeNull()
-    expect(resolveShortcutAction(key({ code: 'KeyR', altKey: true }), cfg, ids, undefined)).toBeNull()
   })
 })
 
