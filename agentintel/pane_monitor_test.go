@@ -6,11 +6,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/brightman-ai/kit/transcript"
 )
 
 func writeClaudeTranscript(t *testing.T, cwd string, modAgo time.Duration) func() {
 	t.Helper()
-	encoded := strings.NewReplacer("/", "-", ".", "-").Replace(cwd)
+	// The SSOT for this encoding is transcript.EncodeProjectDir, and this used to be a
+	// hand-copy of it. When the real one learned that '_' is also replaced, the copy did not —
+	// and t.TempDir() paths contain the test's own name, so every one of them has an
+	// underscore. Production looked in one directory, the fixture was written to another, and
+	// three tests failed for a reason that had nothing to do with what they test.
+	encoded := transcript.EncodeProjectDir(cwd)
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".claude", "projects", encoded)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -63,7 +70,7 @@ func TestPaneMonitorActive(t *testing.T) {
 // writeClaudeSessions writes N named session files in one cwd's project dir, names[0] newest.
 func writeClaudeSessions(t *testing.T, cwd string, names ...string) func() {
 	t.Helper()
-	encoded := strings.NewReplacer("/", "-", ".", "-").Replace(cwd)
+	encoded := transcript.EncodeProjectDir(cwd)
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".claude", "projects", encoded)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
