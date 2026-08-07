@@ -7,7 +7,7 @@ mock.module('@terminal/api/store', () => ({
   saveStore: (d: Record<string, unknown>) => { saveSpy(d); return Promise.resolve() },
 }))
 
-const { useShortcutsConfig, bindingFor, isDerived, DEFAULT_SHORTCUTS_CONFIG } = await import('../useShortcutsConfig')
+const { useShortcutsConfig, bindingFor, isDerived, DEFAULT_SHORTCUTS_CONFIG, DEFAULT_FIND_IN_TERMINAL_BINDING } = await import('../useShortcutsConfig')
 
 // NOTE: useShortcutsConfig sits on useServerStore, a MODULE-LEVEL singleton (same caveat as
 // useServerStore.test.ts) — these share hydration and run in order.
@@ -53,7 +53,7 @@ describe('useShortcutsConfig', () => {
   it('resetToDefaults restores the prefix and drops every override', async () => {
     const cfg = useShortcutsConfig()
     await cfg.load()
-    cfg.setOverride('renameTab', 'Ctrl+KeyZ')
+    cfg.setOverride('newTab', 'Ctrl+KeyZ')
     cfg.resetToDefaults()
     expect(cfg.config.value).toEqual(DEFAULT_SHORTCUTS_CONFIG)
     await new Promise((r) => setTimeout(r, 550)) // past useServerStore's 500ms debounce
@@ -62,12 +62,15 @@ describe('useShortcutsConfig', () => {
 })
 
 describe('findInTerminal — NOT part of the tab-switch prefix family', () => {
-  // bare `bun test` has no DOM, so `navigator` is undefined and the module's platform check falls
-  // through to the non-Mac default — the same fallback a real Linux/Windows browser gets.
-  it('defaults to Ctrl+Shift+KeyF (never bare Ctrl+F — that is readline/vim forward-char)', async () => {
+  // The default is per-platform, so assert against DEFAULT_FIND_IN_TERMINAL_BINDING rather than
+  // against one platform's answer. This used to hardcode the non-Mac string on the assumption
+  // that `bun test` has no `navigator` — an assumption the runtime quietly stopped honouring,
+  // leaving two permanent failures that said nothing about the code.
+  it('is never bare Ctrl+F — that is readline/vim forward-char inside the shell', async () => {
     const cfg = useShortcutsConfig()
     await cfg.load()
-    expect(bindingFor(cfg.config.value, 'findInTerminal')).toBe('Ctrl+Shift+KeyF')
+    expect(bindingFor(cfg.config.value, 'findInTerminal')).toBe(DEFAULT_FIND_IN_TERMINAL_BINDING)
+    expect(DEFAULT_FIND_IN_TERMINAL_BINDING).not.toBe('Ctrl+KeyF')
   })
 
   it('does NOT move when the tab-switch prefix changes — it is not a derived action', async () => {
@@ -87,6 +90,6 @@ describe('findInTerminal — NOT part of the tab-switch prefix family', () => {
     expect(bindingFor(cfg.config.value, 'findInTerminal')).toBe('Alt+KeyF')
     cfg.clearOverride('findInTerminal')
     expect(isDerived(cfg.config.value, 'findInTerminal')).toBe(true)
-    expect(bindingFor(cfg.config.value, 'findInTerminal')).toBe('Ctrl+Shift+KeyF')
+    expect(bindingFor(cfg.config.value, 'findInTerminal')).toBe(DEFAULT_FIND_IN_TERMINAL_BINDING)
   })
 })

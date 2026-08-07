@@ -179,7 +179,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     return displayTabName(name, tabPositions.value.get(tabId))
   }
 
-  // D1-D3: single-key-direct shortcuts (Alt+1-9 / next / prev / new / close / rename). Standalone
+  // D1-D3: single-key-direct shortcuts (Alt+1-9 / next / prev / new / close). Standalone
   // has one always-mounted CLI portal (no sibling portal competes for these Alt combos the way
   // pro's WindowDockOverlay does), so isActive is unconditionally true — the listener's own
   // onMounted/onBeforeUnmount lifecycle (tied to this component tree) is the only gate needed.
@@ -190,7 +190,6 @@ export function useCliState(runtime: PortalRuntimeResult) {
     onSelect: switchTab,
     onNew: quickCreateTab,
     onClose: (tabId: string) => { void closeTab(tabId) },
-    onRename: startRenameTab,
   })
 
   // D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output —

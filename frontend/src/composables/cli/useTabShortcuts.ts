@@ -34,7 +34,6 @@ export interface TabShortcutsAdapter {
   onSelect: (id: string) => void
   onNew: () => void
   onClose: (id: string) => void
-  onRename: (id: string) => void
 }
 
 interface ParsedBinding {
@@ -90,7 +89,7 @@ export function resolveShortcutAction(
   cfg: ShortcutsConfig,
   orderedIds: string[],
   activeId: string | undefined,
-): { type: 'select'; id: string } | { type: 'new' | 'close' | 'rename' } | null {
+): { type: 'select'; id: string } | { type: 'new' | 'close' } | null {
   const order = computeVisibleTabOrder(orderedIds)
   const b = (action: ShortcutAction): string => bindingFor(cfg, action)
 
@@ -109,7 +108,6 @@ export function resolveShortcutAction(
   }
   if (matchesBinding(e, b('newTab'))) return { type: 'new' }
   if (matchesBinding(e, b('closeTab'))) return activeId ? { type: 'close' } : null
-  if (matchesBinding(e, b('renameTab'))) return activeId ? { type: 'rename' } : null
   return null
 }
 
@@ -130,7 +128,6 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): void {
       case 'select': adapter.onSelect(action.id); break
       case 'new': adapter.onNew(); break
       case 'close': { const id = adapter.activeTabId(); if (id) adapter.onClose(id); break }
-      case 'rename': { const id = adapter.activeTabId(); if (id) adapter.onRename(id); break }
     }
   }
 
