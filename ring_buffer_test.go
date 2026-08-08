@@ -121,3 +121,40 @@ func TestRingBuffer_ConcurrentSafety(t *testing.T) {
 	// No panic, no data race — the test passes if -race doesn't complain.
 	assert.True(t, rb.Len() > 0)
 }
+
+// Seq is the marker every derived cache keys on (see sessions_overview.go). Its whole job is that
+// "same value ⟹ same bytes" holds in BOTH directions, so each way it can break gets a case.
+func TestRingBuffer_SeqTracksContentIdentity(t *testing.T) {
+	rb := NewRingBuffer(16)
+
+	start := rb.Seq()
+	assert.Equal(t, start, rb.Seq(), "reading must not move the marker")
+
+	rb.Write([]byte("abc"))
+	afterWrite := rb.Seq()
+	assert.NotEqual(t, start, afterWrite, "a write that changed the content left the marker still")
+
+	// A zero-length write changes nothing, so neither may the marker — otherwise every idle tick
+	// that happens to flush an empty buffer would invalidate a perfectly good cached screen.
+	rb.Write(nil)
+	assert.Equal(t, afterWrite, rb.Seq(), "an empty write moved the marker")
+
+	// Counting BYTES, not calls: two same-length writes must be distinguishable from one.
+	rb.Write([]byte("de"))
+	twoWrites := rb.Seq()
+	rb.Write([]byte("fg"))
+	assert.NotEqual(t, twoWrites, rb.Seq(), "a second same-length write was indistinguishable from the first")
+
+	// Wrapping past capacity must keep moving it. writePos returns to values it has held before —
+	// that is exactly why the marker cannot be derived from writePos or from Len().
+	beforeWrap := rb.Seq()
+	rb.Write([]byte("0123456789abcdefghij"))
+	assert.True(t, rb.Seq() > beforeWrap, "a wrapping write did not move the marker forward")
+
+	// Reset is the one content change that writes no byte. Missed here, a cache would keep serving
+	// the screen of a buffer that has been cleared.
+	beforeReset := rb.Seq()
+	rb.Reset()
+	assert.NotEqual(t, beforeReset, rb.Seq(), "Reset emptied the buffer without moving the marker")
+	assert.Equal(t, 0, rb.Len())
+}

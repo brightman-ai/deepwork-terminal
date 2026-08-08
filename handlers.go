@@ -489,9 +489,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		tmuxTicker := time.NewTicker(tmuxStatePollInterval)
 		defer tmuxTicker.Stop()
 		var lastTmuxState []byte
-		// Non-tmux Agent Overview feed — same ticker, same diff suppression, separate frame.
-		// See sessions_overview.go for why this rides the existing connection instead of polling.
-		var lastSessionsOverview []byte
+		// Non-tmux Agent Overview feed — same ticker, separate frame. See sessions_overview.go for
+		// why this rides the existing connection instead of polling.
+		//
+		// Tracked by REVISION, not by comparing the payload. The snapshot is global, so "has it
+		// changed" is a fact about the SNAPSHOT, not about this connection — N connections each
+		// re-deriving it by scanning the same bytes was N copies of one comparison per second, and
+		// it grew with the payload as well as with the audience. Zero is never a real revision, so
+		// a fresh connection gets the current state on its first tick with no special case.
+		var lastOverviewRev uint64
 		// Explicit-signal feed (session_signal.go). Seeded with the EMPTY payload so a quiet
 		// machine pushes nothing, while a signal that is already pending at attach time is
 		// delivered on the first tick.
@@ -531,13 +537,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
-				if raw := s.sessionsOverviewJSON(ctx); raw != nil && !bytes.Equal(raw, lastSessionsOverview) {
-					lastSessionsOverview = raw
-					msg, _ := json.Marshal(WSControlMessage{
-						Type:    MsgTypeSessionsOverview,
-						Payload: raw,
-					})
-					if !offer(msg) {
+				// The frame is built once per revision inside overviewSnapshot, so a connection
+				// with something to send marshals nothing at all.
+				if snap := s.overviewSnapshot(ctx); snap.revision != lastOverviewRev && snap.frame != nil {
+					lastOverviewRev = snap.revision
+					if !offer(snap.frame) {
 						return
 					}
 				}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
@@ -69,11 +70,26 @@ type Server struct {
 	// session list. The payload is global (all sessions) but its callers are per-connection, so
 	// without this each client would rebuild the identical answer every second. See
 	// overviewSnapshot.
-	overviewCacheMu sync.Mutex
-	overviewCache   overviewSnapshot
-	overviewCacheAt time.Time
-	agentUsage      *agentReporter
-	mu              sync.Mutex
+	//
+	// overviewCacheMu is held ACROSS the rebuild, not just around the read: it is the thing that
+	// makes N simultaneous cache misses into one rebuild and N waiters. overviewBuilding is read
+	// OUTSIDE that lock (hence atomic) so a caller can tell whether it was the builder or one of
+	// the waiters — inside the lock the answer is always "nobody is building", which is precisely
+	// what the lock guarantees and precisely why it cannot be measured there.
+	overviewCacheMu  sync.Mutex
+	overviewCache    overviewSnapshot
+	overviewCacheAt  time.Time
+	overviewBuilding atomic.Bool
+
+	// Per-session replayed screens, keyed on the ring's content marker (see sessionScreen). A
+	// SEPARATE lock from overviewCacheMu on purpose: this one is taken inside the rebuild, and
+	// folding them together would mean the cheap "has this session's buffer moved" question waits
+	// behind the expensive rebuild it is meant to make unnecessary.
+	screenCacheMu sync.Mutex
+	screenCache   map[string]renderedScreen
+
+	agentUsage *agentReporter
+	mu         sync.Mutex
 
 	// notifier is the background agent-waiting engine (agent_notifier.go): it polls tmux,
 	// detects a pane finishing a turn, and fans the event out through the coordinator to

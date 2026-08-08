@@ -158,21 +158,157 @@ func TestSessionsOverviewJSON_SharesOneSnapshotPerTick(t *testing.T) {
 	}
 	sess.Buffer.Write([]byte("first\r\n"))
 
-	first := string(srv.sessionsOverviewJSON(context.Background()))
+	first := string(srv.overviewSnapshot(context.Background()).json)
 
 	// Content changes, but we are still inside the same tick → callers keep sharing the snapshot.
 	sess.Buffer.Write([]byte("second\r\n"))
-	if cached := string(srv.sessionsOverviewJSON(context.Background())); cached != first {
+	if cached := string(srv.overviewSnapshot(context.Background()).json); cached != first {
 		t.Fatal("a second caller within the same tick recomputed instead of sharing the snapshot")
 	}
 
 	// Past the TTL the next tick recomputes and the new output shows up.
 	time.Sleep(sessionsOverviewCacheTTL + 150*time.Millisecond)
-	fresh := string(srv.sessionsOverviewJSON(context.Background()))
+	fresh := string(srv.overviewSnapshot(context.Background()).json)
 	if fresh == first {
 		t.Fatal("cache never expired — the overview would freeze")
 	}
 	if !strings.Contains(fresh, "second") {
 		t.Fatalf("refreshed snapshot lost the new output: %s", fresh)
+	}
+}
+
+// ── I2「变化才有代价」 ────────────────────────────────────────────────────────────────────────
+//
+// The two halves of the invariant, one test each, because they fail independently: a revision that
+// moves without a change makes every connection push an identical frame forever; a revision that
+// does NOT move on a real change freezes the UI, which is far worse and completely silent.
+
+func TestOverviewRevision_MovesOnlyWhenTheAnswerMoves(t *testing.T) {
+	srv, sm := newOverviewTestServer(t)
+	sess, err := sm.Create("worker")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.Buffer.Write([]byte("steady\r\n"))
+
+	first := srv.overviewSnapshot(context.Background())
+	if first.revision == 0 {
+		t.Fatal("revision 0 is the never-seen sentinel — a real snapshot must not carry it")
+	}
+
+	// A REBUILD with no change. Expire the TTL so this is genuinely a second computation, not the
+	// cache being served: the point is that recomputing an identical answer is not an event.
+	time.Sleep(sessionsOverviewCacheTTL + 150*time.Millisecond)
+	same := srv.overviewSnapshot(context.Background())
+	if same.revision != first.revision {
+		t.Fatalf("revision moved %d → %d with nothing changed — every connection would re-push an identical frame once a second",
+			first.revision, same.revision)
+	}
+
+	sess.Buffer.Write([]byte("something happened\r\n"))
+	time.Sleep(sessionsOverviewCacheTTL + 150*time.Millisecond)
+	moved := srv.overviewSnapshot(context.Background())
+	if moved.revision == first.revision {
+		t.Fatal("revision did NOT move on real output — the card would never update again")
+	}
+	if moved.frame == nil || !strings.Contains(string(moved.frame), "something happened") {
+		t.Fatalf("frame does not carry the new output: %s", moved.frame)
+	}
+	if !strings.Contains(string(moved.frame), MsgTypeSessionsOverview) {
+		t.Fatalf("frame is not a %s control message: %s", MsgTypeSessionsOverview, moved.frame)
+	}
+}
+
+func TestOverviewScreen_ReplaysOnlyWhenTheBufferMoved(t *testing.T) {
+	// The expensive half of a card is replaying up to 128 KiB of ring onto a full grid. It used to
+	// run for every session every tick regardless of whether that session had emitted a byte, so
+	// the cost tracked wall clock and tab count rather than anything the user did.
+	srv, sm := newOverviewTestServer(t)
+	sess, err := sm.Create("worker")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.Buffer.Write([]byte("hello\r\n"))
+	cols, rows := sess.PTYSize()
+
+	first := srv.sessionScreen(sess.ID, sess.Buffer, cols, rows)
+	again := srv.sessionScreen(sess.ID, sess.Buffer, cols, rows)
+	// Identity, not equality: an equal-but-rebuilt grid is exactly the work being skipped, and
+	// only pointer identity can tell the two apart.
+	if len(first) == 0 || &first[0] != &again[0] {
+		t.Fatal("an untouched buffer was replayed twice — the cost still tracks the clock, not the change")
+	}
+
+	sess.Buffer.Write([]byte("world\r\n"))
+	after := srv.sessionScreen(sess.ID, sess.Buffer, cols, rows)
+	if len(after) > 0 && len(first) > 0 && &after[0] == &first[0] {
+		t.Fatal("new output served a stale screen — the card would show the past")
+	}
+	if !strings.Contains(strings.Join(after, "\n"), "world") {
+		t.Fatalf("replayed screen lost the new output: %q", after)
+	}
+
+	// A resize repaints the SAME bytes onto a different grid, so the seq alone must not be taken
+	// as permission to reuse.
+	resized := srv.sessionScreen(sess.ID, sess.Buffer, cols/2, rows)
+	if len(resized) > 0 && len(after) > 0 && &resized[0] == &after[0] {
+		t.Fatal("a resized grid reused the old screen — the card would keep the old wrapping")
+	}
+}
+
+func TestOverviewScreenCache_DropsClosedSessions(t *testing.T) {
+	// The cached grid is the largest thing this file holds; keeping one per session that ever
+	// existed is a leak that only shows up on a long-lived server.
+	srv, sm := newOverviewTestServer(t)
+	sess, err := sm.Create("worker")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.Buffer.Write([]byte("output\r\n"))
+	srv.sessionsOverview(context.Background())
+
+	srv.screenCacheMu.Lock()
+	held := len(srv.screenCache)
+	srv.screenCacheMu.Unlock()
+	if held == 0 {
+		t.Fatal("nothing cached — the reuse path is not being exercised at all")
+	}
+
+	sm.DestroyAll()
+	srv.sessionsOverview(context.Background())
+
+	srv.screenCacheMu.Lock()
+	defer srv.screenCacheMu.Unlock()
+	if len(srv.screenCache) != 0 {
+		t.Fatalf("closed session's screen still cached: %d entries", len(srv.screenCache))
+	}
+}
+
+func TestOverviewSnapshot_CallersCancellationDoesNotCancelTheSharedRebuild(t *testing.T) {
+	// The snapshot describes EVERY session and is served to EVERY caller, but it is built by
+	// whichever connection ticks first. When that connection's context was the rebuild's context,
+	// closing one tab poisoned everyone's answer — `ps` fails under a dead context, every agent
+	// reads as ToolNone, and a well-formed payload claims no session is running an agent. Same lie
+	// as an empty pane bar, different door.
+	srv, sm := newOverviewTestServer(t)
+	sess, err := sm.Create("worker")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.Buffer.Write([]byte("still here\r\n"))
+
+	dead, cancel := context.WithCancel(context.Background())
+	cancel() // the caller is already gone before the rebuild starts
+
+	snap := srv.overviewSnapshot(dead)
+	if len(snap.entries) != 1 {
+		t.Fatalf("a dead caller's context produced %d entries, want 1 — the rebuild rode its lifetime",
+			len(snap.entries))
+	}
+	if snap.revision == 0 || snap.frame == nil {
+		t.Fatal("nothing was published from a rebuild that completed fine")
+	}
+	if !strings.Contains(string(snap.frame), "still here") {
+		t.Fatalf("frame lost the session's output: %s", snap.frame)
 	}
 }
