@@ -101,11 +101,19 @@ export function rendererPreference(): RendererKind | null {
  */
 export function setRendererPreference(kind: RendererKind): void {
   if (typeof window === 'undefined') return
+  // 三处**各自** try/catch，不共用一个。共用时，只要第一句抛了（有些隐私模式/扩展会禁掉持久的
+  // localStorage 而放行会话级的 sessionStorage——这是真实存在的组合），后面两句根本不会执行，
+  // 钉原封不动地留着、重载后照旧压过偏好，于是又变回"一个看得见却无声失效的开关"——正是这个
+  // 函数存在的理由，只是从存储层的另一侧绕回来。三件事互不依赖，就不该被同一个 catch 吞掉。
   try {
     window.localStorage.setItem(PREF_KEY, kind)
+  } catch {
+    // 记不住偏好：这次切换只能活到刷新为止。不值得把终端拦下来，更不该拖累拔钉。
+  }
+  try {
     window.sessionStorage.removeItem(PIN_KEY)
   } catch {
-    // 隐私模式 / 存储被禁：这次切换只能活到刷新为止，没有别的补救，也不值得把终端拦下来。
+    // 钉拔不掉：回到"钉还在"的旧行为，不会更糟。
   }
   clearRendererQuery()
 }
