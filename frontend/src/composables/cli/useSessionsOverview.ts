@@ -12,28 +12,21 @@
  * whole tree, and matches how useServerStore already shares cross-component state here.
  */
 import { computed, ref } from 'vue'
-import { activityMs, agentSaidText, agentSignalText, type OverviewUnit } from './useAgentOverview'
+import { agentSaidText, agentSignalText, cardRawStatus, cardToUnit, type OverviewUnit } from './useAgentOverview'
+import type { SurfaceCard } from '@terminal/types/terminal'
 import { useAgentSignals } from './useAgentSignals'
 
-/** One session's card payload — the wire shape of terminal.SessionOverviewEntry. */
-export interface SessionOverviewEntry {
+/** One session's card payload — the wire shape of terminal.SessionOverviewEntry.
+ *
+ *  The agent facts are NOT listed here: they are the inherited SurfaceCard, the same declaration
+ *  the tmux window carries. This interface used to re-type six of them by hand next to a comment
+ *  saying they mirror the pane payload — which is the arrangement the shared type exists to end. */
+export interface SessionOverviewEntry extends SurfaceCard {
   id: string
   title?: string
   cwd?: string
   engine?: string
-  agentTool?: string
-  agentStatus?: string
   exited?: boolean
-  tail?: string[]
-  /** Finished a turn / blocked and not yet responded to — drives the amber "done-unseen" dot. */
-  awaitingUser?: boolean
-  /** Transcript time of that completion; the reload-proof key the seen layer dismisses against. */
-  awaitingSince?: string
-  /** That turn ended on a question rather than a report (labels the SAME dot, never escalates it). */
-  endedOnQuestion?: boolean
-  /** 这个 session 的 agent 最后一次写 transcript 的时刻（ISO）。缺席 = 无从得知。
-   *  与 tmux pane 的同名字段来自服务端**同一个**共享类型，所以两侧要么都有、要么都没有。 */
-  activityAt?: string
 }
 
 const entries = ref<SessionOverviewEntry[]>([])
@@ -53,16 +46,16 @@ export function sessionEntry(id: string | undefined): SessionOverviewEntry | und
 }
 
 /**
- * 这一帧里，这个 session 的原始状态。**唯一**一条推导 —— 下面的 `units`（喂标签点和总览卡片）
- * 和任何单独的消费者都走这里，所以「同一个终端两处显示不一致」在结构上就不可能发生。
+ * 这一帧里，这个 session 的原始状态。**一条推导，一处实现** —— 下面的 `units`（喂标签点和总览
+ * 卡片）和任何单独的消费者都走这里，所以「同一个终端两处显示不一致」在结构上就不可能发生。
  *
- * 一个已经退出的 PTY 永远是 idle，绝不是 running：进程都没了，谈不上在干活。
+ * 一个已经退出的 PTY 永远是 idle，绝不是 running：进程都没了，谈不上在干活。这是本函数在
+ * cardRawStatus 之外**唯一**多做的一件事——它以前还自己抄了一遍 agentStatus 的三分支判断，
+ * 而同一个文件下面 70 行的 units 里还有第三份内联拷贝。
  */
 export function sessionRawStatus(e: SessionOverviewEntry | undefined): OverviewUnit['rawStatus'] {
   if (!e || e.exited) return 'idle'
-  if (e.agentStatus === 'waiting') return 'waiting'
-  if (e.agentStatus === 'running') return 'running'
-  return 'idle'
+  return cardRawStatus(e)
 }
 
 /** 这个 session 的状态文案（"Codex 运行中"）；'' = 这个终端没有 agent，没有状态可说。
@@ -129,20 +122,11 @@ export function useSessionsOverview(activeId: () => string | undefined, order?: 
     const ids = order?.() ?? []
     const position = new Map(ids.map((id, i) => [id, i + 1]))
     const visible = position.size ? entries.value.filter((e) => position.has(e.id)) : entries.value
-    return visible.map((e, i) => {
-      // A dead PTY is 'idle', never 'running' — an exited shell isn't working on anything.
-      const raw: OverviewUnit['rawStatus'] = e.exited
-        ? 'idle'
-        : e.agentStatus === 'waiting'
-          ? 'waiting'
-          : e.agentStatus === 'running'
-            ? 'running'
-            : 'idle'
-      // Same phrasing helper the tmux side uses, so a user who has both never learns two
-      // dialects for one concept. `raw` (not e.agentStatus) so an exited PTY reads as idle here
-      // exactly as its dot does.
-      const signal = agentSignalText(e.agentTool, raw, e.awaitingUser, e.endedOnQuestion)
-      return {
+    // 同一个 cardToUnit，和 tmux window 走的是同一条。这里曾经是一段 20 行的内联映射，把
+    // rawStatus、状态文案、awaitingSince、activityAt 都又推导了一遍——一条卡片有几个单元
+    // 是两条来源真正的差别，而「卡片说什么」从来不是，那份拷贝存在的唯一理由是 N=1 长得像赋值。
+    return visible.map((e, i) =>
+      cardToUnit(e, {
         key: e.id,
         index: position.get(e.id) ?? i + 1,
         // 原样带上服务端的名字，**不在这里编回落名**：卡面标题（自定义名 → cwd basename →
@@ -150,25 +134,14 @@ export function useSessionsOverview(activeId: () => string | undefined, order?: 
         // 认不出是哪个项目，又因为不长得像自动名而躲过了后面的 basename 回落。
         title: e.title ?? '',
         active: e.id === activeId(),
-        cwd: e.cwd ?? '',
-        tool: e.agentTool ?? '',
-        rawStatus: raw,
-        // Real transcript-derived needs-you, same as a tmux pane: the session is bound to its OWN
-        // transcript by the shared PaneAgentMonitor, so this is per-session truth rather than the
-        // "newest file in this directory" guess that used to make two terminals mirror each other.
-        awaiting: !!e.awaitingUser,
-        awaitingSince: e.awaitingSince ?? '',
-        // 证据年龄，和 tmux 卡片同一条换算（activityMs）、同一个服务端字段。在此之前这里什么都
-        // 没有：一张非 tmux 卡片可以把一条十小时没人写过的 transcript 显示成「运行中」，而屏幕上
-        // 没有任何东西能让人看出区别。
-        activityAt: activityMs(e.activityAt),
-        signals: signal ? [signal] : [],
+        cwd: e.cwd,
+        // units 省略：这张卡就是它自己那一个单元。
+        exited: e.exited,
         // '' when this session has no pending signal, or when the signal was a bare bell — the
         // card then reads exactly as it did before, rather than gaining an empty quote.
         agentSaid: agentSaidText(signalFor(e.id), e.agentTool),
-        tail: e.tail ?? [],
-      }
-    })
+      }),
+    )
   })
 
   return { entries, units }

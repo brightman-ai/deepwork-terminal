@@ -108,7 +108,7 @@ import { computed } from 'vue'
 import type { TmuxSessionState, TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
-import { windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { cardRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 
 const props = defineProps<{
   sessionId: string
@@ -167,7 +167,7 @@ const agentRollup = computed(() => {
  *  bar renders, so this list can never show a color the bar disagrees with. Falls back to the
  *  raw 3-state read (no done-unseen) only when no overview is wired in. '' (idle) → no dot. */
 function winDot(w: TmuxWindowState): string {
-  const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
+  const s = props.statusByIndex?.[w.index] ?? cardRawStatus(w)
   return s === 'idle' ? '' : STATUS_COLOR[s]
 }
 
@@ -176,7 +176,7 @@ function winDot(w: TmuxWindowState): string {
  *  rule). Mirrors TmuxPaneBar's dotClass(); `done-unseen` maps to '' because STATUS_MOTION says
  *  it is static — see that constant for the three-state contract. */
 function winMotionClass(w: TmuxWindowState): string {
-  const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
+  const s = props.statusByIndex?.[w.index] ?? cardRawStatus(w)
   if (s === 'waiting') return 'tss-win-dot--waiting'
   if (s === 'running') return 'tss-win-dot--running'
   return ''

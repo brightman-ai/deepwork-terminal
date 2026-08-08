@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"context"
-	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
@@ -60,24 +59,21 @@ func (t *sessionAgentTracker) Tool(ctx context.Context, shellPID int) agentintel
 }
 
 // sessionAgentState is what one terminal session's card and tab dot both render.
+//
+// The facts are the embedded SurfaceUnit — the same single declaration the pane payload and the
+// card payload carry — rather than a third hand-written copy of the same field names. That copy
+// was not hypothetical: this struct spelled out six of them and sessions_overview.go then assigned
+// them across one at a time, so every new surface fact had two more places to be forgotten in.
 type sessionAgentState struct {
-	Tool            agentintel.AgentTool
-	Status          agentintel.AgentStatus
-	AwaitingUser    bool
-	AwaitingSince   time.Time // zero when not awaiting, or when the completion is undated
-	EndedOnQuestion bool
-	// ActivityAt is when this session's agent last WROTE to its transcript — the age of the
-	// evidence behind Status. Cache-only (one stat, never a directory scan), and read AFTER the
-	// status resolution below so the session is bound to a transcript by the time it is asked.
-	//
-	// The tmux pane has shipped this since a pane sat "running" for ten hours off a transcript
-	// nothing had touched overnight. A non-tmux card could tell exactly the same lie, and nothing
-	// on it would have caught the difference — the field simply had not been carried across.
-	ActivityAt time.Time
+	agentintel.SurfaceUnit
 	// Decision is the provenance of the status above: which single rule produced it and,
 	// for a screen-derived verdict, the line that matched. It exists so a wrong "needs you"
 	// can be traced afterwards instead of re-argued from an approximation — see
 	// agentintel/status_decision.go for the incident that motivated it.
+	//
+	// NOT folded into the unit: the unit is what goes on the WIRE (rule always, evidence only on
+	// attention decisions) while this is the full verdict the LOG needs. Reconstructing the log
+	// from the payload is how a log starts disagreeing with the thing it describes.
 	Decision agentintel.StatusDecision
 }
 
@@ -115,15 +111,7 @@ func (t *sessionAgentTracker) State(ctx context.Context, key string, shellPID in
 		Screen: func() ([]string, bool) { return screen, screen != nil },
 	})
 
-	out := sessionAgentState{
-		Tool:            unit.AgentTool,
-		Status:          unit.AgentStatus,
-		AwaitingUser:    unit.AwaitingUser,
-		AwaitingSince:   unit.AwaitingSince,
-		EndedOnQuestion: unit.EndedOnQuestion,
-		ActivityAt:      unit.ActivityAt,
-		Decision:        decision,
-	}
+	out := sessionAgentState{SurfaceUnit: unit, Decision: decision}
 	t.logDecision(ctx, key, out)
 	return out
 }
@@ -135,7 +123,7 @@ func (t *sessionAgentTracker) logDecision(ctx context.Context, key string, out s
 	if !out.Decision.IsAttention() {
 		return
 	}
-	agentintel.LogStatusDecision(ctx, "session", key, out.Tool, out.Decision)
+	agentintel.LogStatusDecision(ctx, "session", key, out.AgentTool, out.Decision)
 }
 
 // Prune drops bindings for sessions that no longer exist. Called once per overview rebuild so a

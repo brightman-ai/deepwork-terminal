@@ -31,10 +31,10 @@ func newNotifierRig() *agentNotifier {
 
 func sessionEntry(id, tool, status string) SessionOverviewEntry {
 	return SessionOverviewEntry{ID: id, Title: "终端 1", CWD: "/nonexistent-project",
-		SurfaceUnit: agentintel.SurfaceUnit{
+		SurfaceCard: agentintel.SurfaceCard{SurfaceUnit: agentintel.SurfaceUnit{
 			AgentTool:   agentintel.AgentTool(tool),
 			AgentStatus: agentintel.AgentStatus(status),
-		}}
+		}}}
 }
 
 // feed runs one PTY-source pass over the given entries.

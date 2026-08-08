@@ -1,0 +1,196 @@
+{
+  "note": [
+    "The cross-language contract for one Agent-Overview card. ONE file, read by two test suites:",
+    "  Go  (surface_rollup_test.go)  asserts  units + active  --RollUp-->  card",
+    "  TS  (surfaceRollupVectors.test.ts) asserts  card + identity  --cardToUnit-->  unit",
+    "",
+    "Why vectors rather than 'keep the two implementations in step': there is no shared code path",
+    "across the seam, so the only thing that CAN be shared is the examples. Each side owns one half",
+    "of the chain and neither can move without the other's half failing.",
+    "",
+    "`units: null` means a card no Go RollUp produces — a frame from a server that has not been",
+    "upgraded. The Go suite skips those; the TS suite must still handle them, which is the only",
+    "reason its back-compat clauses exist."
+  ],
+  "cases": [
+    {
+      "name": "a card with no units says nothing, and says it without inventing a status",
+      "active": -1,
+      "units": [],
+      "card": {},
+      "identity": { "key": "@0", "index": 0, "title": "empty", "active": false },
+      "unit": { "rawStatus": "idle", "tool": "", "awaiting": false, "awaitingSince": "", "activityAt": null, "signals": [] }
+    },
+    {
+      "name": "one unit is the plain case, not a special one — the card IS its unit",
+      "active": 0,
+      "units": [
+        {
+          "agentTool": "claude",
+          "agentStatus": "waiting",
+          "awaitingUser": true,
+          "awaitingSince": "2026-08-08T09:00:00Z",
+          "endedOnQuestion": true,
+          "statusRule": "screen.approval",
+          "statusEvidence": "Do you want to proceed?",
+          "activityAt": "2026-08-08T08:30:00Z"
+        }
+      ],
+      "card": {
+        "agentTool": "claude",
+        "agentStatus": "waiting",
+        "awaitingUser": true,
+        "awaitingSince": "2026-08-08T09:00:00Z",
+        "endedOnQuestion": true,
+        "statusRule": "screen.approval",
+        "statusEvidence": "Do you want to proceed?",
+        "activityAt": "2026-08-08T08:30:00Z"
+      },
+      "identity": { "key": "sess-1", "index": 1, "title": "worker", "active": true, "cwd": "/repo" },
+      "unit": {
+        "rawStatus": "waiting",
+        "tool": "claude",
+        "awaiting": true,
+        "awaitingSince": "2026-08-08T09:00:00Z",
+        "activityAt": "2026-08-08T08:30:00Z",
+        "signals": ["Claude 等待输入"]
+      }
+    },
+    {
+      "name": "a bell on a bare shell keeps its rule through the roll-up (no tool, no status, still traceable)",
+      "active": 0,
+      "units": [{ "awaitingUser": true, "statusRule": "signal.bell", "statusEvidence": "Codex 任务已完成" }],
+      "card": { "awaitingUser": true, "statusRule": "signal.bell", "statusEvidence": "Codex 任务已完成" },
+      "identity": { "key": "sess-2", "index": 2, "title": "shell", "active": false },
+      "unit": { "rawStatus": "idle", "tool": "", "awaiting": true, "awaitingSince": "", "activityAt": null, "signals": [] }
+    },
+    {
+      "name": "a WAITING background pane turns the whole card red and owns the rule, while the badge follows focus",
+      "active": 1,
+      "units": [
+        {
+          "agentTool": "claude",
+          "agentStatus": "waiting",
+          "awaitingUser": true,
+          "awaitingSince": "2026-08-08T09:00:00Z",
+          "statusRule": "screen.approval",
+          "statusEvidence": "Allow?"
+        },
+        { "agentTool": "codex", "agentStatus": "running", "statusRule": "transcript.running", "activityAt": "2026-08-08T09:00:00Z" }
+      ],
+      "card": {
+        "agentTool": "codex",
+        "agentStatus": "waiting",
+        "awaitingUser": true,
+        "awaitingSince": "2026-08-08T09:00:00Z",
+        "statusRule": "screen.approval",
+        "statusEvidence": "Allow?",
+        "activityAt": "2026-08-08T09:00:00Z"
+      },
+      "identity": { "key": "@1", "index": 1, "title": "editor", "active": true, "cwd": "/repo" },
+      "unit": {
+        "rawStatus": "waiting",
+        "tool": "codex",
+        "awaiting": true,
+        "awaitingSince": "2026-08-08T09:00:00Z",
+        "activityAt": "2026-08-08T09:00:00Z",
+        "signals": ["Claude 等待输入", "Codex 运行中"]
+      }
+    },
+    {
+      "name": "running beats idle, the running unit owns the rule, and activity is the newest of all units",
+      "active": 0,
+      "units": [
+        { "agentTool": "claude", "agentStatus": "idle", "statusRule": "transcript.idle", "activityAt": "2026-08-08T08:00:00Z" },
+        { "agentTool": "codex", "agentStatus": "running", "statusRule": "transcript.running", "activityAt": "2026-08-08T09:00:00Z" }
+      ],
+      "card": { "agentTool": "claude", "agentStatus": "running", "statusRule": "transcript.running", "activityAt": "2026-08-08T09:00:00Z" },
+      "identity": { "key": "@2", "index": 2, "title": "build", "active": false, "cwd": "/repo" },
+      "unit": {
+        "rawStatus": "running",
+        "tool": "claude",
+        "awaiting": false,
+        "awaitingSince": "",
+        "activityAt": "2026-08-08T09:00:00Z",
+        "signals": ["Claude 空闲", "Codex 运行中"]
+      }
+    },
+    {
+      "name": "the badge falls back to the first unit that has a tool when the focused one has none",
+      "active": 1,
+      "units": [{ "agentTool": "claude", "agentStatus": "idle", "statusRule": "transcript.idle" }, {}],
+      "card": { "agentTool": "claude", "agentStatus": "idle", "statusRule": "transcript.idle" },
+      "identity": { "key": "@3", "index": 3, "title": "split", "active": false, "cwd": "/repo" },
+      "unit": { "rawStatus": "idle", "tool": "claude", "awaiting": false, "awaitingSince": "", "activityAt": null, "signals": ["Claude 空闲"] }
+    },
+    {
+      "name": "the completion a card reports is the first DATED one — an undated wait cannot be the seen-key",
+      "active": 0,
+      "units": [
+        { "agentTool": "codex", "agentStatus": "idle", "awaitingUser": true, "statusRule": "transcript.idle" },
+        {
+          "agentTool": "claude",
+          "agentStatus": "idle",
+          "awaitingUser": true,
+          "awaitingSince": "2026-08-08T08:30:00Z",
+          "endedOnQuestion": true,
+          "statusRule": "transcript.turn_end"
+        }
+      ],
+      "card": {
+        "agentTool": "codex",
+        "agentStatus": "idle",
+        "awaitingUser": true,
+        "awaitingSince": "2026-08-08T08:30:00Z",
+        "endedOnQuestion": true,
+        "statusRule": "transcript.idle"
+      },
+      "identity": { "key": "@4", "index": 4, "title": "pair", "active": true, "cwd": "/repo" },
+      "unit": {
+        "rawStatus": "idle",
+        "tool": "codex",
+        "awaiting": true,
+        "awaitingSince": "2026-08-08T08:30:00Z",
+        "activityAt": null,
+        "signals": ["Codex 已完成", "Claude 有提问"]
+      }
+    },
+    {
+      "name": "an undated wait reaches the wire with no timestamp at all, not with a sentinel",
+      "active": 0,
+      "units": [{ "agentTool": "codex", "agentStatus": "idle", "awaitingUser": true, "statusRule": "transcript.turn_end" }],
+      "card": { "agentTool": "codex", "agentStatus": "idle", "awaitingUser": true, "statusRule": "transcript.turn_end" },
+      "identity": { "key": "sess-3", "index": 3, "title": "codex", "active": false },
+      "unit": { "rawStatus": "idle", "tool": "codex", "awaiting": true, "awaitingSince": "", "activityAt": null, "signals": ["Codex 已完成"] }
+    },
+    {
+      "name": "an exited PTY is idle whatever the detector last said — a dead shell is not working",
+      "active": 0,
+      "units": [{ "agentTool": "claude", "agentStatus": "running", "statusRule": "transcript.running", "activityAt": "2026-08-08T09:00:00Z" }],
+      "card": { "agentTool": "claude", "agentStatus": "running", "statusRule": "transcript.running", "activityAt": "2026-08-08T09:00:00Z" },
+      "identity": { "key": "sess-9", "index": 9, "title": "dead", "active": false, "cwd": "/repo", "exited": true },
+      "unit": {
+        "rawStatus": "idle",
+        "tool": "claude",
+        "awaiting": false,
+        "awaitingSince": "",
+        "activityAt": "2026-08-08T09:00:00Z",
+        "signals": ["Claude 空闲"]
+      }
+    },
+    {
+      "name": "back-compat: a not-yet-upgraded server's 0001-01-01 is not a completion and not an age",
+      "active": 0,
+      "units": null,
+      "card": {
+        "agentTool": "claude",
+        "agentStatus": "running",
+        "awaitingUser": true,
+        "awaitingSince": "0001-01-01T00:00:00Z",
+        "activityAt": "0001-01-01T00:00:00Z"
+      },
+      "identity": { "key": "@7", "index": 7, "title": "old", "active": false },
+      "unit": { "rawStatus": "running", "tool": "claude", "awaiting": true, "awaitingSince": "", "activityAt": null, "signals": ["Claude 运行中"] }
+    }
+  ]
+}
