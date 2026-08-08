@@ -413,6 +413,7 @@ import {
   type SurfaceActionId,
 } from '@terminal/components/terminal-session/surfaceActionBar'
 import { canMeasureTerminal } from '@terminal/components/terminal-session/terminalFit'
+import { isViewer, shouldDeclareViewport } from '@terminal/composables/cli/viewportDeclaration'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import {
   GHOST_ECHO_WINDOW,
@@ -1246,19 +1247,55 @@ const clipboardText = useClipboardText({
   hudRecord: (kind, message) => hud.record(kind, message),
 })
 
-// ─── Robust resize: fit + sendResize, retries to handle DOM layout settling ──
-function robustFitAndResize() {
+// ─── 视口声明：谁在什么时候有资格说「我这么大」 ──────────────────────────────
+//
+// 规则与理由在 viewportDeclaration.ts。这里只做接线，且**只有这一处**接线——tmux 标签和非 tmux
+// 标签共用这个 surface，所以两种模式在这一层拿到的是同一条纪律，而不是两份碰巧一致的实现。
+//
+// 记住上一次评估的身份，是为了认出"刚成为观看者"这个**边沿**：那一刻必须声明，哪怕本地网格
+// 没变——要纠正的不是我的网格，是服务端那份可能已经被别人写过的共享尺寸。
+let wasViewer = false
+
+function viewerNow(): boolean {
+  return isViewer({
+    pageVisible: typeof document === 'undefined' || document.visibilityState === 'visible',
+    surfaceActive: props.active,
+  })
+}
+
+/**
+ * fit + （够格时）声明尺寸。
+ *
+ * fit 无条件做：它只改本地网格，不抢任何人的东西，而且让这个标签在被切回来时已经是量准的。
+ * 声明才受规则约束——说出口等于「我是最新的」。
+ */
+function declareViewport(opts: { geometryChanged: boolean }): void {
   const xterm = xtermRef.value
   if (!xterm) return
   xterm.fit()
   const term = xterm.terminal?.()
-  if (term && term.cols > 0 && term.rows > 0) {
-    sendResize(term.cols, term.rows)
-    hud.updateSnapshot({ pty: `${term.cols}x${term.rows}` })
-    // Ghosting guard: a resize/reflow (mobile keyboard show/hide, rotation, reattach) can leave
-    // stale cells when a fullscreen TUI repaints differentially. Force a full repaint after the fit.
-    term.refresh(0, term.rows - 1)
-  }
+  if (!term || term.cols <= 0 || term.rows <= 0) return
+
+  const now = viewerNow()
+  const declare = shouldDeclareViewport(wasViewer, now, opts.geometryChanged)
+  wasViewer = now
+  if (!declare) return
+
+  sendResize(term.cols, term.rows)
+  hud.updateSnapshot({ pty: `${term.cols}x${term.rows}` })
+  // Ghosting guard: a resize/reflow (mobile keyboard show/hide, rotation, reattach) can leave
+  // stale cells when a fullscreen TUI repaints differentially. Force a full repaint after the fit.
+  term.refresh(0, term.rows - 1)
+}
+
+// ─── Robust resize: fit + declare, retries to handle DOM layout settling ──
+//
+// Every caller of this is a real geometry event (connect ladder, drawer squeeze, rotation), so it
+// passes geometryChanged — the gate that still applies is "am I the one being looked at". That is
+// exactly what a backgrounded page's reconnect ladder used to walk straight through, shouting "I am
+// the newest" three times at whoever was actually typing.
+function robustFitAndResize() {
+  declareViewport({ geometryChanged: true })
 }
 
 // Connection diagnostic: a REMOTE tab that never opens its WS just shows "Connecting…" forever
@@ -1341,28 +1378,41 @@ function hasTmuxAgentTopology(state: AgentState | null, list: AgentState[]): boo
 // memoized per tick, so N clients cost one computation, not N. `connectGuarded()` stays
 // idempotent (useWebSocketClient no-ops when already connected), so a re-activate is free.
 watch(() => props.active, (isActive) => {
-  if (!isActive) return
+  if (!isActive) {
+    // Explicitly stop being the viewer, so the next activation is recognised as an EDGE. Left
+    // stale, a return would look like "nothing changed" and skip the declaration it owes.
+    wasViewer = false
+    return
+  }
   // Still connect here: a tab that was never activated has no socket yet (onMounted only connects
   // the active one), so the FIRST activation is what opens it. Later ones are no-ops.
   connectGuarded()
   // Re-fit on show: xterm cannot measure itself while v-show has it display:none, so its cols/rows
-  // are stale from whatever the viewport was when it was last visible.
+  // are stale from whatever the viewport was when it was last visible. This is also the moment this
+  // surface BECOMES the viewer, which is why the declaration is owed even when the grid comes back
+  // identical — see viewportDeclaration.ts.
   nextTick(() => {
-    const xterm = xtermRef.value
-    if (!xterm) return
-    xterm.fit()
-    const term = xterm.terminal?.()
-    if (term) {
-      sendResize(term.cols, term.rows)
-      terminalRows.value = term.rows
-    }
+    declareViewport({ geometryChanged: true })
+    const term = xtermRef.value?.terminal?.()
+    if (term) terminalRows.value = term.rows
   })
 }, { immediate: false })
 
 // ─── Page visibility ──────────────────────────────────────────────────────────
+//
+// Coming back to the foreground is the OTHER way this surface becomes the viewer, and it used to
+// only repaint. Repainting redraws what is there; it does not ask for content laid out for THIS
+// viewport. So a phone returning from the background faithfully re-rendered a screen tmux had
+// composed for someone else's 240 columns. The declaration is what corrects that, and it is owed
+// precisely because the grid did NOT change — the thing that changed is who is looking.
+//
+// Going to the background flows through the same call so `wasViewer` drops to false; the next
+// return is then recognised as an edge rather than as "nothing happened".
 
 function onVisibilityChange() {
-  if (document.visibilityState === 'visible') {
+  const visible = document.visibilityState === 'visible'
+  declareViewport({ geometryChanged: false })
+  if (visible) {
     const term = xtermRef.value?.terminal?.()
     if (term) term.refresh(0, term.rows - 1)
   }
@@ -1752,10 +1802,20 @@ function sendTerminalData(data: Uint8Array) {
   }
 }
 
+// The ResizeObserver's own path: a REAL geometry change (rotation, keyboard, window drag). It is
+// already gated on measurability inside XtermTerminal — a hidden surface has no box and never
+// emits — but it goes through the same rule anyway, so there is exactly ONE answer to "may I
+// declare" instead of one rule and one place that happens to be safe for a different reason.
 function onTerminalResize(cols: number, rows: number) {
-  sendResize(cols, rows)
   terminalRows.value = rows
   hud.record('resize', `${cols}x${rows}`)
+  const now = viewerNow()
+  const declare = shouldDeclareViewport(wasViewer, now, true)
+  wasViewer = now
+  if (declare) {
+    sendResize(cols, rows)
+    hud.updateSnapshot({ pty: `${cols}x${rows}` })
+  }
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
