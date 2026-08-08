@@ -76,4 +76,10 @@ var (
 	// of starting a second one. Every one of these used to be a duplicate full rebuild: the cache
 	// released its lock before building, so N connections ticking together all missed together.
 	terminalOverviewRebuildSharedTotal = obs.NewCounter("terminal_overview_rebuild_shared_total")
+
+	// A rebuild that gave up without publishing (out of budget, or unmarshallable). It exists
+	// because from the outside a server that keeps abandoning rebuilds is indistinguishable from a
+	// quiet one: the cards simply stop moving, no error is raised, and every layer looks healthy.
+	// Non-zero here is the difference between "nothing is happening" and "we cannot find out".
+	terminalOverviewRebuildAbandonedTotal = obs.NewCounter("terminal_overview_rebuild_abandoned_total")
 )

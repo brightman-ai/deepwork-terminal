@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
@@ -71,15 +70,17 @@ type Server struct {
 	// without this each client would rebuild the identical answer every second. See
 	// overviewSnapshot.
 	//
-	// overviewCacheMu is held ACROSS the rebuild, not just around the read: it is the thing that
-	// makes N simultaneous cache misses into one rebuild and N waiters. overviewBuilding is read
-	// OUTSIDE that lock (hence atomic) so a caller can tell whether it was the builder or one of
-	// the waiters — inside the lock the answer is always "nobody is building", which is precisely
-	// what the lock guarantees and precisely why it cannot be measured there.
-	overviewCacheMu  sync.Mutex
-	overviewCache    overviewSnapshot
-	overviewCacheAt  time.Time
-	overviewBuilding atomic.Bool
+	// overviewCacheMu guards the CACHE only, and is never held across a rebuild — see
+	// overviewSnapshot for why that distinction is load-bearing rather than stylistic. The herd is
+	// collapsed by overviewInFlight (a promise every later arrival waits on and may abandon),
+	// because a rebuild contains blocking file reads that no context can preempt, and a mutex
+	// cannot be abandoned. overviewAttemptAt rate-limits ATTEMPTS, so a rebuild that keeps failing
+	// retries at the healthy cadence instead of continuously.
+	overviewCacheMu   sync.Mutex
+	overviewCache     overviewSnapshot
+	overviewCacheAt   time.Time
+	overviewAttemptAt time.Time
+	overviewInFlight  *overviewBuild
 
 	// Per-session replayed screens, keyed on the ring's content marker (see sessionScreen). A
 	// SEPARATE lock from overviewCacheMu on purpose: this one is taken inside the rebuild, and
