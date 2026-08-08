@@ -32,21 +32,37 @@
  */
 import { ref, type Ref } from 'vue'
 import { SLOW_FRAME_MS, type RenderMetricsSummary } from '@terminal/composables/cli/terminalRenderMetrics'
+import type { RendererSource } from '@terminal/composables/cli/terminalRenderer'
 
 export type RendererKind = 'webgl' | 'dom' | 'unknown'
 
+/**
+ * 为什么是这个渲染器。
+ *
+ * 前三档来自 terminalRenderer 的优先级（钉 / 偏好 / 默认），第四档是**想要却拿不到**——
+ * 它单独存在，因为只有它会改变面板的行为：拿不到的东西不该配一个"切过去"的按钮。
+ *
+ * 在此之前这里只有一个 `declineReason` 字符串，把「你自己选的 DOM」和「WebGL 崩了退回 DOM」
+ * 塞在同一个格子里。当 WebGL 还是默认时那句「此浏览器拿不到 WebGL2」恰好总是对的；DOM 一旦
+ * 成为默认，同一句话就开始**对绝大多数人撒谎**。原因必须是一等公民，不能靠默认值碰巧成立。
+ */
+export type RendererCause = RendererSource | 'unavailable'
+
 /** 当前渲染器。'unknown' = 还没有终端挂载过，此时**什么都不该说**。 */
 const renderer = ref<RendererKind>('unknown')
-/** 退回 DOM 的原因（构造/激活抛出的那条消息）。仅在被拒时有值。 */
-const declineReason = ref('')
+/** 为什么是它。 */
+const cause = ref<RendererCause>('default')
+/** WebGL 构造/激活抛出的那条原话。仅 cause==='unavailable' 时有值。 */
+const rendererError = ref('')
 /** 本页面是否发生过 WebGL 上下文丢失。**粘性**：置位后不再清除，直到页面重载。 */
 const contextLost = ref(false)
 /** 最近一次渲染指标窗口（每 ~15s 一次，由 terminalRenderMetrics 产出）。 */
 const metrics = ref<RenderMetricsSummary | null>(null)
 
-export function noteRenderer(kind: 'webgl' | 'dom', reason?: string): void {
+export function noteRenderer(kind: 'webgl' | 'dom', why: RendererCause, error?: string): void {
   renderer.value = kind
-  declineReason.value = reason ?? ''
+  cause.value = why
+  rendererError.value = error ?? ''
 }
 
 export function noteContextLost(): void {
@@ -62,18 +78,20 @@ export function noteRenderMetrics(summary: RenderMetricsSummary): void {
 /** 测试用：重置页面级状态（生产代码没有清除的语义——刷新页面才是）。 */
 export function resetRenderHealthForTest(): void {
   renderer.value = 'unknown'
-  declineReason.value = ''
+  cause.value = 'default'
+  rendererError.value = ''
   contextLost.value = false
   metrics.value = null
 }
 
 export function useRenderHealth(): {
   renderer: Ref<RendererKind>
-  declineReason: Ref<string>
+  cause: Ref<RendererCause>
+  rendererError: Ref<string>
   contextLost: Ref<boolean>
   metrics: Ref<RenderMetricsSummary | null>
 } {
-  return { renderer, declineReason, contextLost, metrics }
+  return { renderer, cause, rendererError, contextLost, metrics }
 }
 
 export interface RenderLine {
@@ -83,22 +101,51 @@ export interface RenderLine {
   text: string
   /** 补充说明：为什么会这样。空则不显示。 */
   detail: string
-  /** 有动作才给 —— 只有"刷新能修"的那一档才配一个按钮。 */
-  action?: { label: string; kind: 'reload' }
+  /**
+   * 有动作才给。两种动作，判据同一条：**点下去真的会发生什么**。
+   *   · 'reload'   —— 上下文丢了，刷新能把 GPU 拿回来。
+   *   · 'renderer' —— 换到另一个渲染器（写偏好 + 刷新）。
+   */
+  action?:
+    | { label: string; kind: 'reload' }
+    | { label: string; kind: 'renderer'; to: 'webgl' | 'dom' }
+}
+
+/** 「为什么是它」的一句话。空 = 不必解释。 */
+function causeDetail(kind: 'webgl' | 'dom', why: RendererCause): string {
+  switch (why) {
+    // 标签页里那根钉最需要被说出来：它压过偏好，且**只在这个标签页里**成立。不说，使用者就会
+    // 遇到"我明明选了另一个"却找不到解释的那种 bug。
+    case 'pinned':
+      return `?renderer=${kind}（仅本标签页）`
+    // 说清它记得住 —— 否则一个刚点完的开关，看起来和一次性的临时状态没有区别。
+    case 'chosen':
+      return '你选择的，本浏览器记住'
+    default:
+      return '默认'
+  }
 }
 
 /**
- * 渲染器那一行说什么。
+ * 渲染器那一行说什么、配什么按钮。
  *
- * 三档的分野是**用户能不能做点什么**，不是好坏：
- *   · 上下文丢失 → 刷新就能拿回 GPU ⟹ warn + 动作
- *   · 从一开始就没有 WebGL2 → 刷新也没用（是驱动/浏览器的事）⟹ muted，只解释，不给假按钮
- *   · 正常 → ok，一句话，无动作
+ * 分档的判据始终是**使用者能不能做点什么**，不是好坏：
+ *   · 上下文丢失 → 刷新就能拿回 GPU ⟹ warn + 刷新
+ *   · 想要 WebGL 却拿不到 → 刷新也没用（是驱动/浏览器的事）⟹ muted，只解释，**不给按钮**：
+ *     切过去只会原地再失败一次，点了没反应的按钮比没有更糟。
+ *   · 其余（就是常态）⟹ 报出当前渲染器 + 一个切到另一个的按钮。
+ *
+ * 那个按钮是这一版的重点。在它之前，换渲染器的唯一办法是手敲一个 `?renderer=` 查询参数——也就是
+ * 说，只有读过源码的人才知道有得换。既然默认已经定在 DOM 一侧（见 terminalRenderer 文件头），
+ * "想要 GPU 的人怎么拿到 GPU"就不能再是一条口口相传的路径。
+ *
+ * DOM 依旧是 muted 而不是 warn：它不是故障，只是没在用 GPU。tone 说的是"要不要管"，不是"好不好"。
  */
 export function rendererLine(
   kind: RendererKind,
   lost: boolean,
-  reason: string,
+  why: RendererCause,
+  error: string,
 ): RenderLine {
   if (lost) {
     return {
@@ -108,16 +155,22 @@ export function rendererLine(
       action: { label: '刷新页面', kind: 'reload' },
     }
   }
-  if (kind === 'webgl') return { tone: 'ok', text: 'WebGL（GPU）', detail: '' }
-  if (kind === 'dom') {
+  if (kind === 'unknown') return { tone: 'muted', text: '尚未初始化', detail: '' }
+  if (kind === 'dom' && why === 'unavailable') {
     return {
       tone: 'muted',
       text: 'DOM（CPU）',
-      // 说清"刷新没用"，免得用户白试 —— 这是浏览器/驱动层面的事。
-      detail: reason ? `此浏览器拿不到 WebGL2：${reason}` : '此浏览器拿不到 WebGL2，刷新无法改变',
+      // 说清"刷新没用"，免得使用者白试 —— 这是浏览器/驱动层面的事。
+      detail: error ? `此浏览器拿不到 WebGL2：${error}` : '此浏览器拿不到 WebGL2，刷新无法改变',
     }
   }
-  return { tone: 'muted', text: '尚未初始化', detail: '' }
+  const to: 'webgl' | 'dom' = kind === 'webgl' ? 'dom' : 'webgl'
+  return {
+    tone: kind === 'webgl' ? 'ok' : 'muted',
+    text: kind === 'webgl' ? 'WebGL（GPU）' : 'DOM（CPU）',
+    detail: causeDetail(kind, why),
+    action: { label: to === 'dom' ? '切换为 DOM' : '切换为 WebGL', kind: 'renderer', to },
+  }
 }
 
 /**
