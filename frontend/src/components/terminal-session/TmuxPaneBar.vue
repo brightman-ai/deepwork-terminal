@@ -80,6 +80,17 @@
     </div>
   </div>
 
+  <!-- tmux server 没了，而它刚才还在。
+       这一条不是装饰。pane bar 的门是 `attached && windows.length`，所以 server 一死它整条消失 ——
+       在屏幕上和「这个 shell 本来就不在 tmux 里」一模一样。2026-08-08 19:34 一台跑了十一天的
+       server 崩掉时，全程序唯一的痕迹是一行 INFO，使用者是自己敲 `tmux attach` 读到 "no sessions"
+       才知道的。服务端现在把这个事实说出来（serverVanished），这里负责让它到达眼睛。
+       从不用 tmux 的人永远看不到这条：那个标志只有在「曾经看见过带会话的 server」之后才可能为真。 -->
+  <div v-else-if="ready && serverVanished" class="tmux-pane-bar tpb-gone" data-testid="tmux-server-gone">
+    <span class="tpb-gone-dot" />
+    <span class="tpb-gone-text">tmux server 不在了 —— 它刚才还在，会话都随它没了</span>
+  </div>
+
   <!-- cwd/status tip — teleported out of the clipping bar, fixed under the button. -->
   <Teleport to="body">
     <div
@@ -143,6 +154,7 @@ const rollupSegs = computed(() => {
 const tmux = useTmuxState(() => props.sessionId)
 const ready = tmux.ready
 const attached = tmux.attached
+const serverVanished = tmux.serverVanished
 const windows = tmux.windows
 
 // Passive attention roll-up on the overview capsule uses this; the bell no longer depends on it.
@@ -281,6 +293,24 @@ function onWinClick(w: TmuxWindowState, e: MouseEvent): void {
   -webkit-user-select: none;
 }
 .tmux-pane-bar::-webkit-scrollbar { display: none; }
+
+/* server 没了这一行占据 pane bar 原来的位置，所以「它去哪了」和「它曾在哪」是同一块像素。
+   刻意不做成可关闭的 toast：这不是一条通知，是一个持续为真的状态，server 回来它自己就消失。
+   用 waiting 那个颜色而不是新造一个红——全 app 的「要你看一眼」是同一种颜色。 */
+.tpb-gone {
+  --status-waiting: v-bind('STATUS_COLOR.waiting');
+  color: #b9a8d0;
+  font-size: 11px;
+  cursor: default;
+}
+.tpb-gone-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-waiting);
+  flex: 0 0 auto;
+}
+.tpb-gone-text { white-space: nowrap; }
 
 .tpb-win {
   flex-shrink: 0;

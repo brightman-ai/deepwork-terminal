@@ -75,6 +75,9 @@ export interface TmuxSessionState {
 export interface TmuxState {
   installed: boolean
   serverRunning: boolean
+  /** 我们**看着的**那个 tmux server 不在了（不是「你从不用 tmux」）。缺席 = 没有这回事。
+   *  只有服务端知道这件事：它跨页面刷新、跨重连、跨「事发时没人在看」都成立。 */
+  serverVanished?: boolean
   attached: boolean
   /** tmux session name THIS shell's client is attached to ('' when detached). */
   attachedSession?: string

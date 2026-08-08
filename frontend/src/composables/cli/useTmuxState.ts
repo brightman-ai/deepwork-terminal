@@ -51,6 +51,9 @@ export interface TmuxStateStore {
   ready: ComputedRef<boolean>
   installed: ComputedRef<boolean>
   serverRunning: ComputedRef<boolean>
+  /** 一个我们看着的 tmux server 消失了。与 serverRunning=false 不同：那对从不用 tmux 的人
+   *  也成立，而这条只在「它曾经在、现在没了」时为真。 */
+  serverVanished: ComputedRef<boolean>
   /** True iff THIS session's shell is inside a tmux client (per-shell, not global). */
   attached: ComputedRef<boolean>
   /** tmux session name THIS shell is attached to ('' when detached). */
@@ -125,6 +128,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
   const ready = computed(() => state.value !== null)
   const installed = computed(() => state.value?.installed ?? false)
   const serverRunning = computed(() => state.value?.serverRunning ?? false)
+  const serverVanished = computed(() => state.value?.serverVanished ?? false)
   const attached = computed(() => state.value?.attached ?? false)
   const attachedSession = computed(() => state.value?.attachedSession ?? '')
   const prefixBytes = computed(() => decodePrefix(state.value?.prefix?.bytes))
@@ -259,7 +263,7 @@ function createStore(sessionId: () => string): TmuxStateStore {
   }
 
   return {
-    state, ready, installed, serverRunning, attached, attachedSession, prefixBytes, prefixDisplay,
+    state, ready, installed, serverRunning, serverVanished, attached, attachedSession, prefixBytes, prefixDisplay,
     modeKeys, windows, activeCwd, activeTool, prefixSeq, selectWindow, runCopyMotion, runRefreshClient, newSession, setOverviewActive, handleWSMessage, fetchSnapshot,
   }
 }
