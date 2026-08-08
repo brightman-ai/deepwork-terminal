@@ -1278,8 +1278,19 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
 
   const now = viewerNow()
   const declare = shouldDeclareViewport(wasViewer, now, opts.geometryChanged)
+  if (!declare) {
+    wasViewer = now
+    return
+  }
+  // 「我声明过了」必须意味着**这句话真的发出去了**。socket 没开时 sendControl 会静默丢弃，
+  // 把这种情况记成已声明，就等于把一笔还没还的债划掉：重连后的第一次评估会看到
+  // was=true、几何没变，于是闭嘴，而服务端那份尺寸还停在别人写的值上。
+  // 记成"还不是观看者"，这笔债就留到能说话的那一刻——重连梯队会立刻还上。
+  if (wsStatus.value !== 'connected') {
+    wasViewer = false
+    return
+  }
   wasViewer = now
-  if (!declare) return
 
   sendResize(term.cols, term.rows)
   hud.updateSnapshot({ pty: `${term.cols}x${term.rows}` })
@@ -1804,18 +1815,13 @@ function sendTerminalData(data: Uint8Array) {
 
 // The ResizeObserver's own path: a REAL geometry change (rotation, keyboard, window drag). It is
 // already gated on measurability inside XtermTerminal — a hidden surface has no box and never
-// emits — but it goes through the same rule anyway, so there is exactly ONE answer to "may I
-// declare" instead of one rule and one place that happens to be safe for a different reason.
+// emits — but it goes through the SAME function anyway, so the rule is applied in exactly one
+// place. A second copy here would be a rule that agrees by convention, which is how two of the
+// bugs this commit fixes were written in the first place.
 function onTerminalResize(cols: number, rows: number) {
   terminalRows.value = rows
   hud.record('resize', `${cols}x${rows}`)
-  const now = viewerNow()
-  const declare = shouldDeclareViewport(wasViewer, now, true)
-  wasViewer = now
-  if (declare) {
-    sendResize(cols, rows)
-    hud.updateSnapshot({ pty: `${cols}x${rows}` })
-  }
+  declareViewport({ geometryChanged: true })
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
