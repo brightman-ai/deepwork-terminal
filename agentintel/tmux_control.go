@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -69,7 +70,22 @@ type controlReply struct {
 	err   error
 }
 
-func newTmuxControl() *tmuxControl { return &tmuxControl{} }
+// newTmuxControl builds the connection, unless this process has declared it must never open one.
+//
+// A nil connection is a supported state — TmuxProber.run() checks for it and falls back to
+// spawning a process, which is what every call did before this existed. Tests use that: not
+// "point it somewhere harmless" but "do not create it at all", because a control client that
+// exists is a control client that can die badly, and that is what took down a real server twice
+// (see IsolateTmuxForTests).
+func newTmuxControl() *tmuxControl {
+	if tmuxControlDisabled.Load() {
+		return nil
+	}
+	return &tmuxControl{}
+}
+
+// tmuxControlDisabled is set once, before any test runs, and never in production.
+var tmuxControlDisabled atomic.Bool
 
 // run executes one tmux command over the connection, dialling if needed.
 //
@@ -213,6 +229,30 @@ func isControlFrameEnd(line, keyword string) bool {
 	return len(strings.Fields(strings.TrimPrefix(line, keyword))) == 3
 }
 
+// controlGracefulExit bounds how long a closing connection is given to leave on its own.
+//
+// Closing stdin IS the goodbye in control mode: the client reads EOF, completes tmux's detach
+// handshake and exits — normally within a millisecond, so this ceiling is almost never reached.
+// It is a ceiling rather than a wait: a client that has wedged must not hold the connection
+// mutex, and the poll interval it sits inside is 900ms.
+const controlGracefulExit = 200 * time.Millisecond
+
+// closeLocked tears the connection down, letting the client leave on its own first.
+//
+// ── Why not just Kill ────────────────────────────────────────────────────────────────────────
+// It used to close stdin and SIGKILL in the same breath, giving the client no chance to detach.
+// A control client that vanishes mid-handshake leaves the SERVER holding a half-built client:
+// the CLIENT_CONTROL flag is already set while its control_state may not be — and tmux 3.6b's
+// control_write dereferences that pointer without checking it. Observed on this machine
+// (2026-08-08 19:34:22): the user's tmux server took SIGSEGV inside
+// control_notify_client_detached → control_write, at exactly `ldr x8, [x22, #0x20]` with x22
+// NULL, and eleven days of sessions went with it.
+//
+// The NULL dereference is tmux's bug, not ours — a client being killed is a legal thing for a
+// server to survive, and we could not reproduce the race in 100 attempts, so this is NOT a
+// proven fix. It is the cheap half of the trade regardless: leaving politely costs a
+// sub-millisecond wait on the normal path and removes us from the list of things that hand the
+// server a client it never finished building.
 func (c *tmuxControl) closeLocked() {
 	if c.proc == nil {
 		return
@@ -220,8 +260,19 @@ func (c *tmuxControl) closeLocked() {
 	if c.stdin != nil {
 		c.stdin.Close()
 	}
-	_ = c.proc.Process.Kill()
-	_, _ = c.proc.Process.Wait()
+	reaped := make(chan struct{})
+	go func() {
+		defer close(reaped)
+		_, _ = c.proc.Process.Wait()
+	}()
+	select {
+	case <-reaped:
+	case <-time.After(controlGracefulExit):
+		// It did not take the hint. Now it is a stuck process, and one of those is worse than
+		// an abrupt exit.
+		_ = c.proc.Process.Kill()
+		<-reaped
+	}
 	c.proc, c.stdin = nil, nil
 }
 
