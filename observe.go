@@ -58,4 +58,22 @@ var (
 	// tick; alarming only if it climbs while the UI's dashboards look stale, which would mean the
 	// writer itself is stuck rather than the producer being fast.
 	terminalStatusFramesDroppedTotal = obs.NewCounter("terminal_status_frames_dropped_total")
+
+	// The Agent Overview's per-session screen replay, split by whether it had to be done.
+	//
+	// These two are the readable form of「变化才有代价」on the non-tmux side. A card's screen is a
+	// replay of up to 128 KiB of the ring onto a full grid, and it used to run for EVERY session
+	// EVERY second, whether or not that session had emitted a single byte — the cost tracked WALL
+	// CLOCK, which is exactly the shape that gets worse the more terminals you keep open and the
+	// less any of them is doing. Reuses should dominate on a quiet machine; renders should track
+	// output. Reuses staying at zero while the machine is idle means the marker they key on
+	// (RingBuffer.Seq) has stopped being trustworthy, and that is worth knowing before the CPU bill
+	// is what tells you.
+	terminalOverviewScreenRenderTotal = obs.NewCounter("terminal_overview_screen_render_total")
+	terminalOverviewScreenReuseTotal  = obs.NewCounter("terminal_overview_screen_reuse_total")
+
+	// A caller that arrived while a rebuild was already in flight and waited for ITS result instead
+	// of starting a second one. Every one of these used to be a duplicate full rebuild: the cache
+	// released its lock before building, so N connections ticking together all missed together.
+	terminalOverviewRebuildSharedTotal = obs.NewCounter("terminal_overview_rebuild_shared_total")
 )

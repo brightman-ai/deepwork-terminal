@@ -16,7 +16,15 @@ type RingBuffer struct {
 	capacity int
 	writePos int
 	full     bool
-	mu       sync.Mutex
+	// seq is a monotonic marker of CONTENT IDENTITY: same seq ⟹ same bytes. It exists because
+	// nothing else here can answer "did anything happen since I last looked" —
+	//   · writePos wraps, so it returns to a value it has held before;
+	//   · Len() saturates at capacity and then never moves again;
+	//   · comparing the bytes means reading them, which is the work we are trying to skip.
+	// Whoever caches something DERIVED from this buffer (a replayed screen, a tail) can key on it
+	// and stop recomputing what cannot have changed. See sessions_overview.go.
+	seq uint64
+	mu  sync.Mutex
 }
 
 // NewRingBuffer creates a RingBuffer with the given capacity.
@@ -41,6 +49,9 @@ func (rb *RingBuffer) Write(p []byte) (int, error) {
 	if n == 0 {
 		return 0, nil
 	}
+	// Counting BYTES, not calls: two writes of the same length landing at the same position would
+	// otherwise be indistinguishable from one, and a caller keyed on seq would serve a stale screen.
+	rb.seq += uint64(n)
 
 	// If input is larger than capacity, only keep the last capacity bytes.
 	if n >= rb.capacity {
@@ -146,10 +157,23 @@ func (rb *RingBuffer) IsFull() bool {
 	return rb.full
 }
 
+// Seq returns the content-identity marker. Equal values mean the buffer holds identical bytes;
+// a changed value means it does not. Never decreases, so a cache can compare it with `==` and be
+// right in both directions.
+func (rb *RingBuffer) Seq() uint64 {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	return rb.seq
+}
+
 // Reset clears the buffer.
 func (rb *RingBuffer) Reset() {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	rb.writePos = 0
 	rb.full = false
+	// Emptying IS a content change, and it is the one mutation that does not write a byte. Without
+	// this bump a cache keyed on seq would keep serving the screen of a buffer that has been cleared
+	// — the exact failure the marker exists to prevent, arriving through the one door left open.
+	rb.seq++
 }

@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -33,6 +34,15 @@ const (
 	// sessionsOverviewCacheTTL keeps one tick's snapshot shared across every connected writer.
 	// Slightly under the 1s ticker so a tick never reuses the previous tick's answer.
 	sessionsOverviewCacheTTL = 900 * time.Millisecond
+
+	// overviewRebuildBudget bounds one shared rebuild.
+	//
+	// It exists because the rebuild is DETACHED from its caller (see overviewSnapshot): dropping the
+	// caller's cancellation also drops the only thing that used to stop a wedged `ps` or a stuck
+	// transcript read from holding the shared lock forever. Generous, because exceeding it is not a
+	// slow machine's normal condition — it is the signal that this rebuild's answer is a partial
+	// read and must not be published.
+	overviewRebuildBudget = 5 * time.Second
 )
 
 // SessionOverviewEntry is one card in the non-tmux Agent Overview.
@@ -129,7 +139,7 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		cols, rows := sess.PTYSize()
 		var screen []string
 		if buf != nil {
-			screen = renderScreen(string(buf.ReadTail(sessionScreenScanBytes)), rows, cols)
+			screen = s.sessionScreen(sess.ID, buf, cols, rows)
 		}
 
 		// One screen, two readers: the tracker inspects the RAW screen because a permission
@@ -206,55 +216,177 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 	s.sessionAgent.Prune(live)
 	// Same reason, different map: drop the signal debounce/cooldown clocks of dead sessions.
 	s.signals.prune(live)
+	// Same reason, third map: a closed session's replayed screen is dead weight, and the grid it
+	// holds is the largest thing in this file.
+	s.pruneScreenCache(live)
 	return out
 }
 
-// overviewSnapshot is one tick's answer: the entries plus their marshalled form. Both are cached
-// together so the WS push and the REST session list are the SAME computation, not two that agree
-// by convention — a card and its tab dot showing different statuses was the exact class of bug
-// this feature kept producing.
+// renderedScreen is one session's replayed grid, kept alongside EXACTLY the inputs that produced
+// it. All three must match for the cached lines to still be the right answer — the seq alone is
+// not enough, because a resize repaints the same bytes onto a different grid.
+type renderedScreen struct {
+	seq   uint64
+	cols  int
+	rows  int
+	lines []string
+}
+
+// sessionScreen returns this session's screen, replaying the ring only when it must.
+//
+// ── Why this is the point, not an optimisation ───────────────────────────────────────────────
+// The invariant this file was violating is「变化才有代价」. A card's screen is up to 128 KiB of the
+// ring parsed and replayed onto a full grid — the single most expensive thing per session — and it
+// ran once per second per session unconditionally, because the tick was treated as the reason to
+// recompute. The honest reason to recompute is that the inputs moved. Ten idle terminals cost ten
+// screen replays a second for ten identical answers; the cost tracked the CLOCK and the number of
+// terminals you had ever opened, neither of which is a thing the user did.
+//
+// The comment one level down used to defend this: "deliberately time-based rather than event-based:
+// the ticker is already the clock, so this stays a pure optimization with no new invalidation rules
+// to keep in sync." The invalidation rule turned out to cost one field on the ring buffer, and the
+// thing it bought back is not an optimisation — it is the difference between a machine that idles
+// and one that keeps a core warm to redraw screens nobody wrote to.
+//
+// Note what is NOT skipped: the agent-state read still runs every tick. The transcript is written by
+// a DIFFERENT process and moves with no PTY output at all (an agent thinking, a tool running), so
+// its freshness cannot be inferred from this buffer. Only the screen replay is conditional, because
+// only the screen is a pure function of bytes we can see move.
+func (s *Server) sessionScreen(id string, buf *RingBuffer, cols, rows int) []string {
+	seq := buf.Seq()
+	s.screenCacheMu.Lock()
+	cached, ok := s.screenCache[id]
+	s.screenCacheMu.Unlock()
+	if ok && cached.seq == seq && cached.cols == cols && cached.rows == rows {
+		terminalOverviewScreenReuseTotal.Inc()
+		return cached.lines
+	}
+
+	// Read the tail AFTER sampling seq. The other order would let a write land in between and
+	// produce lines newer than the seq they get filed under — the next tick would then see a
+	// matching seq and serve a screen it believes is current while the buffer has moved on. Sampling
+	// first can only file NEWER content under an OLDER seq, which merely costs one extra replay.
+	lines := renderScreen(string(buf.ReadTail(sessionScreenScanBytes)), rows, cols)
+	terminalOverviewScreenRenderTotal.Inc()
+
+	s.screenCacheMu.Lock()
+	// Created here rather than in NewServer: a Server assembled any other way (tests do, and an
+	// embedder may) would otherwise panic on the first write to a nil map — a constructor is a
+	// promise, and this is one line that does not need anyone to keep it.
+	if s.screenCache == nil {
+		s.screenCache = make(map[string]renderedScreen)
+	}
+	s.screenCache[id] = renderedScreen{seq: seq, cols: cols, rows: rows, lines: lines}
+	s.screenCacheMu.Unlock()
+	return lines
+}
+
+func (s *Server) pruneScreenCache(live map[string]bool) {
+	s.screenCacheMu.Lock()
+	defer s.screenCacheMu.Unlock()
+	for id := range s.screenCache {
+		if !live[id] {
+			delete(s.screenCache, id)
+		}
+	}
+}
+
+// overviewSnapshot is one tick's answer: the entries, their marshalled form, the finished WS frame,
+// and the revision that identifies all three. They are cached TOGETHER so the WS push and the REST
+// session list are the SAME computation, not two that agree by convention — a card and its tab dot
+// showing different statuses was the exact class of bug this feature kept producing.
 type overviewSnapshot struct {
 	entries []SessionOverviewEntry
 	json    []byte
+	// frame is the marshalled WSControlMessage, built ONCE per revision instead of once per
+	// connection per tick. The payload is global, so the frame around it is global too; every
+	// connection re-encoding the same envelope was N copies of one answer.
+	frame []byte
+	// revision changes if and only if `json` changes. It is what lets a subscriber ask "is this
+	// new?" by comparing a uint64 instead of the whole payload — the difference between a cost
+	// that scales with CHANGE and one that scales with the number of people watching. Starts at 1,
+	// so a fresh subscriber's zero value never accidentally matches a real snapshot.
+	revision uint64
 }
 
 // overviewSnapshot returns the current snapshot, rebuilding it at most once per tick.
 //
-// Memoized because the payload is GLOBAL (it describes every session) while the callers are
-// PER-CONNECTION: with a surface mounted per terminal, N clients would otherwise each rebuild the
-// identical answer every second — N× the ring replays, screen renders and transcript reads for one
-// shared result. The cache turns that back into one computation per tick, whatever N is.
-// Deliberately time-based rather than event-based: the ticker is already the clock, so this stays
-// a pure optimization with no new invalidation rules to keep in sync.
+// ── Why the lock is held ACROSS the rebuild ──────────────────────────────────────────────────
+// The payload is GLOBAL (it describes every session) while the callers are PER-CONNECTION. The
+// previous version released the lock before building, which made the cache a hit-path optimisation
+// only: on a MISS, every caller that arrived in that window started its own full rebuild. And they
+// arrive together by construction — N connections each ticking at 1s all miss the same expired
+// entry within the same millisecond, so the one moment the answer is expensive is exactly the
+// moment N of them compute it in parallel. Holding the lock turns the herd into one builder and
+// N waiters who then find the fresh entry. That is the same shape tmux's topologySnapshot already
+// uses, and for the same reason.
+//
+// Waiting is the correct behaviour for every caller here: they all want THIS tick's answer, and a
+// second concurrent rebuild would not produce a better one, only an equal one at double the cost.
 func (s *Server) overviewSnapshot(ctx context.Context) overviewSnapshot {
-	now := time.Now()
-	s.overviewCacheMu.Lock()
-	if s.overviewCacheAt.Add(sessionsOverviewCacheTTL).After(now) {
-		cached := s.overviewCache
-		s.overviewCacheMu.Unlock()
-		return cached
-	}
-	s.overviewCacheMu.Unlock()
+	// Sampled BEFORE the lock, deliberately: a builder holds the mutex for the whole rebuild, so by
+	// the time we are inside we can no longer tell whether we walked in or queued. Reading it here
+	// answers the question that matters — "was someone already building when I arrived", i.e. was I
+	// one of the herd this lock exists to collapse. Approximate at the edge (the builder may finish
+	// between this read and the Lock) and that is fine for a counter; a flag we could only read
+	// after acquiring would be exactly zero forever, which is worse than approximate.
+	contended := s.overviewBuilding.Load()
 
-	entries := s.sessionsOverview(ctx)
+	s.overviewCacheMu.Lock()
+	defer s.overviewCacheMu.Unlock()
+	if s.overviewCacheAt.Add(sessionsOverviewCacheTTL).After(time.Now()) {
+		if contended {
+			terminalOverviewRebuildSharedTotal.Inc()
+		}
+		return s.overviewCache
+	}
+	s.overviewBuilding.Store(true)
+	defer s.overviewBuilding.Store(false)
+
+	// ── The rebuild does not belong to whoever asked for it ──────────────────────────────────
+	// This answer describes every session and is served to every caller, but it used to run under
+	// the CONTEXT OF ONE CONNECTION — whichever one happened to tick first. A client closing its
+	// tab mid-rebuild therefore cancelled a computation the other clients were waiting for, and the
+	// cancellation does not surface as an error: `ps` fails, the process snapshot falls back to
+	// whatever is cached (nil on a fresh server), every agent reads as ToolNone, and the result is a
+	// perfectly well-formed payload saying NO SESSION IS RUNNING AN AGENT. That is the same lie the
+	// tmux side told with an empty pane bar ("observed nothing" published as "there is nothing"),
+	// arriving through a different door.
+	//
+	// WithoutCancel keeps the caller's log fields — the rebuild should still be traceable to the
+	// tick that triggered it — and drops only its LIFETIME, which was never the right owner.
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), overviewRebuildBudget)
+	defer cancel()
+
+	entries := s.sessionsOverview(bctx)
+	if bctx.Err() != nil {
+		// Out of budget. What we hold is a partial read of a loaded machine, not a description of
+		// it. Publish nothing, stamp nothing, and deliberately do NOT refresh overviewCacheAt, so
+		// the next caller retries immediately instead of serving this for a full TTL.
+		return s.overviewCache
+	}
 	raw, err := json.Marshal(entries)
 	if err != nil {
-		return overviewSnapshot{entries: entries}
+		// Marshal failed: publish nothing, cache nothing. Entries still go back to the REST caller,
+		// which does not need the encoded form. Deliberately NOT stamped as a new revision — a
+		// revision that no payload corresponds to would tell subscribers something changed and then
+		// have nothing to send them.
+		return overviewSnapshot{entries: entries, revision: s.overviewCache.revision}
 	}
-	snap := overviewSnapshot{entries: entries, json: raw}
 
-	s.overviewCacheMu.Lock()
+	snap := overviewSnapshot{entries: entries, json: raw, revision: s.overviewCache.revision}
+	// The revision moves only when the ANSWER moves. A rebuild that reproduces the same bytes is a
+	// rebuild nobody needs to hear about — that is the whole content of「变化才有代价」at this layer.
+	if !bytes.Equal(raw, s.overviewCache.json) {
+		snap.revision = s.overviewCache.revision + 1
+		snap.frame, _ = json.Marshal(WSControlMessage{Type: MsgTypeSessionsOverview, Payload: raw})
+	} else {
+		snap.frame = s.overviewCache.frame
+	}
+
 	s.overviewCache = snap
-	s.overviewCacheAt = now
-	s.overviewCacheMu.Unlock()
+	s.overviewCacheAt = time.Now()
 	return snap
-}
-
-// sessionsOverviewJSON is the WS push payload. Returning raw JSON lets each writer byte-compare
-// against the previous push and skip identical frames — the same diff suppression tmux_state uses,
-// and the reason a quiet machine pushes nothing at all.
-func (s *Server) sessionsOverviewJSON(ctx context.Context) []byte {
-	return s.overviewSnapshot(ctx).json
 }
 
 // sessionAgentStatuses is the session-id → (tool, status) view the REST list renders. Same
