@@ -6,32 +6,59 @@ import {
 
 beforeEach(resetRenderHealthForTest)
 
-describe('rendererLine — 三档按"用户能不能做点什么"分', () => {
-  it('WebGL 正常 → 一句话，无动作', () => {
-    const l = rendererLine('webgl', false, '')
+describe('rendererLine — 动作按"点下去真的会发生什么"给', () => {
+  it('WebGL 在用 → ok，并给一个换到 DOM 的出口', () => {
+    const l = rendererLine('webgl', false, 'chosen', '')
     expect(l.tone).toBe('ok')
     expect(l.text).toContain('WebGL')
-    expect(l.action).toBeUndefined()
+    expect(l.action).toEqual({ label: '切换为 DOM', kind: 'renderer', to: 'dom' })
   })
 
-  it('上下文丢失 → 唯一给动作的一档（刷新真能修）', () => {
-    const l = rendererLine('webgl', true, '')
+  // DOM 现在是默认，所以"怎么拿到 GPU"必须是面板上按得到的一件事，
+  // 而不是只有读过源码的人才知道的一个 ?renderer= 查询参数。
+  it('DOM 在用 → muted（不是故障），并给一个换到 WebGL 的出口', () => {
+    const l = rendererLine('dom', false, 'default', '')
+    expect(l.tone).toBe('muted')
+    expect(l.text).toContain('DOM')
+    expect(l.action).toEqual({ label: '切换为 WebGL', kind: 'renderer', to: 'webgl' })
+  })
+
+  it('上下文丢失 → 动作是刷新，不是换渲染器（刷新才是真能修的那个）', () => {
+    const l = rendererLine('webgl', true, 'chosen', '')
     expect(l.tone).toBe('warn')
     expect(l.action?.kind).toBe('reload')
     expect(l.detail).toContain('刷新可恢复')
   })
 
-  it('从一开始就没 WebGL2 → 不给按钮，并说清刷新没用', () => {
-    const l = rendererLine('dom', false, 'WebGL2 not supported')
+  it('想要 WebGL 却拿不到 → 不给按钮，并说清刷新没用', () => {
+    const l = rendererLine('dom', false, 'unavailable', 'WebGL2 not supported')
     expect(l.tone).toBe('muted')
-    expect(l.action).toBeUndefined()          // 点了没反应的按钮比没有更糟
+    // 点了只会原地再失败一次 —— 点了没反应的按钮比没有更糟。
+    expect(l.action).toBeUndefined()
     expect(l.detail).toContain('WebGL2')
   })
 
-  it('还没有终端挂载过 → 什么都不说，绝不猜一个渲染器', () => {
-    const l = rendererLine('unknown', false, '')
+  it('还没有终端挂载过 → 什么都不说，绝不猜一个渲染器，也不给按钮', () => {
+    const l = rendererLine('unknown', false, 'default', '')
     expect(l.text).toBe('尚未初始化')
     expect(l.action).toBeUndefined()
+  })
+})
+
+// 原因不是装饰：DOM 成为默认之后，「你自己选的」「URL 钉的」「默认」三种 DOM 长得一模一样，
+// 而使用者的下一个问题恰恰是"那我改的那次到底生效没有"。
+describe('rendererLine 的 detail — 回答"为什么是它"', () => {
+  it('URL 钉：说清它只在这个标签页里成立', () => {
+    expect(rendererLine('webgl', false, 'pinned', '').detail).toContain('?renderer=webgl')
+    expect(rendererLine('dom', false, 'pinned', '').detail).toContain('仅本标签页')
+  })
+
+  it('自己选的：说清记得住 —— 否则看起来和一次性状态没区别', () => {
+    expect(rendererLine('dom', false, 'chosen', '').detail).toContain('记住')
+  })
+
+  it('默认：一个字，不抢注意力', () => {
+    expect(rendererLine('dom', false, 'default', '').detail).toBe('默认')
   })
 })
 
@@ -77,19 +104,29 @@ describe('metricsLine', () => {
 })
 
 describe('页面级状态', () => {
-  it('最后挂载的终端写入渲染器', () => {
-    noteRenderer('webgl')
-    expect(useRenderHealth().renderer.value).toBe('webgl')
+  it('最后挂载的终端写入渲染器和它的原因', () => {
+    noteRenderer('webgl', 'chosen')
+    const h = useRenderHealth()
+    expect(h.renderer.value).toBe('webgl')
+    expect(h.cause.value).toBe('chosen')
+  })
+
+  it('WebGL 失败时原话被单独留着 —— 它是 detail 里唯一能指向真凶的东西', () => {
+    noteRenderer('dom', 'unavailable', 'WebGL2 not supported')
+    const h = useRenderHealth()
+    expect(h.cause.value).toBe('unavailable')
+    expect(rendererLine(h.renderer.value, false, h.cause.value, h.rendererError.value).detail)
+      .toContain('WebGL2 not supported')
   })
 
   it('上下文丢失是粘性的，且把渲染器改成 dom（说实话，不留旧值）', () => {
-    noteRenderer('webgl')
+    noteRenderer('webgl', 'chosen')
     noteContextLost()
     const h = useRenderHealth()
     expect(h.contextLost.value).toBe(true)
     expect(h.renderer.value).toBe('dom')
     // 之后又有终端挂载并拿到 webgl，也不清除"本页面降级过"这个事实
-    noteRenderer('webgl')
+    noteRenderer('webgl', 'chosen')
     expect(h.contextLost.value).toBe(true)
   })
 

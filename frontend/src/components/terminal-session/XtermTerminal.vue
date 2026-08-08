@@ -50,11 +50,12 @@ import { createLogger } from '@ce/utils/obs'
 import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
 import { renderSyncEnabled, renderSyncOverride } from '@terminal/composables/cli/terminalRenderSync'
 import {
-  rendererOverride,
+  rendererPin,
+  rendererPreference,
   resolveRenderer,
-  rendererDeclineReason,
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
+import type { RendererCause } from '@terminal/composables/cli/renderHealth'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -374,8 +375,10 @@ const rendererLog = createLogger('cli-renderer')
 
 interface RendererChoice {
   renderer: 'webgl' | 'dom'
-  /** Why the GPU renderer was declined. Absent when it was taken. */
-  reason?: string
+  /** WHY this one — the policy source, or 'unavailable' when WebGL was wanted and refused. */
+  cause: RendererCause
+  /** WebGL's own error message. Only with cause 'unavailable'. */
+  error?: string
 }
 
 // Which renderer this terminal is SUPPOSED to be on. Not the same question as "is webglAddon
@@ -463,26 +466,32 @@ function reacquireWebglRenderer(): void {
 
 // Decides and records the renderer; it deliberately does NOT report. The report belongs after the
 // initial fit — see initTerminal — because the grid size is half of what makes the report useful.
-function enableWebglRenderer(term: Terminal): RendererChoice {
-  // Ask the policy FIRST. Until now this function was called unconditionally and the only way to
-  // end up on the DOM renderer was for WebGL to fail — so when the GPU path rendered WRONG rather
-  // than not at all (mobile atlas corruption: 'e' painted as 'ョ'), there was no way out but a
-  // rebuild. See terminalRenderer.ts for the rule and for the ?renderer= escape hatch.
-  const override = rendererOverride()
-  const policy = { override, isMobile: isMobile.value }
-  if (resolveRenderer(policy) === 'dom') {
+//
+// Named for the QUESTION, not for one of the answers: it used to be `enableWebglRenderer`, from the
+// era when WebGL was unconditional and the DOM renderer was only ever reached by WebGL failing. It
+// now picks between two, and DOM is the default (see terminalRenderer.ts) — a name that presumes the
+// answer is how a function quietly stops matching what it does.
+function chooseRenderer(term: Terminal): RendererChoice {
+  // Ask the policy FIRST. This function used to be called unconditionally and the only way to end
+  // up on the DOM renderer was for WebGL to fail — so when the GPU path rendered WRONG rather than
+  // not at all (mobile atlas corruption: 'e' painted as 'ョ'), there was no way out but a rebuild.
+  const decision = resolveRenderer({ pin: rendererPin(), preference: rendererPreference() })
+  if (decision.renderer === 'dom') {
     webglAddon = null
     rendererInUse = 'dom'
-    return { renderer: 'dom', reason: rendererDeclineReason(policy) }
+    return { renderer: 'dom', cause: decision.source }
   }
   const attached = attachWebglAddon(term)
   if ('addon' in attached) {
     rendererInUse = 'webgl'
-    return { renderer: 'webgl' }
+    return { renderer: 'webgl', cause: decision.source }
   }
-  // Not an error path for the user: the DOM renderer is a working terminal, just a slower one.
+  // Not an error path for the user: the DOM renderer is a working terminal, just a slower one. But
+  // it IS a different reason from "you chose DOM", and the panel must not conflate them — the one
+  // thing this cause changes is that no "switch to WebGL" button is offered, because it would fail
+  // again identically.
   rendererInUse = 'dom'
-  return { renderer: 'dom', reason: attached.error }
+  return { renderer: 'dom', cause: 'unavailable', error: attached.error }
 }
 
 function initTerminal() {
@@ -528,7 +537,7 @@ function initTerminal() {
   })
 
   terminal.open(terminalContainer.value)
-  const rendererChoice: RendererChoice = enableWebglRenderer(terminal)
+  const rendererChoice: RendererChoice = chooseRenderer(terminal)
   renderSyncOn = renderSyncEnabled(rendererChoice.renderer, renderSyncOverride())
   renderMetrics = createRenderMetrics((summary) => {
     const facts = {
@@ -581,7 +590,7 @@ function initTerminal() {
   }
   rendererLog.info('cli.renderer.active', rendererFacts)
   reportServerEvent('cli.renderer.active', rendererFacts)
-  noteRenderer(rendererChoice.renderer, rendererChoice.reason)
+  noteRenderer(rendererChoice.renderer, rendererChoice.cause, rendererChoice.error)
 
   // [TH-0501-m9j] Platform-aware input routing.
   // WKWebView's textarea input events intermittently fail to trigger xterm's onData

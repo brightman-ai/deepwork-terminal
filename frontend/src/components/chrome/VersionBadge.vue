@@ -26,11 +26,12 @@
  * 行 —— 行为无处可漂移。
  */
 import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
-import { Copy, Check, ExternalLink, RefreshCw } from 'lucide-vue-next'
+import { Copy, Check, ExternalLink, RefreshCw, ArrowLeftRight } from 'lucide-vue-next'
 import { useBuildVersionLabel } from '@terminal/composables/cli/useBuildVersionLabel'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { pageLine, programLine, badgeNeedsAttention } from '@terminal/composables/cli/versionPanel'
 import { useRenderHealth, rendererLine, metricsLine } from '@terminal/composables/cli/renderHealth'
+import { setRendererPreference, type RendererKind } from '@terminal/composables/cli/terminalRenderer'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 /** 面板标题里的产品名 —— 两壳各自传，其余一切共享。 */
@@ -69,8 +70,10 @@ function toggle(): void {
 
 // 渲染：这个页面此刻怎么把字画到屏幕上。收录理由见 renderHealth.ts —— 界面上看不见、会改变你对
 // "卡不卡"的解读、且一旦静默降级没有别的东西会告诉你。数据全部来自**已经在跑**的上报路径。
-const { renderer, declineReason, contextLost, metrics } = useRenderHealth()
-const render = computed(() => rendererLine(renderer.value, contextLost.value, declineReason.value))
+const { renderer, cause, rendererError, contextLost, metrics } = useRenderHealth()
+const render = computed(() =>
+  rendererLine(renderer.value, contextLost.value, cause.value, rendererError.value),
+)
 const renderMetrics = computed(() => metricsLine(metrics.value))
 
 const page = computed(() => pageLine(updateAvailable.value))
@@ -88,12 +91,24 @@ async function copyVersion(): Promise<void> {
   }
 }
 
-function runAction(line: { action?: { kind: string; href?: string } }): void {
+function runAction(line: { action?: { kind: string; href?: string; to?: string } }): void {
   const a = line.action
   if (!a) return
   if (a.kind === 'refresh') { applyUpdate(); return }
   // 普通重载即可拿回 GPU 上下文 —— 不必走 applyUpdate 那套清缓存的重活，那是给"页面旧了"用的。
   if (a.kind === 'reload') { window.location.reload(); return }
+  // 换渲染器 = 记住选择 + 整页重载。
+  //
+  // **不是**热切换，这是刻意的：渲染器是「这个页面 + 这块 GPU」的属性（见 renderHealth 文件头），
+  // 而一个页面里挂着每个标签页一个终端（v-show，从不卸载）。就地 dispose/attach 只会改到当前
+  // 这一个终端，另外那些留在旧渲染器上；而且 renderSync 的开关和渲染指标上报的 renderer 标签
+  // 都是挂载时定下的，热切换会让它们**继续报一个已经不成立的事实**。终端本身是服务端 PTY + 回放
+  // 缓冲，重载会重新接上，没有东西会丢。
+  if (a.kind === 'renderer' && (a.to === 'webgl' || a.to === 'dom')) {
+    setRendererPreference(a.to as RendererKind)
+    window.location.reload()
+    return
+  }
   if (a.kind === 'open' && a.href) window.open(a.href, '_blank', 'noopener,noreferrer')
 }
 
@@ -173,8 +188,18 @@ onUnmounted(() => {
         <div class="vb-block-title">渲染</div>
         <div class="vb-row">
           <span class="vb-line" :class="`t-${render.tone}`" data-testid="version-panel-render">{{ render.text }}</span>
-          <button v-if="render.action" class="vb-act" type="button" data-testid="version-panel-render-action" @click="runAction(render)">
-            <RefreshCw :size="12" /><span>{{ render.action.label }}</span>
+          <!-- 图标跟着动作的语义走：换渲染器是「换一个」，不是「刷新」——两者都会重载页面，但用户
+               按下去时想的是哪件事，决定了他敢不敢按。title 把重载这个代价说在前面。 -->
+          <button
+            v-if="render.action"
+            class="vb-act"
+            type="button"
+            :title="render.action.kind === 'renderer' ? '切换渲染器并刷新页面' : undefined"
+            data-testid="version-panel-render-action"
+            @click="runAction(render)"
+          >
+            <component :is="render.action.kind === 'renderer' ? ArrowLeftRight : RefreshCw" :size="12" />
+            <span>{{ render.action.label }}</span>
           </button>
         </div>
         <div v-if="render.detail" class="vb-sub" data-testid="version-panel-render-detail">{{ render.detail }}</div>
