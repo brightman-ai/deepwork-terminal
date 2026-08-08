@@ -226,10 +226,25 @@ func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, tail Pan
 		}
 		// STICKY (false-"跑完了" fix): past the window, do NOT blindly re-resolve to cwd-newest —
 		// that's exactly how a long-idle pane gets its binding STOLEN by a same-cwd sibling's newer
-		// session file and re-fires a stale done-unseen. Claude gives no per-process session id, but
-		// one PID == one session for its lifetime (a new session is a new process → new PID → the
-		// pid check above already forces a relocate), so a bound file that STILL EXISTS never needs
-		// replacing. Re-locate only once it's actually gone (rotated/deleted).
+		// session file and re-fires a stale done-unseen. A bound file that still exists is kept;
+		// re-locate only once it's actually gone (rotated/deleted).
+		//
+		// Stickiness protects the GUESS, never the IDENTITY. This used to protect both, on the
+		// premise that "one PID == one session for its lifetime". That premise is false: claude
+		// rotates its session file WITHIN a process — /compact and resume both start a new one —
+		// and the superseded file stays on disk, so the stat below succeeded forever and the pid
+		// record was never consulted again. Observed live: pane 3's claude (pid 37702, alive for
+		// eight days) had moved to a 632 KB session while the pane was still reading the 10.8 MB
+		// one it left behind at 01:07, reporting「空闲 · 9 分钟前」over a running Bash.
+		//
+		// A same-cwd sibling cannot steal a binding this way — the pid record names ONE session
+		// per process, so honouring it can only ever move a pane onto its OWN file.
+		if owned := m.ownedTranscript(tool, pid, cwd); owned != "" && owned != pt.path {
+			pt.path = owned
+			pt.driver = nil // the pane moved to a different file; its reader is about the old one
+			pt.locatedAt = time.Now()
+			return pt
+		}
 		if _, err := os.Stat(pt.path); err == nil {
 			pt.locatedAt = time.Now() // re-validated; keep the binding
 			return pt
@@ -247,6 +262,23 @@ func (m *PaneAgentMonitor) entryLocked(key, cwd string, tool AgentTool, tail Pan
 	pt.processPID = pid
 	pt.locatedAt = time.Now()
 	return pt
+}
+
+// ownedTranscript is the transcript a runtime says this process owns, or "" when the runtime
+// publishes no such record. It is a LOOKUP, not a search: no directory scan, no mtime guess, no
+// tie to break — which is what makes it safe to let it override a sticky binding.
+//
+// Only claude publishes one (PID → sessionId, written by the CLI at startup and updated when it
+// rotates). Codex holds its rollout fd open instead, and that identity is read where the fd is.
+func (m *PaneAgentMonitor) ownedTranscript(tool AgentTool, pid int, cwd string) string {
+	if tool != ToolClaude || pid <= 0 {
+		return ""
+	}
+	path, err := m.locator.ClaudeSessionForProcess(pid, cwd)
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 // boundElsewhereLocked is the set of transcript paths currently bound to OTHER live panes.
