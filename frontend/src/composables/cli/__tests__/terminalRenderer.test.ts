@@ -100,6 +100,33 @@ describe('setRendererPreference', () => {
     expect(search).not.toContain('renderer=')
   })
 
+  // codex review 找出来的：两处共用一个 try/catch 时，只要 localStorage 先抛，拔钉那句根本
+  // 不会执行 —— 钉留着、重载后照旧压过偏好，于是又变回"看得见却无声失效的开关"，正是这个函数
+  // 存在的理由，只是从存储层的另一侧绕回来。有些隐私模式确实只禁持久存储、放行会话存储。
+  it('只有 localStorage 被禁时，钉照样要拔干净（一处失败不许拖累另一处）', () => {
+    const session = fakeStorage()
+    const loc = { href: 'https://host/app?renderer=dom', search: '?renderer=dom' }
+    ;(globalThis as { window?: unknown }).window = {
+      location: loc,
+      get localStorage(): Storage { throw new Error('persistent storage blocked') },
+      sessionStorage: session,
+      history: {
+        state: null,
+        replaceState: (_s: unknown, _t: string, url: string) => {
+          const u = new URL(url)
+          loc.href = u.toString()
+          loc.search = u.search
+        },
+      },
+    }
+    expect(rendererPin()).toBe('dom')            // 钉已落在 sessionStorage 里
+
+    setRendererPreference('webgl')
+
+    expect(rendererPin()).toBe(null)             // 记不住偏好，但钉必须拔掉
+    expect(loc.search).not.toContain('renderer')
+  })
+
   it('存储被禁（隐私模式）不抛异常 —— 换不了渲染器不该把终端一起拖下水', () => {
     ;(globalThis as { window?: unknown }).window = {
       location: { search: '' },

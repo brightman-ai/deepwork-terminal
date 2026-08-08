@@ -221,16 +221,26 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     queuedBinaryBytes = 0
   }
 
-  function sendControl(msg: WSControlMessage) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const json = JSON.stringify(msg)
-      bytesSentInWindow += json.length
-      ws.send(json)
-    }
+  /**
+   * Returns whether the frame actually went out.
+   *
+   * It used to return void, and a caller that needed to know asked `status.value === 'connected'`
+   * instead. That is a DIFFERENT question, one async hop removed: `status` only leaves 'connected'
+   * when `ws.onclose` fires, while `reconnect()`/`disconnect()` null out or close the socket
+   * SYNCHRONOUSLY. In that window the ref still says connected, this function still drops the
+   * frame, and the caller records a message it never sent. Only the transport knows; so the
+   * transport says.
+   */
+  function sendControl(msg: WSControlMessage): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    const json = JSON.stringify(msg)
+    bytesSentInWindow += json.length
+    ws.send(json)
+    return true
   }
 
-  function sendResize(cols: number, rows: number) {
-    sendControl({ type: 'resize', payload: { cols, rows } })
+  function sendResize(cols: number, rows: number): boolean {
+    return sendControl({ type: 'resize', payload: { cols, rows } })
   }
 
   function scheduleReconnect() {

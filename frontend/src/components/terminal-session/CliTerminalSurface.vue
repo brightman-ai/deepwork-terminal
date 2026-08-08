@@ -1282,17 +1282,20 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
     wasViewer = now
     return
   }
-  // 「我声明过了」必须意味着**这句话真的发出去了**。socket 没开时 sendControl 会静默丢弃，
-  // 把这种情况记成已声明，就等于把一笔还没还的债划掉：重连后的第一次评估会看到
-  // was=true、几何没变，于是闭嘴，而服务端那份尺寸还停在别人写的值上。
-  // 记成"还不是观看者"，这笔债就留到能说话的那一刻——重连梯队会立刻还上。
-  if (wsStatus.value !== 'connected') {
-    wasViewer = false
+
+  // 「我声明过了」必须意味着**这句话真的发出去了**。把没发出去的记成已声明，等于把一笔还没还的
+  // 债划掉：下一次评估看到 was=true、几何没变，于是闭嘴，而服务端那份尺寸还停在别人写的值上。
+  //
+  // 判据取 sendResize 的**返回值**，不取 `wsStatus`——那是另一个问题，而且晚一拍：status 要等
+  // `ws.onclose` 回调才离开 'connected'，而 reconnect()/disconnect() 是**同步**把 socket 关掉/
+  // 置空的。那一拍之内 ref 还说 connected、帧已经被丢弃，于是又记了一笔没发生的声明。
+  // 只有传输层知道自己发没发出去，所以由传输层说。
+  const sent = sendResize(term.cols, term.rows)
+  if (!sent) {
+    wasViewer = false // 债留到能说话的那一刻——重连梯队会立刻还上
     return
   }
   wasViewer = now
-
-  sendResize(term.cols, term.rows)
   hud.updateSnapshot({ pty: `${term.cols}x${term.rows}` })
   // Ghosting guard: a resize/reflow (mobile keyboard show/hide, rotation, reattach) can leave
   // stale cells when a fullscreen TUI repaints differentially. Force a full repaint after the fit.
@@ -1427,6 +1430,32 @@ function onVisibilityChange() {
     const term = xtermRef.value?.terminal?.()
     if (term) term.refresh(0, term.rows - 1)
   }
+}
+
+// ─── 窗口焦点：visibilityState 看不见的那半边 ─────────────────────────────────
+//
+// `visibilityState` 只回答"这个页面被遮住了吗"。**它看不见"我人走开了"**：一台第二屏上的 PC，
+// 浏览器窗口从头到尾没被遮挡过，使用者转头去用手机、手机接管了排版、再转回来——PC 这边一个
+// visibilitychange 都不会有，`wasViewer` 一直是 true，于是永远不补那次声明，屏幕就一直按手机的
+// 宽度排着。这条是 codex 对上一版的 review 找出来的，它是真的。
+//
+// `blur`/`focus` 补的正是这一半：切到别的应用会 blur，切回来会 focus，两个事件跟"人在不在这台
+// 机器上用它"高度重合，而且**不遮挡也照样触发**。所以 blur 撤销观看者身份，focus 让下一次评估
+// 认出这是一条边沿。
+//
+// 剩下的残余：使用者始终坐在 PC 前，从不切走窗口，只是低头用了一会儿手机。那既不 blur 也不
+// visibilitychange。**这一块交给 tmux 自己**——`window-size latest` 的定义就是"最近有活动的
+// 客户端"，所以只要在 PC 上敲一个字，tmux 立刻把窗口排回 PC 的尺寸。看而不动本来就不算 activity，
+// 这是策略的定义，不是漏洞。
+//
+// 焦点刻意**不进** `viewerNow()`：那会让"焦点在 devtools 时拖窗口改大小"变成不声明，把一个真实
+// 的几何变化憋住。身份的边沿用事件表达，几何变化照旧自己走。
+function onWindowBlur() {
+  wasViewer = false
+}
+
+function onWindowFocus() {
+  declareViewport({ geometryChanged: false })
 }
 
 let viewportScrollLockRaf = 0
@@ -1590,6 +1619,8 @@ function onTerminalBodyTouchMove(e: TouchEvent) {
 onMounted(() => {
   void loadShortcutsConfig()
   document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('blur', onWindowBlur)
+  window.addEventListener('focus', onWindowFocus)
   document.addEventListener('keydown', onKeydownDirect, { capture: true })
   document.addEventListener('keydown', onFindShortcutKeydown, { capture: true })
   document.addEventListener('paste', onClipboardPaste, { capture: true })
@@ -1618,6 +1649,8 @@ onUnmounted(() => {
   document.removeEventListener('keydown', onFindShortcutKeydown, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('blur', onWindowBlur)
+  window.removeEventListener('focus', onWindowFocus)
   window.removeEventListener('scroll', lockKeyboardViewportScroll)
   window.visualViewport?.removeEventListener('scroll', lockKeyboardViewportScroll)
   window.visualViewport?.removeEventListener('resize', lockKeyboardViewportScroll)
