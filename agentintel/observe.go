@@ -54,6 +54,11 @@ var (
 	// on an idle machine would mean the interaction clock is being set by something that is not a
 	// user (see NoteInteraction's call sites).
 	TmuxProbeDeferredTotal = obs.NewCounter("tmux_probe_deferred_for_interaction_total")
+	// A tmux server we had been watching disappeared. Distinct from "no server running", which
+	// is also true for everyone who never starts tmux — this counts only the transition, so any
+	// non-zero value is a server that died under someone. It is the metric that would have told
+	// us the crash of 2026-08-08 19:34:22 happened, instead of one INFO line about window-size.
+	TmuxServerVanishedTotal = obs.NewCounter("tmux_server_vanished_total")
 	// The two tmux transports. Their RATIO is the health of the persistent connection: a
 	// fallback spawn is correct but costs a process, and a connection that silently falls back
 	// on every command would otherwise be indistinguishable from a working one.
@@ -120,6 +125,23 @@ func LogTmuxScanComplete(ctx context.Context, sessionID, sessionName string, pan
 // would break it silently, with nothing to point at.
 //
 // Called on change only, so this is one line per actual state, not per probe.
+// LogTmuxServerVanished reports that a tmux server we were watching is no longer there.
+//
+// WARN, not INFO, and this is the whole reason it exists. When a server holding eleven days of
+// sessions took SIGSEGV (2026-08-08 19:34:22), the ONLY trace anywhere in this program was one
+// INFO line reading "window-size unreadable" — the pane bar just disappeared, which looks
+// exactly like a shell that was never in tmux, and the user found out by typing `tmux attach`
+// and reading "no sessions".
+//
+// Emitted once per disappearance (the caller holds the edge), so a machine that stays without
+// tmux says this once rather than once a second.
+func LogTmuxServerVanished(ctx context.Context, lastKnownWindows int) {
+	Logger.Warn(ctx, "tmux server is gone — it was there, with sessions on it, and now there is none",
+		"last_known_windows", lastKnownWindows,
+		"meaning", "this is an observed ABSENCE, not a failed probe: a probe that could not find out is handled separately and never lands here",
+		"effect", "every pane bar and overview card sourced from tmux is now empty; the UI says so via serverVanished")
+}
+
 func LogTmuxWindowSize(ctx context.Context, value string) {
 	switch value {
 	case "latest":
