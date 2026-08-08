@@ -54,6 +54,11 @@ var (
 	// on an idle machine would mean the interaction clock is being set by something that is not a
 	// user (see NoteInteraction's call sites).
 	TmuxProbeDeferredTotal = obs.NewCounter("tmux_probe_deferred_for_interaction_total")
+	// The two tmux transports. Their RATIO is the health of the persistent connection: a
+	// fallback spawn is correct but costs a process, and a connection that silently falls back
+	// on every command would otherwise be indistinguishable from a working one.
+	TmuxControlCommands = obs.NewCounter("tmux_control_commands_total")
+	TmuxSpawnedCommands = obs.NewCounter("tmux_spawned_commands_total")
 )
 
 // LogTmuxProbe records the cost of one topology rebuild, and says so out loud when it crosses

@@ -505,8 +505,16 @@ func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool
 func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bool, bool, bool) {
 	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
+	// list-clients, not list-sessions' #{session_attached}, because THIS PROCESS is a client.
+	// The persistent control connection (tmux_control.go) attaches to a session to run commands
+	// on it, which flips session_attached from 0 to 1 — measured — and would report a session
+	// you detached from as still attached. An observer that changes the quantity it observes is
+	// not an observer. #{client_control_mode} is how tmux lets us subtract ourselves.
+	//
+	// It answers the second question too: tmux exits non-zero with "no server running", while a
+	// live server with nobody attached exits 0 with no output. Same one command as before.
 	out, err := tmuxCommandContext(cctx,
-		"list-sessions", "-F", "#{session_name}"+tmuxFieldSep+"#{session_attached}",
+		"list-clients", "-F", "#{client_session}"+tmuxFieldSep+"#{client_control_mode}",
 	).Output()
 	if err != nil {
 		// tmux exits non-zero with "no server running", and that IS an answer — the third
@@ -515,8 +523,17 @@ func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bo
 		// which is the same mistake as an empty pane bar, one layer up and louder.
 		return nil, false, cctx.Err() == nil
 	}
+	return parseClientAttachment(string(out)), true, true
+}
+
+// parseClientAttachment turns `list-clients` rows into "which sessions a USER is looking at".
+//
+// Control-mode clients are subtracted because one of them is ours. Pre-3.2 tmux expands
+// client_control_mode to empty and such a client counts as real — the safe direction, since it
+// can only fail to subtract, never invent an attachment that is not there.
+func parseClientAttachment(out string) map[string]bool {
 	result := make(map[string]bool)
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			continue
@@ -525,10 +542,12 @@ func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bo
 		if len(fields) != 2 {
 			continue
 		}
-		n, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
-		result[fields[0]] = n > 0
+		if strings.TrimSpace(fields[1]) == "1" {
+			continue
+		}
+		result[fields[0]] = true
 	}
-	return result, true, true
+	return result
 }
 
 // buildSessions groups panes into sessions → windows → panes and runs per-pane
