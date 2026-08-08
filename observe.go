@@ -1,7 +1,12 @@
 // Package terminal — observability declarations (BS-08 Terminal).
 package terminal
 
-import "github.com/brightman-ai/kit/obs"
+import (
+	"context"
+	"time"
+
+	"github.com/brightman-ai/kit/obs"
+)
 
 // STG constants for terminal session lifecycle phases.
 const (
@@ -82,4 +87,57 @@ var (
 	// quiet one: the cards simply stop moving, no error is raised, and every layer looks healthy.
 	// Non-zero here is the difference between "nothing is happening" and "we cannot find out".
 	terminalOverviewRebuildAbandonedTotal = obs.NewCounter("terminal_overview_rebuild_abandoned_total")
+
+	// How long ONE overview rebuild took.
+	//
+	// The three counters above answer "which path ran" and "did it publish". None of them can
+	// answer "is this rebuild eating the tick", which is the only question a stall actually
+	// raises — and until this histogram existed, the honest answer for the non-tmux overview was
+	// that nobody could find out. The tmux side has had exactly this since its own months-old lag
+	// was finally measured (agentintel.TmuxProbeDuration); this is the same eye pointed at the
+	// twin feed.
+	//
+	// Measured around the WHOLE rebuild — every session's screen replay, every incremental
+	// transcript read, and the marshal — because that is what a waiting caller experiences. It is
+	// deliberately observed on the abandoned paths too: a rebuild that ran out of budget is the
+	// most expensive one there is, and dropping it would make this number look best exactly when
+	// the machine is worst.
+	terminalOverviewRebuildDuration = obs.NewHistogram("terminal_overview_rebuild_duration_seconds", obs.DefaultBuckets())
 )
+
+// slowOverviewRebuild is the line between "one tick's work" and "a stall the user can feel".
+//
+// The rebuild is driven by the same 1s ticker as the tmux topology probe and its answer is
+// memoized for sessionsOverviewCacheTTL (900ms), so a rebuild past that TTL is no longer one
+// tick's work: the next tick's callers arrive to find it still in flight and are served the
+// PREVIOUS answer. 300ms is well under that — the same fraction of the same 1s cycle as
+// agentintel's slowTmuxProbe — so the log fires while the condition is still "slow" rather than
+// once it has already become "the cards are a tick behind".
+const slowOverviewRebuild = 300 * time.Millisecond
+
+// overviewRebuildLogs keeps the line below to one per interval while a machine stays slow, and
+// emits immediately on the transition into slow. Same policy as the tmux probe's, for the same
+// reason: this is a once-per-second path, so an ungated log would bury the event it reports.
+var overviewRebuildLogs = obs.NewLogCoalescer(30 * time.Second)
+
+// logOverviewRebuild records the cost of one overview rebuild and says so out loud when it
+// crosses slowOverviewRebuild.
+//
+// Same shape AND same severity as agentintel.LogTmuxProbe, deliberately: same 1s cycle, same
+// "slow but still answering" condition. WARN stays reserved for the rebuild that gives up
+// (terminalOverviewRebuildAbandonedTotal, logged in buildOverview), which is a different fact —
+// slow means the cards are late, abandoned means they are not coming.
+func logOverviewRebuild(ctx context.Context, elapsed time.Duration, sessions int) {
+	terminalOverviewRebuildDuration.Observe(elapsed.Seconds())
+	if elapsed < slowOverviewRebuild {
+		return
+	}
+	overviewRebuildLogs.Info(ctx, terminalLogger, "overview-rebuild", "slow",
+		"sessions overview rebuild is slow",
+		"elapsed_ms", elapsed.Milliseconds(),
+		"threshold_ms", slowOverviewRebuild.Milliseconds(),
+		"sessions", sessions,
+		// The two things that drive the cost, so the log names its own cause.
+		"note", "each session costs a bounded ring replay plus an incremental transcript read",
+		"effect", "past the 900ms snapshot TTL the next tick is served the previous answer")
+}

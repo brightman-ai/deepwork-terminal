@@ -21,54 +21,21 @@ type TmuxPrefix struct {
 }
 
 // TmuxPaneState is one pane within the topology, enriched with agent detection.
+//
+// The agent facts are NOT declared here: they are the embedded SurfaceUnit, the single declaration
+// this payload shares with the non-tmux session card (sessions_overview.go). What each of those
+// fields means is documented once, on that type — see surface_unit.go.
 type TmuxPaneState struct {
-	Index       int         `json:"index"`
-	Active      bool        `json:"active"`
-	Title       string      `json:"title"`
-	PID         int         `json:"pid"`
-	CWD         string      `json:"cwd"`
-	PaneID      string      `json:"paneId,omitempty"` // stable tmux pane id ("%N")
-	AgentTool   AgentTool   `json:"agentTool,omitempty"`
-	AgentStatus AgentStatus `json:"agentStatus,omitempty"`
-	// AwaitingUser: the agent completed a turn / is blocked and hasn't been responded
-	// to — drives the "needs-you" dot. Distinct from AgentStatus==idle, which also
-	// covers a fresh pane that never ran a turn (not awaiting).
-	AwaitingUser bool `json:"awaitingUser,omitempty"`
-	// AwaitingSince: transcript time of the completion behind AwaitingUser (zero when not
-	// awaiting). Reload-proof (transcript-derived) → the frontend keys its per-window "seen"
-	// dismissal on it so a cleared dot stays cleared across F5 yet re-appears on a new turn.
-	AwaitingSince time.Time `json:"awaitingSince,omitempty"`
-	// EndedOnQuestion: the completed turn ended on a free-text question. Refines the SAME
-	// needs-you dot's label ("有提问" vs "已完成") — it never raises its severity, because an
-	// agent at an empty prompt is not blocked. See AgentState.EndedOnQuestion.
-	EndedOnQuestion bool `json:"endedOnQuestion,omitempty"`
-	// StatusRule is the single rule that produced this pane's verdict ("transcript.running",
-	// "screen.approval", …), present on EVERY decision — green included.
-	//
-	// It used to be gated on AwaitingUser, on the reasoning that "a running pane accuses nobody,
-	// so it needs no defence". A pane stuck green while its agent waits accuses nobody and gets
-	// nobody's attention either — that is the failure mode you cannot even notice, and it was
-	// undiagnosable by construction, since five different rules return Running and none of them
-	// left a mark. The rule is stable while the status is, and this frame is diff-suppressed, so
-	// shipping it always costs nothing between polls.
-	//
-	// StatusEvidence — the matched screen line, scrubbed and truncated — stays confined to
-	// attention decisions: it changes every poll (spinner frames), which would defeat the
-	// suppression, and on a green pane the rule alone answers the question.
-	//
-	// Diagnostic fields: nothing renders them, they exist so a wrong dot can be traced instead of
-	// re-argued. See status_decision.go.
-	StatusRule     string `json:"statusRule,omitempty"`
-	StatusEvidence string `json:"statusEvidence,omitempty"`
-	// ActivityAt is when this pane's agent last WROTE to its transcript — not when the server
-	// last looked. It is the age of the evidence behind AgentStatus, and it is shipped because
-	// a status with no age cannot be sanity-checked by the person reading it.
-	//
-	// The bug that put it here: a pane read "running" for ten hours off a transcript nothing had
-	// touched since the night before. Every layer was individually plausible, and the one fact
-	// that would have made it obvious at a glance — "运行中 · 10 小时前" — was the one fact the UI
-	// did not have. Freshness is not a debug detail; it is half the meaning of a status.
-	ActivityAt time.Time `json:"activityAt,omitempty"`
+	Index  int    `json:"index"`
+	Active bool   `json:"active"`
+	Title  string `json:"title"`
+	PID    int    `json:"pid"`
+	CWD    string `json:"cwd"`
+	PaneID string `json:"paneId,omitempty"` // stable tmux pane id ("%N")
+	// Embedded, not listed: everything below this line is what both surfaces carry, promoted into
+	// this payload's JSON at exactly this position. A new surface fact belongs in SurfaceUnit,
+	// where both feeds get it or neither does.
+	SurfaceUnit
 }
 
 // TmuxWindowState is one window with its panes.
@@ -118,7 +85,25 @@ type TmuxSessionState struct {
 type TmuxState struct {
 	Installed     bool `json:"installed"`
 	ServerRunning bool `json:"serverRunning"`
-	Attached      bool `json:"attached"`
+	// ServerVanished: we HAD a tmux server with sessions on it, and now there is none.
+	//
+	// Distinct from `!ServerRunning`, which is also the honest answer for someone who simply
+	// never started tmux. The difference is the whole point: a machine that never had tmux
+	// should say nothing, while a server that DIED under a user who was using it must not be
+	// reported by silence.
+	//
+	// It is on the wire because only the server can know it — the flag survives a page reload,
+	// a reconnect, and a client that was not watching when it happened, none of which a
+	// frontend-side "it used to be there" could.
+	//
+	// The incident that put it here (2026-08-08 19:34:22): a tmux server holding eleven days of
+	// work took SIGSEGV. The pane bar is gated on `attached && windows.length`, so it simply
+	// disappeared — indistinguishable from "this shell isn't in tmux". The only trace anywhere
+	// was one INFO line saying `window-size unreadable`, and the user found out by typing
+	// `tmux attach` himself and reading "no sessions". That is「观察不到 ≠ 不存在」inverted: we
+	// DID observe an absence, and published it as though nothing had happened.
+	ServerVanished bool `json:"serverVanished,omitempty"`
+	Attached       bool `json:"attached"`
 	// AttachedSession is the tmux session name this shellPID's client is attached
 	// to (empty when not attached). It scopes the pane bar to THIS session's
 	// windows rather than any session that merely has a client somewhere.
@@ -196,6 +181,13 @@ type TmuxStateService struct {
 	topology     TmuxState
 	topologyAt   time.Time
 	topologyRead bool
+	// sawSessions records that a tmux server with at least one session was once observed by
+	// THIS process. It is what makes ServerVanished mean "it died" rather than "you don't use
+	// tmux" — and it is deliberately sticky for the life of the process: a server that comes
+	// back clears it by being observed again, but nothing else should.
+	sawSessions bool
+	// vanishReported keeps the WARN to one per disappearance instead of one per second.
+	vanishReported bool
 
 	// cmdTimeout is this service's budget for one topology probe's tmux commands. A field
 	// rather than a bare const because the budget is the thing that decides whether a probe
@@ -203,6 +195,17 @@ type TmuxStateService struct {
 	// test reproducing the exact shape that broke (child context expiring, parent healthy), and
 	// by any future caller that needs a different budget. Zero means the package default.
 	cmdTimeout time.Duration
+}
+
+// lastKnownWindows is how much was on the server the last time we could see it. It is the
+// difference between "tmux is gone" and "tmux is gone, and it had nine windows on it" — the
+// second is the one a person needs in order to know whether to care.
+func (s *TmuxStateService) lastKnownWindows() int {
+	n := 0
+	for _, sess := range s.topology.Sessions {
+		n += len(sess.Windows)
+	}
+	return n
 }
 
 func (s *TmuxStateService) commandTimeout() time.Duration {
@@ -539,6 +542,35 @@ func (s *TmuxStateService) topologySnapshot(ctx context.Context) TmuxState {
 	}
 	LogTmuxProbe(ctx, time.Since(probeStart), panes, windows)
 
+	// ── Did a server we were watching go away? ────────────────────────────────────────────────
+	// Sticky by design — the flag stays until a server is actually seen again, so a client that
+	// reloads or reconnects after the fact still learns what happened.
+	//
+	// `sawSessions` is the load-bearing half: without it this fires for everyone who simply never
+	// starts tmux, and a warning that cries wolf once is never believed again. Pinned by
+	// TestServerVanished_StaysSilentForSomeoneWhoNeverRanTmux (verified red when the guard is
+	// dropped).
+	//
+	// The `answered` gate is DEFENCE, not the live guard, and saying so is the honest version:
+	// a probe that could not answer already returns the cached topology below rather than `st`,
+	// so today this branch is unreachable for it — an attempt to verify it red failed for exactly
+	// that reason. It stays because the two rules are independent: if that lower return ever
+	// stops shielding this, "could not find out" must still not become "it died".
+	if answered {
+		switch {
+		case len(st.Sessions) > 0:
+			s.sawSessions = true
+			s.vanishReported = false
+		case !st.ServerRunning && s.sawSessions:
+			st.ServerVanished = true
+			if !s.vanishReported {
+				s.vanishReported = true
+				TmuxServerVanishedTotal.Inc()
+				LogTmuxServerVanished(ctx, s.lastKnownWindows())
+			}
+		}
+	}
+
 	// A probe that did not ANSWER must not be published as one. "there are no panes" and "I
 	// could not find out" produce the identical empty Sessions and mean opposite things, and
 	// only the first may replace what we know.
@@ -702,50 +734,29 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 		}
 		if agent, ok := agents[p.PanePID]; ok {
 			tool := agent.Tool
-			ps.AgentTool = tool
-			decision := s.paneDecision(ctx, p, agent)
-			ps.AgentStatus = decision.Status
-			// Needs-you: an explicit block (waiting) always counts; an idle pane counts
-			// only if the driver says a turn actually completed (not fresh-idle). Snapshot()
-			// reuses the driver Status() just updated, so no extra transcript read.
-			snap := s.paneMonitor.Snapshot(paneKey(p))
-			// How old the evidence is. Read AFTER paneDecision so the pane is bound this cycle;
-			// cache-only, so it costs one stat and never a directory scan.
-			ps.ActivityAt = s.paneMonitor.TranscriptWrittenAt(paneKey(p))
-			ps.AwaitingUser = ps.AgentStatus == StatusWaiting ||
-				(ps.AgentStatus == StatusIdle && snap.AwaitingUser)
-			decision.Awaiting = ps.AwaitingUser
-			// Carry the reload-proof "completed at" so the frontend's seen-layer can tell
-			// THIS completion from the next one, plus whether that turn ended on a question
-			// (labels the same amber dot "有提问" instead of a bare "已完成").
-			if ps.AwaitingUser {
-				ps.AwaitingSince = snap.AwaitingSince
-				ps.EndedOnQuestion = snap.EndedOnQuestion
-			}
-			// WHY this pane has the status it has — on EVERY decision now, not only the ones
-			// that ask something of the user.
-			//
-			// Provenance used to be confined to attention states, reasoning that "a running pane
-			// accuses nobody, so it needs no defence". Two reports in one hour falsified that. A
-			// pane stuck GREEN while its agent waits is the SILENT failure — nobody tells you, so
-			// you sit there — which is strictly worse than a false amber you glance at and
-			// dismiss. And it was untraceable BY CONSTRUCTION: FIVE rules can return Running
-			// (transcript.running / transcript.writing / transcript.unlocatable / screen.spinner /
-			// a screen veto), and none of them left a mark in the payload or the log, so "why is
-			// it green" could only ever be answered by guessing at the source.
-			//
-			// The RULE is safe to ship unconditionally precisely because it is stable while the
-			// state is: this frame is diff-suppressed, and a string that changes only when the
-			// REASON changes costs nothing between polls — and that change is exactly the moment
-			// worth pushing. EVIDENCE stays gated, because it carries a live screen line that
-			// differs on every poll (spinner frames, token counters) and would defeat the
-			// suppression for no diagnostic gain: for a green pane the rule already says it all.
-			ps.StatusRule = string(decision.Rule)
-			if decision.IsAttention() {
-				ps.StatusEvidence = decision.Evidence
-			}
-			// Logged for every decision too, same reason. Volume is already bounded: the
-			// coalescer emits on CHANGE and at most once per 30s while a decision stands.
+			// ONE decision, shared with the non-tmux session card. The only thing this source
+			// contributes is where the screen comes from: a capture-pane, which can fail — and
+			// saying so (ok=false) is what keeps "could not read it" from being published as
+			// "there is nothing there". See agentintel/surface_decision.go.
+			unit, decision := s.paneMonitor.DecideSurface(SurfaceProbe{
+				Key: paneKey(p), CWD: p.PaneCWD, Tool: tool, ProcessPID: agent.ProcessPID,
+				Screen: func() ([]string, bool) {
+					cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
+					defer cancel()
+					lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
+					return lines, err == nil
+				},
+			})
+			// Every agent fact this pane carries — status, needs-you, the reload-proof
+			// completion time, the rule behind the verdict, the age of the evidence — arrives
+			// as ONE value from ONE place. This block used to re-derive each of them here, and
+			// the session card re-derived them again in its own file; the two had drifted on
+			// three of them before anyone noticed.
+			ps.SurfaceUnit = unit
+			// Logged for every decision, not just the ones asking something of the user: a pane
+			// stuck GREEN while its agent waits is the failure nobody is told about, and five
+			// different rules return Running. Volume is bounded by the coalescer — it emits on
+			// CHANGE and at most once per 30s while a decision stands.
 			LogStatusDecision(ctx, "tmux", fmt.Sprintf("%s.%d", p.SessionWindow, p.PaneIndex), tool, decision)
 			agentKeys[paneKey(p)] = true
 		}
@@ -780,124 +791,3 @@ func paneKey(p TmuxPane) string {
 	return strconv.Itoa(p.PanePID)
 }
 
-// panePromptVerdict scrapes the pane's last visible lines once and classifies them. The PTY is the
-// ONE per-pane-reliable liveness signal — a spinner can only render in the pane that is actually
-// working — so it is the tiebreaker whenever the transcript-derived status may be stale or (Claude,
-// cwd-located) mis-attributed. Returns PromptUnknown on any capture error, so an ambiguous read
-// never overrides the transcript.
-// paneTailLines is the raw form of the same capture panePromptVerdict classifies. It exists for
-// the transcript tiebreak, which needs the TEXT rather than a verdict about it — see
-// matchPaneToTranscript. An error yields nil, and nil simply means "no evidence": the caller then
-// falls back to the mtime guess it would have made anyway.
-func (s *TmuxStateService) paneTailLines(ctx context.Context, p TmuxPane) []string {
-	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
-	defer cancel()
-	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
-	if err != nil {
-		return nil
-	}
-	return lines
-}
-
-func (s *TmuxStateService) panePromptVerdict(ctx context.Context, p TmuxPane) OutputVerdict {
-	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
-	defer cancel()
-	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
-	if err != nil {
-		return OutputVerdict{State: PromptUnknown, Rule: RuleNone}
-	}
-	return AnalyzeOutputDetail(lines)
-}
-
-// paneDecision derives a pane's agent status with a JSONL-gated terminal read, and names the
-// rule that produced it:
-//   - transcript being written (PaneAgentMonitor.Active) → working → Running, WITHOUT touching the pane.
-//   - transcript stopped → read the visible pane: a permission/selection/input PROMPT lives there
-//     (never in the transcript), so AnalyzeOutput on it is the ground truth — needs-permission →
-//     Waiting (the push trigger), a spinner → still Running, otherwise the turn is done → Idle.
-//
-// This keeps the (slightly brittle, version-coupled) prompt scrape OFF the hot path: it runs only
-// for stopped panes, not every agent pane every poll — accurate where it matters, cheap otherwise.
-//
-// It returns a StatusDecision rather than a bare status so a wrong verdict can be traced to ONE
-// rule afterwards; the classification itself is unchanged.
-func (s *TmuxStateService) paneDecision(ctx context.Context, p TmuxPane, agent DetectedAgent) StatusDecision {
-	tool := agent.Tool
-	// Accurate JSONL-derived status: a turn's end is recorded in the transcript
-	// (Claude end_turn / Codex task_complete → waiting/idle), a Bash/Read tool is
-	// executing = running. This fixes the mtime heuristic's blind spots — a just-
-	// written ask card looked "running", a silently-running long tool looked "idle",
-	// and (Codex) a finished turn looked perpetually "running" because its rollout
-	// was unlocatable. Both Claude and Codex carry turn boundaries in JSONL, so both
-	// use the driver; a Running result is still confirmed against the pane for a
-	// terminal-only permission prompt.
-	if tool == ToolClaude || tool == ToolCodex {
-		// The tail closure is the ONLY new cost here and it is almost never paid: the monitor
-		// invokes it exclusively when a claude pane's identity lookup missed AND two or more
-		// transcripts in this cwd are still unclaimed — the ambiguity that used to be settled by
-		// mtime order, i.e. by luck. Everything else keeps the cached binding and captures nothing.
-		tail := func() []string { return s.paneTailLines(ctx, p) }
-		if st, ok := s.paneMonitor.StatusWithTail(paneKey(p), p.PaneCWD, tool, tail, agent.ProcessPID); ok {
-			switch st {
-			case StatusRunning:
-				// A pending tool may instead be blocked on a permission [Y/n] — that prompt
-				// is terminal UI, absent from the transcript — so confirm against the pane.
-				if v := s.panePromptVerdict(ctx, p); v.State == PromptNeedsPermission {
-					return StatusDecision{Status: StatusWaiting, Rule: v.Rule, Evidence: v.Line}
-				}
-				return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptRunning}
-			case StatusWaiting:
-				return StatusDecision{Status: StatusWaiting,
-					Rule: TranscriptStatusRule(StatusWaiting, s.paneMonitor.Snapshot(paneKey(p)))}
-			case StatusIdle:
-				// The transcript says this turn ended (idle → drives the done-unseen dot / "跑完了"
-				// notification). But a transcript-idle can be STALE within a poll: an agent that just
-				// hit a turn boundary and immediately kept going (auto-continue, queued prompt,
-				// next-turn thinking) is still working before its next line lands. The pane's OWN PTY
-				// is the tiebreaker — a live spinner can only render in the pane that's actually
-				// running — so a visibly-spinning idle is vetoed back to Running. Gated on Active()
-				// (transcript freshly written) so a long-settled idle pane, which isn't spinning
-				// anyway, never pays for a pane scrape. Only a POSITIVE spinner overrides; an
-				// idle/unknown PTY trusts the transcript, so a genuinely-done pane still reads Idle.
-				if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) {
-					if v := s.panePromptVerdict(ctx, p); v.State == PromptRunning {
-						return StatusDecision{Status: StatusRunning, Rule: v.Rule, Evidence: v.Line}
-					}
-				}
-				return StatusDecision{Status: StatusIdle,
-					Rule: TranscriptStatusRule(StatusIdle, s.paneMonitor.Snapshot(paneKey(p)))}
-			}
-		}
-	}
-
-	// Codex, or Claude transcript not locatable yet: the mtime gate + terminal read. NOTE this
-	// is the one arm where the SCREEN ALONE can declare Waiting — there is no transcript
-	// opinion to confirm — so its decisions carry the screen rule and the line that matched.
-	if s.paneMonitor.Active(paneKey(p), p.PaneCWD, tool, agent.ProcessPID) {
-		// Active() answers true for two different reasons and only one of them is evidence: the
-		// transcript was written recently, OR it could not be located at all (in which case it
-		// assumes busy rather than misreading a starting agent's screen as an idle prompt).
-		// Reporting both as「transcript.writing」claims a file is being written when there is no
-		// file — the green pane that started this had exactly that rule and no transcript, so the
-		// rule sent every reader looking in the wrong place.
-		if !s.paneMonitor.Located(paneKey(p)) {
-			return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptUnlocatable}
-		}
-		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptWriting}
-	}
-	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
-	defer cancel()
-	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
-	if err != nil {
-		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptUnlocatable}
-	}
-	v := AnalyzeOutputDetail(lines)
-	switch v.State {
-	case PromptNeedsPermission:
-		return StatusDecision{Status: StatusWaiting, Rule: v.Rule, Evidence: v.Line}
-	case PromptRunning:
-		return StatusDecision{Status: StatusRunning, Rule: v.Rule, Evidence: v.Line}
-	default:
-		return StatusDecision{Status: StatusIdle, Rule: v.Rule, Evidence: v.Line}
-	}
-}

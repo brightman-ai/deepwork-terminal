@@ -151,14 +151,26 @@ export function windowCwd(w: TmuxWindowState): string {
 export function windowActivityAt(w: TmuxWindowState): number {
   let newest = 0
   for (const p of w.panes ?? []) {
-    // isDatedSince 是本仓库对「Go 的零时间会被序列化成 0001-01-01，不会被 omitempty 吃掉」
-    // 这件事的既有共识（awaitingSince 一路都这么过滤）。一个定位不到 transcript 的 pane 正是
-    // 会带着零时间过来，不挡住就会在提示框里显示"17755921 小时前"。
-    if (!p.agentTool || !isDatedSince(p.activityAt)) continue
-    const ms = Date.parse(p.activityAt)
-    if (Number.isFinite(ms) && ms > newest) newest = ms
+    const ms = activityMs(p.activityAt)
+    if (p.agentTool && ms > newest) newest = ms
   }
   return newest
+}
+
+/**
+ * 一个 surface unit 的 activityAt → epoch ms；**0 = 无从得知**。
+ *
+ * 两个来源共用这一条，因为「多新算新、拿不到怎么办」是**一个**语义，不是每个 feed 一份。
+ * 服务端那侧已经把它收进了一个共享类型（agentintel.SurfaceUnit），这里是它在前端的另一半：
+ * 从前 tmux 有这个换算而 PTY 卡片压根没有这个字段，于是「运行中」在非 tmux 那侧永远没有年龄。
+ *
+ * 挡零时间是**向后兼容**，不是当前契约：后端现在用 omitzero，拿不到就不发这个键。但一个还没
+ * 升级的服务端仍会发 `0001-01-01T00:00:00Z`，不挡住就会在提示框里显示「17755921 小时前」。
+ */
+export function activityMs(activityAt: string | undefined): number {
+  if (!isDatedSince(activityAt)) return 0
+  const ms = Date.parse(activityAt)
+  return Number.isFinite(ms) ? ms : 0
 }
 
 /** The window's active agent tool, if any (claude/codex badge). */
@@ -307,7 +319,13 @@ export interface OverviewUnit {
    *
    * 它是 rawStatus 这条结论的**证据年龄**。放进 OverviewUnit 而不是只放在 tmux 那侧，是因为
    * 「一个没有年龄的状态无法被证伪」对两种来源同样成立：一条十小时没人再写的 transcript 撑出来的
-   * 「运行中」，和真的在跑，在屏幕上长得一模一样。非 tmux 来源暂时给不出这个值 → 省略，卡片就不显示，
+   * 「运行中」，和真的在跑，在屏幕上长得一模一样。
+   *
+   * 两个来源现在都给得出：服务端把它收进了共享的 agentintel.SurfaceUnit，所以 tmux pane 和
+   * 非 tmux 卡片要么都有、要么都没有。这里曾经写着「非 tmux 来源暂时给不出这个值」——那个「暂时」
+   * 持续了整整一个特性周期，正是本轮要消灭的那种半边真话。
+   *
+   * 仍然可能是 0：一个还没绑定到 transcript 的 agent 确实无从得知它多新。那时卡片不显示年龄，
    * 而不是编一个「刚刚」。
    */
   activityAt?: number
@@ -423,17 +441,23 @@ function saveSeen(map: Record<string, string>): void {
   }
 }
 
-/** A dated (non-zero) AwaitingSince. A tmux "zero" time (`0001-01-01…`, from omitempty not
- *  applying to time.Time) or an absent value means the wait couldn't be dated (e.g. a PTY-only
- *  permission prompt) → treated as "unknown completion": never persist-dismissable, so such a
- *  high-signal wait keeps showing (incl. across F5) rather than being wrongly muted.
+/** A dated (non-zero) AwaitingSince. An ABSENT value means the wait couldn't be dated (e.g. a
+ *  PTY-only permission prompt) → treated as "unknown completion": never persist-dismissable, so
+ *  such a high-signal wait keeps showing (incl. across F5) rather than being wrongly muted.
  *
- *  NOT a rare edge case, and not a bug to be fixed upstream: the backend contract-tests the zero
- *  value (`agentintel/awaiting_since_contract_test.go`), every PTY-derived wait carries it, and
- *  `CodexDriver` never emits a driver-side waiting at all — so for Codex, EVERY waiting is undated.
- *  Exported because the attention HUD must branch on the SAME predicate: one policy for "we cannot
- *  tell two of these apart", not one per consumer. The policy is fail-OPEN (keep showing / stay
- *  interruptible), because the alternative silently swallows the highest-signal state in the app. */
+ *  NOT a rare edge case: every PTY-derived wait is undated, and `CodexDriver` never emits a
+ *  driver-side waiting at all — so for Codex, EVERY waiting is undated. Exported because the
+ *  attention HUD must branch on the SAME predicate: one policy for "we cannot tell two of these
+ *  apart", not one per consumer. The policy is fail-OPEN (keep showing / stay interruptible),
+ *  because the alternative silently swallows the highest-signal state in the app.
+ *
+ *  ── The `0001-01-01` clause is now BACK-COMPAT, not the contract ────────────────────────────
+ *  It used to be the contract: `omitempty` does nothing to a time.Time, so an undated tmux pane
+ *  shipped a literal Go zero time and the backend contract-tested that sentinel. It no longer does
+ *  — `omitzero` omits the key, and `agentintel/awaiting_since_contract_test.go` now asserts the
+ *  ABSENCE, both for awaitingSince and activityAt. The clause stays because a not-yet-upgraded
+ *  server still sends the sentinel, and this predicate was already treating it identically to an
+ *  absent value — which is exactly why removing it upstream needed no change here. */
 export function isDatedSince(since: string | undefined): since is string {
   return !!since && !since.startsWith('0001-01-01')
 }

@@ -119,7 +119,7 @@ func TestSessionAgentStatuses_ComesFromTheSameSnapshotAsTheCards(t *testing.T) {
 			}
 			continue
 		}
-		if !ok || got[0] != e.AgentTool || got[1] != e.AgentStatus {
+		if !ok || got[0] != string(e.AgentTool) || got[1] != string(e.AgentStatus) {
 			t.Fatalf("list says %v, card says (%q,%q) — they must be the same snapshot",
 				got, e.AgentTool, e.AgentStatus)
 		}

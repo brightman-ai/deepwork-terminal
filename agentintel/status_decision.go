@@ -92,6 +92,15 @@ const (
 	RuleScreenPromptLikely StatusRule = "screen.prompt_likely"
 	// RuleScreenQuiet — the screen said nothing recognisable either way.
 	RuleScreenQuiet StatusRule = "screen.quiet"
+	// RuleScreenUnreadable — the screen could not be READ at all (a capture that failed, a
+	// session with no replay yet), as opposed to one that was read and said nothing.
+	//
+	// The two used to be collapsed, in opposite directions on each side: a pane whose capture
+	// failed was reported as「transcript.unlocatable」— naming the transcript for a screen
+	// problem — while a session with no screen was reported as idle, which asserts the one thing
+	// nobody knew. A rule exists to be followed back to a cause; a rule that names the wrong
+	// subsystem is worse than none.
+	RuleScreenUnreadable StatusRule = "screen.unreadable"
 
 	// ── signal family: the program said so out loud (BEL / OSC), zero inference ──────
 	RuleSignalBell   StatusRule = "signal.bell"

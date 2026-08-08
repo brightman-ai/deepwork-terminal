@@ -47,43 +47,22 @@ const (
 
 // SessionOverviewEntry is one card in the non-tmux Agent Overview.
 //
-// Field names mirror the tmux pane/window payload (agentTool / agentStatus / tail) so the frontend
-// can normalize both sources into ONE card model instead of maintaining two shapes.
+// The agent facts are NOT declared here: they are the embedded SurfaceUnit, the single declaration
+// this payload shares with the tmux pane (agentintel/tmux_state.go). This comment used to say
+// "field names mirror the tmux pane/window payload … so the frontend can normalize both sources
+// into ONE card model" — an accurate description of the intent and a request the compiler could
+// not enforce. It is now enforced: there is one field list, so a card and a pane cannot describe
+// the same fact under different names, and neither can grow a fact the other lacks.
 type SessionOverviewEntry struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
 	CWD    string `json:"cwd,omitempty"`
 	Engine string `json:"engine,omitempty"`
-	// AgentTool / AgentStatus come from the same detector the session list uses — literally the
-	// same snapshot (handleListSessions reads this struct), so a card and its tab dot cannot
-	// disagree even for one tick.
-	AgentTool   string `json:"agentTool,omitempty"`
-	AgentStatus string `json:"agentStatus,omitempty"`
-	// AwaitingUser / AwaitingSince / EndedOnQuestion mirror the tmux pane payload so the shared
-	// overview state machine treats a session and a pane identically: needs-you, the reload-proof
-	// completion the "seen" layer dismisses against, and whether that turn ended on a question.
-	AwaitingUser    bool   `json:"awaitingUser,omitempty"`
-	AwaitingSince   string `json:"awaitingSince,omitempty"`
-	EndedOnQuestion bool   `json:"endedOnQuestion,omitempty"`
-	// StatusRule explains WHY this session has the status it has — the single rule behind the
-	// verdict ("transcript.running", "screen.approval", "signal.notify"…). Present on EVERY
-	// decision, including a plain green one.
-	//
-	// It used to ride only on waiting/awaiting, reasoning that those are the verdicts that can be
-	// wrong in a way the user feels. They are not the only ones: a session stuck GREEN while its
-	// agent waits is the failure nobody is told about, and it left no trace at all — five separate
-	// rules can return Running, so the question "why is it green" had no answer but a guess.
-	// Shipping the rule unconditionally is free here because it is stable while the status is, and
-	// this frame is diff-suppressed: it only changes when the REASON changes.
-	//
-	// StatusEvidence is the screen line that matched, scrubbed and truncated — and stays confined
-	// to attention decisions, because it churns on every tick (spinner frames, token counters) and
-	// would defeat that suppression for no gain: on a green session the rule already says it all.
-	//
-	// Diagnostic only — nothing renders them; they exist so a wrong dot can be TRACED rather than
-	// re-argued. See agentintel/status_decision.go.
-	StatusRule     string `json:"statusRule,omitempty"`
-	StatusEvidence string `json:"statusEvidence,omitempty"`
+	// Embedded, not listed. AgentTool / AgentStatus still come from the same detector the session
+	// list uses — literally the same snapshot (handleListSessions reads this struct), so a card and
+	// its tab dot cannot disagree even for one tick; what changed is that the FIELDS are now shared
+	// with the pane payload rather than re-typed alongside it. See agentintel/surface_unit.go.
+	agentintel.SurfaceUnit
 	// Exited marks a dead PTY. Kept explicit rather than inferred from an empty tail: a live shell
 	// that has simply printed nothing is NOT the same as one whose process is gone.
 	Exited bool `json:"exited,omitempty"`
@@ -147,11 +126,14 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// because that same chrome is noise once you already have a status dot for it.
 		agent := s.sessionAgent.State(ctx, sess.ID, sess.ShellPID(), entry.CWD, screen)
 		if agent.Tool != "" {
-			entry.AgentTool = string(agent.Tool)
-			entry.AgentStatus = string(agent.Status)
+			entry.AgentTool = agent.Tool
+			entry.AgentStatus = agent.Status
 			entry.AwaitingUser = agent.AwaitingUser
 			entry.AwaitingSince = agent.AwaitingSince
 			entry.EndedOnQuestion = agent.EndedOnQuestion
+			// How old the evidence behind that status is. The tmux pane has always shipped this;
+			// a card could tell the same "running for ten hours" lie with nothing to catch it.
+			entry.ActivityAt = agent.ActivityAt
 			// Same split as the tmux pane payload, and deliberately kept identical to it: the
 			// RULE rides on every decision (a green session that should be amber is the silent
 			// failure, and it used to leave no trace at all), the EVIDENCE only on the ones
@@ -166,9 +148,12 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		} else if s.hooks.AgentDetect != nil && sess.ShellPID() > 0 {
 			// Deprecated host override — only reachable when the built-in detector found
 			// nothing, so an embedder with an exotic runtime can still contribute a status.
+			// Converted at THIS boundary, once. The hook predates the domain types and hands back
+			// bare strings; that is a reason to narrow them here, not a reason for the rest of the
+			// system to describe an agent with a type that cannot tell a tool from a status.
 			if tool, status := s.hooks.AgentDetect(ctx, sess.ShellPID(), entry.CWD); tool != "" {
-				entry.AgentTool = tool
-				entry.AgentStatus = status
+				entry.AgentTool = agentintel.AgentTool(tool)
+				entry.AgentStatus = agentintel.AgentStatus(status)
 			}
 		}
 
@@ -184,8 +169,14 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 			// AwaitingSince is the key the frontend's "seen" layer dismisses against, so a
 			// fresh signal MUST advance it past whatever the transcript produced — otherwise
 			// a card the user already dismissed would swallow the new signal in silence.
-			if prev, perr := time.Parse(time.RFC3339Nano, entry.AwaitingSince); entry.AwaitingSince == "" || perr != nil || at.After(prev) {
-				entry.AwaitingSince = at.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
+			//
+			// A plain time comparison now that both feeds carry a time.Time. This used to parse the
+			// string back out of the field it had just formatted — the round trip existed only
+			// because the card had been given a pre-formatted string where the pane had a real
+			// instant, and it could fail (a parse error was treated as "no time", which silently
+			// took the same branch as "advance it").
+			if entry.AwaitingSince.IsZero() || at.After(entry.AwaitingSince) {
+				entry.AwaitingSince = at.UTC()
 			}
 			// The signal OUTRANKS whatever the detectors concluded, so it owns the provenance
 			// too — otherwise a card raised by a BEL would carry a screen rule that had nothing
@@ -320,6 +311,15 @@ type overviewBuild struct {
 	done chan struct{}
 	snap overviewSnapshot
 	ok   bool
+	// elapsed is how long THIS rebuild took — a property of this rebuild, not a reading taken
+	// from a global counter afterwards.
+	//
+	// The distinction is not academic. The histogram is process-wide while rebuilds are
+	// deliberately detached from whoever asked for them (see overviewSnapshot), so "the count
+	// went up by one" is a claim about the whole process during a window, not about this build.
+	// Anything else running concurrently makes it wrong, and it will be wrong intermittently —
+	// the worst way to be wrong.
+	elapsed time.Duration
 }
 
 // awaitOverview waits for the in-flight build, or leaves when the caller's own context ends.
@@ -405,11 +405,24 @@ func (s *Server) overviewSnapshot(ctx context.Context) overviewSnapshot {
 
 // buildOverview performs one rebuild and publishes it, or publishes nothing and says so.
 func (s *Server) buildOverview(parent context.Context, b *overviewBuild) {
+	// What this rebuild cost, measured on EVERY exit path. Until this existed the non-tmux
+	// overview had counters for which path ran and none at all for how long it took — so the one
+	// question a stalled dashboard raises ("is the rebuild eating the tick?") had no answer but a
+	// guess, which is precisely the mistake this scope already made once. See logOverviewRebuild.
+	start := time.Now()
+	sessions := 0
 	defer func() {
+		// Recorded on b BEFORE close(b.done): the channel close is what publishes this build to
+		// its waiters, so anything set after it is a race.
+		b.elapsed = time.Since(start)
 		s.overviewCacheMu.Lock()
 		s.overviewInFlight = nil
 		s.overviewCacheMu.Unlock()
 		close(b.done)
+		// Logged on the PARENT context: it carries the tick's log fields, and this is a
+		// measurement of work that has already finished, so the caller's lifetime is irrelevant
+		// to it — the same reason the rebuild itself runs under WithoutCancel below.
+		logOverviewRebuild(parent, time.Since(start), sessions)
 	}()
 
 	// ── The rebuild does not belong to whoever asked for it ──────────────────────────────────
@@ -432,6 +445,7 @@ func (s *Server) buildOverview(parent context.Context, b *overviewBuild) {
 	defer cancel()
 
 	entries := s.sessionsOverview(bctx)
+	sessions = len(entries)
 	if bctx.Err() != nil {
 		// Out of budget: what we hold is a partial read of a loaded machine, not a description of
 		// it. Publish nothing — and COUNT it, because a rebuild that quietly gives up looks exactly
@@ -472,12 +486,16 @@ func (s *Server) buildOverview(parent context.Context, b *overviewBuild) {
 
 // sessionAgentStatuses is the session-id → (tool, status) view the REST list renders. Same
 // snapshot as the cards by construction.
+//
+// Strings, because that is what this view IS: the shape handleListSessions marshals. Widening
+// happens here, once, at the edge where the domain leaves the program — not by keeping the domain
+// itself untyped for the convenience of its last consumer.
 func (s *Server) sessionAgentStatuses(ctx context.Context) map[string][2]string {
 	snap := s.overviewSnapshot(ctx)
 	out := make(map[string][2]string, len(snap.entries))
 	for _, e := range snap.entries {
 		if e.AgentTool != "" {
-			out[e.ID] = [2]string{e.AgentTool, e.AgentStatus}
+			out[e.ID] = [2]string{string(e.AgentTool), string(e.AgentStatus)}
 		}
 	}
 	return out

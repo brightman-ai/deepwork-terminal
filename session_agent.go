@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
@@ -63,8 +64,16 @@ type sessionAgentState struct {
 	Tool            agentintel.AgentTool
 	Status          agentintel.AgentStatus
 	AwaitingUser    bool
-	AwaitingSince   string // RFC3339; "" when not awaiting or the completion is undated
+	AwaitingSince   time.Time // zero when not awaiting, or when the completion is undated
 	EndedOnQuestion bool
+	// ActivityAt is when this session's agent last WROTE to its transcript — the age of the
+	// evidence behind Status. Cache-only (one stat, never a directory scan), and read AFTER the
+	// status resolution below so the session is bound to a transcript by the time it is asked.
+	//
+	// The tmux pane has shipped this since a pane sat "running" for ten hours off a transcript
+	// nothing had touched overnight. A non-tmux card could tell exactly the same lie, and nothing
+	// on it would have caught the difference — the field simply had not been carried across.
+	ActivityAt time.Time
 	// Decision is the provenance of the status above: which single rule produced it and,
 	// for a screen-derived verdict, the line that matched. It exists so a wrong "needs you"
 	// can be traced afterwards instead of re-argued from an approximation — see
@@ -90,52 +99,31 @@ func (t *sessionAgentTracker) State(ctx context.Context, key string, shellPID in
 	if agent.Tool == agentintel.ToolNone {
 		return sessionAgentState{}
 	}
-	out := sessionAgentState{Tool: agent.Tool, Status: agentintel.StatusIdle}
 
-	status, ok := t.monitor.Status(key, cwd, agent.Tool, agent.ProcessPID)
-	if !ok {
-		// Transcript not locatable yet (a just-started agent, or Codex before its rollout
-		// exists). Fall back to the same mtime gate the tmux path uses: writing = working.
-		// NOTE this is the one arm where the SCREEN ALONE can declare Waiting — there is no
-		// transcript opinion to confirm it against — which is exactly why its decision carries
-		// the rule and the line that produced it.
-		if t.monitor.Active(key, cwd, agent.Tool, agent.ProcessPID) {
-			out.Status = agentintel.StatusRunning
-			out.Decision = agentintel.StatusDecision{Status: out.Status, Rule: agentintel.RuleTranscriptWriting}
-		} else {
-			v := agentintel.AnalyzeOutputDetail(screen)
-			if v.State == agentintel.PromptNeedsPermission {
-				out.Status = agentintel.StatusWaiting
-			}
-			out.Decision = agentintel.StatusDecision{Status: out.Status, Rule: v.Rule, Evidence: v.Line}
-		}
-		out.AwaitingUser = out.Status == agentintel.StatusWaiting
-		out.Decision.Awaiting = out.AwaitingUser
-		t.logDecision(ctx, key, out)
-		return out
-	}
-	out.Status = status
-	out.Decision = agentintel.StatusDecision{Status: status,
-		Rule: agentintel.TranscriptStatusRule(status, t.monitor.Snapshot(key))}
+	// ONE decision, shared with the tmux pane. This function used to hold its own copy of the
+	// whole verdict — transcript status, the permission-prompt confirmation, needs-you,
+	// awaiting-since, the rule — under a comment asking it not to drift from the pane's copy.
+	// It had drifted on three of them (no spinner veto, a rule naming the wrong subsystem for an
+	// unlocatable transcript, an ungated EndedOnQuestion). See agentintel/surface_decision.go.
+	//
+	// The only thing this source contributes is where the screen comes from. It is already in
+	// memory — replayed for the card's tail — so unlike a pane there is nothing to capture and
+	// nothing that can fail. `ok=false` here means the session has no replay YET (no ring
+	// content), which is genuinely "could not read", not "read it, it was blank".
+	unit, decision := t.monitor.DecideSurface(agentintel.SurfaceProbe{
+		Key: key, CWD: cwd, Tool: agent.Tool, ProcessPID: agent.ProcessPID,
+		Screen: func() ([]string, bool) { return screen, screen != nil },
+	})
 
-	// A transcript-running agent may actually be blocked on a permission prompt: the tool_use is
-	// pending in the transcript while the CLI waits for your y/n on screen. Only this direction is
-	// checked — the screen can prove "blocked", it cannot prove "not blocked".
-	if status == agentintel.StatusRunning {
-		if v := agentintel.AnalyzeOutputDetail(screen); v.State == agentintel.PromptNeedsPermission {
-			out.Status = agentintel.StatusWaiting
-			out.Decision = agentintel.StatusDecision{Status: out.Status, Rule: v.Rule, Evidence: v.Line}
-		}
+	out := sessionAgentState{
+		Tool:            unit.AgentTool,
+		Status:          unit.AgentStatus,
+		AwaitingUser:    unit.AwaitingUser,
+		AwaitingSince:   unit.AwaitingSince,
+		EndedOnQuestion: unit.EndedOnQuestion,
+		ActivityAt:      unit.ActivityAt,
+		Decision:        decision,
 	}
-
-	snap := t.monitor.Snapshot(key)
-	out.AwaitingUser = out.Status == agentintel.StatusWaiting ||
-		(out.Status == agentintel.StatusIdle && snap.AwaitingUser)
-	if out.AwaitingUser && !snap.AwaitingSince.IsZero() {
-		out.AwaitingSince = snap.AwaitingSince.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
-		out.EndedOnQuestion = snap.EndedOnQuestion
-	}
-	out.Decision.Awaiting = out.AwaitingUser
 	t.logDecision(ctx, key, out)
 	return out
 }

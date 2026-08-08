@@ -294,7 +294,7 @@ func TestSignalRaisesAwaitingUser(t *testing.T) {
 	if !entries[0].AwaitingUser {
 		t.Fatal("an explicit signal did not raise AwaitingUser — the card would stay silent")
 	}
-	if entries[0].AwaitingSince == "" {
+	if entries[0].AwaitingSince.IsZero() {
 		t.Fatal("AwaitingSince must carry the signal time: it is the key the seen layer dismisses against")
 	}
 	if entries[0].AgentStatus == "waiting" {

@@ -12,7 +12,7 @@
  * whole tree, and matches how useServerStore already shares cross-component state here.
  */
 import { computed, ref } from 'vue'
-import { agentSaidText, agentSignalText, type OverviewUnit } from './useAgentOverview'
+import { activityMs, agentSaidText, agentSignalText, type OverviewUnit } from './useAgentOverview'
 import { useAgentSignals } from './useAgentSignals'
 
 /** One session's card payload — the wire shape of terminal.SessionOverviewEntry. */
@@ -31,6 +31,9 @@ export interface SessionOverviewEntry {
   awaitingSince?: string
   /** That turn ended on a question rather than a report (labels the SAME dot, never escalates it). */
   endedOnQuestion?: boolean
+  /** 这个 session 的 agent 最后一次写 transcript 的时刻（ISO）。缺席 = 无从得知。
+   *  与 tmux pane 的同名字段来自服务端**同一个**共享类型，所以两侧要么都有、要么都没有。 */
+  activityAt?: string
 }
 
 const entries = ref<SessionOverviewEntry[]>([])
@@ -155,6 +158,10 @@ export function useSessionsOverview(activeId: () => string | undefined, order?: 
         // "newest file in this directory" guess that used to make two terminals mirror each other.
         awaiting: !!e.awaitingUser,
         awaitingSince: e.awaitingSince ?? '',
+        // 证据年龄，和 tmux 卡片同一条换算（activityMs）、同一个服务端字段。在此之前这里什么都
+        // 没有：一张非 tmux 卡片可以把一条十小时没人写过的 transcript 显示成「运行中」，而屏幕上
+        // 没有任何东西能让人看出区别。
+        activityAt: activityMs(e.activityAt),
         signals: signal ? [signal] : [],
         // '' when this session has no pending signal, or when the signal was a bare bell — the
         // card then reads exactly as it did before, rather than gaining an empty quote.
