@@ -309,39 +309,108 @@ type overviewSnapshot struct {
 	revision uint64
 }
 
+// overviewBuild is one in-flight rebuild that later arrivals WAIT ON instead of duplicating.
+//
+// A promise rather than a mutex, and the distinction is the whole point: **waiting on a channel is
+// cancellable, waiting on a mutex is not.** `sync.Mutex.Lock()` cannot be abandoned, so a rebuild
+// that wedges pins every waiter for as long as it lasts — including WS producer goroutines whose
+// browser tab has already closed and whose context is long cancelled. They cannot exit. That is a
+// goroutine leak that no amount of care at the call sites can undo.
+type overviewBuild struct {
+	done chan struct{}
+	snap overviewSnapshot
+	ok   bool
+}
+
+// awaitOverview waits for the in-flight build, or leaves when the caller's own context ends.
+//
+// Leaving is free and correct: the build keeps running and publishes for whoever asks next, and the
+// departing caller gets the last good snapshot — which is the honest answer to "what do we know
+// right now", not a placeholder.
+func awaitOverview(ctx context.Context, b *overviewBuild, lastGood overviewSnapshot) overviewSnapshot {
+	finished := func() overviewSnapshot {
+		if b.ok {
+			return b.snap
+		}
+		return lastGood
+	}
+	// A finished build beats an expired context. The answer is already in hand, and handing back a
+	// staler one merely because the caller is in a hurry would be gratuitous. Asked FIRST and
+	// non-blockingly because Go's select picks at random when both cases are ready — leaving it to
+	// the select below would make the result a coin flip.
+	select {
+	case <-b.done:
+		return finished()
+	default:
+	}
+	select {
+	case <-b.done:
+		return finished()
+	case <-ctx.Done():
+		return lastGood
+	}
+}
+
 // overviewSnapshot returns the current snapshot, rebuilding it at most once per tick.
 //
-// ── Why the lock is held ACROSS the rebuild ──────────────────────────────────────────────────
-// The payload is GLOBAL (it describes every session) while the callers are PER-CONNECTION. The
-// previous version released the lock before building, which made the cache a hit-path optimisation
-// only: on a MISS, every caller that arrived in that window started its own full rebuild. And they
-// arrive together by construction — N connections each ticking at 1s all miss the same expired
-// entry within the same millisecond, so the one moment the answer is expensive is exactly the
-// moment N of them compute it in parallel. Holding the lock turns the herd into one builder and
-// N waiters who then find the fresh entry. That is the same shape tmux's topologySnapshot already
-// uses, and for the same reason.
+// ── One builder, N waiters, and every waiter free to leave ───────────────────────────────────
+// The payload is GLOBAL (it describes every session) while the callers are PER-CONNECTION, and they
+// arrive together by construction: N connections each ticking at 1s miss the same expired entry
+// within the same millisecond. So the one moment the answer is expensive is exactly the moment N of
+// them would compute it in parallel. That herd has to collapse to one.
 //
-// Waiting is the correct behaviour for every caller here: they all want THIS tick's answer, and a
-// second concurrent rebuild would not produce a better one, only an equal one at double the cost.
+// The obvious way to collapse it — hold the cache mutex across the rebuild — was WRONG, and this is
+// the second version. The rebuild is not made of cancellable work: `ps` and `tmux` run under
+// contexts, but the transcript reads underneath (agentintel's JSONLReader: os.Open, bufio) and
+// liveCWD's /proc read are **plain blocking syscalls, which Go cannot preempt with a context**. The
+// budget below therefore does not bound them, and jsonl_reader.go documents a 19-second first pass
+// over a 4 GB rollout as a condition this codebase has actually met. Under the mutex version, one
+// such read froze every WS overview push and the whole REST /sessions endpoint, and stranded every
+// waiting goroutine past the death of its own connection.
+//
+// So the mutex guards the CACHE — briefly — and a promise deduplicates the COMPUTATION. Same
+// collapse, and a wedged rebuild now costs exactly one stuck goroutine instead of all of them.
 func (s *Server) overviewSnapshot(ctx context.Context) overviewSnapshot {
-	// Sampled BEFORE the lock, deliberately: a builder holds the mutex for the whole rebuild, so by
-	// the time we are inside we can no longer tell whether we walked in or queued. Reading it here
-	// answers the question that matters — "was someone already building when I arrived", i.e. was I
-	// one of the herd this lock exists to collapse. Approximate at the edge (the builder may finish
-	// between this read and the Lock) and that is fine for a counter; a flag we could only read
-	// after acquiring would be exactly zero forever, which is worse than approximate.
-	contended := s.overviewBuilding.Load()
-
 	s.overviewCacheMu.Lock()
-	defer s.overviewCacheMu.Unlock()
-	if s.overviewCacheAt.Add(sessionsOverviewCacheTTL).After(time.Now()) {
-		if contended {
-			terminalOverviewRebuildSharedTotal.Inc()
-		}
-		return s.overviewCache
+	now := time.Now()
+	if s.overviewCacheAt.Add(sessionsOverviewCacheTTL).After(now) {
+		snap := s.overviewCache
+		s.overviewCacheMu.Unlock()
+		return snap
 	}
-	s.overviewBuilding.Store(true)
-	defer s.overviewBuilding.Store(false)
+	lastGood := s.overviewCache
+	if b := s.overviewInFlight; b != nil {
+		s.overviewCacheMu.Unlock()
+		terminalOverviewRebuildSharedTotal.Inc()
+		return awaitOverview(ctx, b, lastGood)
+	}
+	// Rate-limit ATTEMPTS, not just successes. Without this, a rebuild that keeps failing never
+	// stamps overviewCacheAt, so every single caller starts another one immediately and the server
+	// does nothing but retry — the pathological case being a machine slow enough that the rebuild
+	// legitimately cannot finish, where the old code turned "slow but eventually right" into
+	// "permanently empty, at full CPU". One attempt per TTL is the same cadence as healthy
+	// operation, so this costs nothing when things work.
+	if s.overviewAttemptAt.Add(sessionsOverviewCacheTTL).After(now) {
+		s.overviewCacheMu.Unlock()
+		return lastGood
+	}
+	b := &overviewBuild{done: make(chan struct{})}
+	s.overviewInFlight = b
+	s.overviewAttemptAt = now
+	s.overviewCacheMu.Unlock()
+
+	go s.buildOverview(ctx, b)
+	return awaitOverview(ctx, b, lastGood)
+}
+
+// buildOverview performs one rebuild and publishes it, or publishes nothing and says so.
+func (s *Server) buildOverview(parent context.Context, b *overviewBuild) {
+	defer func() {
+		s.overviewCacheMu.Lock()
+		s.overviewInFlight = nil
+		s.overviewCacheMu.Unlock()
+		close(b.done)
+	}()
 
 	// ── The rebuild does not belong to whoever asked for it ──────────────────────────────────
 	// This answer describes every session and is served to every caller, but it used to run under
@@ -355,25 +424,34 @@ func (s *Server) overviewSnapshot(ctx context.Context) overviewSnapshot {
 	//
 	// WithoutCancel keeps the caller's log fields — the rebuild should still be traceable to the
 	// tick that triggered it — and drops only its LIFETIME, which was never the right owner.
-	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), overviewRebuildBudget)
+	//
+	// The budget bounds the SUBPROCESS half only (ps/tmux/lsof, which run under this context). It
+	// cannot bound a blocking file read; saying otherwise would be the kind of comment that makes
+	// the next person trust a guarantee that is not there.
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(parent), overviewRebuildBudget)
 	defer cancel()
 
 	entries := s.sessionsOverview(bctx)
 	if bctx.Err() != nil {
-		// Out of budget. What we hold is a partial read of a loaded machine, not a description of
-		// it. Publish nothing, stamp nothing, and deliberately do NOT refresh overviewCacheAt, so
-		// the next caller retries immediately instead of serving this for a full TTL.
-		return s.overviewCache
+		// Out of budget: what we hold is a partial read of a loaded machine, not a description of
+		// it. Publish nothing — and COUNT it, because a rebuild that quietly gives up looks exactly
+		// like a quiet machine from the outside. Waiters fall back to the last good snapshot.
+		terminalOverviewRebuildAbandonedTotal.Inc()
+		terminalLogger.Warn(bctx, "overview rebuild abandoned: out of budget",
+			"budget_ms", overviewRebuildBudget.Milliseconds(),
+			"sessions", len(entries),
+			"effect", "serving the last good snapshot; the cards are stale, not wrong")
+		return
 	}
 	raw, err := json.Marshal(entries)
 	if err != nil {
-		// Marshal failed: publish nothing, cache nothing. Entries still go back to the REST caller,
-		// which does not need the encoded form. Deliberately NOT stamped as a new revision — a
-		// revision that no payload corresponds to would tell subscribers something changed and then
-		// have nothing to send them.
-		return overviewSnapshot{entries: entries, revision: s.overviewCache.revision}
+		// Publish nothing, stamp no revision: a revision no payload corresponds to would tell
+		// subscribers something changed and then have nothing to send them.
+		terminalOverviewRebuildAbandonedTotal.Inc()
+		return
 	}
 
+	s.overviewCacheMu.Lock()
 	snap := overviewSnapshot{entries: entries, json: raw, revision: s.overviewCache.revision}
 	// The revision moves only when the ANSWER moves. A rebuild that reproduces the same bytes is a
 	// rebuild nobody needs to hear about — that is the whole content of「变化才有代价」at this layer.
@@ -383,10 +461,13 @@ func (s *Server) overviewSnapshot(ctx context.Context) overviewSnapshot {
 	} else {
 		snap.frame = s.overviewCache.frame
 	}
-
 	s.overviewCache = snap
 	s.overviewCacheAt = time.Now()
-	return snap
+	s.overviewCacheMu.Unlock()
+
+	// Written before the deferred close(b.done) publishes it — the channel close is what makes
+	// these visible to waiters, so nothing here needs its own lock.
+	b.snap, b.ok = snap, true
 }
 
 // sessionAgentStatuses is the session-id → (tool, status) view the REST list renders. Same

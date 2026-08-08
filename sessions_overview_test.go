@@ -284,12 +284,16 @@ func TestOverviewScreenCache_DropsClosedSessions(t *testing.T) {
 	}
 }
 
-func TestOverviewSnapshot_CallersCancellationDoesNotCancelTheSharedRebuild(t *testing.T) {
+func TestOverviewSnapshot_CallersCancellationDoesNotPoisonTheSharedRebuild(t *testing.T) {
 	// The snapshot describes EVERY session and is served to EVERY caller, but it is built by
 	// whichever connection ticks first. When that connection's context was the rebuild's context,
 	// closing one tab poisoned everyone's answer — `ps` fails under a dead context, every agent
 	// reads as ToolNone, and a well-formed payload claims no session is running an agent. Same lie
 	// as an empty pane bar, different door.
+	//
+	// The dead caller itself is entitled to leave immediately (that is a separate invariant, pinned
+	// below). What must NOT happen is the build it kicked off producing a degraded answer for the
+	// clients that are still here.
 	srv, sm := newOverviewTestServer(t)
 	sess, err := sm.Create("worker")
 	if err != nil {
@@ -299,16 +303,90 @@ func TestOverviewSnapshot_CallersCancellationDoesNotCancelTheSharedRebuild(t *te
 
 	dead, cancel := context.WithCancel(context.Background())
 	cancel() // the caller is already gone before the rebuild starts
+	srv.overviewSnapshot(dead)
 
-	snap := srv.overviewSnapshot(dead)
+	// Whatever that dead caller got, the build it started must land intact for everyone else.
+	deadline := time.Now().Add(5 * time.Second)
+	var snap overviewSnapshot
+	for time.Now().Before(deadline) {
+		srv.overviewCacheMu.Lock()
+		snap = srv.overviewCache
+		srv.overviewCacheMu.Unlock()
+		if snap.revision != 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if len(snap.entries) != 1 {
-		t.Fatalf("a dead caller's context produced %d entries, want 1 — the rebuild rode its lifetime",
+		t.Fatalf("the rebuild a dead caller started published %d entries, want 1 — it rode that caller's lifetime",
 			len(snap.entries))
 	}
-	if snap.revision == 0 || snap.frame == nil {
-		t.Fatal("nothing was published from a rebuild that completed fine")
-	}
-	if !strings.Contains(string(snap.frame), "still here") {
+	if snap.frame == nil || !strings.Contains(string(snap.frame), "still here") {
 		t.Fatalf("frame lost the session's output: %s", snap.frame)
+	}
+}
+
+func TestOverviewSnapshot_AWaiterLeavesWhenItsOwnCallerGivesUp(t *testing.T) {
+	srv, sm := newOverviewTestServer(t)
+	if _, err := sm.Create("worker"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Stand in for a rebuild that has wedged inside an unpreemptable read: an in-flight promise
+	// that never completes. This is the state the whole design has to survive.
+	stuck := &overviewBuild{done: make(chan struct{})}
+	srv.overviewCacheMu.Lock()
+	srv.overviewInFlight = stuck
+	srv.overviewCacheAt = time.Time{} // expired, so callers take the miss path
+	srv.overviewCacheMu.Unlock()
+	defer close(stuck.done)
+
+	gone, cancel := context.WithCancel(context.Background())
+	done := make(chan overviewSnapshot, 1)
+	go func() { done <- srv.overviewSnapshot(gone) }()
+
+	// The caller's connection drops while the rebuild is still stuck.
+	cancel()
+
+	select {
+	case <-done:
+		// Left as soon as its own context ended, which is the entire point.
+	case <-time.After(2 * time.Second):
+		t.Fatal("a caller whose context was cancelled could not abandon a wedged rebuild — " +
+			"this is the goroutine leak a mutex makes unavoidable")
+	}
+}
+
+// A rebuild that keeps failing must retry at the healthy cadence, not continuously. Without an
+// ATTEMPT stamp, a failure never refreshes overviewCacheAt, so the next caller starts another
+// rebuild instantly — turning "slow but eventually right" into "permanently empty, at full CPU".
+func TestOverviewSnapshot_AFailedRebuildDoesNotSpin(t *testing.T) {
+	srv, sm := newOverviewTestServer(t)
+	if _, err := sm.Create("worker"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A build attempt just happened and published nothing (the failure shape).
+	srv.overviewCacheMu.Lock()
+	srv.overviewAttemptAt = time.Now()
+	srv.overviewCacheAt = time.Time{}
+	srv.overviewCacheMu.Unlock()
+
+	srv.overviewSnapshot(context.Background())
+
+	srv.overviewCacheMu.Lock()
+	spinning := srv.overviewInFlight != nil
+	srv.overviewCacheMu.Unlock()
+	if spinning {
+		t.Fatal("a caller started a fresh rebuild immediately after a failed one — the server would " +
+			"do nothing but retry for as long as the condition lasts")
+	}
+
+	// …and it does resume once the cadence allows it.
+	srv.overviewCacheMu.Lock()
+	srv.overviewAttemptAt = time.Now().Add(-2 * sessionsOverviewCacheTTL)
+	srv.overviewCacheMu.Unlock()
+	if snap := srv.overviewSnapshot(context.Background()); snap.revision == 0 {
+		t.Fatal("the retry never produced a snapshot — the overview would stay empty for good")
 	}
 }
