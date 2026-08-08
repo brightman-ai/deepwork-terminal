@@ -70,10 +70,42 @@ type TmuxProber struct {
 	// once a second per connection.
 	clientMu    sync.Mutex
 	clientCache map[int]clientCacheEntry
+
+	// control is the preferred transport: one persistent connection instead of a process per
+	// command. Nil-safe and self-healing — when it cannot answer, `run` spawns a process, which
+	// is exactly what every call did before it existed. See tmux_control.go.
+	control *tmuxControl
 }
 
 func NewTmuxProber(inspector *ProcessInspector) *TmuxProber {
-	return &TmuxProber{inspector: inspector, clientCache: map[int]clientCacheEntry{}}
+	return &TmuxProber{inspector: inspector, clientCache: map[int]clientCacheEntry{}, control: newTmuxControl()}
+}
+
+// run executes one tmux command and returns its output lines.
+//
+// The single choke point for tmux I/O in this file, so the transport decision is made once
+// rather than at each call site — and so the fallback cannot be forgotten at one of them.
+func (tp *TmuxProber) run(ctx context.Context, args ...string) ([]string, error) {
+	if tp.control != nil {
+		lines, err := tp.control.run(ctx, args...)
+		if err == nil {
+			TmuxControlCommands.Inc()
+			return lines, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err // the CALLER ran out of time; a process would not be faster
+		}
+		TmuxSpawnedCommands.Inc()
+	}
+	out, err := tmuxCommandContext(ctx, args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(out), "\n")
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, nil
 }
 
 // clientPIDFor finds the tmux client process inside shellPID's tree, off the shared ps snapshot.
@@ -212,14 +244,11 @@ func (tp *TmuxProber) ListPanesForSession(ctx context.Context, sessionName strin
 
 // ListPanes returns panes from the tmux server visible to this process.
 func (tp *TmuxProber) ListPanes(ctx context.Context) ([]TmuxPane, error) {
-	out, err := tmuxCommandContext(ctx,
-		"list-panes", "-s",
-		"-F", tmuxPaneFormat(),
-	).Output()
+	lines, err := tp.run(ctx, "list-panes", "-s", "-F", tmuxPaneFormat())
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-panes: %w", err)
 	}
-	return parseTmuxPanes(string(out))
+	return parseTmuxPanes(strings.Join(lines, "\n"))
 }
 
 // CapturePane reads the last n visible lines of a tmux pane (zero-invasion, read-only). The agent's
@@ -228,13 +257,10 @@ func (tp *TmuxProber) ListPanes(ctx context.Context) ([]TmuxPane, error) {
 // is read only for panes that have stopped producing output (see PaneAgentMonitor).
 func (tp *TmuxProber) CapturePane(ctx context.Context, sessionWindow string, paneIdx, lines int) ([]string, error) {
 	target := fmt.Sprintf("%s.%d", sessionWindow, paneIdx)
-	out, err := tmuxCommandContext(ctx,
-		"capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines),
-	).Output()
+	raw, err := tp.run(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", lines))
 	if err != nil {
 		return nil, fmt.Errorf("tmux capture-pane %s: %w", target, err)
 	}
-	raw := strings.Split(string(out), "\n")
 	for len(raw) > 0 && raw[len(raw)-1] == "" {
 		raw = raw[:len(raw)-1]
 	}
@@ -252,13 +278,10 @@ func (tp *TmuxProber) CapturePane(ctx context.Context, sessionWindow string, pan
 // grabbed only the last N raw lines first. Stripping (per `tool`) then capping keeps the pushed
 // payload — and the diff that decides whether to push at all — as small as the const promises.
 func (tp *TmuxProber) CaptureWindowTail(ctx context.Context, sessionWindow string, tool AgentTool, lines int) ([]string, error) {
-	out, err := tmuxCommandContext(ctx,
-		"capture-pane", "-t", sessionWindow, "-p",
-	).Output()
+	raw, err := tp.run(ctx, "capture-pane", "-t", sessionWindow, "-p")
 	if err != nil {
 		return nil, fmt.Errorf("tmux capture-pane %s: %w", sessionWindow, err)
 	}
-	raw := strings.Split(string(out), "\n")
 	// Strip the agent's bottom chrome by tool (bare shell / unknown → left as-is), then keep the
 	// last N content lines. stripAgentChrome already trims trailing blank padding.
 	content := stripAgentChrome(raw, tool)
