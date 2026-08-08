@@ -109,3 +109,30 @@ func LogTmuxScanComplete(ctx context.Context, sessionID, sessionName string, pan
 		"panes", panes,
 		"agents", agents)
 }
+
+// LogTmuxWindowSize names the arbitration rule the whole multi-client sizing design rests on.
+//
+// A tmux window has ONE size, so two clients watching it cannot both get their own layout. Human's
+// decision was `latest` — the most recently used client wins, i.e. "whoever is using it gets the
+// layout" — and the client-side discipline (declare your viewport when you become the viewer, never
+// when you are not) is built on top of that. `latest` is also tmux's default, which is exactly what
+// made this dangerous: the design worked without anyone ever checking, and one line in a tmux.conf
+// would break it silently, with nothing to point at.
+//
+// Called on change only, so this is one line per actual state, not per probe.
+func LogTmuxWindowSize(ctx context.Context, value string) {
+	switch value {
+	case "latest":
+		Logger.Info(ctx, "tmux window-size is latest — the client in use owns the layout, as designed",
+			"window_size", value)
+	case "":
+		Logger.Info(ctx, "tmux window-size unreadable — cannot confirm the multi-client sizing rule",
+			"window_size", "unknown")
+	default:
+		Logger.Warn(ctx, "tmux window-size is not latest — a second client will NOT get its own layout",
+			"window_size", value,
+			"expected", "latest",
+			"effect", "a phone/PC watching the same window keeps whatever this policy picks, so declaring a viewport has no visible result",
+			"fix", "tmux set -g window-size latest")
+	}
+}

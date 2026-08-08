@@ -181,6 +181,11 @@ type TmuxStateService struct {
 	modeKeys         string
 	modeKeysAt       time.Time
 	modeKeysResolved bool
+	// windowSize is the resolved global `window-size`. Read but never published: see WindowSize.
+	windowSize         string
+	windowSizeAt       time.Time
+	windowSizeResolved bool
+	windowSizeLogged   string
 
 	// topologyMu guards the shared topology snapshot AND serialises its rebuild: a caller that
 	// arrives while a rebuild is in flight waits for that result instead of starting a second
@@ -320,6 +325,72 @@ func (s *TmuxStateService) resolveModeKeys(ctx context.Context) string {
 	return "emacs"
 }
 
+// WindowSize returns the resolved global `window-size` ("latest" | "largest" | "smallest" |
+// "manual"), cached with the same short TTL as the prefix.
+//
+// ── Why a value nothing renders is read at all ───────────────────────────────────────────────
+// A tmux window has exactly ONE size, so when two clients watch the same window somebody has to
+// lose. Human decided who: `latest` — the client with the most recent activity, i.e. "whoever is
+// using it gets the layout". The whole client-side discipline built on that decision (a page
+// declares its viewport when it becomes the viewer, and never when it is not — see
+// frontend/…/viewportDeclaration.ts) is correct only if tmux is actually arbitrating that way.
+//
+// And nothing in this program knew the option existed. `latest` is tmux's default, so the design
+// worked by luck: one line in a user's tmux.conf (`set -g window-size largest`) and the phone would
+// silently never get its own layout, with no error, no log, and nothing to point at. The next
+// person to debug it would have to re-derive every step from scratch — which is the actual cost
+// being paid here, and it is much larger than this function.
+//
+// Deliberately NOT put on the wire. No client acts on it; a payload field nobody reads is a second
+// thing to keep true. Logging it names the assumption at the moment it stops holding, which is the
+// only moment it matters.
+func (s *TmuxStateService) WindowSize(ctx context.Context) string {
+	s.mu.Lock()
+	if s.windowSizeResolved && time.Since(s.windowSizeAt) < tmuxPrefixTTL {
+		v := s.windowSize
+		s.mu.Unlock()
+		return v
+	}
+	s.mu.Unlock()
+
+	v := s.resolveWindowSize(ctx)
+
+	s.mu.Lock()
+	s.windowSize = v
+	s.windowSizeAt = time.Now()
+	s.windowSizeResolved = true
+	// Logged on CHANGE only (first observation included), so a server that has been up for a week
+	// carries one line per actual state rather than one per probe.
+	changed := s.windowSizeLogged != v
+	s.windowSizeLogged = v
+	s.mu.Unlock()
+
+	if changed {
+		LogTmuxWindowSize(ctx, v)
+	}
+	return v
+}
+
+func (s *TmuxStateService) resolveWindowSize(ctx context.Context) string {
+	if !s.TmuxInstalled() {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
+	defer cancel()
+	out, err := tmuxCommandContext(cctx, "show-options", "-g", "window-size").Output()
+	if err != nil {
+		// Unreadable is not the same as any particular value, and guessing "latest" here would
+		// re-create exactly the silent assumption this exists to end.
+		return ""
+	}
+	// Output form: "window-size latest".
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
 // parsePrefix converts a tmux key spec ("C-b", "C-a", "M-x", "F1") into a
 // display label + the control byte(s) to emulate it. Only C-<letter> maps to a
 // single control byte; anything else keeps its display but carries no bytes
@@ -433,6 +504,10 @@ func (s *TmuxStateService) topologySnapshot(ctx context.Context) TmuxState {
 	// Sessions and mean opposite things.
 	answered := true
 	if st.Installed {
+		// Resolved for its side effect (see WindowSize): it names the arbitration rule the whole
+		// multi-client sizing design rests on, and says so out loud the moment it stops being
+		// `latest`. TTL-cached like the prefix, so this is one tmux command per 10s, not per probe.
+		s.WindowSize(ctx)
 		// ONE list-sessions answers both "is a server up" and "which sessions have a client".
 		// They used to be two separate invocations of the same command — `ServerRunning` looked
 		// only at the exit code, `attachedSessions` only at the output — which is one more command
