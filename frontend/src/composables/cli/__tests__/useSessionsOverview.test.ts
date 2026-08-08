@@ -139,4 +139,30 @@ describe('状态源唯一性：标签点 vs 终端表面那一行', () => {
     expect(units.value[0].awaiting).toBe(true)
     applyAgentSignalFrame({ signals: [] }) // 复位，避免污染后续用例（帧是全量替换语义）
   })
+
+  // ── 证据年龄：非 tmux 卡片也必须有 ──────────────────────────────────────────────────────
+  //
+  // 「运行中」这三个字，在真的在跑和一条十小时没人再写的 transcript 之间长得一模一样。tmux pane
+  // 一直带着 activityAt 来分辨这件事，非 tmux 卡片一个字都没有——不是决定，只是这个特性当初停在
+  // 了那里。服务端已经把它收进共享的 SurfaceUnit（两侧要么都有要么都没有），这里钉住前端那一半。
+  it('卡片带上证据年龄，和 tmux 那侧同一条换算', () => {
+    applyAgentSignalFrame({ signals: [] })
+    applySessionsOverviewFrame([
+      entry('a', { agentTool: 'claude', agentStatus: 'running', activityAt: '2026-08-08T09:00:00Z' }),
+    ])
+    const { units } = useSessionsOverview(() => 'a', () => ['a'])
+    expect(units.value[0].activityAt).toBe(Date.parse('2026-08-08T09:00:00Z'))
+  })
+
+  it('拿不到年龄就是 0，绝不编一个「刚刚」', () => {
+    applyAgentSignalFrame({ signals: [] })
+    applySessionsOverviewFrame([
+      // 键缺席 = 服务端也不知道（omitzero）。这是当前契约。
+      entry('a', { agentTool: 'claude', agentStatus: 'running' }),
+      // 零时间哨兵 = 还没升级的服务端。前端把它和「缺席」同等对待，否则卡片会写「17755921 小时前」。
+      entry('b', { agentTool: 'claude', agentStatus: 'running', activityAt: '0001-01-01T00:00:00Z' }),
+    ])
+    const { units } = useSessionsOverview(() => 'a', () => ['a', 'b'])
+    expect(units.value.map((u) => u.activityAt)).toEqual([0, 0])
+  })
 })

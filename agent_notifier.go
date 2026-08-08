@@ -296,17 +296,23 @@ func (n *agentNotifier) scanSessions(ctx context.Context, now time.Time, pl *age
 // separated so it can be driven from a test without conjuring a real agent process.
 func (n *agentNotifier) observeSessions(entries []SessionOverviewEntry, now time.Time, pl *agentintel.ProjectLocator, current map[string]bool) {
 	for _, e := range entries {
-		status := agentintel.AgentStatus(e.AgentStatus)
-		if !trackableStatus(e.AgentTool, status) {
+		// Widened to a plain string at THIS boundary, the same way the tmux arm above does it
+		// (`string(pane.AgentTool)`). The notifier's own target/summary/wire representation is a
+		// string all the way down to notify_stats; pushing the surface unit's domain type through
+		// that path would turn one type's convergence into a migration of a neighbouring
+		// subsystem, and buy nothing — nothing on this path can confuse a tool for a status.
+		tool := string(e.AgentTool)
+		status := e.AgentStatus
+		if !trackableStatus(tool, status) {
 			continue
 		}
 		n.observe(ptyKey(e.ID), targetMeta{
-			tool: e.AgentTool, cwd: e.CWD,
+			tool: tool, cwd: e.CWD,
 			// session is the DEEP-LINK target (?session=…), location is what the message
 			// shows. A tab has no window/pane coordinates, so its title IS its whole address.
 			session:        n.sessionDeepName(e.ID, e.Title),
 			location:       e.Title,
-			transcriptPath: transcriptPath(pl, e.CWD, e.AgentTool),
+			transcriptPath: transcriptPath(pl, e.CWD, tool),
 		}, status, now, current)
 	}
 }

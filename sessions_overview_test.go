@@ -1,11 +1,20 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/brightman-ai/deepwork-terminal/agentintel"
+	"github.com/brightman-ai/kit/obs"
 )
 
 // The non-tmux overview's whole value is that a card shows what the terminal is ACTUALLY doing.
@@ -389,4 +398,302 @@ func TestOverviewSnapshot_AFailedRebuildDoesNotSpin(t *testing.T) {
 	if snap := srv.overviewSnapshot(context.Background()); snap.revision == 0 {
 		t.Fatal("the retry never produced a snapshot — the overview would stay empty for good")
 	}
+}
+
+// ── CP1: the eye this rebuild did not have ───────────────────────────────────────────────────
+//
+// The tmux probe has published its own duration ever since its months-old lag was finally
+// measured (agentintel.TmuxProbeDuration). The non-tmux rebuild — the structural twin, on the
+// same 1s ticker — published only WHICH path ran and whether it gave up, never how long it took.
+// So "is the rebuild eating the tick?" had no answer but a guess, which is exactly the mistake
+// this feature already shipped once ("the ticker is already the clock, so this is a pure
+// optimisation"). The first test pins the instrument; the second one produces the number.
+
+// histogramCount reads a histogram's observation count out of the metric registry. The registry
+// exposes histograms only through WritePrometheus, so this parses the exposition text — which is
+// also precisely what a real scrape would see, i.e. it fails if the metric is unreachable rather
+// than merely unset.
+func histogramCount(t *testing.T, name string) uint64 {
+	t.Helper()
+	var buf bytes.Buffer
+	obs.WritePrometheus(&buf)
+	prefix := name + "_count "
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		n, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, prefix)), 10, 64)
+		if err != nil {
+			t.Fatalf("unparsable %s line %q: %v", name, line, err)
+		}
+		return n
+	}
+	t.Fatalf("%s is not registered — the overview rebuild has no duration instrument at all", name)
+	return 0
+}
+
+const overviewRebuildDurationMetric = "terminal_overview_rebuild_duration_seconds"
+
+func TestOverviewRebuild_IsTimed(t *testing.T) {
+	srv, sm := newOverviewTestServer(t)
+	if _, err := sm.Create("worker"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	before := histogramCount(t, overviewRebuildDurationMetric)
+	b := &overviewBuild{done: make(chan struct{})}
+	srv.buildOverview(context.Background(), b)
+	after := histogramCount(t, overviewRebuildDurationMetric)
+
+	// THIS rebuild's own cost, read off the build rather than inferred from a process-wide
+	// counter. Rebuilds are detached from their callers by design, so any other one running
+	// concurrently makes a global delta a statement about the process, not about this build —
+	// which is how this assertion first failed: "recorded 2 observations" during a full run,
+	// green in isolation. An intermittently-wrong assertion is worse than none.
+	if b.elapsed <= 0 {
+		t.Fatal("the rebuild did not time itself — an untimed rebuild is one nobody can find out about")
+	}
+	// And the instrument is actually wired to the registry: without this the field above could be
+	// set while nothing ever reaches a scrape. `>= 1` rather than `== 1` because the count is
+	// process-wide and a detached rebuild may legitimately land inside this window; the exactness
+	// that matters is asserted above, where it belongs.
+	if delta := int64(after) - int64(before); delta < 1 {
+		t.Fatalf("a completed rebuild reached the duration histogram %d times — the field is set but "+
+			"the metric is not connected to anything", delta)
+	}
+}
+
+// claudeTranscriptBody builds a syntactically real Claude JSONL transcript: `turns` complete
+// user → tool_use → tool_result → end_turn cycles, padded to the order of magnitude a transcript
+// that has been open for a while actually reaches. Size is the point — the incremental driver's
+// FIRST pass over a session reads the whole file, and that first pass is what a freshly started
+// server pays for every terminal at once.
+func claudeTranscriptBody(sessionID, cwd string, turns int) string {
+	var sb strings.Builder
+	pad := strings.Repeat("context line that stands in for a real message body; ", 4)
+	base := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < turns; i++ {
+		at := base.Add(time.Duration(i) * 10 * time.Second)
+		ts := func(off int) string { return at.Add(time.Duration(off) * time.Second).Format(time.RFC3339) }
+		tool := fmt.Sprintf("tool_%d", i)
+		fmt.Fprintf(&sb, `{"type":"user","sessionId":%q,"cwd":%q,"timestamp":%q,"message":{"role":"user","content":"%s%d"}}`+"\n",
+			sessionID, cwd, ts(0), pad, i)
+		fmt.Fprintf(&sb, `{"type":"assistant","sessionId":%q,"cwd":%q,"timestamp":%q,"message":{"id":"msg_%d_a","role":"assistant","model":"claude-sonnet-5","stop_reason":"tool_use","content":[{"type":"tool_use","id":%q,"name":"Read","input":{"file_path":"%s/file_%d.go"}}],"usage":{"input_tokens":1200,"output_tokens":48}}}`+"\n",
+			sessionID, cwd, ts(1), i, tool, cwd, i)
+		fmt.Fprintf(&sb, `{"type":"user","sessionId":%q,"cwd":%q,"timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"%s"}]}}`+"\n",
+			sessionID, cwd, ts(2), tool, pad)
+		fmt.Fprintf(&sb, `{"type":"assistant","sessionId":%q,"cwd":%q,"timestamp":%q,"message":{"id":"msg_%d_b","role":"assistant","model":"claude-sonnet-5","stop_reason":"end_turn","content":[{"type":"text","text":"%s"}],"usage":{"input_tokens":1300,"output_tokens":96}}}`+"\n",
+			sessionID, cwd, ts(3), i, pad)
+	}
+	return sb.String()
+}
+
+// nearestRank is the plain nearest-rank percentile. Deliberately not an interpolating one: with
+// 20 samples an interpolated P95 is a number no single rebuild ever took.
+func nearestRank(sorted []time.Duration, pct int) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := (pct*len(sorted)+99)/100 - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+func summarize(t *testing.T, label string, samples []time.Duration) time.Duration {
+	t.Helper()
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	p50, p95 := nearestRank(sorted, 50), nearestRank(sorted, 95)
+	t.Logf("%-24s n=%d  min=%v  P50=%v  P95=%v  max=%v",
+		label, len(sorted), sorted[0], p50, p95, sorted[len(sorted)-1])
+	return p95
+}
+
+// TestOverviewRebuild_RealMachineCost is the measurement CP1 exists to produce.
+//
+// Everything known about this rebuild's cost came from a fixture with NO agent process and NO
+// transcript — it isolated the screen replay and nothing else, which is the cheap half. This runs
+// the whole path on real machinery: real PTYs, real child processes the detector must find in a
+// real `ps` snapshot, and real transcripts on disk that the incremental driver actually parses.
+//
+// It asserts only that the fixture is genuinely exercising that path (five detected agents, five
+// timed rebuilds per round). The DURATION is reported, never asserted — a threshold here would be
+// a machine-speed test, and the number's job is to decide whether CP2 is worth doing at all, not
+// to pass or fail.
+func TestOverviewRebuild_RealMachineCost(t *testing.T) {
+	const sessionCount = 5
+	const rounds = 20
+
+	base := t.TempDir()
+
+	// A process the detector will recognise. Detection matches the BASENAME TOKEN of a process's
+	// argv as `ps` reports it, so a long-lived script named "claude" is an agent as far as every
+	// layer under test is concerned ("/bin/sh …/bin/claude" → token base "claude").
+	//
+	// A script rather than a copy of some system binary: macOS refuses to execute a copied
+	// platform binary at all (SIGKILL, exit 137 — verified), so that route measures nothing.
+	binDir := filepath.Join(base, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeClaude := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nwhile :; do sleep 1; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hermetic transcript roots: DW_CLAUDE_PROJECTS decides where shards are read from, and
+	// CLAUDE_CONFIG_DIR keeps the PID→session lookup off the real ~/.claude.
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(base, "claude-projects"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(base, "claude-home"))
+	locator := agentintel.NewProjectLocator()
+
+	sm := NewSessionManager(1<<20, "/bin/sh")
+	t.Cleanup(sm.DestroyAll)
+	srv, err := NewServer(WithConfig(Config{
+		Addr:         ":0",
+		DefaultShell: "/bin/sh",
+		BufferSize:   1 << 20,
+		MaxSessions:  16,
+		AuthCode:     testAuthCode,
+	}))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv.mgr = sm
+
+	type fixture struct {
+		sess       *Session
+		transcript string
+	}
+	fixtures := make([]fixture, 0, sessionCount)
+	for i := 0; i < sessionCount; i++ {
+		cwd := filepath.Join(base, "proj", strconv.Itoa(i))
+		if err := os.MkdirAll(cwd, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		shard := locator.ClaudeProjectDir(cwd)
+		if err := os.MkdirAll(shard, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sessionID := fmt.Sprintf("fixture-session-%d", i)
+		path := filepath.Join(shard, sessionID+".jsonl")
+		// EvalSymlinks because the locator resolves the cwd the same way (macOS /var → /private/var);
+		// the transcript has to name the path the driver will see.
+		realCWD, err := filepath.EvalSymlinks(cwd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(claudeTranscriptBody(sessionID, realCWD, 400)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		sess, err := sm.CreateWithOptions(CreateOptions{Name: fmt.Sprintf("agent-%d", i), Shell: "/bin/sh", CWD: cwd})
+		if err != nil {
+			t.Fatalf("CreateWithOptions: %v", err)
+		}
+		// A real desktop grid, not the default — the replay cost scales with it.
+		if err := sess.SetPTYSize(200, 50); err != nil {
+			t.Fatalf("SetPTYSize: %v", err)
+		}
+		// Start the agent as a CHILD of this session's shell: detection walks descendants and
+		// never looks at the shell itself.
+		if _, err := sess.PTY.Write([]byte(fakeClaude + "\n")); err != nil {
+			t.Fatalf("write to pty: %v", err)
+		}
+		fixtures = append(fixtures, fixture{sess: sess, transcript: path})
+	}
+
+	if info, err := os.Stat(fixtures[0].transcript); err == nil {
+		t.Logf("fixture: %d sessions, %d KiB transcript each, 200x50 grid",
+			sessionCount, info.Size()/1024)
+	}
+
+	// Wait for the process table to show every fake agent. The inspector caches `ps` for 3s, so
+	// this is a poll, not a sleep.
+	deadline := time.Now().Add(30 * time.Second)
+	var detected int
+	var rules []string
+	for time.Now().Before(deadline) {
+		detected = 0
+		rules = rules[:0]
+		for _, e := range srv.sessionsOverview(context.Background()) {
+			if e.AgentTool != "" {
+				detected++
+				rules = append(rules, e.StatusRule)
+			}
+		}
+		if detected == sessionCount {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if detected != sessionCount {
+		t.Fatalf("only %d/%d sessions have a detected agent — the fixture is measuring the cheap path, "+
+			"which is the very mistake this measurement exists to correct", detected, sessionCount)
+	}
+	// Detected is not the same as PARSED. `transcript.unlocatable` means the driver never found a
+	// file and the expensive half never ran, which would make every number below a measurement of
+	// the wrong thing — and it would look exactly like a fast machine.
+	for i, rule := range rules {
+		if !strings.HasPrefix(rule, "transcript.") || rule == string(agentintel.RuleTranscriptUnlocatable) {
+			t.Fatalf("session %d resolved via %q — its transcript was never parsed, so this fixture "+
+				"measures the cheap path", i, rule)
+		}
+	}
+
+	rebuild := func() time.Duration {
+		b := &overviewBuild{done: make(chan struct{})}
+		start := time.Now()
+		srv.buildOverview(context.Background(), b)
+		return time.Since(start)
+	}
+
+	// The cold pass — every transcript parsed end to end, every screen replayed from scratch: what
+	// a server pays in its first second with agents already running.
+	//
+	// It has to be MADE cold. The detection wait above already drove several rebuilds, so the
+	// drivers are bound and incremental by now; measuring "the first rebuild" at this point would
+	// quietly report a warm number under a cold label. Dropping the tracker and the screen cache
+	// puts the server back in the state it boots into.
+	srv.sessionAgent = newSessionAgentTracker()
+	srv.screenCacheMu.Lock()
+	srv.screenCache = nil
+	srv.screenCacheMu.Unlock()
+	t.Logf("%-24s %v", "cold first rebuild", rebuild())
+
+	// The quiet shape: nothing moved. This is the one CP2 would optimise, so it is the one its
+	// trigger reads.
+	quiet := make([]time.Duration, 0, rounds)
+	for i := 0; i < rounds; i++ {
+		quiet = append(quiet, rebuild())
+	}
+	quietP95 := summarize(t, "quiet (nothing moved)", quiet)
+
+	// The busy shape: every session emitted output AND its agent appended a turn, so no screen is
+	// reused and every driver has new bytes to parse. This is the worst honest tick.
+	busy := make([]time.Duration, 0, rounds)
+	noise := []byte(strings.Repeat("build output line that repaints the card\r\n", 48))
+	for i := 0; i < rounds; i++ {
+		for j, f := range fixtures {
+			f.sess.Buffer.Write(noise)
+			fh, err := os.OpenFile(f.transcript, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = fh.WriteString(claudeTranscriptBody(fmt.Sprintf("fixture-session-%d", j), base, 1))
+			fh.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		busy = append(busy, rebuild())
+	}
+	busyP95 := summarize(t, "busy (every session moved)", busy)
+
+	t.Logf("CP2 trigger reads the QUIET P95 (%v) against 20ms; busy P95 was %v", quietP95, busyP95)
 }
