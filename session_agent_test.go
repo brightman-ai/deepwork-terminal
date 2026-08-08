@@ -83,8 +83,8 @@ func TestSessionAgentTracker_SameCwdSessionsGetDistinctTranscripts(t *testing.T)
 func TestSessionAgentTracker_NoAgentNoStatus(t *testing.T) {
 	tr := newSessionAgentTracker()
 	got := tr.State(context.Background(), "s1", os.Getpid(), t.TempDir(), nil)
-	if got.Tool != agentintel.ToolNone || got.Status != "" {
-		t.Fatalf("a shell with no agent reported tool=%q status=%q, want empty", got.Tool, got.Status)
+	if got.AgentTool != agentintel.ToolNone || got.AgentStatus != "" {
+		t.Fatalf("a shell with no agent reported tool=%q status=%q, want empty", got.AgentTool, got.AgentStatus)
 	}
 	if got.AwaitingUser {
 		t.Fatal("a shell with no agent must not be marked needs-you")
@@ -94,8 +94,8 @@ func TestSessionAgentTracker_NoAgentNoStatus(t *testing.T) {
 // A dead/absent shell PID must be inert rather than falling through to some cwd-wide guess.
 func TestSessionAgentTracker_NoShellPIDIsInert(t *testing.T) {
 	tr := newSessionAgentTracker()
-	if got := tr.State(context.Background(), "s1", 0, "/tmp", nil); got.Tool != agentintel.ToolNone {
-		t.Fatalf("shellPID 0 → tool %q, want none", got.Tool)
+	if got := tr.State(context.Background(), "s1", 0, "/tmp", nil); got.AgentTool != agentintel.ToolNone {
+		t.Fatalf("shellPID 0 → tool %q, want none", got.AgentTool)
 	}
 }
 

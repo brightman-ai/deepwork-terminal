@@ -19,7 +19,7 @@
  * State for vanished windows is pruned each push (no leak, and a reused id starts clean).
  */
 import { computed, ref, watch, type Ref } from 'vue'
-import type { TmuxWindowState } from '@terminal/types/terminal'
+import type { SurfaceCard, SurfaceUnit, TmuxWindowState } from '@terminal/types/terminal'
 import type { TabNotLive } from './tabLiveness'
 // 「这个名字是用户起的，还是自动生成的占位」以及「终端N」这套措辞的 SSOT（标签栏也读它）。
 import { displayTabName, isDefaultTabName } from './useTabDisplayName'
@@ -113,48 +113,24 @@ export const STATUS_MOTION = {
  *  test is what makes this comment a fact rather than a hope.) */
 export const URGENCY_ORDER: readonly EffectiveStatus[] = ['waiting', 'running', 'done-unseen', 'idle']
 
-/** Raw per-window status from its panes: any waiting → waiting; any running → running; else idle. */
-export function windowRawStatus(w: TmuxWindowState): 'waiting' | 'running' | 'idle' {
-  const panes = w.panes ?? []
-  if (panes.some((p) => p.agentStatus === 'waiting')) return 'waiting'
-  if (panes.some((p) => p.agentStatus === 'running')) return 'running'
+/**
+ * 这张卡的原始状态 —— **全 app 唯一**一条 agentStatus → rawStatus 的推导。
+ *
+ * 它只读卡片自己的字段，因为「这张卡在说什么」已经在服务端算完了（agentintel.RollUp：任一单元
+ * waiting → waiting，任一 running → running）。这里曾经有三份拷贝：tmux 的 windowRawStatus 遍历
+ * panes 算一遍，useSessionsOverview 的 sessionRawStatus 算一遍，同文件里 units 的内联三元表达式
+ * 又算了第三遍。三份同一条规则，其中两份还在同一个文件里隔了 70 行。
+ */
+export function cardRawStatus(c: SurfaceCard): 'waiting' | 'running' | 'idle' {
+  if (c.agentStatus === 'waiting') return 'waiting'
+  if (c.agentStatus === 'running') return 'running'
   return 'idle'
 }
 
-/** Backend "needs-you": any pane finished a turn / is blocked and hasn't been responded to.
- *  This is the durable, reload-proof signal (transcript-derived) that replaces the old
- *  "witness the running→idle transition" heuristic — a pane already done at page load counts. */
-export function windowAwaiting(w: TmuxWindowState): boolean {
-  return (w.panes ?? []).some((p) => p.awaitingUser)
-}
-
-/** The transcript time of the awaiting pane's last completion — the reload-proof key the
- *  seen-layer dismisses against. '' when no pane is awaiting or the time is undated. */
-export function windowAwaitingSince(w: TmuxWindowState): string {
-  const p = (w.panes ?? []).find((p) => p.awaitingUser && isDatedSince(p.awaitingSince))
-  return p?.awaitingSince ?? ''
-}
-
-/** The window's active-pane cwd (what the overview card shows). */
-export function windowCwd(w: TmuxWindowState): string {
-  const panes = w.panes ?? []
-  return (panes.find((p) => p.active) ?? panes[0])?.cwd ?? ''
-}
-
-/**
- * 这个窗口里 agent 最后一次动的时刻（epoch ms；0 = 无从得知）。
- *
- * 取所有 agent pane 里最新的一个：一个窗口里只要还有 agent 在写，这个窗口就不是"陈的"。
- * 它服务于一件事——让状态可被人**证伪**。状态本身没有年龄时，「运行中」这三个字既可能是
- * 真的在跑，也可能是十小时前某条没人再写的 transcript 留下的，而这两者在屏幕上长得一模一样。
- */
-export function windowActivityAt(w: TmuxWindowState): number {
-  let newest = 0
-  for (const p of w.panes ?? []) {
-    const ms = activityMs(p.activityAt)
-    if (p.agentTool && ms > newest) newest = ms
-  }
-  return newest
+/** 这张卡正在报告的那次完成的时间戳；'' = 没在等，或这次等待没有时间可依（见 isDatedSince）。
+ *  服务端的 roll-up 只会填「有日期的」那一个，这里再挡一次是为了旧服务端发的 0001-01-01 哨兵。 */
+export function cardAwaitingSince(c: SurfaceCard): string {
+  return isDatedSince(c.awaitingSince) ? c.awaitingSince : ''
 }
 
 /**
@@ -171,13 +147,6 @@ export function activityMs(activityAt: string | undefined): number {
   if (!isDatedSince(activityAt)) return 0
   const ms = Date.parse(activityAt)
   return Number.isFinite(ms) ? ms : 0
-}
-
-/** The window's active agent tool, if any (claude/codex badge). */
-export function windowTool(w: TmuxWindowState): string {
-  const panes = w.panes ?? []
-  const active = panes.find((p) => p.active)
-  return active?.agentTool ?? panes.find((p) => p.agentTool)?.agentTool ?? ''
 }
 
 /** Display name for an agent tool. '' stays '' (no agent → no name to show). */
@@ -253,15 +222,6 @@ export function agentSaidText(sig: AgentSaidLike | undefined, tool?: string): st
   // 中英混排：拉丁名后补一个空格（"Codex 说"），中文名不补（"终端说"）。
   const gap = /[A-Za-z0-9)\]]$/.test(who) ? ' ' : ''
   return `${who}${gap}说：“${quote}”`
-}
-
-/** Per-pane attribution for split windows. A window-level red dot can legitimately come
- * from a background pane while its active pane is running; exposing the owner prevents the
- * signal from looking like a stale, undismissable status. */
-export function windowAgentSignals(w: TmuxWindowState): string[] {
-  return (w.panes ?? [])
-    .filter((p) => p.agentTool)
-    .map((p) => agentSignalText(p.agentTool, p.agentStatus, p.awaitingUser, p.endedOnQuestion))
 }
 
 /** Stable seen-state key: tmux window id (`@N`), falling back to index if a backend omits it.
@@ -343,23 +303,86 @@ export interface OverviewUnit {
   liveness?: TabNotLive
 }
 
-/** tmux windows → units. Reuses the window* accessors above so tmux's semantics (active pane
- *  wins for cwd/tool, any pane waiting → waiting) stay defined in exactly one place. */
+/**
+ * CardIdentity — 一张卡片里**只有调用方知道**的那几件事。
+ *
+ * 为什么不放进 SurfaceCard 一起从服务端发下来：`index` 和 `active` 对两条来源根本不是同一种事实。
+ * tmux window 的编号是 tmux server 的（`#{window_index}`，也是 prefix+N 的目标）；一张非 tmux 卡片
+ * 的编号是**标签页的位置**，服务端压根不知道，`active` 同理（「你正在看哪个标签」是每个客户端各自
+ * 的答案）。一个共享类型带上一边填不出的字段，只会变成一句有编译器背书的假话——所以它们从这里传，
+ * 不对称摆在接缝上，看得见。
+ */
+export interface CardIdentity {
+  /** Stable seen-state identity. tmux: window id (`@N`); cli: session id. Never a reusable index. */
+  key: string
+  index: number
+  title: string
+  active: boolean
+  cwd?: string
+  /** 卡片下面的子单元，只用来生成逐单元的归属文案（分屏 window 的每个 pane）。
+   *  **省略 = 这张卡就是它自己那个单元** —— 非 tmux 卡片的 N=1 不是特例，是平凡情形。 */
+  units?: SurfaceUnit[]
+  /** 进程已经没了（非 tmux 的 exited PTY）：不管探测器最后说了什么，一个死掉的 shell 不在跑活。 */
+  exited?: boolean
+  /** agent 自己喊的那一句，已成句（见 agentSaidText）。只有 PTY 卡片给得出。 */
+  agentSaid?: string
+  /** 第二个轴：这张卡背后还有没有活着的进程（见 tabLiveness.ts）。 */
+  liveness?: TabNotLive
+}
+
+/**
+ * 逐单元的归属文案（"Claude 运行中"）—— 一张卡片下面**每个**有 agent 的单元一句。
+ *
+ * 分屏 window 用得上：一个 window 级的红点完全可能来自后台 pane 而它的活动 pane 正在跑，
+ * 说清是谁在等，那个红点才不像一个消不掉的陈状态。一张只有一个单元的卡片自然只得到一句。
+ */
+export function unitSignals(units: SurfaceUnit[], exited?: boolean): string[] {
+  return units
+    .filter((u) => u.agentTool)
+    .map((u) => agentSignalText(u.agentTool, exited ? 'idle' : cardRawStatus(u), u.awaitingUser, u.endedOnQuestion))
+}
+
+/**
+ * cardToUnit — **唯一**一条「服务端卡片 → 总览单元」的映射，两条来源共用。
+ *
+ * 在此之前这里有两份：tmuxWindowsToUnits 调六个 window* 存取器把 panes 抹平一遍，
+ * useSessionsOverview 里另有一段 20 行的内联映射把 session 抹平一遍。两份做的是同一件事，
+ * 差别只在「tmux 那张卡有好几个单元」——而那件事现在在服务端就做完了（agentintel.RollUp）。
+ */
+export function cardToUnit(c: SurfaceCard, id: CardIdentity): OverviewUnit {
+  const units = id.units ?? [c]
+  const rawStatus = id.exited ? 'idle' : cardRawStatus(c)
+  return {
+    key: id.key,
+    index: id.index,
+    title: id.title,
+    active: id.active,
+    cwd: id.cwd ?? '',
+    tool: c.agentTool ?? '',
+    rawStatus,
+    awaiting: !!c.awaitingUser,
+    awaitingSince: cardAwaitingSince(c),
+    signals: unitSignals(units, id.exited),
+    agentSaid: id.agentSaid,
+    activityAt: activityMs(c.activityAt),
+    tail: c.tail ?? [],
+    liveness: id.liveness,
+  }
+}
+
+/** tmux windows → units. The window IS the card (its facts are the server-side roll-up of its
+ *  panes); the panes come along only as the sub-units the attribution lines are written from. */
 export function tmuxWindowsToUnits(windows: TmuxWindowState[]): OverviewUnit[] {
-  return windows.map((w) => ({
-    key: windowKey(w),
-    index: w.index,
-    title: w.name,
-    active: !!w.active,
-    cwd: windowCwd(w),
-    tool: windowTool(w),
-    rawStatus: windowRawStatus(w),
-    awaiting: windowAwaiting(w),
-    awaitingSince: windowAwaitingSince(w),
-    signals: windowAgentSignals(w),
-    activityAt: windowActivityAt(w),
-    tail: w.tail ?? [],
-  }))
+  return windows.map((w) =>
+    cardToUnit(w, {
+      key: windowKey(w),
+      index: w.index,
+      title: w.name,
+      active: !!w.active,
+      cwd: w.cwd,
+      units: w.panes ?? [],
+    }),
+  )
 }
 
 /** 路径的最后一段（'' / '/' → ''）。尾部斜杠先剃掉，否则 `/a/b/` 会得到空串。 */

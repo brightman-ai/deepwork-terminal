@@ -60,21 +60,28 @@ func fixedOverviewEntries() []SessionOverviewEntry {
 		Title:  "worker",
 		CWD:    "/repo",
 		Engine: "shell",
-		SurfaceUnit: agentintel.SurfaceUnit{
-			AgentTool:       agentintel.ToolClaude,
-			AgentStatus:     agentintel.StatusWaiting,
-			AwaitingUser:    true,
-			AwaitingSince:   time.Date(2026, 8, 8, 9, 0, 0, 123456789, time.UTC),
-			EndedOnQuestion: true,
-			StatusRule:      "screen.approval",
-			StatusEvidence:  "Do you want to proceed?",
-			ActivityAt:      time.Date(2026, 8, 8, 8, 59, 0, 0, time.UTC),
-		},
 		Exited: false,
-		Tail:   []string{"line one", "line two"},
+		SurfaceCard: agentintel.SurfaceCard{
+			SurfaceUnit: agentintel.SurfaceUnit{
+				AgentTool:       agentintel.ToolClaude,
+				AgentStatus:     agentintel.StatusWaiting,
+				AwaitingUser:    true,
+				AwaitingSince:   time.Date(2026, 8, 8, 9, 0, 0, 123456789, time.UTC),
+				EndedOnQuestion: true,
+				StatusRule:      "screen.approval",
+				StatusEvidence:  "Do you want to proceed?",
+				ActivityAt:      time.Date(2026, 8, 8, 8, 59, 0, 0, time.UTC),
+			},
+			Tail: []string{"line one", "line two"},
+		},
 	}
 	bare := SessionOverviewEntry{ID: "sess-2", Title: "quiet"}
-	return []SessionOverviewEntry{full, bare}
+	// A third, for the one key whose POSITION the two above cannot show: `exited` is omitempty and
+	// false in both, so a reordering of it would slip past a golden made only of them. It moved when
+	// the card became an embedded type (own fields first, shared last), and a key that moves without
+	// a test noticing is the whole failure mode these bytes exist to prevent.
+	dead := SessionOverviewEntry{ID: "sess-3", Title: "gone", Exited: true}
+	return []SessionOverviewEntry{full, bare, dead}
 }
 
 // fixedTmuxState is the tmux payload's frozen input, same two halves for the same reason.
@@ -98,6 +105,20 @@ func fixedTmuxState() agentintel.TmuxState {
 		},
 	}
 	bare := agentintel.TmuxPaneState{Index: 1, PID: 4243, CWD: "/repo"}
+	// The window's card facts come from RollUpPanes, not from a literal written next to the panes:
+	// a golden whose card was hand-typed would keep passing while the roll-up that produces it in
+	// production said something else — pinning the bytes of a fiction.
+	win := agentintel.TmuxWindowState{
+		Index:    0,
+		Name:     "editor",
+		WindowID: "@1",
+		Active:   true,
+		Panes:    []agentintel.TmuxPaneState{full, bare},
+		SurfaceCard: agentintel.SurfaceCard{
+			Tail: []string{"line one", "line two"},
+		},
+	}
+	win.RollUpPanes()
 	return agentintel.TmuxState{
 		Installed:       true,
 		ServerRunning:   true,
@@ -108,14 +129,7 @@ func fixedTmuxState() agentintel.TmuxState {
 		Sessions: []agentintel.TmuxSessionState{{
 			Name:     "main",
 			Attached: true,
-			Windows: []agentintel.TmuxWindowState{{
-				Index:    0,
-				Name:     "editor",
-				WindowID: "@1",
-				Active:   true,
-				Panes:    []agentintel.TmuxPaneState{full, bare},
-				Tail:     []string{"line one", "line two"},
-			}},
+			Windows:  []agentintel.TmuxWindowState{win},
 		}},
 	}
 }
@@ -160,28 +174,47 @@ func jsonName(f reflect.StructField) string {
 	return tag
 }
 
-// splitSurface separates a payload's OWN wire fields from those promoted out of the embedded
-// SurfaceUnit. A payload that does not embed it at all fails here rather than silently reporting
+// splitSurface separates a payload's OWN wire fields from those promoted out of the named embedded
+// shared type. A payload that does not embed it at all fails here rather than silently reporting
 // every field as its own — that shape is precisely the pre-shared-type world.
-func splitSurface(t *testing.T, typ reflect.Type) (own, unit []string) {
+//
+// `embed` is a parameter because there are now TWO layers to hold still: units embed SurfaceUnit,
+// cards embed SurfaceCard. They are checked the same way on purpose — the mismatch that produced
+// this round was a shared UNIT sitting under two unshared CARDS, so a rule that only ever looked at
+// one depth would have been blind to it.
+func splitSurface(t *testing.T, typ reflect.Type, embed string) (own, shared []string) {
 	t.Helper()
 	embedded := false
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
-		if f.Anonymous && f.Type.Name() == "SurfaceUnit" {
+		if f.Anonymous && f.Type.Name() == embed {
 			embedded = true
-			for j := 0; j < f.Type.NumField(); j++ {
-				unit = append(unit, jsonName(f.Type.Field(j)))
-			}
+			shared = append(shared, flattenJSONNames(f.Type)...)
 			continue
 		}
 		own = append(own, jsonName(f))
 	}
 	if !embedded {
-		t.Fatalf("%s no longer embeds agentintel.SurfaceUnit — the two surface payloads are back to "+
-			"two hand-written field lists that only a comment asks to stay in step", typ)
+		t.Fatalf("%s no longer embeds agentintel.%s — the surface payloads are back to "+
+			"hand-written field lists that only a comment asks to stay in step", typ, embed)
 	}
-	return own, unit
+	return own, shared
+}
+
+// flattenJSONNames is the wire names a struct contributes, following embedded structs the way
+// encoding/json promotes them — SurfaceCard's own contribution is SurfaceUnit's fields plus `tail`,
+// and the assertions below compare that flattened list, not the two-level Go shape.
+func flattenJSONNames(typ reflect.Type) []string {
+	var out []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			out = append(out, flattenJSONNames(f.Type)...)
+			continue
+		}
+		out = append(out, jsonName(f))
+	}
+	return out
 }
 
 // The fields each payload legitimately owns, because they describe that source's STRUCTURE rather
@@ -192,21 +225,37 @@ func splitSurface(t *testing.T, typ reflect.Type) (own, unit []string) {
 // SurfaceUnit, where it always belonged: "how old is the evidence behind this status" is a fact
 // about a surface, not about tmux, and a non-tmux card could tell exactly the same ten-hour lie
 // with nothing on it to catch the difference. Its absence from this list is the assertion.
+//
+// `tail` used to be on the CARD lists for the same "it's just this source's structure" reason, on
+// both of them, separately. It is not any more: a card's last lines are a card fact on either feed,
+// they were already required to share a length (OverviewTailLines), and two declarations sharing a
+// constant is precisely the arrangement that let one of them sit at 8 while its comment claimed it
+// matched the other's 40.
 var (
-	overviewOwnFields = []string{"id", "title", "cwd", "engine", "exited", "tail"}
-	tmuxPaneOwnFields = []string{"index", "active", "title", "pid", "cwd", "paneId"}
+	overviewOwnFields   = []string{"id", "title", "cwd", "engine", "exited"}
+	tmuxWindowOwnFields = []string{"index", "name", "windowId", "active", "cwd", "panes"}
+	tmuxPaneOwnFields   = []string{"index", "active", "title", "pid", "cwd", "paneId"}
 )
 
 func TestSurfaceUnit_NeitherPayloadCanGrowHalfAFact(t *testing.T) {
-	overviewOwn, overviewUnit := splitSurface(t, reflect.TypeOf(SessionOverviewEntry{}))
-	paneOwn, paneUnit := splitSurface(t, reflect.TypeOf(agentintel.TmuxPaneState{}))
+	entryOwn, entryCard := splitSurface(t, reflect.TypeOf(SessionOverviewEntry{}), "SurfaceCard")
+	winOwn, winCard := splitSurface(t, reflect.TypeOf(agentintel.TmuxWindowState{}), "SurfaceCard")
+	paneOwn, paneUnit := splitSurface(t, reflect.TypeOf(agentintel.TmuxPaneState{}), "SurfaceUnit")
 
 	// One declaration, so one field list — in the same order, since order is wire-visible.
-	if !reflect.DeepEqual(overviewUnit, paneUnit) {
-		t.Fatalf("the two payloads no longer share one unit field list:\n card: %v\n pane: %v", overviewUnit, paneUnit)
+	if !reflect.DeepEqual(entryCard, winCard) {
+		t.Fatalf("the two CARD payloads no longer share one field list:\n session: %v\n  window: %v", entryCard, winCard)
 	}
-	if len(overviewUnit) == 0 {
+	if len(paneUnit) == 0 {
 		t.Fatal("the shared unit contributes no fields at all — the embed is decorative")
+	}
+	// A card says everything a unit says, plus its tail. Stated as an equation rather than a second
+	// literal list: the point is that the card layer cannot quietly stop carrying a unit fact (or
+	// start carrying one the unit lacks), which no amount of frozen lists would catch on its own.
+	if want := append(append([]string{}, paneUnit...), "tail"); !reflect.DeepEqual(entryCard, want) {
+		t.Errorf("a card no longer carries exactly the unit's facts plus its tail.\n  have: %v\n  want: %v\n"+
+			"A card IS a surface (SurfaceCard embeds SurfaceUnit); if this drifted, one of the two "+
+			"layers grew a fact the other cannot express.", entryCard, want)
 	}
 
 	for _, tc := range []struct {
@@ -215,7 +264,8 @@ func TestSurfaceUnit_NeitherPayloadCanGrowHalfAFact(t *testing.T) {
 		want  []string
 		other string
 	}{
-		{"SessionOverviewEntry", overviewOwn, overviewOwnFields, "TmuxPaneState"},
+		{"SessionOverviewEntry", entryOwn, overviewOwnFields, "TmuxWindowState"},
+		{"TmuxWindowState", winOwn, tmuxWindowOwnFields, "SessionOverviewEntry"},
 		{"TmuxPaneState", paneOwn, tmuxPaneOwnFields, "SessionOverviewEntry"},
 	} {
 		if reflect.DeepEqual(tc.got, tc.want) {
@@ -223,9 +273,11 @@ func TestSurfaceUnit_NeitherPayloadCanGrowHalfAFact(t *testing.T) {
 		}
 		t.Errorf("%s's own wire fields changed.\n  have: %v\n  want: %v\n"+
 			"If the new field is a SURFACE FACT (something %s should report too), it belongs in "+
-			"agentintel.SurfaceUnit so both feeds get it. If it genuinely describes only this "+
-			"source's structure, add it to the frozen list above and say why — but do not let one "+
-			"feed learn a fact the other cannot.", tc.name, tc.got, tc.want, tc.other)
+			"agentintel.SurfaceUnit — or in SurfaceCard if it belongs to the card rather than to one "+
+			"of its units — so both feeds get it. If it genuinely describes only this source's "+
+			"structure, add it to the frozen list above and say why. Identity is the one thing that "+
+			"legitimately lives here: see SurfaceCard on why index/active cannot be shared.",
+			tc.name, tc.got, tc.want, tc.other)
 	}
 }
 
@@ -233,7 +285,7 @@ func TestSurfaceUnit_NeitherPayloadCanGrowHalfAFact(t *testing.T) {
 // the assertions above are about declarations, and a field that is declared but never marshalled
 // (an untagged field, a `json:"-"`) would satisfy them while reaching nobody.
 func TestSurfaceUnit_EveryUnitFieldReachesBothWires(t *testing.T) {
-	_, unit := splitSurface(t, reflect.TypeOf(SessionOverviewEntry{}))
+	_, unit := splitSurface(t, reflect.TypeOf(agentintel.TmuxPaneState{}), "SurfaceUnit")
 
 	card, err := json.Marshal(fixedOverviewEntries())
 	if err != nil {

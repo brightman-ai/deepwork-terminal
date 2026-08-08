@@ -28,10 +28,9 @@ import { computed, getCurrentInstance, onUnmounted, ref, watch, type Ref } from 
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import {
   URGENCY_ORDER,
+  cardAwaitingSince,
   isDatedSince,
-  windowAwaitingSince,
   windowKey,
-  windowTool,
   type EffectiveStatus,
 } from '@terminal/composables/cli/useAgentOverview'
 import {
@@ -344,13 +343,13 @@ export function useAttentionHud(deps: AttentionHudDeps): AttentionHud {
       key,
       index: w.index,
       name: w.name,
-      tool: windowTool(w),
+      tool: w.agentTool ?? '',
       status,
       // `awaitingSince` is the alert's identity — '' when the backend could not date the wait
       // (PTY-derived prompts; ALL Codex waits). An undated wait still gets an alert: the edge is
       // proof something changed. It simply has no identity to dedupe on, so the two identity gates
       // stand down for it and the cooldown takes over — see createAttentionGate's block comment.
-      ackKey: windowAwaitingSince(w),
+      ackKey: cardAwaitingSince(w),
     }
   }
 

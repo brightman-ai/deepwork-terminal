@@ -2,12 +2,11 @@ import { describe, it, expect, beforeEach, afterAll } from 'bun:test'
 import { ref, nextTick } from 'vue'
 import {
   useAgentOverview,
-  windowRawStatus,
-  windowCwd,
-  windowTool,
-  windowAgentSignals,
-  windowAwaitingSince,
-  windowActivityAt,
+  activityMs,
+  cardAwaitingSince,
+  cardRawStatus,
+  tmuxWindowsToUnits,
+  unitSignals,
   overviewCardTitle,
   overviewColumns,
   STATUS_COLOR,
@@ -66,75 +65,81 @@ type WinOpts = {
   awaiting?: boolean // backend "needs-you": finished a turn, not yet responded to
   since?: string     // AwaitingSince (transcript completion time); defaults to T1 when awaiting
 }
+/**
+ * A pushed tmux window — i.e. a CARD. Its agent facts sit on the window itself because that is
+ * where the server puts them (agentintel.RollUp over the panes); the pane below carries the same
+ * facts because a one-pane window's roll-up IS its pane, and the per-pane attribution lines are
+ * written from the panes.
+ *
+ * This fixture used to set the facts on the pane ALONE and let the frontend derive the window's —
+ * which is exactly the arrangement that has been removed: six accessors flattening a tree in the
+ * language furthest from the data, duplicating a rule the other feed got for free from N=1.
+ */
 function win(index: number, opts: WinOpts = {}): TmuxWindowState {
   const { status = 'idle', cwd = '', tool = '', active = false, windowId = `@${index}`, awaiting = false } = opts
   const since = opts.since !== undefined ? opts.since : awaiting ? T1 : undefined
+  const facts = {
+    agentTool: (tool || undefined) as never,
+    agentStatus: (status === 'idle' ? undefined : status) as never,
+    awaitingUser: awaiting,
+    awaitingSince: since,
+  }
   return {
     index,
     name: `w${index}`,
     windowId,
     active,
-    panes: [
-      {
-        index: 0,
-        active: true,
-        cwd,
-        agentTool: (tool || undefined) as never,
-        agentStatus: (status === 'idle' ? undefined : status) as never,
-        awaitingUser: awaiting,
-        awaitingSince: since,
-      } as never,
-    ],
+    cwd,
+    ...facts,
+    panes: [{ index: 0, active: true, cwd, ...facts } as never],
   }
 }
 
-describe('windowRawStatus / cwd / tool / awaitingSince', () => {
-  it('waiting > running > idle, and reads active-pane cwd/tool', () => {
-    expect(windowRawStatus(win(1, { status: 'waiting' }))).toBe('waiting')
-    expect(windowRawStatus(win(1, { status: 'running' }))).toBe('running')
-    expect(windowRawStatus(win(1, { status: 'idle' }))).toBe('idle')
-    expect(windowCwd(win(1, { cwd: '/tmp/x' }))).toBe('/tmp/x')
-    expect(windowTool(win(1, { tool: 'claude' }))).toBe('claude')
+describe('card facts (server-rolled-up) → overview unit', () => {
+  it('waiting > running > idle, and the card carries its own cwd/tool', () => {
+    expect(cardRawStatus(win(1, { status: 'waiting' }))).toBe('waiting')
+    expect(cardRawStatus(win(1, { status: 'running' }))).toBe('running')
+    expect(cardRawStatus(win(1, { status: 'idle' }))).toBe('idle')
+    const [u] = tmuxWindowsToUnits([win(1, { cwd: '/tmp/x', tool: 'claude' })])
+    expect(u.cwd).toBe('/tmp/x')
+    expect(u.tool).toBe('claude')
   })
-  it('windowAwaitingSince returns the dated completion, or "" when not awaiting / undated', () => {
-    expect(windowAwaitingSince(win(1, { awaiting: true, since: T1 }))).toBe(T1)
-    expect(windowAwaitingSince(win(1, { status: 'idle' }))).toBe('') // not awaiting
-    expect(windowAwaitingSince(win(1, { awaiting: true, since: TZERO }))).toBe('') // undated
+  it('cardAwaitingSince returns the dated completion, or "" when not awaiting / undated', () => {
+    expect(cardAwaitingSince(win(1, { awaiting: true, since: T1 }))).toBe(T1)
+    expect(cardAwaitingSince(win(1, { status: 'idle' }))).toBe('') // not awaiting
+    expect(cardAwaitingSince(win(1, { awaiting: true, since: TZERO }))).toBe('') // undated
   })
   // 证据的年龄。加它是因为一个 pane 曾经"运行中"了十个小时——状态本身没有年龄时，真的在跑
   // 和十小时前那条没人再写的 transcript，在屏幕上长得一模一样。
-  it('windowActivityAt takes the newest agent pane, and is 0 when nothing can be dated', () => {
-    const older = '2026-08-03T01:00:00.000Z'
+  //
+  // 「取最新的那个单元」这条规则现在在服务端（agentintel.RollUp），由 surface_rollup_vectors.json
+  // 那组跨语言向量钉住；这里钉的是它在前端剩下的那一半——**换算**，以及拿不到时不许编。
+  it('activityMs reads the card"s own timestamp, and refuses to invent one', () => {
     const newer = '2026-08-03T02:00:00.000Z'
     const w = win(9, { tool: 'claude', status: 'running' })
-    w.panes[0].activityAt = older
-    w.panes.push({ index: 1, active: false, agentTool: 'codex', agentStatus: 'running', activityAt: newer } as never)
-    expect(windowActivityAt(w)).toBe(Date.parse(newer))
+    w.activityAt = newer
+    // 服务端已经取过 max 了：前端读卡片，不再自己遍历 panes（那个 pane 是旧的也不影响）。
+    w.panes[0].activityAt = '2026-08-03T01:00:00.000Z'
+    expect(tmuxWindowsToUnits([w])[0].activityAt).toBe(Date.parse(newer))
 
-    // 没有 agent 的 pane 不算数：它的 transcript 时间根本不存在，别拿它冒充活跃度。
-    const bare = win(10, {})
-    bare.panes[0].activityAt = newer
-    expect(windowActivityAt(bare)).toBe(0)
-
-    expect(windowActivityAt(win(11, { tool: 'claude' }))).toBe(0) // 有 agent 但没时间戳
-
-    // Go 的零时间不会被 omitempty 吃掉，会原样序列化成 0001-01-01 —— 定位不到 transcript 的
-    // pane 就是这样过来的。不挡住，提示框里会出现"17755921 小时前"这种东西。
-    const undated = win(12, { tool: 'codex', status: 'running' })
-    undated.panes[0].activityAt = '0001-01-01T00:00:00Z'
-    expect(windowActivityAt(undated)).toBe(0)
+    expect(activityMs(undefined)).toBe(0) // 有 agent 但没时间戳 → 不显示年龄，而不是编一个「刚刚」
+    // Go 的零时间不会被 omitempty 吃掉，会原样序列化成 0001-01-01 —— 一个还没升级的服务端就是
+    // 这样发的。不挡住，提示框里会出现"17755921 小时前"这种东西。
+    expect(activityMs(TZERO)).toBe(0)
+    expect(tmuxWindowsToUnits([win(11, { tool: 'claude' })])[0].activityAt).toBe(0)
   })
   it('attributes a split window to its active runtime and explains every pane signal', () => {
-    const w = win(5, { tool: 'claude', status: 'waiting' })
-    w.panes[0].active = false
-    w.panes.push({
-      index: 1,
-      active: true,
-      agentTool: 'codex',
-      agentStatus: 'running',
-    } as never)
-    expect(windowTool(w)).toBe('codex')
-    expect(windowAgentSignals(w)).toEqual(['Claude 等待输入', 'Codex 运行中'])
+    // The card says what the server rolled up: focus decides the BADGE (codex, the active pane),
+    // severity decides the DOT (waiting, from the background claude). Both at once is the whole
+    // reason the attribution lines exist.
+    const w = win(5, { tool: 'codex', status: 'waiting' })
+    w.panes[0] = { index: 0, active: false, agentTool: 'claude', agentStatus: 'waiting' } as never
+    w.panes.push({ index: 1, active: true, agentTool: 'codex', agentStatus: 'running' } as never)
+    const [u] = tmuxWindowsToUnits([w])
+    expect(u.tool).toBe('codex')
+    expect(u.rawStatus).toBe('waiting')
+    expect(u.signals).toEqual(['Claude 等待输入', 'Codex 运行中'])
+    expect(unitSignals([])).toEqual([]) // 一个没有单元的卡片说不出任何归属
   })
 })
 

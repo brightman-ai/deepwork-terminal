@@ -64,19 +64,22 @@ function win(index: number, opts: WinOpts = {}): TmuxWindowState {
   // across waiting → done-unseen. Getting this wrong here would fake-pass gate 1.
   const needsYou = awaiting || status === 'waiting'
   const since = opts.since !== undefined ? opts.since : needsYou ? T1 : undefined
+  const facts = {
+    agentTool: tool as TmuxWindowState['panes'][number]['agentTool'],
+    agentStatus: status as TmuxWindowState['panes'][number]['agentStatus'],
+    awaitingUser: needsYou,
+    awaitingSince: since,
+  }
   return {
     index,
     name: `w${index}`,
     windowId: `@${index}`,
     active,
-    panes: Array.from({ length: panes }, (_, i) => ({
-      index: i,
-      active: i === 0,
-      agentTool: tool as TmuxWindowState['panes'][number]['agentTool'],
-      agentStatus: status as TmuxWindowState['panes'][number]['agentStatus'],
-      awaitingUser: needsYou,
-      awaitingSince: since,
-    })),
+    // The CARD's facts, where the server now puts them (agentintel.RollUp). Every pane here is
+    // identical, so the roll-up of N of them is the same value — which is what makes "a multi-pane
+    // window still contributes ONE card item" the thing this fixture is actually testing.
+    ...facts,
+    panes: Array.from({ length: panes }, (_, i) => ({ index: i, active: i === 0, ...facts })),
   }
 }
 

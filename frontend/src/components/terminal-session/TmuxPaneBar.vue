@@ -37,7 +37,7 @@
       :key="w.index"
       class="tpb-win"
       :class="{ 'is-active': w.active }"
-      :aria-label="`窗口 ${w.index}：${windowAgentSignals(w).join(' · ') || winStatusLabel(w)}`"
+      :aria-label="`窗口 ${w.index}：${unitSignals(w.panes ?? []).join(' · ') || winStatusLabel(w)}`"
       :data-testid="`tmux-win-${w.index}`"
       @click="onWinClick(w, $event)"
       @mouseenter="onWinHover(w, $event)"
@@ -116,7 +116,7 @@
 import { computed, ref } from 'vue'
 import type { TmuxWindowState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-import { windowActivityAt, windowAgentSignals, windowCwd, windowRawStatus, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { activityMs, cardRawStatus, unitSignals, STATUS_COLOR, STATUS_MOTION, type EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 import { relativeFromMs } from '@terminal/utils/time'
 
 const props = defineProps<{
@@ -159,7 +159,7 @@ const windows = tmux.windows
 
 // Passive attention roll-up on the overview capsule uses this; the bell no longer depends on it.
 const anyWaiting = computed(() =>
-  windows.value.some(w => windowRawStatus(w) === 'waiting'),
+  windows.value.some(w => cardRawStatus(w) === 'waiting'),
 )
 
 function onBellClick(): void {
@@ -169,7 +169,7 @@ function onBellClick(): void {
 /** Seen-aware dot: waiting→red, running→green, done-unseen→amber, idle→none. Uses the shared
  *  effectiveStatus (SSOT) when provided, else falls back to raw pane status. */
 function dotClass(w: TmuxWindowState): string {
-  const s = props.statusByIndex?.[w.index] ?? windowRawStatus(w)
+  const s = props.statusByIndex?.[w.index] ?? cardRawStatus(w)
   if (s === 'waiting') return 'tpb-dot--waiting'
   if (s === 'running') return 'tpb-dot--running'
   if (s === 'done-unseen') return 'tpb-dot--done'
@@ -186,10 +186,10 @@ function newWindow(): void {
 // under the button. Data is already pushed (tmux_state): the window's cwd is its ACTIVE
 // pane's pane_current_path. SWITCHING stays the primary action — the tip never blocks it:
 // desktop hovers it; a touch tap switches AND flashes it for ~2s (auto-dismiss).
-// Tip content reuses the overview's SSOT helpers (windowCwd/windowRawStatus) — no second
-// cwd/status derivation lives here.
+// Tip content reads the CARD the server already rolled up (cwd/agentStatus/activityAt) — no
+// second derivation lives here, and after this round there is no first one either.
 function winStatusLabel(w: TmuxWindowState): string {
-  const raw = windowRawStatus(w)
+  const raw = cardRawStatus(w)
   return raw === 'waiting' ? '等待输入' : raw === 'running' ? '运行中' : '空闲'
 }
 
@@ -203,15 +203,15 @@ let touched = false // set on touchstart so we can tell a tap (auto-dismiss) fro
 let tipTimer: ReturnType<typeof setTimeout> | null = null
 
 const tipWindow = computed(() => windows.value.find(w => w.index === tipWin.value) ?? null)
-const tipCwd = computed(() => (tipWindow.value ? windowCwd(tipWindow.value) : ''))
+const tipCwd = computed(() => (tipWindow.value?.cwd ?? ''))
 const tipStatus = computed(() => {
   if (!tipWindow.value) return ''
-  return windowAgentSignals(tipWindow.value).join(' · ') || winStatusLabel(tipWindow.value)
+  return unitSignals(tipWindow.value.panes ?? []).join(' · ') || winStatusLabel(tipWindow.value)
 })
 
 // 证据的年龄。用已有的 relativeFromMs（不另造一套「刚刚/N分钟前」），tipNow 让这个值在提示框
 // 开着的时候继续走——相对时间是会腐坏的量：算一次就钉住，等于对着人说「刚刚」直到天荒地老。
-const tipActivityMs = computed(() => (tipWindow.value ? windowActivityAt(tipWindow.value) : 0))
+const tipActivityMs = computed(() => activityMs(tipWindow.value?.activityAt))
 const tipActivity = computed(() => {
   void tipNow.value
   return tipActivityMs.value ? relativeFromMs(tipActivityMs.value) : ''
@@ -224,11 +224,11 @@ const tipActivityExact = computed(() =>
 const tipStale = computed(() => {
   void tipNow.value
   if (!tipActivityMs.value || !tipWindow.value) return false
-  return windowRawStatus(tipWindow.value) === 'running' && Date.now() - tipActivityMs.value > 5 * 60_000
+  return cardRawStatus(tipWindow.value) === 'running' && Date.now() - tipActivityMs.value > 5 * 60_000
 })
 
 function showTip(w: TmuxWindowState, el: HTMLElement): void {
-  if (!windowCwd(w)) return // no cwd yet → don't pop an empty tip
+  if (!w.cwd) return // no cwd yet → don't pop an empty tip
   const r = el.getBoundingClientRect()
   const width = 240
   tipPos.value = { left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)), top: r.bottom + 6 }

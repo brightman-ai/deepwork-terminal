@@ -38,18 +38,55 @@ type TmuxPaneState struct {
 	SurfaceUnit
 }
 
-// TmuxWindowState is one window with its panes.
+// TmuxWindowState is one window with its panes — and, on the Agent Overview, one CARD.
+//
+// The identity fields below are tmux's own and stay here (see SurfaceCard on why identity is not
+// shared). What the card SAYS is not tmux-specific and is no longer computed by whoever renders
+// it: the embedded SurfaceCard carries the roll-up of Panes, produced by the one rule in
+// agentintel.RollUp, so a tmux card and a non-tmux card answer "what is the agent doing here"
+// through the same fields and the same logic.
 type TmuxWindowState struct {
 	Index int    `json:"index"`
 	Name  string `json:"name"`
 	// WindowID is tmux's stable "@N" id — survives index reuse/reorder, unlike Index. The Agent
 	// Overview keys its per-window seen-state on it so a reused index can't inherit stale state.
-	WindowID string          `json:"windowId,omitempty"`
-	Active   bool            `json:"active"`
-	Panes    []TmuxPaneState `json:"panes"`
-	// Tail is the last few lines of this window's active pane, for the Agent Overview's
-	// per-window live preview. Optional: absent when capture failed or is disabled.
-	Tail []string `json:"tail,omitempty"`
+	WindowID string `json:"windowId,omitempty"`
+	Active   bool   `json:"active"`
+	// CWD is the card's working directory: the active pane's, falling back to the first pane's.
+	// It used to be derived client-side (`windowCwd`) from the same two-line rule the card title
+	// and the workbench both depend on — a rule that has no reason to live in a renderer.
+	CWD   string          `json:"cwd,omitempty"`
+	Panes []TmuxPaneState `json:"panes"`
+	// Embedded: the card's own agent facts (RollUp of Panes) and its tail. Tail lived here as a
+	// bare field before; it is the same key in the same place, now declared once for both feeds.
+	SurfaceCard
+}
+
+// RollUpPanes recomputes the window's CARD facts from the panes it currently holds.
+//
+// Called once per built window, after its panes are final and sorted — a card whose roll-up was
+// taken before its last pane arrived would describe a window that never existed. It is the only
+// writer of the embedded SurfaceUnit, so "the card disagrees with its panes" has one place to be.
+func (w *TmuxWindowState) RollUpPanes() {
+	units := make([]SurfaceUnit, len(w.Panes))
+	active := -1
+	for i, p := range w.Panes {
+		units[i] = p.SurfaceUnit
+		// #{pane_active} — the ONE focused pane in a split, not "its window is current". The
+		// difference matters here for the same reason it matters in the payload: with the wrong
+		// flag every pane looks focused and the tiebreaker silently picks whichever sorts first.
+		if p.Active && active < 0 {
+			active = i
+		}
+	}
+	w.SurfaceUnit = RollUp(units, active)
+	w.CWD = ""
+	if len(w.Panes) > 0 {
+		w.CWD = w.Panes[0].CWD
+		if active >= 0 {
+			w.CWD = w.Panes[active].CWD
+		}
+	}
 }
 
 // OverviewTailLines caps how many trailing lines each Agent-Overview card's tail carries.
@@ -772,6 +809,9 @@ func (s *TmuxStateService) buildSessions(ctx context.Context, panes []TmuxPane, 
 			ps := winPanes[wk]
 			sort.Slice(ps, func(i, j int) bool { return ps[i].Index < ps[j].Index })
 			w.Panes = ps
+			// The card, from the panes that are actually in it. After the sort, so the roll-up's
+			// "first unit that …" tiebreakers read in the same order the wire and the UI do.
+			w.RollUpPanes()
 			windows = append(windows, w)
 		}
 		sort.Slice(windows, func(i, j int) bool { return windows[i].Index < windows[j].Index })

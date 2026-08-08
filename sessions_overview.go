@@ -58,17 +58,19 @@ type SessionOverviewEntry struct {
 	Title  string `json:"title"`
 	CWD    string `json:"cwd,omitempty"`
 	Engine string `json:"engine,omitempty"`
-	// Embedded, not listed. AgentTool / AgentStatus still come from the same detector the session
-	// list uses — literally the same snapshot (handleListSessions reads this struct), so a card and
-	// its tab dot cannot disagree even for one tick; what changed is that the FIELDS are now shared
-	// with the pane payload rather than re-typed alongside it. See agentintel/surface_unit.go.
-	agentintel.SurfaceUnit
 	// Exited marks a dead PTY. Kept explicit rather than inferred from an empty tail: a live shell
 	// that has simply printed nothing is NOT the same as one whose process is gone.
 	Exited bool `json:"exited,omitempty"`
-	// Tail is the last few lines of REAL output (agent chrome stripped). Empty when the session has
-	// produced nothing yet — the card then says so rather than rendering blank padding.
-	Tail []string `json:"tail,omitempty"`
+	// Embedded, not listed: the CARD — its agent facts and its tail, the same declaration the tmux
+	// window carries (agentintel/surface_card.go). AgentTool / AgentStatus still come from the same
+	// detector the session list uses — literally the same snapshot (handleListSessions reads this
+	// struct), so a card and its tab dot cannot disagree even for one tick.
+	//
+	// This card has exactly ONE unit and that unit is the session itself, so its facts and the
+	// unit's are the same values — which is not a shortcut taken here but the general rule applied
+	// to N=1 (RollUp is used below rather than assigning around it, and TestRollUp_OneUnitIsIdentity
+	// is what makes that safe to rely on).
+	agentintel.SurfaceCard
 }
 
 // sessionsOverview builds the current card set for every live session.
@@ -124,36 +126,23 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// One screen, two readers: the tracker inspects the RAW screen because a permission
 		// prompt lives in the agent's bottom chrome, and the card shows the STRIPPED screen
 		// because that same chrome is noise once you already have a status dot for it.
-		agent := s.sessionAgent.State(ctx, sess.ID, sess.ShellPID(), entry.CWD, screen)
-		if agent.Tool != "" {
-			entry.AgentTool = agent.Tool
-			entry.AgentStatus = agent.Status
-			entry.AwaitingUser = agent.AwaitingUser
-			entry.AwaitingSince = agent.AwaitingSince
-			entry.EndedOnQuestion = agent.EndedOnQuestion
-			// How old the evidence behind that status is. The tmux pane has always shipped this;
-			// a card could tell the same "running for ten hours" lie with nothing to catch it.
-			entry.ActivityAt = agent.ActivityAt
-			// Same split as the tmux pane payload, and deliberately kept identical to it: the
-			// RULE rides on every decision (a green session that should be amber is the silent
-			// failure, and it used to leave no trace at all), the EVIDENCE only on the ones
-			// asking for the user (it is a live screen line — it churns every tick and would
-			// defeat this frame's diff suppression). See tmux_state.go for the full reasoning;
-			// these two paths must not drift, or "why is it green" gets two different answers
-			// depending on whether you run tmux.
-			entry.StatusRule = string(agent.Decision.Rule)
-			if agent.Decision.IsAttention() {
-				entry.StatusEvidence = agent.Decision.Evidence
-			}
-		} else if s.hooks.AgentDetect != nil && sess.ShellPID() > 0 {
+		//
+		// The session's ONE unit arrives whole — status, needs-you, the reload-proof completion
+		// time, the rule behind the verdict, the age of the evidence — from the decision shared
+		// with the tmux pane. This used to be seven assignments copying it across field by field,
+		// including a second, hand-rolled version of the rule/evidence split that DecideSurface
+		// already applies; every one of them was a place a new surface fact could be forgotten on
+		// this side alone.
+		unit := s.sessionAgent.State(ctx, sess.ID, sess.ShellPID(), entry.CWD, screen).SurfaceUnit
+		if unit.AgentTool == agentintel.ToolNone && s.hooks.AgentDetect != nil && sess.ShellPID() > 0 {
 			// Deprecated host override — only reachable when the built-in detector found
 			// nothing, so an embedder with an exotic runtime can still contribute a status.
 			// Converted at THIS boundary, once. The hook predates the domain types and hands back
 			// bare strings; that is a reason to narrow them here, not a reason for the rest of the
 			// system to describe an agent with a type that cannot tell a tool from a status.
 			if tool, status := s.hooks.AgentDetect(ctx, sess.ShellPID(), entry.CWD); tool != "" {
-				entry.AgentTool = agentintel.AgentTool(tool)
-				entry.AgentStatus = agentintel.AgentStatus(status)
+				unit.AgentTool = agentintel.AgentTool(tool)
+				unit.AgentStatus = agentintel.AgentStatus(status)
 			}
 		}
 
@@ -165,7 +154,7 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// AgentStatus="waiting" (red, blocked): a bell may mean "approve this" or "I'm done",
 		// and we cannot tell which. Amber is the honest severity for "come look".
 		if sig, at, _, ok := sess.PendingSignal(); ok {
-			entry.AwaitingUser = true
+			unit.AwaitingUser = true
 			// AwaitingSince is the key the frontend's "seen" layer dismisses against, so a
 			// fresh signal MUST advance it past whatever the transcript produced — otherwise
 			// a card the user already dismissed would swallow the new signal in silence.
@@ -175,8 +164,8 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 			// because the card had been given a pre-formatted string where the pane had a real
 			// instant, and it could fail (a parse error was treated as "no time", which silently
 			// took the same branch as "advance it").
-			if entry.AwaitingSince.IsZero() || at.After(entry.AwaitingSince) {
-				entry.AwaitingSince = at.UTC()
+			if unit.AwaitingSince.IsZero() || at.After(unit.AwaitingSince) {
+				unit.AwaitingSince = at.UTC()
 			}
 			// The signal OUTRANKS whatever the detectors concluded, so it owns the provenance
 			// too — otherwise a card raised by a BEL would carry a screen rule that had nothing
@@ -186,9 +175,15 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 			if sig.Kind == ansisignal.KindBell {
 				rule = agentintel.RuleSignalBell
 			}
-			entry.StatusRule = string(rule)
-			entry.StatusEvidence = sanitizeFieldMax(strings.TrimSpace(sig.Title+" "+sig.Body), 120)
+			unit.StatusRule = string(rule)
+			unit.StatusEvidence = sanitizeFieldMax(strings.TrimSpace(sig.Title+" "+sig.Body), 120)
 		}
+
+		// The card, from its units — all one of them. Deliberately RollUp rather than a plain
+		// assignment: a session card is not a different kind of thing from a tmux window card, it
+		// is the same thing with N=1, and routing it around the shared rule is exactly how the two
+		// would start drifting again the next time that rule gains a clause.
+		entry.SurfaceUnit = agentintel.RollUp([]agentintel.SurfaceUnit{unit}, 0)
 
 		if screen != nil {
 			// TailFromLines removes the agent's pinned chrome exactly as the tmux overview
