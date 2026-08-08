@@ -191,6 +191,20 @@ type TmuxStateService struct {
 	topology     TmuxState
 	topologyAt   time.Time
 	topologyRead bool
+
+	// cmdTimeout is this service's budget for one topology probe's tmux commands. A field
+	// rather than a bare const because the budget is the thing that decides whether a probe
+	// ANSWERS or merely runs out of time, and a rule that important has to be reachable — by a
+	// test reproducing the exact shape that broke (child context expiring, parent healthy), and
+	// by any future caller that needs a different budget. Zero means the package default.
+	cmdTimeout time.Duration
+}
+
+func (s *TmuxStateService) commandTimeout() time.Duration {
+	if s.cmdTimeout > 0 {
+		return s.cmdTimeout
+	}
+	return tmuxCmdTimeout
 }
 
 // NewTmuxStateService builds a service over the shared process inspector so it
@@ -249,7 +263,7 @@ func (s *TmuxStateService) resolvePrefix(ctx context.Context) TmuxPrefix {
 	if !s.TmuxInstalled() {
 		return defaultPrefix
 	}
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	out, err := tmuxCommandContext(cctx, "show-options", "-g", "prefix").Output()
 	if err != nil {
@@ -289,7 +303,7 @@ func (s *TmuxStateService) resolveModeKeys(ctx context.Context) string {
 	if !s.TmuxInstalled() {
 		return defaultModeKeys
 	}
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	out, err := tmuxCommandContext(cctx, "show-options", "-g", "mode-keys").Output()
 	if err != nil {
@@ -341,7 +355,7 @@ func (s *TmuxStateService) ServerRunning(ctx context.Context) bool {
 	if !s.TmuxInstalled() {
 		return false
 	}
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	// list-sessions exits non-zero ("no server running") when no server exists.
 	err := tmuxCommandContext(cctx, "list-sessions", "-F", "#{session_name}").Run()
@@ -354,7 +368,7 @@ func (s *TmuxStateService) Attached(ctx context.Context, shellPID int) bool {
 	if shellPID <= 0 || !s.TmuxInstalled() {
 		return false
 	}
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	return s.prober.DetectTmux(cctx, shellPID)
 }
@@ -380,7 +394,7 @@ func (s *TmuxStateService) State(ctx context.Context, shellPID int) TmuxState {
 	if shellPID > 0 {
 		st.Attached = s.Attached(ctx, shellPID)
 		if st.Attached {
-			cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+			cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 			st.AttachedSession = s.prober.FindClientSession(cctx, shellPID)
 			cancel()
 		}
@@ -414,19 +428,29 @@ func (s *TmuxStateService) topologySnapshot(ctx context.Context) TmuxState {
 		Prefix:    s.Prefix(ctx),
 		ModeKeys:  s.ModeKeys(ctx),
 	}
+	// answered records that the probe actually REACHED a conclusion about the topology, as
+	// opposed to running out of time on the way there. The two produce the same empty
+	// Sessions and mean opposite things.
+	answered := true
 	if st.Installed {
 		// ONE list-sessions answers both "is a server up" and "which sessions have a client".
 		// They used to be two separate invocations of the same command — `ServerRunning` looked
 		// only at the exit code, `attachedSessions` only at the output — which is one more command
 		// queued on a single-threaded server for an answer already in hand.
-		attached, running := s.sessionAttachment(ctx)
+		attached, running, reachedServer := s.sessionAttachment(ctx)
+		answered = reachedServer
 		st.ServerRunning = running
 		if running {
-			cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+			cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 			panes, err := s.prober.ListPanes(cctx)
 			if err == nil && len(panes) > 0 {
 				st.Sessions = s.buildSessions(cctx, panes, attached)
 			}
+			// tmuxCmdTimeout is ONE budget for list-panes plus a capture per window, so a busy
+			// machine exhausts it partway through and leaves Sessions empty or short. Measured on
+			// a loaded laptop: a bare tmux call went from ~5ms to 0.5s, nine windows blew the
+			// 1.5s budget, and the pane bar vanished.
+			answered = answered && err == nil && cctx.Err() == nil
 			cancel()
 		}
 	}
@@ -440,10 +464,26 @@ func (s *TmuxStateService) topologySnapshot(ctx context.Context) TmuxState {
 	}
 	LogTmuxProbe(ctx, time.Since(probeStart), panes, windows)
 
-	// A probe cut short by a cancelled/expired ctx is NOT cached: caching it would pin an empty
-	// topology for the rest of the TTL and blank the UI's tab strip for a full second on every
-	// hiccup. Serve it once, let the next caller retry.
-	if ctx.Err() == nil {
+	// A probe that did not ANSWER must not be published as one. "there are no panes" and "I
+	// could not find out" produce the identical empty Sessions and mean opposite things, and
+	// only the first may replace what we know.
+	//
+	// This used to be guarded — the intent was already written down right here — but on the
+	// PARENT ctx, while the timeout that actually fires lives on the per-command child. The
+	// parent stays healthy, so every timed-out probe was published AND cached for a full TTL:
+	// the pane bar disappeared, came back on the next good probe, disappeared again. That is
+	// the「一会有一会没有」, and it is a correctness bug, not a slow machine — a slow machine is
+	// merely what makes it fire.
+	//
+	// Degraded and nothing known yet is the one case where the empty answer is still the best
+	// one available: serve it, but never cache it, so the next caller retries immediately.
+	if ctx.Err() != nil {
+		return st
+	}
+	if !answered && s.topologyRead {
+		return s.topology
+	}
+	if answered {
 		s.topology = st
 		s.topologyAt = time.Now()
 		s.topologyRead = true
@@ -454,7 +494,7 @@ func (s *TmuxStateService) topologySnapshot(ctx context.Context) TmuxState {
 // attachedSessions returns the set of session names that currently have a
 // client attached (from list-sessions #{session_attached}).
 func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool {
-	attached, _ := s.sessionAttachment(ctx)
+	attached, _, _ := s.sessionAttachment(ctx)
 	return attached
 }
 
@@ -462,14 +502,18 @@ func (s *TmuxStateService) attachedSessions(ctx context.Context) map[string]bool
 // sessions have a client attached, and whether a tmux server answered at all (it exits non-zero
 // with "no server running" when there is none). Splitting these into two commands cost an extra
 // round trip on a server that handles them one at a time.
-func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bool, bool) {
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bool, bool, bool) {
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	out, err := tmuxCommandContext(cctx,
 		"list-sessions", "-F", "#{session_name}"+tmuxFieldSep+"#{session_attached}",
 	).Output()
 	if err != nil {
-		return nil, false
+		// tmux exits non-zero with "no server running", and that IS an answer — the third
+		// return says so. A context that expired is not an answer about anything: collapsing
+		// the two into `running=false` publishes「tmux 没在跑」to a user whose tmux is fine,
+		// which is the same mistake as an empty pane bar, one layer up and louder.
+		return nil, false, cctx.Err() == nil
 	}
 	result := make(map[string]bool)
 	for _, line := range strings.Split(string(out), "\n") {
@@ -484,7 +528,7 @@ func (s *TmuxStateService) sessionAttachment(ctx context.Context) (map[string]bo
 		n, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
 		result[fields[0]] = n > 0
 	}
-	return result, true
+	return result, true, true
 }
 
 // buildSessions groups panes into sessions → windows → panes and runs per-pane
@@ -652,7 +696,7 @@ func paneKey(p TmuxPane) string {
 // matchPaneToTranscript. An error yields nil, and nil simply means "no evidence": the caller then
 // falls back to the mtime guess it would have made anyway.
 func (s *TmuxStateService) paneTailLines(ctx context.Context, p TmuxPane) []string {
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
 	if err != nil {
@@ -662,7 +706,7 @@ func (s *TmuxStateService) paneTailLines(ctx context.Context, p TmuxPane) []stri
 }
 
 func (s *TmuxStateService) panePromptVerdict(ctx context.Context, p TmuxPane) OutputVerdict {
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
 	if err != nil {
@@ -747,7 +791,7 @@ func (s *TmuxStateService) paneDecision(ctx context.Context, p TmuxPane, agent D
 		}
 		return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptWriting}
 	}
-	cctx, cancel := context.WithTimeout(ctx, tmuxCmdTimeout)
+	cctx, cancel := context.WithTimeout(ctx, s.commandTimeout())
 	defer cancel()
 	lines, err := s.prober.CapturePane(cctx, p.SessionWindow, p.PaneIndex, paneScanLines)
 	if err != nil {
