@@ -155,3 +155,81 @@ func TestPaneLocate_FallsBackToCWDScan(t *testing.T) {
 		t.Fatalf("sibling exclusion must still apply: got %q want %q", got, older)
 	}
 }
+
+// TestPaneEntry_RotatedSessionIsFollowed is the regression gate for「明明在运行，却显示空闲」.
+//
+// claude rotates its session file WITHIN one process — /compact and resume both start a new one
+// — and leaves the superseded file on disk. The sticky rule that keeps a long-idle pane from
+// having its binding stolen by a same-cwd sibling was also keeping it on that dead file: the
+// stat succeeded forever, so the pid record was never consulted again. Observed live: a pane
+// whose claude had moved to a 632 KB session was still reading the 10.8 MB one it left behind,
+// reporting idle-nine-minutes-ago over a running Bash.
+func TestPaneEntry_RotatedSessionIsFollowed(t *testing.T) {
+	home := claudeHomeFixture(t)
+	cwd := "/tmp/dw-identity-rotated"
+
+	before := writeTranscriptFor(t, cwd, "sess-before-compact", 30*time.Minute)
+	writeSessionRecord(t, home, 7001, "sess-before-compact", cwd)
+
+	m := NewPaneAgentMonitor(NewProjectLocator())
+	m.mu.Lock()
+	pt := m.entryLocked("pane-1", cwd, ToolClaude, nil, 7001)
+	m.mu.Unlock()
+	if pt.path != before {
+		t.Fatalf("initial binding %q, want %q", pt.path, before)
+	}
+
+	// /compact: same process, new session file, the old one still on disk and NEWER by mtime
+	// than the fresh one would be if we only looked at the directory.
+	after := writeTranscriptFor(t, cwd, "sess-after-compact", 0)
+	writeSessionRecord(t, home, 7001, "sess-after-compact", cwd)
+
+	// Inside the relocate window nothing re-resolves — that is the cheap path, and correct.
+	m.mu.Lock()
+	pt = m.entryLocked("pane-1", cwd, ToolClaude, nil, 7001)
+	m.mu.Unlock()
+	if pt.path != before {
+		t.Fatalf("re-resolved inside the window: got %q", pt.path)
+	}
+
+	// Past it, the pid record is authoritative: same process, different file, so follow it.
+	m.mu.Lock()
+	m.cache["pane-1"].locatedAt = time.Now().Add(-2 * pathRelocateAfter)
+	pt = m.entryLocked("pane-1", cwd, ToolClaude, nil, 7001)
+	m.mu.Unlock()
+	if pt.path != after {
+		t.Fatalf("stayed on the superseded transcript %q, want the rotated-to %q", pt.path, after)
+	}
+	if pt.driver != nil {
+		t.Fatal("the reader for the old file must be dropped, or it keeps reporting its state")
+	}
+	if _, err := os.Stat(before); err != nil {
+		t.Fatal("the superseded file is expected to still exist — that is the whole trap")
+	}
+}
+
+// A pane whose runtime publishes NO identity keeps the sticky protection intact: without a
+// record there is nothing authoritative to override it with, and re-resolving by mtime is
+// exactly the theft the stickiness exists to prevent.
+func TestPaneEntry_StickyStillHoldsWithoutAnIdentityRecord(t *testing.T) {
+	claudeHomeFixture(t)
+	cwd := "/tmp/dw-identity-sticky"
+
+	mine := writeTranscriptFor(t, cwd, "sess-mine", 30*time.Minute)
+	m := NewPaneAgentMonitor(NewProjectLocator())
+	m.mu.Lock()
+	pt := m.entryLocked("pane-1", cwd, ToolClaude, nil, 8001)
+	m.mu.Unlock()
+	if pt.path != mine {
+		t.Fatalf("initial binding %q, want %q", pt.path, mine)
+	}
+
+	writeTranscriptFor(t, cwd, "sess-sibling", 0) // a newer same-cwd file appears
+	m.mu.Lock()
+	m.cache["pane-1"].locatedAt = time.Now().Add(-2 * pathRelocateAfter)
+	pt = m.entryLocked("pane-1", cwd, ToolClaude, nil, 8001)
+	m.mu.Unlock()
+	if pt.path != mine {
+		t.Fatalf("a sibling's newer file stole the binding: got %q want %q", pt.path, mine)
+	}
+}
