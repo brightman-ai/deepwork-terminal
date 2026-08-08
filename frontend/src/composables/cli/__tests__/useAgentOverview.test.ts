@@ -335,6 +335,20 @@ describe('overviewCardTitle (卡片标题：一眼分得出是哪个终端)', ()
     expect(overviewCardTitle(unit('终端', '/', 7))).toBe('终端7')
   })
 
+  // Human 实测：五个还没 cd 的终端 → 五张卡全叫 "anthony"。basename 回落假设「工作目录就是项目」，
+  // 而家目录是这个假设唯一系统性失效的地方——那不是项目名，是用户名，且对每张卡都一样。
+  it('家目录不是项目名：一屋子还没 cd 的终端不许全叫用户名', () => {
+    expect(overviewCardTitle(unit('终端', '/Users/anthony', 1))).toBe('终端1')
+    expect(overviewCardTitle(unit('终端', '/Users/anthony/', 3))).toBe('终端3')
+    expect(overviewCardTitle(unit('', '/home/anthony', 2))).toBe('终端2')
+    expect(overviewCardTitle(unit('终端', '/root', 4))).toBe('终端4')
+    // 家目录**里面**的项目照旧——挡掉的只有家目录本身那一层。
+    expect(overviewCardTitle(unit('终端', '/Users/anthony/code/dw', 1))).toBe('dw')
+    expect(overviewCardTitle(unit('终端', '/home/anthony/src', 1))).toBe('src')
+    // 用户自己起过名，永远轮不到这条规则。
+    expect(overviewCardTitle(unit('部署', '/Users/anthony', 1))).toBe('部署')
+  })
+
   it('同 cwd 的多个终端不会互相冒充：编号仍在卡片左侧徽标里（标题相同是允许的）', () => {
     // 这里显式记录取舍：basename 可能重名，但"看得出是哪个项目"比"绝对唯一"更有用，
     // 唯一性由卡片上恒显的 w.index 承担 —— 它同时是 终端N 和 前缀+N 的目标。

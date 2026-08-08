@@ -394,6 +394,23 @@ function cwdBasename(cwd: string): string {
 }
 
 /**
+ * 这个 cwd 是**家目录本身**吗 —— 那样它的最后一段就不是项目名，是用户名。
+ *
+ * 为什么要单挑出来：basename 回落之所以有用，是因为一个终端的工作目录**通常**就是它在做的项目
+ * （`deepwork-terminal`、`teamworkbench`）。家目录是这条推理唯一系统性失效的地方：一个还没 cd
+ * 的新终端就在那儿，而人开五个终端时它们全都还没 cd。Human 实测的结果是**五张卡全叫 "anthony"**
+ * ——一个既不是项目、又对每张卡都一样的词，等于那一行什么都没说，还挡住了本来有用的「终端N」
+ * （编号至少能和标签栏、前缀+N 对上）。
+ *
+ * 判定按形状而不是查 $HOME：前端拿不到服务端的家目录，而 `/Users/<x>` `/home/<x>` `/root` 这三种
+ * 形状覆盖了这个程序实际跑的所有平台。判错的代价也是有上限的——最坏情况是某个真的叫这个名字的
+ * 项目退回显示「终端N」，比五张同名卡片好。
+ */
+function isHomeDir(path: string): boolean {
+  return path === '/root' || /^\/(?:Users|home)\/[^/]+$/.test(path)
+}
+
+/**
  * 卡片标题：**这张卡是哪个终端**，一眼可辨（布局之外的另一半 SSOT，两条数据源共用）。
  *
  * 优先级：用户自己起的名 → cwd 的 basename → 「终端N」。
@@ -410,7 +427,8 @@ export function overviewCardTitle(u: Pick<OverviewUnit, 'title' | 'cwd' | 'index
   const raw = (u.title || '').trim()
   // 用户改过名就永远听用户的——哪怕它比 basename 短、比 basename 怪。
   if (raw && !isDefaultTabName(raw)) return raw
-  const base = cwdBasename(u.cwd)
+  const path = (u.cwd || '').replace(/\/+$/, '')
+  const base = isHomeDir(path) ? '' : cwdBasename(path)
   if (base) return base
   // 连 cwd 都没有（例如进程已结束的标签）：退回带编号的占位，至少与标签栏、前缀+N 对得上。
   return displayTabName('终端', u.index)

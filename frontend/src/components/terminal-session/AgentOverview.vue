@@ -359,20 +359,29 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
 .is-pc.agent-overview { padding: 16px; }
 
 /* 画大卡时（PC）撑满 overlay（.terminal-overview-overlay inset:0 全高）：
-   rollup 顶 + 卡片区 flex 吃满剩余 + 空闲条钉底。卡高由 .ao-active 的
-   grid-auto-rows: minmax(300px,1fr) 决定 —— 空间足则 1fr 铺满、卡多到 1fr<保底则取
-   300px 保可读、总高超一屏由 overlay 现成的 overflow-y:auto 滚动（Q1 长高优先·溢出滚）。 */
+   rollup 顶 + 卡片区按内容长 + 空闲条钉底（margin-top:auto，而不是靠上面的卡片撑）。
+
+   ── 这里曾经写着 `flex: 1 1 auto; min-height: 0`，那一行同时制造了三个症状 ──
+   卡片区被允许缩到比自己的行还矮，于是 grid 的 1fr 把**整个视口高度**分给了几行卡片：
+     · 每张卡被撑到 ~500px，而 tail 是底对齐的 → 上面 60–85% 是纯空白（Human 实测：五个终端，
+       3、4、5 号卡几乎整张是空的）；
+     · 行高之和恰好等于容器高 → overlay 那条 overflow-y:auto **没有可滚的行程**，
+       于是「右边有一条滚动条，但滚轮纹丝不动」；
+     · 一旦卡片多到 300px 保底顶上来，超出的部分就落在 .agent-overview 的盒子外面，
+       被 overlay 裁掉 → 「第二排被裁在屏幕底下」。
+   卡高不该由「这一格能给多少空间」决定，而该由「这张卡有多少内容」决定，封顶在读得下的高度。 */
 .agent-overview.is-fill {
   display: flex;
   flex-direction: column;
   min-height: 100%;
 }
 .agent-overview.is-fill .ao-active {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
 }
+/* 空闲条仍然钉在底部，但现在是它自己钉的：卡片区不再被拉长去填满剩余空间。 */
 .agent-overview.is-fill .ao-idle {
   flex: 0 0 auto;
+  margin-top: auto;
 }
 
 /* ── 顶部状态条：编号点条（左，可换行）+ roll-up 计数（右，钉住不换行） ── */
@@ -460,16 +469,18 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
 .ao-active {
   display: grid;
   grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
-  /* 卡高 SSOT。两个值分工不同，别混：
-     · 300px 保底 = **最少要读得出内容**。大卡 tail 是 0.72rem×1.55 ≈ 18px/行，扣掉 tail 内边距
-       18 + 头部 22 + cwd 16 + 间距/卡内边距 ≈ 100，300px ≈ 11 行。再矮（原来是 208px）就只剩
-       五六行，预览框显得太矮、认不出这个终端在干嘛。
-     · 1fr = **有多高长多高**。上界不在这里，在后端 agentintel.OverviewTailLines（40 行，tmux 与
-       非 tmux 共用同一个常量）；卡片底对齐 + 从顶部裁剪，所以行数由卡实际拿到的高度决定。
-     注：这里曾写「后端每张卡固定发 8 行，300px 刚好全看见」。那句话两处都错——tmux 一直发 40 行，
-     非 tmux 发 8 行（已修，见 OverviewTailLines 注释），而且卡高本来就不该由 payload 行数倒推：
-     它是「这一格能给多少空间」，不是「一屏正好装下多少行」。 */
-  grid-auto-rows: minmax(300px, 1fr);
+  /* 卡高 SSOT：**按内容长，两端封住**。行高取这一行里最高那张卡的内容高度，夹在 [150, 300] 之间。
+     · 300px 上限 = **一张卡最多值得占多少**。大卡 tail 是 0.72rem×1.55 ≈ 18px/行，扣掉 tail 内边距
+       18 + 头部 22 + cwd 16 + 间距/卡内边距 ≈ 100，300px ≈ 11 行；再高，多出来的行既挤掉了下一张
+       卡、又不是你打开总览要找的东西（要读全文你会切过去）。后端仍发 40 行
+       （agentintel.OverviewTailLines，两条来源同一个常量），卡片底对齐 + 从顶部裁剪，所以拿到多少
+       高度就显示多少行。
+     · 150px 下限 = **一张卡还得像张卡**。刚开的终端只有一行提示符，没有下限就会塌成一条。
+     · 轨道用 max-content（不是 300px）：定长上限会被 grid 的 maximize-tracks 一步吃满，见 .ao-card--big。
+     这里原来是 `minmax(300px, 1fr)`。1fr 的意思是「把容器剩下的高度分给我」，配上上面那个
+     `min-height: 0`，容器高度就是视口——于是卡高变成了**屏幕有多高**的函数，跟卡里有什么无关。
+     Human 实测的三个症状（85% 空白 / 滚不动 / 第二排被裁）全部由那一条推出来。 */
+  grid-auto-rows: minmax(150px, max-content);
   gap: 14px;
   align-items: stretch;
   margin-bottom: 14px;
@@ -564,7 +575,12 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
   padding: 15px 17px;
   border-left-width: 1px; /* 大卡用整圈边框，不用左色条 */
   border-radius: 11px;
-  /* 卡高不在此写死：由 .ao-active grid-auto-rows 统一控（align-items:stretch 拉伸填满行）*/
+  /* 卡片的高度上限。放在**卡片**上而不是轨道上，是 CSS Grid 的一条硬性质：
+     `minmax(150px, 300px)` 两端都是定长时，轨道在「maximize tracks」那一步会把剩余空间一路分到
+     上限，于是每张卡又变回 300px 高——和 1fr 的老毛病一模一样，只是换了个上界。轨道要按内容长
+     （max-content），上限就必须由卡片自己的 max-height 提供：网格取的是卡片的 max-content 贡献，
+     而那个贡献本来就受 max-height 夹逼。 */
+  max-height: 300px;
 }
 .ao-card--big.s-waiting {
   border-color: var(--status-waiting);
