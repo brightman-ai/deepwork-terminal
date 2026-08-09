@@ -484,12 +484,10 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
      Human 实测的三个症状（85% 空白 / 滚不动 / 第二排被裁）全部由那一条推出来。 */
   grid-auto-rows: minmax(150px, max-content);
   gap: 14px;
-  /* 每张卡按**自己**的内容长，而不是被拉到本行最高那张的高度。
-     行高仍然由最高的那张决定（grid 的行就是这样），但矮的那张不再被 stretch 撑成一个空盒子——
-     多出来的空间退成栅格间隙。这两件事看起来像同一件，读起来完全不同：Human 实测报的
-     「每张卡片 80–90% 是空的」抱怨的是**空卡片**，不是空白；一张只有两行输出的卡就该长两行的样子。
-     代价是同一行的卡片下沿参差，这是刻意换来的。 */
-  align-items: start;
+  /* 同一行的卡片等高。Human 实测判的：按内容各长各的会「异形」——一行里三张卡下沿参差，
+     视觉上不像一组卡片，像三块碎片。等高的代价是内容少的那张被拉长（见 .ao-card-tail 的
+     处理：预览框只占内容那么高，多出来的是卡片底色而不是一个巨大的空面板）。 */
+  align-items: stretch;
   margin-bottom: 14px;
 }
 
@@ -614,12 +612,22 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
 .ao-card--big .ao-card-tail {
   font-size: 0.72rem;
   line-height: 1.55;
-  flex: 1;
+  /* 预览框**只占内容那么高**，但内容超出时可以被压扁（min-height:0 + shrink），
+     配合下面的 flex-end 从**顶部**裁 —— 终端输出是往下长的，最新的几行必须留在框底。
+     这里原来是 `flex: 1`：框恒等于卡片剩下的全部空间，于是一张只有两行输出的卡在等高行里
+     会显示成一个几乎全空的巨大深色面板，正是 Human 报的「每张卡片 80–90% 是空的」。
+     换成 hug 之后，多出来的空间是**卡片底色**，不是一个空面板；卡片仍然等高（见 .ao-active
+     的 align-items:stretch），cwd 由下面的 margin-top:auto 钉在卡底。 */
+  flex: 0 1 auto;
   min-height: 0;
   padding: 9px 11px;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
+}
+/* 卡片等高时，路径那一行钉在卡底，而不是紧贴着预览框飘在半空。 */
+.ao-card--big .ao-card-cwd {
+  margin-top: auto;
 }
 
 .ao-card-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
