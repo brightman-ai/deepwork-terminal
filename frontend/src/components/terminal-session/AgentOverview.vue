@@ -476,13 +476,20 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
        （agentintel.OverviewTailLines，两条来源同一个常量），卡片底对齐 + 从顶部裁剪，所以拿到多少
        高度就显示多少行。
      · 150px 下限 = **一张卡还得像张卡**。刚开的终端只有一行提示符，没有下限就会塌成一条。
+       注意这**不是**原设计里那个 300px —— 那个 300 是「有内容时最少要读得出」的可读下限，而
+       max-content 已经让「有内容」自己把行撑到该有的高度，所以这里的下限只需管住「几乎没内容」。
      · 轨道用 max-content（不是 300px）：定长上限会被 grid 的 maximize-tracks 一步吃满，见 .ao-card--big。
      这里原来是 `minmax(300px, 1fr)`。1fr 的意思是「把容器剩下的高度分给我」，配上上面那个
      `min-height: 0`，容器高度就是视口——于是卡高变成了**屏幕有多高**的函数，跟卡里有什么无关。
      Human 实测的三个症状（85% 空白 / 滚不动 / 第二排被裁）全部由那一条推出来。 */
   grid-auto-rows: minmax(150px, max-content);
   gap: 14px;
-  align-items: stretch;
+  /* 每张卡按**自己**的内容长，而不是被拉到本行最高那张的高度。
+     行高仍然由最高的那张决定（grid 的行就是这样），但矮的那张不再被 stretch 撑成一个空盒子——
+     多出来的空间退成栅格间隙。这两件事看起来像同一件，读起来完全不同：Human 实测报的
+     「每张卡片 80–90% 是空的」抱怨的是**空卡片**，不是空白；一张只有两行输出的卡就该长两行的样子。
+     代价是同一行的卡片下沿参差，这是刻意换来的。 */
+  align-items: start;
   margin-bottom: 14px;
 }
 
@@ -579,8 +586,14 @@ function tailLines(w: OverviewUnit, limit?: number): string[] {
      `minmax(150px, 300px)` 两端都是定长时，轨道在「maximize tracks」那一步会把剩余空间一路分到
      上限，于是每张卡又变回 300px 高——和 1fr 的老毛病一模一样，只是换了个上界。轨道要按内容长
      （max-content），上限就必须由卡片自己的 max-height 提供：网格取的是卡片的 max-content 贡献，
-     而那个贡献本来就受 max-height 夹逼。 */
-  max-height: 300px;
+     而那个贡献本来就受 max-height 夹逼。
+
+     **上限是 70vh，不是 300px。** 300px 在原设计里是「最少要读得出内容」的**下限**（≈11 行），
+     我一度把它当成了天花板 —— 于是输出多的卡片被砍到 11 行，Human 实测的判决是「这么矮，里面的字
+     看不清，不能起到预览的作用」。一张卡真正的上界本来就在后端（OverviewTailLines = 40 行 ≈ 780px），
+     这里只需要拦住「一张卡吃掉整屏」：70vh 保证一屏永远看得见下一张卡的头，剩下的交给滚动
+     （滚动现在真的有行程了，见上面 .ao-active 那段）。 */
+  max-height: 70vh;
 }
 .ao-card--big.s-waiting {
   border-color: var(--status-waiting);
