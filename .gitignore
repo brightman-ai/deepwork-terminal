@@ -28,3 +28,6 @@ docs/
 # goreleaser build output (root); internal/spa/dist is separate + tracked
 /dist/
 tmp/
+
+# 32M 的发布二进制不是源码
+/.release-bin/
