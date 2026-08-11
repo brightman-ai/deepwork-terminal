@@ -93,7 +93,7 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// a server restart and therefore decides where an auto-reopened shell lands. liveCWD was
 		// already here and already documented for exactly this; the overview just never used it.
 		// Falls back to the creation cwd when /proc is unavailable (non-Linux) or the shell is gone.
-		cwd := liveCWD(sess.ShellPID())
+		cwd := processCWD(sess.ShellPID())
 		sess.mu.Lock()
 		if cwd == "" {
 			cwd = sess.CWD

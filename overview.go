@@ -1,27 +1,10 @@
 package terminal
 
 import (
-	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
-
-// liveCWD returns the shell's CURRENT working directory via /proc/<pid>/cwd (Linux).
-// Unlike the session's CREATION cwd, this follows the user's `cd`, so the overview
-// finds the claude/codex transcript for the dir where the agent is ACTUALLY running
-// even without tmux to report an active-pane cwd. "" on any error (non-Linux, gone, …).
-func liveCWD(pid int) string {
-	if pid <= 0 {
-		return ""
-	}
-	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-	if err != nil {
-		return ""
-	}
-	return dir
-}
 
 // handleSessionOverview handles GET /sessions/{id}/overview.
 //
@@ -66,7 +49,7 @@ func (s *Server) handleSessionOverview(w http.ResponseWriter, r *http.Request) {
 	cwd := baseCWD
 	if lc, ok := s.workbenchCWD(r.Context(), id, r.URL.Query().Get("cwd")); ok && lc != "" {
 		cwd = lc
-	} else if live := liveCWD(sess.ShellPID()); live != "" {
+	} else if live := processCWD(sess.ShellPID()); live != "" {
 		cwd = live
 	}
 

@@ -120,7 +120,7 @@ func (s *InProcessService) PasteUpload(_ context.Context, id string, filename st
 	// frozen WorkingDir it replaces.
 	cwd := sessionCWD
 	if cwd == "" {
-		if live := liveShellCWD(sess); live != "" {
+		if live := processCWD(sess.ShellPID()); live != "" {
 			cwd = live
 		} else {
 			cwd = sess.WorkingDir()

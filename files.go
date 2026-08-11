@@ -665,14 +665,17 @@ func (s *Server) workbenchCWD(ctx context.Context, sessionID, cwdParam string) (
 }
 
 // resolveWorkbenchCWD is workbenchCWD's pure core: it returns the resolved dir plus the SOURCE
-// it came from ("override" | "tmux-active" | "proc" | "session"), split out so the source is
+// it came from ("tmux-active" | "proc" | "client" | "session"), split out so the source is
 // available for the log line above (and unit tests) without threading it through every caller.
+// 顺序是**先问我们自己能观察到的，再信客户端捎回来的**：
+//
+//	tmux 活动 pane → 进程实时 cwd → 客户端回传 → 会话出生时的目录
+//
+// 客户端回传的那个 cwd 不是独立信源 —— 它**本来就是服务端自己算出来发下去的**（经
+// sessions_overview / tmux_state 推给前端，再由上传请求带回来）。所以它只会更旧，不会更准。
+// 它此前排在第一位，于是一次探测失败会被**固化**：服务端把自己的错误答案当成客户端权威输入又
+// 收了回来，之后每一次上传都落在同一个错地方。它现在退到实时观察之后，只在我们确实看不到时兜底。
 func (s *Server) resolveWorkbenchCWD(ctx context.Context, sessionID, cwdParam string) (cwd, source string, ok bool) {
-	if cwdParam != "" && filepath.IsAbs(cwdParam) {
-		if info, err := os.Stat(cwdParam); err == nil && info.IsDir() {
-			return cwdParam, "override", true
-		}
-	}
 	sess, err := s.mgr.Get(sessionID)
 	if err != nil {
 		return "", "", false
@@ -680,8 +683,13 @@ func (s *Server) resolveWorkbenchCWD(ctx context.Context, sessionID, cwdParam st
 	if pc := s.activePaneCWD(ctx, sess.ShellPID()); pc != "" {
 		return pc, "tmux-active", true
 	}
-	if live := liveShellCWD(sess); live != "" {
+	if live := processCWD(sess.ShellPID()); live != "" {
 		return live, "proc", true
+	}
+	if cwdParam != "" && filepath.IsAbs(cwdParam) {
+		if info, err := os.Stat(cwdParam); err == nil && info.IsDir() {
+			return cwdParam, "client", true
+		}
 	}
 	return sess.CWD, "session", true
 }
@@ -740,25 +748,11 @@ func (s *Server) activePaneCWD(ctx context.Context, shellPID int) string {
 	return ""
 }
 
-// liveShellCWD returns the current working directory of the session's shell process via
-// /proc/<pid>/cwd (Linux/WSL). Returns "" off-Linux, on error, or if the target isn't a
-// directory, so callers fall back to the static session cwd. NOTE: for a tmux session this
-// is tmux's own cwd, not the active pane's — callers must prefer the client-supplied pane
-// cwd first (workbenchCWD does).
-func liveShellCWD(sess *Session) string {
-	pid := sess.ShellPID()
-	if pid <= 0 {
-		return ""
-	}
-	dir, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-	if err != nil {
-		return ""
-	}
-	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
-		return ""
-	}
-	return dir
-}
+// liveShellCWD 与 liveCWD 都已并入 processCWD（proc_cwd.go）—— 同一个问题此前有两份实现，
+// 而且行为不一致（一份校验结果是不是目录，一份不校验），并且**两份都只认 Linux 的 /proc**。
+//
+// NOTE 仍然成立：对一个 tmux 会话，这拿到的是 tmux 自己的 cwd，不是活动 pane 的 —— 调用方必须
+// 先问活动 pane（resolveWorkbenchCWD 就是这么排的）。
 
 // safeResolve joins a client-supplied relative path onto the session cwd and proves
 // the result stays within the cwd subtree. It defends against `..` escape, absolute
