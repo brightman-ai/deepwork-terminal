@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -275,8 +276,13 @@ func TestStandaloneCSP_AllowsSameOriginFrames(t *testing.T) {
 	assert.Contains(t, standaloneCSP, "connect-src 'self' http: https: ws: wss:")
 }
 
-// workbenchCWD prefers a valid client cwd (tmux active pane), else a live/static session
-// cwd (non-tmux). This is the SSOT both the files drawer and clipboard upload resolve through.
+// workbenchCWD 是文件抽屉和剪贴板上传共用的那个解析入口（SSOT）。
+//
+// ⚠ 这个用例跑在 **mock PTY** 上（pipePTYFactory，sess.Cmd 为 nil → ShellPID() 恒为 0），所以
+// 进程 cwd 探测在这里必然短路。它验的是「**探不到进程时**怎么退」这条退化路径：客户端给的绝对
+// 路径可用、相对路径忽略、未知会话报 not-ok。
+// 真实环境有真 PID，走的是另一条分支 —— 顺序本身由 TestWorkbenchCWD_LiveProcessBeatsClientEcho
+// 用真 PTY 覆盖。别把这里的 "client cwd 赢了" 读成优先级的证明，它只是退化路径的表现。
 func TestWorkbenchCWD_Resolution(t *testing.T) {
 	_, sm, srv := newDrawerTestServer(t)
 	cwd := t.TempDir()
@@ -528,4 +534,45 @@ func TestPreviewableInRecent(t *testing.T) {
 	abs := filepath.Join(outside, "b.md")
 	assert.True(t, previewableInRecent(root, abs, true), "outside-cwd recent file allowed")
 	assert.False(t, previewableInRecent(root, abs, false), "outside-cwd non-recent path excluded")
+}
+
+// 上面那个 TestWorkbenchCWD_Resolution 用的是 mock PTY（pipePTYFactory），sess.Cmd 为 nil →
+// ShellPID() 恒为 0 → 进程 cwd 探测直接短路。也就是说它**从没验过**自己注释里声称的那个优先级，
+// 只验了「探不到进程时怎么退」这条退化路径 —— 而真实环境走的恰恰是另一条分支。
+//
+// 这一条用真 PTY（真 fork、真 PID）把顺序钉死：**我们自己能观察到的实时 cwd，压过客户端捎回来的**。
+// 这很要紧，因为客户端那个值本来就是服务端自己算出来发下去的，它只会更旧不会更准；让它排在前面，
+// 一次探测失败就会被固化成之后每一次上传的落点（「图片传飞到 home」正是这么来的）。
+func TestWorkbenchCWD_LiveProcessBeatsClientEcho(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("本平台没有取别的进程 cwd 的实现，跳过：%s", runtime.GOOS)
+	}
+	_, _, srv := newDrawerTestServer(t)
+
+	realSM := NewSessionManagerWithFactory(4096, "/bin/sh", DefaultPTYFactory)
+	t.Cleanup(realSM.DestroyAll)
+	srv.mgr = realSM
+
+	shellDir := t.TempDir()
+	_, err := realSM.CreateWithOptions(CreateOptions{Name: "real", CWD: shellDir})
+	require.NoError(t, err)
+	sess := sessionByName(t, realSM, "real")
+	require.Positive(t, sess.ShellPID(), "真 PTY 会话必须有真 PID，否则这个测试又退化成 mock 那条路")
+
+	// 客户端捎回来一个**别的**目录（模拟一次陈旧回传）。
+	clientDir := t.TempDir()
+	got, ok := srv.workbenchCWD(context.Background(), sess.ID, clientDir)
+	require.True(t, ok)
+
+	// mac 的 t.TempDir() 落在 /var/folders（→ /private/var 的软链），而进程 cwd 报的是解析后的
+	// 真实路径。两边都解开再比，比的才是「是不是同一个目录」。
+	wantReal, err := filepath.EvalSymlinks(shellDir)
+	require.NoError(t, err)
+	gotReal, err := filepath.EvalSymlinks(got)
+	require.NoError(t, err)
+	assert.Equal(t, wantReal, gotReal, "shell 真实所在的目录必须赢过客户端回传的那个")
+
+	clientReal, err := filepath.EvalSymlinks(clientDir)
+	require.NoError(t, err)
+	assert.NotEqual(t, clientReal, gotReal)
 }
