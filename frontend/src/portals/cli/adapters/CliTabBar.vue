@@ -81,7 +81,23 @@
             @dblclick.stop
             @mousedown.stop
           />
-          <span v-else class="tab-name">{{ displayTabName(tab.name, tabPositions.get(tab.id)) }}</span>
+          <!-- 位置角标 —— 编号在这个屏幕上**唯一**的落点。
+               名字一律不带编号（tabBaseName），角标一律带：所有标签一视同仁，眼睛永远在同一个
+               地方找编号。此前是「默认名叫『终端3』、改过名的『build』什么都没有」，同一个信息
+               放在两个位置、还不总是都在 —— 而 Alt+N / leader+N 正是按这个号切的，桌面端又没有
+               底栏那排数字，于是改过名的标签的编号在整个屏幕上无处可寻。
+               absolute 坐在 tab 左侧 padding 的空白里：不进流、不撑宽、不挤名字，零布局代价。 -->
+          <!-- 刻意**不** aria-hidden：编号从名字里挪出来之后，这里就是它唯一的载体，藏起来等于
+               对读屏用户把「这是第几个」整个删掉 —— 而 Alt+N 对他们只会更重要。读出来是「3 build」，
+               和眼睛看到的一模一样。 -->
+          <span
+            v-if="tabPositions.get(tab.id) !== undefined"
+            class="tab-pos"
+            :data-testid="`cli-portal-tab-pos-${tab.id}`"
+          >{{ tabPositions.get(tab.id) }}</span>
+          <!-- `v-else` 承重：重命名输入框和标签名是**互斥**的两种状态。少了它，改名时输入框和
+               旧名字会同时出现在同一个标签里 —— 一个既在编辑又在显示旧值的格子。 -->
+          <span v-if="renamingTabId !== tab.id" class="tab-name">{{ tabBaseName(tab.name) }}</span>
 
           <!-- 「已重开」——服务重启后这个标签背后的进程没了，我们替用户开了一个新 shell 并 cd 回
                原目录。终端里那行说明是主要的告知，这枚小标只是让人在标签栏一眼看出「是哪几个」。
@@ -195,7 +211,7 @@ import {
 import type { WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { TAB_CLOSE_OPACITY } from '@terminal/composables/cli/tabChrome'
-import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
+import { tabBaseName } from '@terminal/composables/cli/useTabDisplayName'
 import VersionBadge from '@terminal/components/chrome/VersionBadge.vue'
 import { TOPBAR_RIGHT_OUTLET_ID } from '@terminal/composables/cli/useTopbarOutlet'
 
@@ -395,6 +411,7 @@ const rollupSegs = computed(() =>
 
 /* Tab */
 .cli-tab-bar__tab {
+  position: relative;   /* 承重：位置角标 absolute 挂在它上面 */
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -438,6 +455,23 @@ const rollupSegs = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 位置角标：坐在 tab 左侧 padding 的空白里，absolute 所以不占一个像素的布局。
+   它现在是编号在标签栏上的**唯一**载体，所以不能压到看不清 —— 小，但不虚。
+   tabular-nums 让 1 和 11 的字宽一致，一列标签的角标不会左右跳。
+   pointer-events:none：点它就是点这个标签，绝不能吃掉那一下。 */
+.tab-pos {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  font-size: 0.58rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: hsl(var(--muted-foreground));
+  opacity: 0.7;
+  pointer-events: none;
+}
+/* 选中的那个标签，编号跟着一起亮 —— 否则「我在第几个」这句话在最该被读到的时候反而最淡。 */
+.cli-tab-bar__tab.is-active .tab-pos { color: inherit; opacity: 0.85; }
 .tab-rename-input {
   flex: 1;
   min-width: 40px;

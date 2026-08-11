@@ -25,3 +25,18 @@ export function displayTabName(name: string, position: number | undefined): stri
   if (position !== undefined && isDefaultTabName(name)) return `终端${position}`
   return name
 }
+
+/**
+ * 同一个标签，但**名字里不带编号** —— 给那些自己另外显示位置角标的地方用（标签栏）。
+ *
+ * 编号只该有一个落点。让默认名渲染成「终端3」、而改过名的「build」什么编号都没有，等于把同一个
+ * 信息放在两个不同的位置上：眼睛扫过去要在名字里找一次、在角标上再找一次，而且两处还不总是都有。
+ * 标签栏因此改成「名字一律不带编号 + 角标一律带」——所有标签一视同仁，编号永远在同一个地方。
+ *
+ * 其余没有角标的地方（总览卡片、右键菜单、底栏提示）继续用 displayTabName：那里名字是编号的
+ * **唯一**载体，摘掉就真的找不回来了。
+ */
+export function tabBaseName(name: string): string {
+  const trimmed = name.trim()
+  return isDefaultTabName(trimmed) ? '终端' : name
+}
