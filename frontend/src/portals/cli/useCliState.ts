@@ -183,13 +183,19 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // has one always-mounted CLI portal (no sibling portal competes for these Alt combos the way
   // pro's WindowDockOverlay does), so isActive is unconditionally true — the listener's own
   // onMounted/onBeforeUnmount lifecycle (tied to this component tree) is the only gate needed.
-  useTabShortcuts({
+  // leader（默认 Ctrl+B）走的是同一张动作表的第二条路。它在**当前标签 attach 了 tmux 时整个让位**：
+  // 那个前缀就是 tmux 自己的前缀，抢它就是抢。attached 只有终端表面知道，所以经它已注册的实例读
+  // ——和这里读 netStats / 调 onSendKey 是同一条既有通路，不新拉线。
+  const { leaderPending, leaderLabel } = useTabShortcuts({
     orderedTabIds: () => visibleTabIds.value,
     activeTabId: () => activeTab.value?.id,
     isActive: () => true,
     onSelect: switchTab,
     onNew: quickCreateTab,
     onClose: (tabId: string) => { void closeTab(tabId) },
+    leaderEnabled: () => !(activeTab.value ? surfaceRefs[activeTab.value.id]?.tmuxAttached : false),
+    onOverview: toggleOverview,
+    onRename: startRenameTab,
   })
 
   // D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output —
@@ -271,6 +277,10 @@ export function useCliState(runtime: PortalRuntimeResult) {
     }
     return out
   })
+  // 曾经这里有个 `dwStripTabs` —— 非 tmux 底栏编号列的数据投影。编号列 2026-08-11 退场
+  // （切终端改走底栏总览胶囊 → 总览浮层），这份投影随之没有消费者，一并删掉。
+  // 号码/状态的真相仍是 `tabPositions` / `tabStatuses`，它们还有标签栏、快捷键、总览三个消费者。
+
   /** Overview card → 切过去**并关掉总览**。编号就是可见标签的位置（活着的和已结束的一视同仁），
    *  所以这里直接按位置取标签，不再绕 session id —— 已结束的卡片同样点得动。
    *  「切+关」这件事本身由跨壳 SSOT selectOverviewCard 决定，两个壳不各写一遍。 */
@@ -619,7 +629,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     // 自动重开留下的标记：哪些标签现在挂的是新 shell（用户在里面首次输入即消失）
     reopenedTabIds,
     // D1-D7: tab-shortcut numbering + overview + guide banner deep-link
-    tabPositions, tabDisplayName, tabStatuses,
+    tabPositions, tabDisplayName, tabStatuses, leaderPending, leaderLabel,
     overviewOpen, toggleOverview, closeOverview, overviewGroups: overview.groups, overviewRollup: overview.rollup,
     selectOverviewIndex,
     openShortcutsSettings,

@@ -210,11 +210,26 @@
 
     <!-- 底栏 (mobile only) -->
     <div v-if="isMobile" ref="bottomBarRef" class="bottom-bar">
-      <!-- WS4: persistent tmux quick row — sits directly above the main Toolbar. -->
+      <!-- 这一行是二选一，判据只有一个：**这个 shell 在不在 tmux 里**（attached）。
+           在 → tmux 快捷条（prefix 系动作对它有意义）；不在 → dw 条（切自己的标签 + 半屏滚动）。
+           过去这里的门是「机器装了 tmux」(installed)，于是从不敲 tmux 的人也常年顶着一排
+           vspl/hspl/zoom/sess/detach —— 对他每一个都是死键，占掉手机最输不起的一行。 -->
       <TmuxQuickBar
+        v-if="tmuxReady && tmuxAttached"
         :session-id="sessionId"
         @send-key="onSendKey"
         @open-sheet="tmuxSheetOpen = true"
+      />
+      <!-- `v-else-if="tmuxReady"` 而不是裸 v-else：第一帧 tmux 快照到达之前 attached 是**未知**，
+           裸 v-else 会让 tmux 用户先闪一下 dw 条再换成 tmux 条。宁可这一行晚出现一瞬（和它此前
+           的行为一样），也不要一次无中生有的抖动。 -->
+      <DwQuickBar
+        v-else-if="tmuxReady"
+        :rollup="dwRollup"
+        :overview-open="dwOverviewOpen"
+        :tmux-installed="tmuxInstalled"
+        @toggle-overview="emit('dw-toggle-overview')"
+        @action="onDwQuickAction"
       />
       <Toolbar
         :session-id="sessionId"
@@ -391,6 +406,8 @@ import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.v
 import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
 import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.vue'
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
+import DwQuickBar from '@terminal/components/terminal-session/DwQuickBar.vue'
+import type { DwQuickAction } from '@terminal/components/terminal-session/dwQuickBar'
 import TmuxStatusSheet from '@terminal/components/terminal-session/TmuxStatusSheet.vue'
 import TmuxPaneBar from '@terminal/components/terminal-session/TmuxPaneBar.vue'
 import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
@@ -473,6 +490,18 @@ const props = defineProps<{
   /** Classifies a LIVE connection failure (auth vs unreachable vs HTTPS-block) by probing the
    *  peer's REST — surfaced through the connection chip so a stuck "Connecting…" isn't a dead end. */
   diagnose?: () => Promise<{ ok: boolean; error?: string }>
+  /**
+   * 非 tmux 底栏（DwQuickBar）的全局状态卷起与总览开关，由**拥有标签列表的那一层**下传。
+   *
+   * 这个表面自己推导不出来，也不该推导：标签的身份/顺序/状态只有 portal 有（useCliState），
+   * 在这里再算一遍就是第二个真相源。`dwOverviewOpen` 说的是**宿主那个**总览（非 tmux 的总览
+   * 挂在 portal 上），与本组件自己那个 tmux 总览 `overviewOpen` 是两回事，刻意不共用一个名字。
+   *
+   * 曾经这里还有 `dwTabs`/`dwActiveTabId`（底栏编号列的数据）。编号列 2026-08-11 退场后它们
+   * 没有消费者了，一并删掉 —— 留着就是一条谁也不喂的管子，下一个人还会以为底栏有编号列。
+   */
+  dwRollup?: Record<EffectiveStatus, number>
+  dwOverviewOpen?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -480,6 +509,8 @@ const emit = defineEmits<{
   (e: 'agent-notifications', state: AgentState[]): void
   (e: 'session-exit', exitCode: number): void
   (e: 'connection-change', status: WSConnectionStatus): void
+  /** 底栏那个总览胶囊 —— 非 tmux 的总览挂在宿主上（它才拥有标签），这里只转达。 */
+  (e: 'dw-toggle-overview'): void
 }>()
 
 // 终端英文文案 (仅非连接态内联显示; connected 无内联文本)。覆盖 @ce ConnectionChip 默认中文。
@@ -519,6 +550,10 @@ const tmuxAttached = computed(() => tmux.attached.value)
 // render NEITHER the pane bar NOR the agent badge (both would be a guessed state). The row
 // keeps its height from the always-present ConnectionStatus on the right → no layout jump.
 const tmuxReady = computed(() => tmux.ready.value)
+// 机器上装了 tmux。**不再**是任何一条 bar 的出现条件（那正是「从不用 tmux 却顶着一排 tmux 死键」
+// 的来源）；它现在只回答一个窄问题：dw 底栏要不要留那个 attach 逃生口。没装 tmux 的机器上给一个
+// attach 按钮，等于给一个必然 command not found 的按钮。
+const tmuxInstalled = computed(() => tmux.installed.value)
 // ── Agent Overview: the dashboard view of THIS tmux session. ONE useAgentOverview instance is
 // the SSOT for both the pane bar's roll-up/badge and the overview grid (they share seen-state).
 const overviewOpen = ref(false)
@@ -1595,15 +1630,22 @@ function disarmPaste(): void {
 // Non-passive touchmove listener (a `@touchmove.passive` template binding cannot preventDefault):
 //   1. While SELECTING — swallow the finger-drag so it adjusts anchors instead of scrolling the
 //      viewport / page out from under the selection ("selection jumps on Safari scroll" bug).
-//   2. Idle, NORMAL buffer — let it through: xterm's own viewport momentum-scroll handles it.
-//   3. Idle, ALTERNATE screen (fullscreen TUI) — xterm has no scrollback, so a finger swipe would
-//      do NOTHING (the reported "touch scroll is bad" in flicker mode). Convert the swipe into the
-//      app's own scroll via scrollGesture (mouse-wheel / PgUp-PgDn), one cell-height per step.
+//   2. Otherwise — convert the swipe into a scroll via scrollGesture, which knows how to move
+//      whichever thing owns the history (xterm's scrollback in the normal buffer; the app itself
+//      on the alternate screen).
+//
+// ── 这里曾经把普通缓冲区直接放行，理由是「xterm 自己的 viewport 会做惯性滚动」──────────────
+// 那个理由在 xterm 5.x 是对的：`.xterm-viewport` 里有一个 `.xterm-scroll-area`，高度 = 总行数 ×
+// 行高，靠它撑开**浏览器原生滚动**，手指拖动因此自然可用。
+// **xterm 6.0 把它删了**。实测（本仓库 @xterm/xterm 6.0.0）：`.xterm-viewport` 没有任何子元素、
+// 没有 `.xterm-scroll-area`、`scrollHeight === clientHeight === 504`，原生滚动**不可能发生**。
+// 于是这一行 return 把手势交给了一个已经不存在的机制 —— 没有报错、没有日志，只是不用 tmux 的人
+// 在手机上再也翻不回去看历史了。升级依赖时最难发现的正是这种：没坏在编译期，坏在一个假设上。
 function onTerminalBodyTouchMove(e: TouchEvent) {
   if (!isMobile.value) return
   if (isSelecting.value) { e.preventDefault(); return }
   const term = xtermRef.value?.terminal?.()
-  if (!term || term.buffer.active.type !== 'alternate') return
+  if (!term) return
   const touch = e.touches[0]
   if (!touch) return
   const cellH = (terminalBodyRef.value?.clientHeight ?? 0) / Math.max(1, term.rows) || 18
@@ -1921,19 +1963,46 @@ function onTogglePanel(panel: 'numpad' | 'compose') {
   hud.record('state', `panel: ${activeMode.value}`)
 }
 
-// Sentinels emitted by TmuxQuickBar's ½↑/½↓ buttons (NOT byte sequences sent to the PTY) — they
+// Sentinels emitted by the ½↑/½↓ buttons (NOT byte sequences sent to the PTY) — they
 // route a half-page scroll through onSendKey so it is buffer-aware with a STABLE distance.
 const HALF_PAGE_UP = 'dw:scroll-half-up'
 const HALF_PAGE_DOWN = 'dw:scroll-half-down'
 
+/**
+ * 半屏滚动该由客户端做，还是交给服务端的 tmux copy-mode。
+ *
+ * · **alt screen**（全屏 TUI：claude-code / less / vim）：xterm 手里没有 scrollback，画面归应用 ——
+ *   `scrollGesture` 会把手势转成应用听得懂的滚轮/翻页。
+ * · **normal buffer + 在 tmux 里**：tmux 的历史比 xterm 手里那 5000 行长，走服务端更值。
+ * · **normal buffer + 不在 tmux 里**：xterm 自己的 scrollback 就是全部历史 → 本地滚。
+ *
+ * 最后这种情况以前**没有实现**：½↑½↓ 无条件走 tmux copy-mode，没 tmux 就是个哑动作。这正是
+ * 「不用 tmux 的人四个回看入口全是死的」里的一个 —— 另外三个（PgUp/PgDn、手指拖）各有各的
+ * 修法，判断相近但不相同（例如 PgUp 在 alt screen 下**应该**发给 PTY，让 less 自己翻页），
+ * 所以刻意不硬凑成同一个函数。
+ */
+function scrollsLocally(t: Terminal | null | undefined): t is Terminal {
+  return !!t && (t.buffer.active.type === 'alternate' || !tmuxAttached.value)
+}
+
+/** dw 底栏的动作。半屏滚动复用上面那条哨兵路径（同一个判断），attach 是那个逃生口。 */
+function onDwQuickAction(id: DwQuickAction) {
+  if (id === 'half-up') return onSendKey(HALF_PAGE_UP)
+  if (id === 'half-down') return onSendKey(HALF_PAGE_DOWN)
+  if (id === 'attach') {
+    // 真的敲一行 `tmux attach` 进去，和 tmux 那条 bar 的 attach 是同一个动作 —— 一旦 attach 成功，
+    // tmux_state 推过来 attached=true，这条 bar 自己就换成 tmux 那条了。
+    onSendKey('tmux attach\r')
+    hud.record('state', 'tmux attach')
+  }
+}
+
 function onSendKey(key: string) {
-  // ½↑/½↓: alt screen (fullscreen TUI) → scroll the app a fixed half-screen via scrollGesture
-  // (stable, predictable distance per press); normal buffer → tmux copy-mode half-page, which
-  // reaches tmux's full scrollback history. Intercept BEFORE any byte is sent.
+  // ½↑/½↓ —— 判断见 scrollsLocally。截在任何字节发出去之前。
   if (key === HALF_PAGE_UP || key === HALF_PAGE_DOWN) {
     const t = xtermRef.value?.terminal?.()
     const dir: 1 | -1 = key === HALF_PAGE_UP ? -1 : 1
-    if (t && t.buffer.active.type === 'alternate') {
+    if (scrollsLocally(t)) {
       scrollGesture(t, dir, Math.max(1, Math.floor(t.rows / 2)))
     } else {
       void tmux.runCopyMotion(dir < 0 ? 'halfpage-up' : 'halfpage-down')
@@ -1943,8 +2012,18 @@ function onSendKey(key: string) {
   }
   const term = xtermRef.value?.terminal?.()
   if (term && (key === '\x1b[5~' || key === '\x1b[6~')) {
+    const dir: 1 | -1 = key === '\x1b[5~' ? -1 : 1
+    // 不在 tmux 里、又是普通缓冲区时，这两个键**不再发给 PTY**：那条路上没有接收者（shell 不处理
+    // PgUp），按下去只会什么都不发生。这里改滚 xterm 自己的 scrollback —— 也就是这块屏幕上唯一
+    // 真的存着历史的地方。主 Toolbar 的 PgU/PgD 和这条 bar 的按钮走的都是这一处，所以同一屏上
+    // 两个同名键不会有两种行为。
+    if (!tmuxAttached.value && term.buffer.active.type !== 'alternate') {
+      scrollGesture(term, dir, Math.max(1, term.rows - 1))
+      hud.record('keyboard', `${dir < 0 ? 'PgUp' : 'PgDn'} (scrollback)`)
+      return
+    }
     sendBinary(encoder.encode(key))
-    hud.record('keyboard', `${key === '\x1b[5~' ? 'PgUp' : 'PgDn'} (PTY)`)
+    hud.record('keyboard', `${dir < 0 ? 'PgUp' : 'PgDn'} (PTY)`)
     return
   }
   if (tmuxDetected.value && (key === '\x1b[H' || key === '\x1b[F' ||
@@ -2253,7 +2332,10 @@ function clipboardWrite(text: string): Promise<boolean> {
 // surface's body. openInstallGuide opens the notify-provider quick sheet (the notify
 // entry point backing the pane bar's bell); the name is kept for the host API.
 function openInstallGuide() { notifyQuickOpen.value = true }
-defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide })
+// `tmuxAttached` 对外，是为了让**拥有标签的那一层**能回答一个只有这里知道的问题：当前这个标签的
+// shell 是不是在 tmux 里。leader 键的让位就靠它 —— 一旦 attach，Ctrl+B 整个属于 tmux，dw 一个键
+// 都不碰（见 useTabShortcuts 的 leaderEnabled）。判据只有这一个，和底栏那一行二选一用的是同一个。
+defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached })
 </script>
 
 <style scoped>
