@@ -15,11 +15,14 @@ import {
   bindingFor,
   bindingLabel,
   isDerived,
+  leaderCostNote,
+  leaderHintText,
+  DEFAULT_LEADER,
   type ShortcutAction,
   type ShortcutPrefix,
 } from '@terminal/composables/cli/useShortcutsConfig'
 
-const { config, loading, load, setPrefix, setOverride, clearOverride, resetToDefaults } = useShortcutsConfig()
+const { config, loading, load, setPrefix, setOverride, clearOverride, setLeader, resetToDefaults } = useShortcutsConfig()
 
 // Which prefixes the BROWSER eats is platform-specific, and getting this wrong steers people away
 // from the one option that works for them. On macOS the browser's own tab shortcuts are Cmd-based,
@@ -86,7 +89,27 @@ function unpinLabel(action: ShortcutAction): string {
   return action === 'findInTerminal' ? '已自定义 · 改回默认' : '已自定义 · 跟随前缀'
 }
 
-const capturing = ref<ShortcutAction | null>(null)
+/**
+ * 此刻正在捕获**哪一个**绑定。
+ *
+ * 一个状态，不是两个布尔：leader 的捕获曾经是一路独立的 `capturingLeader`，于是两者可以同时为真
+ * —— 先点某个动作、再点 leader，两个都 armed；捕获完一个，另一个还等在那里，下一次按键会顺手把
+ * 它也改掉。一个界面能进入的非法组合，迟早会被人走到。
+ */
+const capturing = ref<{ kind: 'action'; id: ShortcutAction } | { kind: 'leader' } | null>(null)
+const capturingLeader = computed(() => capturing.value?.kind === 'leader')
+function capturingAction(action: ShortcutAction): boolean {
+  return capturing.value?.kind === 'action' && capturing.value.id === action
+}
+
+/** leader 之后能按什么 —— **从键位表派生**（leaderHintText），不手抄第二份。
+ *  手抄的第二份注定和键位表分家：改了键位忘了改文案，设置页就开始教人按一个不存在的键。 */
+const LEADER_HINTS = leaderHintText()
+
+const leaderDisplay = computed(() =>
+  config.value.leader ? bindingLabel(config.value.leader) : '已关闭',
+)
+const leaderCost = computed(() => leaderCostNote(config.value.leader))
 
 function prefixIsReserved(p: ShortcutPrefix): boolean {
   return PREFIXES.value.find((o) => o.value === p)?.reserved ?? false
@@ -112,12 +135,20 @@ function display(action: ShortcutAction): string {
 
 function startCapture(action: ShortcutAction): void {
   if (action === 'switchTab') return // the digit family follows the prefix; nothing to capture
-  capturing.value = action
+  capturing.value = { kind: 'action', id: action }
+}
+function startCaptureLeader(): void {
+  capturing.value = { kind: 'leader' }
 }
 
+/**
+ * 捕获一个组合键。**一个 handler 管两种落点**（动作 override / leader）——它们此前是两份几乎
+ * 逐字相同的实现，配上两个各自独立的布尔状态，于是可以同时 armed，捕获完一个另一个还等着，
+ * 下一次按键会顺手把它也改掉。现在落点由 `capturing` 这一个状态说了算。
+ */
 function onCaptureKey(e: KeyboardEvent): void {
-  const action = capturing.value
-  if (!action) return
+  const target = capturing.value
+  if (!target) return
   e.preventDefault()
   e.stopPropagation()
 
@@ -132,7 +163,9 @@ function onCaptureKey(e: KeyboardEvent): void {
   // A bare key would swallow ordinary typing in the terminal — require at least one modifier.
   if (parts.length === 0) { capturing.value = null; return }
 
-  setOverride(action, [...parts, e.code].join('+'))
+  const binding = [...parts, e.code].join('+')
+  if (target.kind === 'leader') setLeader(binding)
+  else setOverride(target.id, binding)
   capturing.value = null
 }
 
@@ -165,6 +198,48 @@ onMounted(() => { void load() })
         <p class="sc-prefix-tip">{{ thirdPartyHint }}</p>
       </div>
 
+      <!-- leader：第二条路，不是替代。上面那套一按就到但候选池小（浏览器和系统在同几个修饰键里
+           抢）；leader 是 tmux 那种两段式，第二段不需要修饰键，键位一下子够用。两条同时有效。 -->
+      <div class="sc-prefix sc-leader">
+        <div class="sc-prefix-head">
+          <span class="sc-prefix-label">leader 键（两段式）</span>
+          <span class="sc-prefix-sub">像 tmux 那样：先按 leader，再按一个普通键。和上面的前缀键<b>同时有效</b></span>
+        </div>
+        <div class="sc-leader-row">
+          <button
+            type="button"
+            class="sc-key"
+            :class="{ capturing: capturingLeader, off: !config.leader }"
+            data-testid="shortcut-leader"
+            @click="startCaptureLeader"
+          >{{ capturingLeader ? '按下新的组合…' : leaderDisplay }}</button>
+          <button
+            v-if="config.leader"
+            type="button"
+            class="sc-unpin"
+            data-testid="shortcut-leader-off"
+            @click="setLeader('')"
+          >关掉</button>
+          <button
+            v-else
+            type="button"
+            class="sc-unpin"
+            data-testid="shortcut-leader-on"
+            @click="setLeader(DEFAULT_LEADER)"
+          >开启（{{ bindingLabel(DEFAULT_LEADER) }}）</button>
+        </div>
+        <p v-if="config.leader" class="sc-leader-keys">{{ LEADER_HINTS }}</p>
+        <!-- 这一句是这一块唯一真正有用的话：注册一个 leader 就是从 shell 手里拿走那个键，而
+             leader 唯一生效的场景（不在 tmux 里）正是 shell 场景。与其等人某天发现光标左移不好
+             使了再去猜是谁干的，不如现在就说清楚。 -->
+        <p v-if="leaderCost.text" class="sc-leader-cost" :class="{ severe: leaderCost.severe }">
+          注意：这个键在 shell 里原本是「{{ leaderCost.text }}」，设为 leader 后在<b>不用 tmux 的终端里</b>就按不出来了。
+        </p>
+        <p class="sc-prefix-tip">
+          在已经 attach 了 tmux 的标签里，leader <b>整个让位给 tmux</b> —— 那时它就是 tmux 的前缀，dw 一个键都不碰。
+        </p>
+      </div>
+
       <div v-for="group in GROUPS" :key="group.title" class="sc-list">
         <div class="sc-group-head">
           <span class="sc-group-title">{{ group.title }}</span>
@@ -178,11 +253,11 @@ onMounted(() => { void load() })
           <button
             type="button"
             class="sc-key"
-            :class="{ capturing: capturing === row.key, pinned: !isDerived(config, row.key) }"
+            :class="{ capturing: capturingAction(row.key), pinned: !isDerived(config, row.key) }"
             :disabled="row.key === 'switchTab'"
             :data-testid="`shortcut-${row.key}`"
             @click="startCapture(row.key)"
-          >{{ capturing === row.key ? '按下新的组合…' : display(row.key) }}</button>
+          >{{ capturingAction(row.key) ? '按下新的组合…' : display(row.key) }}</button>
           <button
             v-if="!isDerived(config, row.key)"
             type="button"
@@ -225,6 +300,18 @@ onMounted(() => { void load() })
 .sc-prefix-btn.warn small { color: #ff9800; }
 .sc-prefix-warn { margin: 9px 0 0; font-size: 0.72rem; color: #ff9800; }
 .sc-prefix-tip { margin: 7px 0 0; font-size: 0.72rem; color: hsl(var(--muted-foreground)); }
+
+.sc-leader { border-bottom: 1px solid hsl(var(--border)); }
+.sc-leader-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sc-key.off { color: hsl(var(--muted-foreground)); font-style: italic; }
+.sc-leader-keys {
+  margin: 9px 0 0; font-size: 0.72rem; color: hsl(var(--muted-foreground));
+  font-family: ui-monospace, Menlo, monospace;
+}
+/* 代价那一句用橙色（和上面 prefixWarning 同一个"要你看一眼"的橙），撞到会中断/退出 shell 的键
+   （^C / ^D / ^Z）时升到红：那不是"少个快捷键"，是一按就丢进程。 */
+.sc-leader-cost { margin: 7px 0 0; font-size: 0.72rem; color: #ff9800; }
+.sc-leader-cost.severe { color: #f87171; font-weight: 600; }
 
 .sc-list { display: flex; flex-direction: column; }
 .sc-group-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 14px 0 4px; }
