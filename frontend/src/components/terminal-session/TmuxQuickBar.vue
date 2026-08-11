@@ -1,33 +1,27 @@
 <template>
   <!-- WS4 — persistent tmux quick-action row. One compact, horizontally-scrollable line
-       mounted directly ABOVE the main Toolbar. Renders only when tmux is installed on the
-       machine, so it stays invisible for plain (non-tmux) hosts. Every action just sends a
-       key sequence over the existing @send-key → PTY path; topology is PUSHED (WS tmux_state)
-       so there is no per-tap server roundtrip. The leading `tmux:` label is itself a tap
-       target that opens the WS8 status sheet. -->
-  <div v-if="ready && installed" class="tmux-quick-bar" data-testid="tmux-quick-bar" @mousedown.prevent>
+       mounted directly ABOVE the main Toolbar. Every action just sends a key sequence over the
+       existing @send-key → PTY path; topology is PUSHED (WS tmux_state) so there is no per-tap
+       server roundtrip. The leading `tmux:` label is itself a tap target that opens the WS8
+       status sheet.
+
+       ── 门是 `attached`，不再是 `installed` ────────────────────────────────────────────────
+       曾经的门是「这台机器装了 tmux」。那让一个从不敲 tmux 的人，屏幕最下面常年顶着
+       vspl / hspl / zoom / sess / detach —— 对他每一个都是死键，占掉手机最输不起的一行。
+       现在这一行是二选一：在 tmux 里就是这条，不在就是 DwQuickBar。
+       因此**这条 bar 内部不再判 attached**：门已经保证了它为真。
+
+       那个「未 attach 时置顶的醒目 attach 按钮」也随之删掉了 —— 门改成 attached 之后它永远
+       不可能出现。它没有消失，是搬了家：搬到 DwQuickBar 的尾部当逃生口（见 dwQuickBar.ts）。
+       没有那次搬家，装了 tmux 但此刻没 attach 的人就再也点不到「进 tmux」了。 -->
+  <div v-if="ready && attached" class="tmux-quick-bar" data-testid="tmux-quick-bar" @mousedown.prevent>
     <button
-      class="tqb-tag"
+      class="tqb-tag is-attached"
       data-testid="tmux-quick-tag"
-      :class="{ 'is-attached': attached }"
       title="tmux status"
       @click="$emit('openSheet')"
     >
       <span class="tqb-tag-text">tmux:</span>
-    </button>
-
-    <!-- attach FIRST when detached (prominent), LAST when attached — driven purely off `attached` -->
-    <button
-      v-if="!attached"
-      class="tqb-btn tqb-btn--attach"
-      data-testid="tmux-quick-attach"
-      title="tmux attach"
-      @click="send('tmux attach\r')"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4" /><polyline points="10,17 15,12 10,7" /><line x1="15" y1="12" x2="3" y2="12" />
-      </svg>
-      <span class="tqb-cap">attach</span>
     </button>
 
     <button class="tqb-btn" data-testid="tmux-quick-cp" :title="`${pfxLabel} [ copy mode`" @click="send(tmux.prefixSeq('['))">
@@ -41,17 +35,14 @@
     <!-- Half-page up/down — a STABLE half-screen scroll, buffer-aware. Routes through the
          surface's onSendKey (the sentinel below): in a fullscreen TUI (alt screen, e.g. claude-code)
          it scrolls the app itself a fixed half-screen via forwarded mouse-wheel; in the normal
-         buffer it runs tmux copy-mode half-page (server-side, reaching tmux's full scrollback).
-         Only while attached (no tmux client → nothing to scroll). -->
+         buffer it runs tmux copy-mode half-page (server-side, reaching tmux's full scrollback). -->
     <button
-      v-if="attached"
       class="tqb-btn tqb-btn--scroll"
       data-testid="tmux-quick-halfpgup"
       title="Half Page Up"
       @click="send('dw:scroll-half-up')"
     ><span class="tqb-cap">½↑</span></button>
     <button
-      v-if="attached"
       class="tqb-btn tqb-btn--scroll"
       data-testid="tmux-quick-halfpgdn"
       title="Half Page Down"
@@ -92,10 +83,8 @@
     </button>
     <!-- New tmux session — create + switch the client onto it (server-side; keystroke
          new-session is unreliable and refuses to nest). Placed before the session switcher
-         so "新会话 → sess" reads as create-then-pick. Only while attached: a new session is
-         meaningful once you're in tmux (use attach otherwise). -->
+         so "新会话 → sess" reads as create-then-pick. -->
     <button
-      v-if="attached"
       class="tqb-btn tqb-btn--new"
       data-testid="tmux-quick-newsession"
       title="新建 tmux 会话并切换"
@@ -119,9 +108,9 @@
       <span class="tqb-cap">detach</span>
     </button>
 
-    <!-- attach LAST when attached (de-emphasised re-attach affordance) -->
+    <!-- attach 收尾（低强调的「重新 attach」意符）。这条 bar 只在已经 attach 时出现，所以它
+         唯一的用处是 tmux 客户端掉了之后再连回去。 -->
     <button
-      v-if="attached"
       class="tqb-btn"
       data-testid="tmux-quick-attach"
       title="tmux attach"
@@ -148,7 +137,8 @@ const emit = defineEmits<{
 
 const tmux = useTmuxState(() => props.sessionId)
 const ready = tmux.ready
-const installed = tmux.installed
+// `installed`（这台机器装没装 tmux）刻意不再读：它曾经是这条 bar 的门，而那正是「不用 tmux 的人
+// 也常年顶着一排 tmux 死键」的根。现在唯一还需要它的是 DwQuickBar 的 attach 逃生口。
 const attached = tmux.attached
 
 /** Caption matching the live tmux prefix: "^B" for C-b, "^A" for C-a, else display. */

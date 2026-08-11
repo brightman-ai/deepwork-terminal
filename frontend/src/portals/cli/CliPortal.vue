@@ -54,11 +54,14 @@
       :error="error"
       :active-tab-id="activeTab?.id"
       :tabs-with-session="surfaceTabs"
+      :dw-rollup="overviewRollup"
+      :dw-overview-open="overviewOpen"
       @register-surface="registerSurface"
       @agent-state="onTabAgentState"
       @agent-notifications="onTabAgentNotifications"
       @session-exit="onTabSessionExit"
       @connection-change="onTabConnectionChange"
+      @dw-toggle-overview="toggleOverview"
     />
 
     <!-- 服务重启后原来那张「假装恢复成功」的空终端，换成如实说明 + 两个明确选择。 -->
@@ -73,6 +76,9 @@
       :action="detachedAction"
       @close="closeTab(detachedCard.tabId)"
     />
+
+    <!-- leader 等待提示 —— 和 pro 用同一个共享组件，措辞从键位表派生（见 leaderHintText）。 -->
+    <LeaderHintBar :pending="leaderPending" :label="leaderLabel" />
 
     <!-- Tab right-click menu. Same action table as the keyboard shortcuts, plus the two things a
          shortcut can't express (关闭其他 / 复制目录路径). -->
@@ -115,6 +121,7 @@ import RemoteTermDialog from '@terminal/components/terminal-session/RemoteTermDi
 import UsageChip from '@terminal/components/report/UsageChip.vue'
 import ShortcutsGuideBanner from '@terminal/components/terminal-session/ShortcutsGuideBanner.vue'
 import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
+import LeaderHintBar from '@terminal/components/terminal-session/LeaderHintBar.vue'
 import CliTabContextMenu from '@terminal/components/cli/CliTabContextMenu.vue'
 import DetachedTerminalCard from '@terminal/components/cli/DetachedTerminalCard.vue'
 
@@ -140,6 +147,9 @@ const {
   overviewOpen, toggleOverview, closeOverview, overviewGroups, overviewRollup,
   selectOverviewIndex, openShortcutsSettings,
   tabMenu, openTabMenu,
+  // leader 等待态 + 它的键名。键名走 bindingLabel（绑定措辞的 SSOT），所以提示条和设置页
+  // 显示的是同一个结果，不会写成两种样子。
+  leaderPending, leaderLabel,
 } = useCliState(runtime)
 </script>
 

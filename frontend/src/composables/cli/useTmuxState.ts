@@ -257,7 +257,15 @@ function createStore(sessionId: () => string): TmuxStateStore {
     const id = sessionId()
     if (!id) return
     try {
-      const resp = await cliFetch(cliApi('/tmux/state'))
+      // **必须带 ?session=**：`attached`（这个 shell 在不在 tmux 里）是相对某个会话的 shell PID
+      // 算出来的，服务端只有拿到 session 才算得了它。这里此前取了 id、判了空，然后请求时把它丢了
+      // —— 于是首帧永远是 shellPID=0 → `attached=false`，`ready` 却已经为 true。
+      //
+      // 那个「假的真」会连累一串下游：打开一个本来就在 tmux 里的标签，头一秒会渲染成非 tmux 的
+      // 底栏、把 leader 判给 dw（于是抢走 tmux 用户的 Ctrl+B）、把 PgUp 分给本地 scrollback，
+      // 直到约 1 秒后 session-scoped 的 WS 帧才把它纠正回来。ready 的意思必须是「我知道答案」，
+      // 不能是「我拿到了一个答案，只是它算的不是这个会话」。
+      const resp = await cliFetch(cliApi(`/tmux/state?session=${encodeURIComponent(id)}`))
       if (resp.ok) handleWSMessage(await resp.json())
     } catch { /* endpoint may be absent in older hosts — stay null, bar stays hidden */ }
   }

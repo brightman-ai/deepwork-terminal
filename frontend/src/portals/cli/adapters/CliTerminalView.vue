@@ -33,12 +33,15 @@
         :is-remote="tab.isRemote"
         :conn-error="tab.connError"
         :diagnose="tab.diagnose"
+        :dw-rollup="dwRollup"
+        :dw-overview-open="dwOverviewOpen"
         :ref="(el) => onSurfaceRef(tab.id, el)"
         :data-testid="`cli-portal-surface-${tab.id}`"
         @agent-state="(s) => emit('agent-state', tab.id, s)"
         @agent-notifications="(s) => emit('agent-notifications', tab.id, s)"
         @session-exit="(code) => emit('session-exit', tab.id, code)"
         @connection-change="(s) => emit('connection-change', tab.id, s)"
+        @dw-toggle-overview="emit('dw-toggle-overview')"
       />
     </template>
   </div>
@@ -46,6 +49,7 @@
 
 <script setup lang="ts">
 import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
+import type { EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
 
 interface TabWithSession {
@@ -68,6 +72,10 @@ defineProps<{
   error: string | null
   activeTabId: string | undefined
   tabsWithSession: TabWithSession[]
+  /** 非 tmux 底栏的状态卷起与总览开关。这一层只**转发** —— 标签的身份/顺序/状态归 portal
+   *  （useCliState），终端表面不自己推导（否则就有第二个真相源）。 */
+  dwRollup?: Record<EffectiveStatus, number>
+  dwOverviewOpen?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -76,6 +84,8 @@ const emit = defineEmits<{
   (e: 'agent-notifications', tabId: string, states: AgentState[]): void
   (e: 'session-exit', tabId: string, exitCode: number): void
   (e: 'connection-change', tabId: string, status: WSConnectionStatus): void
+  /** 底栏的总览胶囊，原样上交给拥有标签的那一层执行。 */
+  (e: 'dw-toggle-overview'): void
 }>()
 
 function onSurfaceRef(tabId: string, el: unknown) {
