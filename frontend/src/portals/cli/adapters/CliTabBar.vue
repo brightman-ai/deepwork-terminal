@@ -197,7 +197,6 @@ import {
   agentSaidText,
   STATUS_COLOR,
   STATUS_MOTION,
-  URGENCY_ORDER,
   type EffectiveStatus,
 } from '@terminal/composables/cli/useAgentOverview'
 import { useAgentSignals } from '@terminal/composables/cli/useAgentSignals'
@@ -208,6 +207,12 @@ import {
   type TabLiveness,
   type TabNotLive,
 } from '@terminal/composables/cli/tabLiveness'
+import {
+  effectiveTabStatus,
+  tabNotLive,
+  tabReopened,
+  rollupSegments,
+} from '@terminal/composables/cli/tabPresentation'
 import type { WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { TAB_CLOSE_OPACITY } from '@terminal/composables/cli/tabChrome'
@@ -261,21 +266,20 @@ const emit = defineEmits<{
 // manual refresh button, the auto-update pill, and HelpCenter's manual entry).
 
 /** '' when this tab has no agent — an idle shell renders NO dot, exactly like the overview grid
- *  and the pane bar (idle is deliberately absent from STATUS_COLOR for this reason). */
+ *  and the pane bar (idle is deliberately absent from STATUS_COLOR for this reason).
+ *  逻辑本体在 tabPresentation.ts（与 pro 的 TopTabBar 共用），这里只是绑 props 的薄包装。 */
 function tabStatus(tabId: string): EffectiveStatus | '' {
-  const s = props.tabStatuses.get(tabId)
-  return s && s !== 'idle' ? s : ''
+  return effectiveTabStatus(props.tabStatuses, tabId)
 }
 
 /** null = 这个标签背后还有活着的进程（默认）。有值就一定要说出来。 */
 function notLive(tabId: string): TabNotLive | null {
-  const l = props.tabLiveness?.get(tabId)
-  return l && l !== 'live' ? l : null
+  return tabNotLive(props.tabLiveness, tabId)
 }
 
 /** 这个标签现在挂的是自动重开出来的新 shell，且用户还没动过手。 */
 function reopened(tabId: string): boolean {
-  return props.reopenedTabs?.has(tabId) ?? false
+  return tabReopened(props.reopenedTabs, tabId)
 }
 
 // 显式信号（BEL / OSC 9·777·99）：唯一带着 agent 原话的那条帧。标签上只有一枚点，容不下一句话，
@@ -301,16 +305,9 @@ function tabTitle(tab: WorkbenchTab): string | undefined {
 }
 
 /** Roll-up segments, most-urgent first, zero counts dropped. Ordering comes from URGENCY_ORDER
- *  (the same constant the overview groups iterate), so the capsule can't disagree with the grid. */
-const ROLLUP_ICON: Record<Exclude<EffectiveStatus, 'idle'>, string> = {
-  waiting: '◉', running: '●', 'done-unseen': '✓',
-}
-const rollupSegs = computed(() =>
-  URGENCY_ORDER
-    .filter((s): s is Exclude<EffectiveStatus, 'idle'> => s !== 'idle')
-    .map((status) => ({ status, icon: ROLLUP_ICON[status], count: props.rollup?.[status] ?? 0 }))
-    .filter((s) => s.count > 0),
-)
+ *  (the same constant the overview groups iterate), so the capsule can't disagree with the grid.
+ *  逻辑本体在 tabPresentation.ts（与 pro 的 TopTabBar 共用）。 */
+const rollupSegs = computed(() => rollupSegments(props.rollup))
 </script>
 
 <style scoped>
