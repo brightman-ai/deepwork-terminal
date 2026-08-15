@@ -108,14 +108,11 @@
             class="tab-reopened"
             :data-testid="`cli-portal-tab-reopened-${tab.id}`"
           >已重开</span>
-
-          <!-- Close -->
-          <span
-            class="tab-close"
-            :data-testid="`cli-portal-tab-close-${tab.id}`"
-            @click.stop="emit('close', tab.id)"
-          >&times;</span>
         </button>
+        <!-- 关闭走右键/长按菜单（useTabContextMenu 的「关闭」项），标签本体不再放常驻 ✕。
+             关闭是低频操作，常驻 ✕ 离标签名太近、标签变窄后尤其容易误触；hover 才揭示的方案也
+             不考虑——那正是曾经踩过的坑（iOS 把"揭示"这次触摸当 hover 吃掉第一次点击，切标签
+             要点两下）。菜单入口天然不受这个限制。 -->
       </template>
     </template>
 
@@ -215,7 +212,6 @@ import {
 } from '@terminal/composables/cli/tabPresentation'
 import type { WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
 import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
-import { TAB_CLOSE_OPACITY } from '@terminal/composables/cli/tabChrome'
 import { tabBaseName } from '@terminal/composables/cli/useTabDisplayName'
 import VersionBadge from '@terminal/components/chrome/VersionBadge.vue'
 import { TOPBAR_RIGHT_OUTLET_ID } from '@terminal/composables/cli/useTopbarOutlet'
@@ -293,15 +289,17 @@ const { signalFor } = useAgentSignals()
  * agentSaidText（和总览卡片同一个 SSOT），说话人取自 sessions_overview 帧里检测到的引擎，所以同一个
  * 终端在卡片和标签上不会被叫成两个名字；裸 BEL 没有正文，那时这里什么也不加。
  */
-function tabTitle(tab: WorkbenchTab): string | undefined {
-  const parts: string[] = []
+function tabTitle(tab: WorkbenchTab): string {
+  // 名字打头、无条件带上：标签宽度收紧后名字常被 ellipsis 截断，这个 title 是截断后
+  // 唯一能查到全名的地方（标签栏本身不再有别的地方摆得下全名）。
+  const parts: string[] = [tabBaseName(tab.name)]
   const l = notLive(tab.id)
   if (l) parts.push(LIVENESS_LABEL[l])
   // 小标只有两个字，放不下「为什么」——完整那句话在这里补上（终端里也写了同样一句）。
   if (reopened(tab.id)) parts.push('上一个进程已随服务重启结束，这是一个新的 shell')
   const said = agentSaidText(signalFor(tab.sessionId), sessionEntry(tab.sessionId)?.agentTool)
   if (said) parts.push(said)
-  return parts.length ? parts.join(' · ') : undefined
+  return parts.join(' · ')
 }
 
 /** Roll-up segments, most-urgent first, zero counts dropped. Ordering comes from URGENCY_ORDER
@@ -412,9 +410,11 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 12px;
-  min-width: 80px;
-  max-width: 200px;
+  padding: 0 8px;
+  min-width: 60px;
+  /* 上限而非真固定：短名字(如"终端2")天然更窄，省下的横向空间留给别的标签——
+     tmux 密度对标要的是"同样空间放更多个"，真固定宽反而会让短名字占满不必要的格。 */
+  max-width: 112px;
   height: 36px;
   background: transparent;
   border: none;
@@ -481,25 +481,6 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
   font: inherit;
   padding: 0 4px;
   outline: none;
-}
-
-/* Close ✕ —— 常驻可见，不再靠 hover 揭示。取值与理由都在共享的 TAB_CLOSE_OPACITY，
-   pro 的 TopTabBar 用同一份：hover 揭示会让 iOS 把切标签的第一次点击吃掉。 */
-.tab-close {
-  font-size: 1rem;
-  line-height: 1;
-  flex-shrink: 0;
-  padding: 0 2px;
-  border-radius: 3px;
-  opacity: v-bind('TAB_CLOSE_OPACITY.idle');
-  margin-left: auto;
-  color: hsl(var(--muted-foreground));
-  transition: opacity 0.1s;
-}
-.tab-close:hover {
-  opacity: v-bind('TAB_CLOSE_OPACITY.hover');
-  color: #ff6b6b;
-  background: rgba(255,255,255,0.12);
 }
 
 /* Agent dot — colours + rhythms bound from the SSOT constants, never typed as hex here.
