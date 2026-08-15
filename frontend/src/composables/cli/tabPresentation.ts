@@ -2,7 +2,7 @@
  * tabPresentation — 标签栏"一个标签该画成什么"的纯判定逻辑 SSOT。
  *
  * standalone 的 `CliTabBar.vue` 与 pro 的 `TopTabBar.vue` 是两个 presentational 组件（刻意的：
- * 见 tabChrome.ts 头注），但状态点颜色/存活态/已重开/roll-up 这几条判定此前各自手写了一份几乎
+ * 两壳顶栏架构真实不同），但状态点颜色/存活态/已重开/roll-up 这几条判定此前各自手写了一份几乎
  * 逐行相同的代码——这才是真正的重复（组件本身该分开，判定逻辑不该分开）。
  */
 import { URGENCY_ORDER, type EffectiveStatus } from './useAgentOverview'
