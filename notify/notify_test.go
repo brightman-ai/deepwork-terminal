@@ -88,7 +88,7 @@ func TestCoordinatorStatusJoinsEnabled(t *testing.T) {
 func TestPlainTextShowsAllSessionsCapped(t *testing.T) {
 	var sessions []SessionRef
 	for i := 0; i < 7; i++ {
-		sessions = append(sessions, SessionRef{Tool: "claude", Location: "loc", Status: "idle", Turns: 1, JustChanged: i == 3})
+		sessions = append(sessions, SessionRef{Tool: "claude", Location: "loc", Status: "idle", JustChanged: i == 3})
 	}
 	e := Event{Title: "t", Counts: Counts{Idle: 7}, Sessions: sessions}
 	txt := PlainText(e)
@@ -196,6 +196,89 @@ func TestWebhookSigningVectors(t *testing.T) {
 	if got := dingtalkSign("1700000000000", "ding-secret"); got != "nqq88ibHb0KGsDlurqi82ts6x3l4frnYUqJn0JfHX9o=" {
 		t.Fatalf("dingtalkSign vector mismatch (algo drift?): got %s", got)
 	}
+}
+
+// markdownBody is what Feishu's card body, DingTalk's text, and WeCom's content all
+// render — no vendor documents which field their OS push-notification preview
+// actually reads, so the title must LEAD the body (not just appear somewhere in it):
+// whichever field the client previews from, the first characters still say
+// who/where/status without opening the message. Plain text, no markdown syntax
+// (bold "**" etc.) eating into the lead — a generic preview snippet is unlikely to
+// render markdown before truncating.
+func TestMarkdownBodyLeadsWithPlainTitle(t *testing.T) {
+	e := Event{Title: "✅ codex·bun 已完成", Kind: KindDone, Counts: Counts{Idle: 1}}
+	body := markdownBody(e)
+	if !strings.HasPrefix(body, e.Title) {
+		t.Fatalf("body must lead with the exact title, got:\n%s", body)
+	}
+	if strings.Contains(body[:len(e.Title)], "*") {
+		t.Fatalf("title portion must not carry markdown syntax, got:\n%s", body[:len(e.Title)])
+	}
+}
+
+// WeCom's markdown message type has no title field (unlike Feishu/DingTalk) — the
+// title must be folded into content itself, or a WeCom user never sees which
+// session triggered the notification (only whatever the client truncates from body).
+func TestWeComProviderFoldsTitleIntoContent(t *testing.T) {
+	p := NewWeComProvider(fixedNow)
+	cfg := ProviderConfig{Kind: "wecom", Enabled: true}
+	cfg.Settings, _ = json.Marshal(WebhookSettings{URL: "https://qyapi.weixin.qq.com/x"})
+	e := Event{Title: "✅ codex·bun 已完成", Kind: KindDone, Counts: Counts{Idle: 1}}
+
+	body := captureWebhookBody(t, p, e, cfg)
+	var payload struct {
+		Markdown struct {
+			Content string `json:"content"`
+		} `json:"markdown"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("body is not the expected markdown payload: %s", body)
+	}
+	if !strings.HasPrefix(payload.Markdown.Content, e.Title) {
+		t.Fatalf("content must LEAD with the title (not just contain it), got:\n%s", payload.Markdown.Content)
+	}
+}
+
+// Feishu's card has a separate header.title, but the body div must ALSO lead with
+// the title (belt-and-braces — see markdownBody), since it's unconfirmed whether
+// Feishu's OS push preview reads header.title or the card body content.
+func TestFeishuCardBodyLeadsWithTitle(t *testing.T) {
+	e := Event{Title: "❓ agent·stwork 需要回答", Kind: KindWaiting, Counts: Counts{Waiting: 1}}
+	els := feishuElements(e)
+	div, ok := els[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first element should be the body div: %+v", els[0])
+	}
+	text, ok := div["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("div missing text: %+v", div)
+	}
+	content, _ := text["content"].(string)
+	if !strings.HasPrefix(content, e.Title) {
+		t.Fatalf("card body must lead with the title, got:\n%s", content)
+	}
+}
+
+// captureWebhookBody drives a real Send() against a local httptest server and
+// returns what it POSTed — build() is unexported, so this is the black-box way to
+// inspect a provider's payload without duplicating its shaping logic in the test.
+func captureWebhookBody(t *testing.T, p Provider, e Event, cfg ProviderConfig) []byte {
+	t.Helper()
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0}`))
+	}))
+	defer srv.Close()
+	var ws WebhookSettings
+	_ = json.Unmarshal(cfg.Settings, &ws)
+	ws.URL = srv.URL
+	cfg.Settings, _ = json.Marshal(ws)
+	if out, detail := p.Send(context.Background(), e, cfg); out != OutcomeSent {
+		t.Fatalf("send failed: %v %s", out, detail)
+	}
+	return gotBody
 }
 
 // Slack speaks mrkdwn, not standard markdown: the deep link must render as

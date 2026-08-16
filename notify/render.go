@@ -79,10 +79,7 @@ func SessionLine(s SessionRef) string {
 	if tool == "" {
 		tool = "agent"
 	}
-	parts := []string{tool, s.Location, fmt.Sprintf("%d turn", s.Turns)}
-	if s.Stats != "" {
-		parts = append(parts, s.Stats)
-	}
+	parts := []string{tool, s.Location}
 	prefix := "· "
 	if s.JustChanged {
 		prefix = "🆕 "

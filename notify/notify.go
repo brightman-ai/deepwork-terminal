@@ -64,8 +64,6 @@ type SessionRef struct {
 	Location    string `json:"location"`    // readable "where": "main · 窗口3 TERMINAL · 面板1"
 	Status      string `json:"status"`      // "waiting" | "idle" | "running"
 	JustChanged bool   `json:"justChanged"` // transitioned in this batch → 🆕 marker
-	Turns       int    `json:"turns"`
-	Stats       string `json:"stats"` // optional compact stats ("in 29k out 532k cc 2.3M cr 152.9M ~$112")
 }
 
 // Counts is the live header tally across ALL tracked sessions (never capped — the
