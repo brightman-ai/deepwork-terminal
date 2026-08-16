@@ -10,6 +10,7 @@ import (
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 	"github.com/brightman-ai/deepwork-terminal/ansisignal"
+	"github.com/brightman-ai/deepwork-terminal/notify"
 )
 
 // These cover the two halves that decide whether the feature helps or annoys: the tap that
@@ -88,6 +89,100 @@ func waitForSignal(t *testing.T, sess *Session) (ansisignal.Signal, bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return ansisignal.Signal{}, false
+}
+
+// buildSignalEvent is the pure Title/body builder behind fanOutSignal (§ notify_stats.go's
+// buildNotifyEvent split, same reasoning). It takes ident pre-resolved (see
+// signalIdentity below for how) — these lock in the SessionRef/Kind/headline shape.
+func TestBuildSignalEventDefaultHeadline(t *testing.T) {
+	e := buildSignalEvent(ansisignal.Signal{Kind: ansisignal.KindBell}, "tab.stwork.codex", "codex", "stwork", "")
+	if e.Title != "🔔 tab.stwork.codex 需要你" {
+		t.Fatalf("got %q", e.Title)
+	}
+	if e.Kind != notify.KindWaiting || e.Counts.Waiting != 1 {
+		t.Fatalf("kind/counts: %v %+v", e.Kind, e.Counts)
+	}
+	if e.Sessions[0].Location != "stwork" || e.Sessions[0].Tool != "codex" || e.Sessions[0].Status != "waiting" {
+		t.Fatalf("session ref: %+v", e.Sessions[0])
+	}
+}
+
+// A program-provided OSC title (e.g. `\e]777;notify;Claude Code;...`) is real content
+// the terminal chose to say — it must still surface, with the identity leading it.
+func TestBuildSignalEventCustomTitleLeadsWithIdentity(t *testing.T) {
+	e := buildSignalEvent(ansisignal.Signal{Kind: ansisignal.KindNotify, Title: "Build failed"}, "tab.worker.agent", "", "worker", "")
+	if e.Title != "🔔 tab.worker.agent · Build failed" {
+		t.Fatalf("got %q", e.Title)
+	}
+}
+
+// No signal.Body → the generic explanatory line, unchanged by the identity work.
+func TestBuildSignalEventDefaultSummary(t *testing.T) {
+	e := buildSignalEvent(ansisignal.Signal{Kind: ansisignal.KindBell}, "tab.stwork.claude", "claude", "stwork", "")
+	if e.Summary != "终端发出了通知信号（bell）" {
+		t.Fatalf("got %q", e.Summary)
+	}
+}
+
+// fakeTmuxStateProvider serves a canned TmuxState so signalIdentity can be tested
+// without a real tmux server.
+type fakeTmuxStateProvider struct {
+	state agentintel.TmuxState
+	err   error
+}
+
+func (f fakeTmuxStateProvider) TmuxState(ctx context.Context, shellPID int) (json.RawMessage, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return json.Marshal(f.state)
+}
+
+// signalIdentity resolves the ACTUAL tmux window when the session is a tmux client —
+// the bug this locks in: it used to unconditionally report "tab.<title>", claiming a
+// tmux-attached session was a plain tab (reported directly against a real notification).
+func TestSignalIdentityTmuxAttachedUsesActiveWindow(t *testing.T) {
+	rig := newSignalTestRig(t)
+	sess, _ := rig.newSession(t, "worker")
+	sess.TmuxDetected = true
+	rig.srv.tmuxProvider = fakeTmuxStateProvider{state: agentintel.TmuxState{
+		Attached: true, AttachedSession: "0",
+		Sessions: []agentintel.TmuxSessionState{{
+			Name: "0",
+			Windows: []agentintel.TmuxWindowState{
+				{Index: 3, Name: "agent-memory", Active: false},
+				{Index: 6, Name: "bun", Active: true},
+			},
+		}},
+	}}
+	got := rig.srv.signalIdentity(context.Background(), sess, "codex")
+	if got != "tmux.6.bun.codex" {
+		t.Fatalf("should name the ACTIVE window (6.bun), got %q", got)
+	}
+}
+
+// A session that never attached to tmux at all still falls back to "tab" — this is
+// the correct case for that branch, not the bug (which was firing it unconditionally).
+func TestSignalIdentityNonTmuxFallsBackToTab(t *testing.T) {
+	rig := newSignalTestRig(t)
+	sess, _ := rig.newSession(t, "stwork")
+	got := rig.srv.signalIdentity(context.Background(), sess, "agent")
+	if got != "tab.stwork.agent" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// A tmux-detected session whose topology query fails (timeout, provider error) must
+// not crash or hang — it degrades to "tab", the same honest fallback as not-attached.
+func TestSignalIdentityTmuxQueryFailureFallsBackToTab(t *testing.T) {
+	rig := newSignalTestRig(t)
+	sess, _ := rig.newSession(t, "worker")
+	sess.TmuxDetected = true
+	rig.srv.tmuxProvider = fakeTmuxStateProvider{err: context.DeadlineExceeded}
+	got := rig.srv.signalIdentity(context.Background(), sess, "claude")
+	if got != "tab.worker.claude" {
+		t.Fatalf("got %q", got)
+	}
 }
 
 func TestSignalTap_OSCNotificationBecomesPendingSignal(t *testing.T) {

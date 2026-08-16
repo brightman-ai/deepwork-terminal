@@ -92,8 +92,7 @@ type agentNotifier struct {
 	pending      map[string]bool                   // targets triggered in the current (coalescing) batch
 	pendingSince time.Time
 
-	baseline  map[string]agentintel.SessionSummary // transcriptPath → summary at last notification (delta source)
-	archived  map[string]archivedRec               // transcriptPath → closed-pane session (today-scoped)
+	archived  map[string]archivedRec // transcriptPath → closed-pane session (today-scoped)
 	lastFlush time.Time
 }
 
@@ -123,7 +122,6 @@ func (s *Server) ensureNotifier() {
 		meta:         map[string]targetMeta{},
 		lastNotified: map[string]time.Time{},
 		pending:      map[string]bool{},
-		baseline:     map[string]agentintel.SessionSummary{},
 		archived:     map[string]archivedRec{},
 	}
 	s.notifier = n
@@ -235,7 +233,7 @@ func (n *agentNotifier) tick(ctx context.Context) {
 
 	// Flush the coalesced batch once the window has elapsed.
 	if len(n.pending) > 0 && now.Sub(n.pendingSince) >= notifyCoalesceWindow {
-		n.flush(now, pl)
+		n.flush(now)
 	}
 }
 
@@ -399,24 +397,19 @@ func (n *agentNotifier) sessionDeepName(id, fallback string) string {
 	return fallback
 }
 
-// flush computes the live + archived metrics, builds one (merged) notification with
-// the stats body, sends it through the A/B coordinator, and advances the baseline.
-func (n *agentNotifier) flush(now time.Time, pl *agentintel.ProjectLocator) {
+// flush computes the live session set, builds one (merged) notification, sends it
+// through the A/B coordinator, and advances per-pane cooldowns.
+func (n *agentNotifier) flush(now time.Time) {
 	var live, triggered []liveSession
-	liveSumm := map[string]agentintel.SessionSummary{}
 	for id, stt := range n.prev {
 		m := n.meta[id]
 		if m.tool == "" || m.cwd == "" {
 			continue
 		}
-		summ := computeSummary(pl, m.cwd, m.tool, stt == agentintel.StatusRunning)
-		if m.transcriptPath != "" {
-			liveSumm[m.transcriptPath] = summ
-		}
 		ls := liveSession{
 			key: id, location: m.location,
 			tool: m.tool, session: m.session, window: m.window, windowName: m.windowName, pane: m.pane,
-			status: stt, summary: summ, activeToday: isTodayFile(m.transcriptPath, now),
+			status: stt,
 		}
 		live = append(live, ls)
 		if n.pending[id] {
@@ -424,32 +417,17 @@ func (n *agentNotifier) flush(now time.Time, pl *agentintel.ProjectLocator) {
 		}
 	}
 
-	var archivedToday []agentintel.SessionSummary
-	archivedTodayCount, archivedSinceNotif := 0, 0
-	for _, rec := range n.archived {
-		archivedToday = append(archivedToday, computeSummary(pl, rec.cwd, rec.tool, false))
-		archivedTodayCount++
-		if rec.closedAt.After(n.lastFlush) {
-			archivedSinceNotif++
-		}
-	}
-
-	delta := computeDelta(liveSumm, n.baseline)
-	today := computeToday(live, archivedToday)
-
 	deepSession := ""
 	if len(triggered) > 0 {
 		deepSession = triggered[0].session
 	} else if len(live) > 0 {
 		deepSession = live[0].session
 	}
-	summary := buildSummaryBlocks(delta, today, archivedSinceNotif, archivedTodayCount, now.Sub(n.lastFlush), !n.lastFlush.IsZero())
-	event := buildNotifyEvent(triggered, live, summary, n.server.notifyDeepURL(deepSession))
+	event := buildNotifyEvent(triggered, live, n.server.notifyDeepURL(deepSession))
 
-	// Advance baseline + per-pane cooldowns, clear the batch. PTY sessions are skipped: their
+	// Advance per-pane cooldowns, clear the batch. PTY sessions are skipped: their
 	// clock lives in signalGate and was already consumed at detection (see allowFire), so
 	// stamping a second one here would be a clock nobody reads.
-	n.baseline = liveSumm
 	for id := range n.pending {
 		if _, isPTY := ptySessionID(id); isPTY {
 			continue
@@ -460,8 +438,8 @@ func (n *agentNotifier) flush(now time.Time, pl *agentintel.ProjectLocator) {
 	n.lastFlush = now
 
 	// Fan out asynchronously so a slow channel (a 10-15s network send) never blocks
-	// the 2s poll loop and make it miss state transitions. Baseline/lastFlush were
-	// already advanced above, so the next tick is consistent regardless of send timing.
+	// the 2s poll loop and make it miss state transitions. lastFlush was already
+	// advanced above, so the next tick is consistent regardless of send timing.
 	// The coordinator records delivery metrics internally (its own lock).
 	go func() {
 		rec := n.server.coordinator.Send(context.Background(), event)
@@ -501,23 +479,6 @@ func transcriptPath(pl *agentintel.ProjectLocator, cwd, tool string) string {
 		return agentintel.CodexNewestRolloutForCWD(pl, cwd)
 	}
 	return ""
-}
-
-// computeSummary parses a session's transcript into its metrics summary (turns /
-// tokens / cost). Called only at flush, so the parse is off the 2s poll hot path.
-func computeSummary(pl *agentintel.ProjectLocator, cwd, tool string, active bool) agentintel.SessionSummary {
-	return overviewMetrics(pl, cwd, "", "", active, tool).Summary
-}
-
-func isTodayFile(path string, now time.Time) bool {
-	if path == "" {
-		return false
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return sameDay(fi.ModTime(), now)
 }
 
 func sameDay(a, b time.Time) bool {

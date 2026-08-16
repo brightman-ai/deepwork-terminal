@@ -116,9 +116,15 @@ func classifyWebhook(status int, body []byte) Outcome {
 	return OutcomeSent
 }
 
-// markdownBody renders an Event as markdown text (DingTalk/WeCom/Feishu cards).
+// markdownBody renders an Event as markdown text (DingTalk/WeCom/Feishu cards),
+// LEADING with the title. No vendor documents which field their OS-level push
+// banner actually previews from — a dedicated title field (DingTalk `markdown.title`,
+// Feishu `header.title`) where one exists, or just the first line of `content` where
+// it doesn't (WeCom). Front-loading the title into the body too means whichever field
+// the client's notification preview reads, the first characters still say who/where/
+// status — the whole point being "don't need to open the message to know".
 func markdownBody(e Event) string {
-	text := PlainText(e)
+	text := e.Title + "\n" + PlainText(e)
 	if e.DeepURL != "" {
 		text += "\n\n[打开 Deepwork](" + e.DeepURL + ")"
 	}
@@ -164,7 +170,7 @@ func feishuTemplate(k Kind) string {
 }
 
 func feishuElements(e Event) []any {
-	md := markdownBody(e) // title is in the card header; PlainText carries only the body
+	md := markdownBody(e) // title leads the body too (see markdownBody) — belt-and-braces alongside the card header
 	els := []any{map[string]any{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": md}}}
 	if e.DeepURL != "" {
 		els = append(els, map[string]any{
@@ -213,7 +219,12 @@ func dingtalkSign(tsMs, secret string) string {
 }
 
 // ── WeCom (企业微信) group robot ───────────────────────────────────────────────
-// markdown message; the bot key is embedded in the URL (no extra signing).
+// markdown message; the bot key is embedded in the URL (no extra signing). Unlike
+// Feishu (card header) and DingTalk (markdown.title), WeCom's markdown message type
+// has NO separate title field, so it depends entirely on markdownBody() leading with
+// the title in plain text (no "**" bold markers — a generic notification-preview
+// snippet is unlikely to render markdown before truncating, so bold syntax would
+// just burn the first 2 characters).
 
 func NewWeComProvider(now func() time.Time) Provider {
 	return newWebhook("wecom", "企业微信", func(ws WebhookSettings, e Event, t time.Time) (string, []byte) {

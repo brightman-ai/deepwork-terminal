@@ -269,37 +269,86 @@ func (s *Server) fanOutSignal(sess *Session, sig ansisignal.Signal) {
 		return
 	}
 
-	title, body := sanitizeFieldMax(sig.Title, 48), sanitizeFieldMax(sig.Body, 160)
-	// The wording stays at "需要你": a bell says the program wants you, not WHETHER that is a
-	// permission prompt or a finished turn. Claiming either would be inventing detail we do
-	// not have — the same reason the overview marks this AwaitingUser (amber) and never
-	// escalates it to the blocked/red status.
-	headline := "🔔 需要你"
-	if title != "" {
-		headline = "🔔 " + title
-	}
 	tool := string(s.sessionAgent.Tool(ctx, sess.ShellPID()))
+	ident := s.signalIdentity(ctx, sess, tool)
+	event := buildSignalEvent(sig, ident, tool, sessionTitle(sess), s.notifyDeepURL(sess.Name))
+	rec := s.coordinator.Send(ctx, event)
+	logger.Info("explicit signal notify fanned out",
+		"session_id", sess.ID, "kind", string(sig.Kind), "providers", len(rec.Results))
+}
+
+// signalIdentity resolves identityTag() for a signal's session. A bell/OSC signal is
+// read off ONE session's raw PTY stream, which is a `tmux attach` client whenever
+// GetTmuxDetected() is true — that client is showing exactly one window at a time
+// (tmux's own "active window" concept, the same one `*` marks in `tmux list-windows`),
+// found via the SAME AttachedSession + windows[].Active lookup the tmux topology probe
+// already computes elsewhere in this file (allowBell's tmux arm). Earlier this always
+// fell back to the "tab" branch instead — mislabeling every tmux-attached session as a
+// plain tab, not a remaining acceptable gap but a straight bug (reported directly: a
+// tmux session's notification read "tab.stwork...", claiming the wrong kind entirely).
+// Any lookup failure (probe timeout, no provider, not actually attached despite
+// GetTmuxDetected) still falls back to "tab" — a session genuinely NOT in tmux, or a
+// topology query that failed, correctly has no window coordinates to report.
+func (s *Server) signalIdentity(ctx context.Context, sess *Session, tool string) string {
+	location := sessionTitle(sess)
+	if !sess.GetTmuxDetected() || s.tmuxProvider == nil {
+		return identityTag(tool, location, "", 0)
+	}
+	raw, err := s.tmuxProvider.TmuxState(ctx, sess.ShellPID())
+	if err != nil || raw == nil {
+		return identityTag(tool, location, "", 0)
+	}
+	var st agentintel.TmuxState
+	if json.Unmarshal(raw, &st) != nil || !st.Attached || st.AttachedSession == "" {
+		return identityTag(tool, location, "", 0)
+	}
+	for _, tsess := range st.Sessions {
+		if tsess.Name != st.AttachedSession {
+			continue
+		}
+		for _, win := range tsess.Windows {
+			if win.Active {
+				return identityTag(tool, "", win.Name, win.Index)
+			}
+		}
+	}
+	return identityTag(tool, location, "", 0)
+}
+
+// buildSignalEvent is the pure half of fanOutSignal (everything that doesn't need a
+// live coordinator/context) so its Title/body construction is testable without one —
+// mirrors buildNotifyEvent's split in notify_stats.go for the same reason. ident is
+// the pre-resolved identityTag() string (signalIdentity needs a live tmux query,
+// which is the impure half this function deliberately excludes).
+func buildSignalEvent(sig ansisignal.Signal, ident, tool, sessTitle, deepURL string) notify.Event {
+	title, body := sanitizeFieldMax(sig.Title, 48), sanitizeFieldMax(sig.Body, 160)
+	location := sanitizeFieldMax(sessTitle, 48)
+	// The wording stays at "需要你" absent a program-provided title: a bell says the
+	// program wants you, not WHETHER that is a permission prompt or a finished turn.
+	// Claiming either would be inventing detail we do not have — the same reason the
+	// overview marks this AwaitingUser (amber) and never escalates it to blocked/red.
+	headline := "🔔 " + ident + " 需要你"
+	if title != "" {
+		headline = "🔔 " + ident + " · " + title
+	}
 	summary := body
 	if summary == "" {
 		summary = "终端发出了通知信号（" + string(sig.Kind) + "）"
 	}
 
-	event := notify.Event{
-		Title:  headline + " · " + sanitizeFieldMax(sessionTitle(sess), 48),
+	return notify.Event{
+		Title:  headline,
 		Kind:   notify.KindWaiting,
 		Counts: notify.Counts{Waiting: 1},
 		Sessions: []notify.SessionRef{{
 			Tool:        tool,
-			Location:    sanitizeFieldMax(sessionTitle(sess), 48),
+			Location:    location,
 			Status:      "waiting",
 			JustChanged: true,
 		}},
 		Summary: summary,
-		DeepURL: s.notifyDeepURL(sess.Name),
+		DeepURL: deepURL,
 	}
-	rec := s.coordinator.Send(ctx, event)
-	logger.Info("explicit signal notify fanned out",
-		"session_id", sess.ID, "kind", string(sig.Kind), "providers", len(rec.Results))
 }
 
 // ── WS push ─────────────────────────────────────────────────────────────────────────────

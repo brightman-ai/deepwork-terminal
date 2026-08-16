@@ -24,7 +24,6 @@ func newNotifierRig() *agentNotifier {
 		meta:         map[string]targetMeta{},
 		lastNotified: map[string]time.Time{},
 		pending:      map[string]bool{},
-		baseline:     map[string]agentintel.SessionSummary{},
 		archived:     map[string]archivedRec{},
 	}
 }
