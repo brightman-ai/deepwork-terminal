@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/ansisignal"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // SessionStatus represents the lifecycle state of a terminal session.
@@ -91,7 +93,20 @@ type Session struct {
 	// NEW one" rather than the same one still standing.
 	lastSignalSeq uint64
 
-	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*, ptyCols/ptyRows
+	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*, ptyCols/ptyRows, Name/Title
+}
+
+// SetName renames the session (thread-safe). Clears Title too: sessionTitle()
+// prefers Title over Name, so an explicit user rename must win over whatever
+// static Title the session was created with, or the old value would keep
+// winning forever no matter what the user renames it to — the exact bug this
+// method exists to close (a renamed tab's notifications kept the pre-rename
+// name because nothing ever wrote a new value back to the session at all).
+func (s *Session) SetName(name string) {
+	s.mu.Lock()
+	s.Name = name
+	s.Title = ""
+	s.mu.Unlock()
 }
 
 // SetPTYSize resizes the PTY **and** records the new size on the session.
@@ -199,6 +214,42 @@ func (s *Session) GetTmuxDetected() bool {
 	detected := s.TmuxDetected
 	s.mu.Unlock()
 	return detected
+}
+
+// ForceKillForeground sends SIGKILL to the PTY's current foreground process group — a
+// harder-than-Ctrl+C recovery path for when the foreground program ignores SIGINT (the signal
+// Ctrl+C sends through the PTY). TIOCGPGRP on the PTY master reads exactly the fact the kernel
+// itself consults to route Ctrl+C; this just sends a stronger signal on demand instead of
+// waiting for a program that has decided to ignore the polite one.
+//
+// When the foreground process IS the shell itself (no interactive child running), the shell's
+// own process group gets killed too — the tab disconnects rather than no-op'ing. A "kill
+// whatever's in front" command with no foreground child left to kill has nothing else
+// meaningful to do, and pretending to succeed while leaving the user still stuck would be worse.
+//
+// Not offered for tmux-attached sessions: the PTY's foreground pgid there belongs to tmux's own
+// server/client plumbing, not a fact the web UI can act on — tmux has its own recovery tools
+// (kill-pane etc.) for that case. Callers should already hide the affordance for those sessions;
+// this is the defense-in-depth backend half of that guard.
+func (s *Session) ForceKillForeground() error {
+	s.mu.Lock()
+	ptyFile := s.PTY
+	tmux := s.TmuxDetected
+	s.mu.Unlock()
+	if tmux {
+		return fmt.Errorf("session %s: force-kill not supported for tmux-attached sessions", s.ID)
+	}
+	if ptyFile == nil {
+		return fmt.Errorf("session %s has no active pty", s.ID)
+	}
+	pgid, err := unix.IoctlGetInt(int(ptyFile.Fd()), unix.TIOCGPGRP)
+	if err != nil {
+		return fmt.Errorf("session %s: TIOCGPGRP: %w", s.ID, err)
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		return fmt.Errorf("session %s: kill foreground pgid %d: %w", s.ID, pgid, err)
+	}
+	return nil
 }
 
 // GetStatus returns the session status (thread-safe).

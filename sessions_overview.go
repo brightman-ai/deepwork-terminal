@@ -61,6 +61,12 @@ type SessionOverviewEntry struct {
 	// Exited marks a dead PTY. Kept explicit rather than inferred from an empty tail: a live shell
 	// that has simply printed nothing is NOT the same as one whose process is gone.
 	Exited bool `json:"exited,omitempty"`
+	// TmuxDetected mirrors Session.TmuxDetected — the tab strip's right-click menu needs it to
+	// decide whether "结束卡死进程" (force-kill the foreground process) applies to THIS tab, for
+	// every tab, not just the currently-active one. Single-session GET already exposed the same
+	// fact (handleGetSession); this is that fact reaching the ALL-sessions feed the menu is built
+	// from, so a background tab doesn't have to become active before its menu can be trusted.
+	TmuxDetected bool `json:"tmuxDetected,omitempty"`
 	// Embedded, not listed: the CARD — its agent facts and its tail, the same declaration the tmux
 	// window carries (agentintel/surface_card.go). AgentTool / AgentStatus still come from the same
 	// detector the session list uses — literally the same snapshot (handleListSessions reads this
@@ -99,11 +105,12 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 			cwd = sess.CWD
 		}
 		entry := SessionOverviewEntry{
-			ID:     sess.ID,
-			Title:  sessionTitle(sess),
-			CWD:    cwd,
-			Engine: sess.Engine,
-			Exited: sess.Status == StatusExited,
+			ID:           sess.ID,
+			Title:        sessionTitle(sess),
+			CWD:          cwd,
+			Engine:       sess.Engine,
+			Exited:       sess.Status == StatusExited,
+			TmuxDetected: sess.TmuxDetected,
 		}
 		buf := sess.Buffer
 		sess.mu.Unlock()

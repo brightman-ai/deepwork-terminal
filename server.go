@@ -330,6 +330,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /sessions/{id}", wrap(s.handleGetSession))
 	s.mux.HandleFunc("DELETE /sessions/{id}", wrap(s.handleDeleteSession))
 	s.mux.HandleFunc("POST /sessions/{id}/resize", wrap(s.handleResize))
+	s.mux.HandleFunc("POST /sessions/{id}/rename", wrap(s.handleRenameSession))
+	s.mux.HandleFunc("POST /sessions/{id}/force-kill-fg", wrap(s.handleForceKillForeground))
 	s.mux.HandleFunc("POST /sessions/{id}/input", wrap(s.handleInput))
 	s.mux.HandleFunc("GET /sessions/{id}/ws", wrap(s.handleWebSocket))
 	s.mux.HandleFunc("POST /sessions/{id}/paste-upload", wrap(s.handleClipboardPasteUpload))

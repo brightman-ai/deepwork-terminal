@@ -231,8 +231,13 @@ func flattenJSONNames(typ reflect.Type) []string {
 // they were already required to share a length (OverviewTailLines), and two declarations sharing a
 // constant is precisely the arrangement that let one of them sit at 8 while its comment claimed it
 // matched the other's 40.
+// `tmuxDetected` is on the SessionOverviewEntry-only list, not shared: it answers "is THIS PTY
+// session itself running inside tmux", which only means something for the non-tmux feed's own
+// tabs (the tab-menu's force-kill-fg affordance needs to know, per tab, whether it applies).
+// TmuxWindowState has no analogous fact to report — every entry on that feed is, by definition,
+// already a tmux window, so a per-window "is this tmux" field would be constant-true noise.
 var (
-	overviewOwnFields   = []string{"id", "title", "cwd", "engine", "exited"}
+	overviewOwnFields   = []string{"id", "title", "cwd", "engine", "exited", "tmuxDetected"}
 	tmuxWindowOwnFields = []string{"index", "name", "windowId", "active", "cwd", "panes"}
 	tmuxPaneOwnFields   = []string{"index", "active", "title", "pid", "cwd", "paneId"}
 )
