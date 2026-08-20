@@ -15,11 +15,15 @@
 import { computed, ref } from 'vue'
 
 /** The tab a menu was opened on. `cwd` is optional: a tab that has never connected has no live
- *  working directory, and the copy entry disables itself rather than copying a stale guess. */
+ *  working directory, and the copy entry disables itself rather than copying a stale guess.
+ *  `isTmux` decides whether 结束卡死进程 (force-kill the foreground process) applies — a tmux
+ *  window's PTY foreground pgid belongs to tmux's own plumbing, not a fact this menu can act on
+ *  (tmux has its own recovery tools). Defaults to non-tmux when the caller doesn't know yet. */
 export interface TabMenuTarget {
   id: string
   name: string
   cwd?: string
+  isTmux?: boolean
 }
 
 /** What the host shell can actually do. `closeOthers` is optional — a shell that cannot express it
@@ -33,6 +37,12 @@ export interface TabMenuActions {
   copy(text: string): void | Promise<unknown>
   /** How many tabs exist right now — decides whether 关闭其他 is meaningful. */
   tabCount(): number
+  /** SIGKILL the tab's current PTY foreground process group — the recovery path for when Ctrl+C
+   *  (SIGINT) doesn't reach a hung program. Required like rename/close, not optional like
+   *  closeOthers: an item present in one shell's menu and silently missing in the other is the
+   *  drift bug this file exists to prevent (see file header), and this command's whole point is
+   *  being there exactly when the user is stuck and reaching for it. */
+  forceKillForeground(id: string): void
 }
 
 export interface TabMenuItem {
@@ -89,6 +99,16 @@ export function useTabContextMenu(actions: TabMenuActions) {
       { key: 'copy-cwd', label: '复制目录路径', disabled: !t.cwd, run: () => run(() => { void actions.copy(t.cwd || '') }) },
       { key: 'new', label: '新建终端', run: () => run(() => actions.create()) },
     ]
+    // Not offered for tmux tabs: see TabMenuTarget.isTmux. Absent rather than disabled — a
+    // disabled entry still implies "this could work here", which isn't true for tmux.
+    if (!t.isTmux) {
+      list.push({
+        key: 'force-kill-fg',
+        label: '结束卡死进程',
+        danger: true,
+        run: () => run(() => actions.forceKillForeground(t.id)),
+      })
+    }
     if (actions.closeOthers) {
       list.push({
         key: 'close-others',

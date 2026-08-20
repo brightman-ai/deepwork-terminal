@@ -27,6 +27,9 @@ export interface SessionOverviewEntry extends SurfaceCard {
   cwd?: string
   engine?: string
   exited?: boolean
+  /** Mirrors the backend Session.TmuxDetected — whether THIS PTY session is itself running
+   *  inside tmux. The tab menu's 结束卡死进程 needs this per tab, not just for the active one. */
+  tmuxDetected?: boolean
 }
 
 const entries = ref<SessionOverviewEntry[]>([])

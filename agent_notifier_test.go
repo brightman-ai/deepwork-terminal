@@ -201,3 +201,50 @@ func TestSessionRefLocation(t *testing.T) {
 		t.Fatal("two different tabs produced the same batch identity")
 	}
 }
+
+// tmux window renames are a DIFFERENT shape from the tab-rename bug fixed above:
+// there is no backend Session object caching a stale name — scanTmux() re-derives
+// windowName fresh from the live tmux topology query on every tick (no notifier-side
+// cache; the ONLY cache is the topology probe's own 900ms TTL, agentintel/tmux_state.go
+// tmuxProbeTTL — short enough that a `tmux rename-window` shows up within one poll
+// cycle). This locks in that a name change between two scanTmux() calls propagates —
+// closing the "举一反三" check without needing a fix (the PTY case needed one because
+// Session.Name was a write-once creation-time snapshot with no live source to re-read;
+// tmux windows never had that problem to begin with).
+func TestScanTmuxWindowRenamePropagatesOnNextPoll(t *testing.T) {
+	n := newNotifierRig()
+	pane := func(name string) agentintel.TmuxState {
+		return agentintel.TmuxState{
+			Installed: true, ServerRunning: true,
+			Sessions: []agentintel.TmuxSessionState{{
+				Name: "0",
+				Windows: []agentintel.TmuxWindowState{{
+					Index: 6, Name: name, Active: true,
+					Panes: []agentintel.TmuxPaneState{{
+						Index: 1, PID: 123,
+						SurfaceUnit: agentintel.SurfaceUnit{AgentTool: agentintel.ToolClaude, AgentStatus: agentintel.StatusIdle},
+					}},
+				}},
+			}},
+		}
+	}
+	fake := &fakeTmuxStateProvider{state: pane("stwork")}
+	n.server.tmuxProvider = fake
+	pl := agentintel.NewProjectLocator()
+
+	if ok := n.scanTmux(context.Background(), time.Now(), pl, map[string]bool{}); !ok {
+		t.Fatal("scanTmux should report the topology as readable")
+	}
+	key := "0:6:1"
+	if got := n.meta[key].windowName; got != "stwork" {
+		t.Fatalf("windowName before rename = %q, want %q", got, "stwork")
+	}
+
+	fake.state = pane("agent-memory") // simulate `tmux rename-window` between two polls
+	if ok := n.scanTmux(context.Background(), time.Now(), pl, map[string]bool{}); !ok {
+		t.Fatal("scanTmux should report the topology as readable")
+	}
+	if got := n.meta[key].windowName; got != "agent-memory" {
+		t.Fatalf("windowName after rename = %q, want %q — scanTmux must re-derive it live, not cache the first value", got, "agent-memory")
+	}
+}

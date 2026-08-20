@@ -22,6 +22,7 @@ function harness(overrides: Partial<TabMenuActions> = {}, count = 3) {
     create: () => log.push('create'),
     copy: (t) => { log.push(`copy:${t}`) },
     tabCount: () => count,
+    forceKillForeground: (id) => log.push(`forceKillForeground:${id}`),
     ...overrides,
   }
   return { menu: useTabContextMenu(actions), log }
@@ -48,12 +49,12 @@ describe('useTabContextMenu', () => {
 
   it('every entry runs its action AND closes the menu', () => {
     const { menu, log } = harness()
-    for (const key of ['rename', 'new', 'close-others', 'close']) {
+    for (const key of ['rename', 'new', 'force-kill-fg', 'close-others', 'close']) {
       menu.openAt(fakeEvent().e, { id: 't1', name: '终端 1', cwd: '/repo' })
       item(menu, key).run()
       expect(menu.open.value).toBe(false)
     }
-    expect(log).toEqual(['rename:t1', 'create', 'closeOthers:t1', 'close:t1'])
+    expect(log).toEqual(['rename:t1', 'create', 'forceKillForeground:t1', 'closeOthers:t1', 'close:t1'])
   })
 
   it('copies the tab\'s cwd, and disables the entry when there is none', () => {
@@ -75,7 +76,8 @@ describe('useTabContextMenu', () => {
     // Present: a menu whose entries appear and disappear between right-clicks has to be re-read
     // every time, which costs more than one greyed row.
     expect(item(menu, 'close-others').disabled).toBe(true)
-    expect(menu.items.value.map((i) => i.key)).toEqual(['rename', 'copy-cwd', 'new', 'close-others', 'close'])
+    expect(menu.items.value.map((i) => i.key))
+      .toEqual(['rename', 'copy-cwd', 'new', 'force-kill-fg', 'close-others', 'close'])
   })
 
   it('omits 关闭其他 entirely when the host cannot do it', () => {
@@ -84,6 +86,19 @@ describe('useTabContextMenu', () => {
     expect(menu.items.value.some((i) => i.key === 'close-others')).toBe(false)
     // A capability the shell genuinely lacks is absent, not permanently greyed — greying implies
     // "not right now", which would be a lie.
+  })
+
+  it('结束卡死进程 runs forceKillForeground with the target tab id', () => {
+    const { menu, log } = harness()
+    menu.openAt(fakeEvent().e, { id: 't1', name: '终端 1' })
+    item(menu, 'force-kill-fg').run()
+    expect(log).toEqual(['forceKillForeground:t1'])
+  })
+
+  it('omits 结束卡死进程 for a tmux tab — its foreground pgid is tmux plumbing, not actionable here', () => {
+    const { menu } = harness()
+    menu.openAt(fakeEvent().e, { id: 't1', name: '终端 1', isTmux: true })
+    expect(menu.items.value.some((i) => i.key === 'force-kill-fg')).toBe(false)
   })
 
   it('destructive entries sort last so 关闭 is never adjacent to a benign default', () => {

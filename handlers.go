@@ -193,6 +193,58 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleRenameSession handles POST /sessions/{id}/rename. Body: {"name": "..."}.
+//
+// Renaming a tab was, until this handler existed, a purely frontend concept: it
+// only ever wrote to the workbench's own `tab.name` (useWorkbench.ts renameTab),
+// never told the backend session anything — so every backend consumer of "what is
+// this session called" (the notifier's identityTag, the tmux/PTY notification
+// title, GET /sessions) kept showing the name the session was CREATED with,
+// forever, no matter how many times the user renamed the tab in the UI. This is
+// the missing write side of that gap.
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, err := s.mgr.Get(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	name := sanitizeFieldMax(req.Name, 64)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name must not be empty"})
+		return
+	}
+	sess.SetName(name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleForceKillForeground handles POST /sessions/{id}/force-kill-fg. No request body.
+//
+// The recovery path for "the foreground program in this tab ignores Ctrl+C" (SIGINT through
+// the PTY) — sends SIGKILL to the PTY's current foreground process group instead. See
+// Session.ForceKillForeground for what that means when there is no distinct foreground child
+// (the shell itself gets killed too) and why tmux-attached sessions are rejected.
+func (s *Server) handleForceKillForeground(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, err := s.mgr.Get(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := sess.ForceKillForeground(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleInput handles POST /sessions/{id}/input.
 // [TH-0501-m9j] WKWebView silently drops WebSocket binary frames. HTTP POST is
 // 100% reliable on all platforms. Frontend sends raw bytes as request body.
