@@ -8,6 +8,8 @@ import { ref, computed } from 'vue'
 import type { WorkbenchConfig, WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
 import { createTab, createGroup, createDefaultWorkbenchConfig } from '@terminal/types/workbench'
 import { fetchWorkbenchConfig, saveWorkbenchConfig } from '@terminal/api/workbench'
+import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
+import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 
 export function useWorkbench() {
   const config = ref<WorkbenchConfig | null>(null)
@@ -121,6 +123,25 @@ export function useWorkbench() {
     if (!tab) return
     tab.name = name
     save()
+    syncSessionName(tab, name)
+  }
+
+  /** Tells the backend session its new name too — otherwise this was purely a local
+   *  `tab.name` mutation, and every backend consumer of "what is this session called"
+   *  (the notifier's identityTag/notification title, GET /sessions) kept showing the
+   *  pre-rename name forever, no matter how many times the tab got renamed here.
+   *  Local sessions only: a remote tab's session lives on its peer's own backend
+   *  (different host, different auth code) — out of scope for this sync. Best-effort:
+   *  a failed sync just leaves the old name standing until the next successful rename
+   *  or session recreate, not worth surfacing as an error for a cosmetic label. */
+  function syncSessionName(tab: WorkbenchTab, name: string): void {
+    if (!tab.sessionId || tab.remotePeerId) return
+    const { cliFetch } = useCliAuth()
+    cliFetch(cliApi(`/sessions/${tab.sessionId}/rename`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }).catch(() => {})
   }
 
   /** Records where the terminal ACTUALLY is now, so the stored cwd stops being "where this tab was
@@ -140,6 +161,24 @@ export function useWorkbench() {
     const tab = group?.tabs.find(t => t.id === tabId)
     if (!tab || tab.cwd === cwd) return
     tab.cwd = cwd
+    save()
+  }
+
+  /** Adopts a name that arrived FROM the backend (another device's rename) into this device's
+   *  own tab list — the read side `syncSessionName` never had. A rename only ever wrote
+   *  `tab.name` on the device that typed it (`renameTab` above); every other device keeps
+   *  showing whatever name its own tab list already had, forever, because nothing ever told it
+   *  the backend's title had moved. This is that missing read side, one device's version of the
+   *  same gap `syncSessionName`'s doc comment already named for the write side.
+   *
+   *  Deliberately does NOT call `syncSessionName`: this name came FROM the backend, echoing it
+   *  back would just be a redundant no-op write, not a new fact. */
+  function adoptRemoteTabName(tabId: string, name: string): void {
+    if (!name) return
+    const group = findGroupForTab(tabId)
+    const tab = group?.tabs.find(t => t.id === tabId)
+    if (!tab || tab.name === name) return
+    tab.name = name
     save()
   }
 
@@ -235,6 +274,7 @@ export function useWorkbench() {
     setTabCwd,
     removeTab,
     renameTab,
+    adoptRemoteTabName,
     setActiveTab,
     addGroup,
     removeGroup,

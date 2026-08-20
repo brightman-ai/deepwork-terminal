@@ -59,9 +59,14 @@ export function useCliState(runtime: PortalRuntimeResult) {
 
   const {
     loading, error, groups, activeTab, allTabs, showGroupHeaders,
-    load, addTab, setTabCwd, removeTab, renameTab, setActiveTab,
+    load, addTab, setTabCwd, removeTab, renameTab, adoptRemoteTabName, setActiveTab,
     toggleGroupCollapsed, bindSession, unbindSession,
   } = useWorkbench()
+
+  // Timestamp of this device's own last local rename, by sessionId — see commitRename and the
+  // sessionEntries watch below (cross-device rename sync grace window).
+  const lastLocalRenameAt = new Map<string, number>()
+  const RENAME_GRACE_MS = 4000
 
   // ─── Per-tab runtime state ────────────────────────────────────────────────────
   const tabRuntimes = reactive<Record<string, TabRuntime>>({})
@@ -227,8 +232,21 @@ export function useCliState(runtime: PortalRuntimeResult) {
   watch(sessionEntries, (entries) => {
     for (const tab of allTabs.value) {
       if (!tab.sessionId) continue
-      const cwd = entries.find(e => e.id === tab.sessionId)?.cwd
-      if (cwd) setTabCwd(tab.id, cwd)
+      const entry = entries.find(e => e.id === tab.sessionId)
+      if (!entry) continue
+      if (entry.cwd) setTabCwd(tab.id, entry.cwd)
+      // Cross-device rename sync (read side — see adoptRemoteTabName's doc comment for the write
+      // side this closes). Grace-windowed, NOT string-matched against what we last pushed: a
+      // stale overview frame can carry the PRE-rename title (POST hasn't landed server-side yet),
+      // which differs from both tab.name and our pushed value — matching on value alone would
+      // adopt that stale title and stomp the input the user just typed. A short window during
+      // which this tab ignores the overview feed entirely, regardless of what value shows up in
+      // it, is what actually closes that race.
+      const pushedAt = lastLocalRenameAt.get(tab.sessionId)
+      const withinGrace = pushedAt !== undefined && (Date.now() - pushedAt) < RENAME_GRACE_MS
+      if (entry.title && entry.title !== tab.name && !withinGrace) {
+        adoptRemoteTabName(tab.id, entry.title)
+      }
     }
   }, { deep: false })
 
@@ -316,12 +334,16 @@ export function useCliState(runtime: PortalRuntimeResult) {
     create: () => { void quickCreateTab() },
     copy: (text) => copyTextToClipboard(text),
     tabCount: () => visibleTabIds.value.length,
+    forceKillForeground: (id) => { void forceKillForegroundTab(id) },
   })
 
   function openTabMenu(e: MouseEvent, tabId: string): void {
     const tab = allTabs.value.find(t => t.id === tabId)
     if (!tab) return
-    tabMenu.openAt(e, { id: tabId, name: tabDisplayName(tabId, tab.name), cwd: liveCwd(tabId) })
+    const isTmux = tab.sessionId
+      ? (sessionEntries.value.find(entry => entry.id === tab.sessionId)?.tmuxDetected ?? false)
+      : false
+    tabMenu.openAt(e, { id: tabId, name: tabDisplayName(tabId, tab.name), cwd: liveCwd(tabId), isTmux })
   }
 
   // D6: guide banner's "去设置" deep-links to the shortcuts settings section.
@@ -353,6 +375,19 @@ export function useCliState(runtime: PortalRuntimeResult) {
     removeTab(tabId)
   }
 
+  /** SIGKILL the tab's current PTY foreground process group — see useTabContextMenu's
+   *  forceKillForeground doc. Best-effort like the rest of this menu's fire-and-forget actions:
+   *  it's a recovery command reached for when something is already stuck, so a failed request has
+   *  nothing better to fall back to client-side than leaving the tab as stuck as it already was. */
+  async function forceKillForegroundTab(tabId: string): Promise<void> {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab?.sessionId) return
+    const conn = remotePeers.resolveTabConnection(tab)
+    try {
+      await tabFetch(conn, `/sessions/${tab.sessionId}/force-kill-fg`, { method: 'POST' })
+    } catch { /* silent */ }
+  }
+
   // ─── Tab rename ───────────────────────────────────────────────────────────────
   const renamingTabId = ref<string | null>(null)
   const renameValue = ref('')
@@ -370,7 +405,16 @@ export function useCliState(runtime: PortalRuntimeResult) {
 
   function commitRename() {
     if (renamingTabId.value && renameValue.value.trim()) {
-      renameTab(renamingTabId.value, renameValue.value.trim())
+      const trimmed = renameValue.value.trim()
+      const tab = allTabs.value.find(t => t.id === renamingTabId.value)
+      // Recorded BEFORE the backend POST resolves — the very next sessions_overview push can
+      // still carry the pre-rename title (network/debounce), and without this the reconcile
+      // watch below would read that stale value as "someone else renamed it back" and fight the
+      // input the user just typed. See lastLocalRenameAt below (grace window, not a value match:
+      // the stale frame's title is neither the new name NOR literally our old push, so comparing
+      // against a remembered string can't catch it — only "ignore this tab's feed for a bit" can).
+      if (tab?.sessionId) lastLocalRenameAt.set(tab.sessionId, Date.now())
+      renameTab(renamingTabId.value, trimmed)
     }
     renamingTabId.value = null
   }

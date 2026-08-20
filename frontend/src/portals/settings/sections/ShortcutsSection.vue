@@ -72,6 +72,7 @@ const GROUPS: { title: string; sub: string; rows: ShortcutRow[] }[] = [
       { key: 'nextTab', label: '下一个标签', hint: '' },
       { key: 'newTab', label: '新建标签', hint: '' },
       { key: 'closeTab', label: '关闭当前标签', hint: '' },
+      { key: 'toggleComposeDesktop', label: '打开输入条', hint: '桌面端：先在本地打好整段文字，发送时才一次性送进终端' },
     ],
   },
   {

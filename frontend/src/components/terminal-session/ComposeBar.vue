@@ -98,21 +98,14 @@
  * ComposeBar — Native textarea for composing multi-line input on mobile.
  * Enter = newline. Send button = submit. Draft persisted to localStorage.
  * Snippets stored in localStorage for quick-recall.
+ *
+ * State/behavior lives in useComposeBox (device-agnostic); this file is the mobile SKIN —
+ * on-screen cursor-nav buttons (no hardware arrow keys to reach for) and soft-keyboard viewport
+ * dodging (see useVisualKeyboardInset). See ComposeBarDesktop.vue for the other skin.
  */
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 import { focusWithoutViewportScroll, resetViewportScroll } from '@terminal/composables/cli/useVisualKeyboardInset'
-import {
-  attachCliInputDiagnostics,
-  reportCliInputDiagnostic,
-  summarizeText,
-} from '@terminal/composables/cli/useCliInputDiagnostics'
-import { useServerStore } from '@terminal/composables/cli/useServerStore'
-import { copyTextToClipboard } from '@ce/utils/clipboard'
-
-const DRAFT_KEY = 'cli-compose-draft'
-const HISTORY_MAX = 15
-const serverStore = useServerStore()
+import { useComposeBox } from '@terminal/composables/cli/useComposeBox'
+import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 
 /**
  * `draft` lets the host pre-fill the textarea for editing (e.g. ResourceDrawer's
@@ -127,302 +120,27 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-const text = ref('')
-const textareaRef = ref<HTMLTextAreaElement>()
-const showSnippets = ref(false)
-const showHistory = ref(false)
-const snippets = ref<string[]>([])
-const history = ref<string[]>([])
-let cleanupInputDiagnostics: (() => void) | null = null
-
-// --- Copy-all feedback (icon flips to a checkmark briefly) ---
-const copyFeedback = ref(false)
-let copyFeedbackTimer: ReturnType<typeof setTimeout> | null = null
-
-// --- Undo-clear: 清空全部 is destructive on multi-line drafts (the exact complaint this
-// ships to fix — "很难清除" cuts both ways once it's gone), so the wiped text is kept around
-// for a short window as a one-shot restore, not a confirm-before-clear dialog (that trades
-// one friction for another). clearedBackup holds the pre-clear text; showUndo drives the pill;
-// the timer auto-dismisses so the pill never lingers and blocks the input.
-const clearedBackup = ref<string | null>(null)
-const showUndo = ref(false)
-let undoTimer: ReturnType<typeof setTimeout> | null = null
-const UNDO_VISIBLE_MS = 6000
-
-// --- Draft persistence ---
-function saveDraft() {
-  try { localStorage.setItem(DRAFT_KEY, text.value) } catch {}
-}
-function loadDraft() {
-  try { text.value = localStorage.getItem(DRAFT_KEY) || '' } catch {}
-}
-
-// --- Injected draft (host-supplied, e.g. ResourceDrawer 重发) ---
-// Replace the textarea with the injected text and put the caret at the end so the
-// user can immediately edit before sending. Resize + persist so it behaves like
-// hand-typed content.
-function applyDraft(draft: string) {
-  if (draft == null) return
-  text.value = draft
-  saveDraft()
-  nextTick(() => {
-    autoResize()
-    const ta = textareaRef.value
-    if (ta) {
-      const end = ta.value.length
-      try { ta.setSelectionRange(end, end) } catch {}
-    }
-    focusWithoutViewportScroll(textareaRef.value)
-  })
-}
-watch(() => props.draft, (d) => { if (d != null) applyDraft(d) })
-
-// --- Snippets (server-side, survives trycloudflare domain changes) ---
-function loadSnippets() {
-  snippets.value = serverStore.get<string[]>('snippets', [])
-}
-function saveSnippetsToStorage() {
-  serverStore.set('snippets', snippets.value)
-}
-function saveSnippet() {
-  const t = text.value.trim()
-  if (!t) return
-  if (!snippets.value.includes(t)) {
-    snippets.value.unshift(t)
-    if (snippets.value.length > 20) snippets.value.pop()
-    saveSnippetsToStorage()
-  }
-}
-function insertSnippet(s: string) {
-  text.value = s
-  showSnippets.value = false
-  nextTick(() => {
-    autoResize()
-    focusWithoutViewportScroll(textareaRef.value)
-  })
-}
-function deleteSnippet(i: number) {
-  snippets.value.splice(i, 1)
-  saveSnippetsToStorage()
-}
-function toggleSnippets() {
-  showSnippets.value = !showSnippets.value
-  if (showSnippets.value) showHistory.value = false
-}
-
-// --- Send History (server-side, survives trycloudflare domain changes) ---
-function loadHistory() {
-  history.value = serverStore.get<string[]>('history', [])
-}
-function saveHistoryToStorage() {
-  serverStore.set('history', history.value)
-}
-function pushHistory(t: string) {
-  const trimmed = t.trim()
-  if (!trimmed) return
-  // Dedup: remove existing identical entry
-  const idx = history.value.indexOf(trimmed)
-  if (idx !== -1) history.value.splice(idx, 1)
-  // Prepend (newest first)
-  history.value.unshift(trimmed)
-  if (history.value.length > HISTORY_MAX) history.value.pop()
-  saveHistoryToStorage()
-}
-function insertFromHistory(h: string) {
-  text.value = h
-  showHistory.value = false
-  nextTick(() => {
-    autoResize()
-    focusWithoutViewportScroll(textareaRef.value)
-  })
-}
-function clearHistory() {
-  history.value = []
-  serverStore.set('history', [])
-}
-function toggleHistory() {
-  showHistory.value = !showHistory.value
-  if (showHistory.value) showSnippets.value = false
-}
-
-// --- Auto-resize + input handler ---
-// Grow with content up to MAX_INPUT_LINES, then scroll internally. Capping at a few lines
-// (not ~50vh) is the core of the mobile input fix: a long paste can no longer swallow the
-// screen or push the caret line behind the keyboard. Native caret-follow keeps the caret
-// visible as the box scrolls. Resetting to 'auto' first lets the box shrink back when cleared.
-const MAX_INPUT_LINES = 5
-function autoResize() {
-  const ta = textareaRef.value
-  if (!ta) return
-  ta.style.height = 'auto'
-  const cs = getComputedStyle(ta)
-  const lineHeight = parseFloat(cs.lineHeight) || 21
-  const vPad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + 2 // padding + 1px borders
-  const cap = lineHeight * MAX_INPUT_LINES + vPad
-  ta.style.height = Math.min(ta.scrollHeight, cap) + 'px'
-}
-function onInput(e: Event) {
-  const ie = e as InputEvent
-  reportCliInputDiagnostic('compose.input', {
-    isComposing: ie.isComposing,
-    inputType: ie.inputType,
-    eventData: summarizeText(ie.data),
-    modelValue: summarizeText(text.value),
-  })
-  autoResize()
-  saveDraft()
-}
-
-// --- Focus handler: keep viewport scroll pinned when textarea regains focus ---
-function onTextareaFocus() {
-  // iOS may keep a stale page scroll after the IME checkmark dismisses the
-  // keyboard. The app shell owns visual viewport height; compose only keeps the
-  // root scroll pinned so the textarea never creates its own spacer.
-  reportCliInputDiagnostic('compose.focus', { textLen: text.value.length })
-  resetViewportScroll()
-  setTimeout(resetViewportScroll, 150)
-  setTimeout(resetViewportScroll, 400)
-}
-
-// --- Send ---
-function send() {
-  const val = text.value
-  if (!val) return
-  reportCliInputDiagnostic('compose.send', { value: summarizeText(val) })
-  pushHistory(val)
-  emit('send', val)
-  text.value = ''
-  try { localStorage.removeItem(DRAFT_KEY) } catch {}
-  nextTick(autoResize)
-}
-
-// --- Copy all: writes the FULL current draft to the OS clipboard (same SSOT idiom as
-// every other 复制 affordance in the terminal — copyTextToClipboard handles the
-// insecure-HTTP / iOS execCommand fallback). Briefly flips the icon to a checkmark so a
-// tap gets visible confirmation without a toast stealing space from the compact toolbar.
-async function copyAll() {
-  const ok = await copyTextToClipboard(text.value)
-  reportCliInputDiagnostic('compose.copy-all', { ok, len: text.value.length })
-  if (!ok) return
-  copyFeedback.value = true
-  if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
-  copyFeedbackTimer = setTimeout(() => { copyFeedback.value = false }, 1400)
-}
-
-// --- Clear all (undoable) ---
-// Wipes the draft but keeps the pre-clear text in `clearedBackup` for UNDO_VISIBLE_MS so an
-// accidental tap on a long multi-line draft isn't unrecoverable. An empty textarea has
-// nothing worth restoring, so clearing it shows no undo pill (matches the "clear an
-// already-empty box" fixture — a no-op, not a false affordance).
-function clearAll() {
-  const prev = text.value
-  text.value = ''
-  try { localStorage.removeItem(DRAFT_KEY) } catch {}
-  nextTick(() => {
-    autoResize()
-    focusWithoutViewportScroll(textareaRef.value)
-  })
-  if (undoTimer) { clearTimeout(undoTimer); undoTimer = null }
-  if (!prev) {
-    showUndo.value = false
-    clearedBackup.value = null
-    return
-  }
-  clearedBackup.value = prev
-  showUndo.value = true
-  undoTimer = setTimeout(() => {
-    showUndo.value = false
-    clearedBackup.value = null
-    undoTimer = null
-  }, UNDO_VISIBLE_MS)
-}
-
-// --- Undo the last clear: restores the FULL pre-clear text (not appended — a straight
-// replace, since the textarea is guaranteed empty right after clearAll). One-shot: once used
-// (or once the pill times out) clearedBackup is gone, so a second tap does nothing.
-function undoClear() {
-  if (clearedBackup.value == null) return
-  text.value = clearedBackup.value
-  saveDraft()
-  clearedBackup.value = null
-  showUndo.value = false
-  if (undoTimer) { clearTimeout(undoTimer); undoTimer = null }
-  nextTick(() => {
-    autoResize()
-    const ta = textareaRef.value
-    if (ta) {
-      const end = ta.value.length
-      try { ta.setSelectionRange(end, end) } catch {}
-    }
-    focusWithoutViewportScroll(textareaRef.value)
-  })
-}
-
-// --- Cursor movement ---
-function moveCursor(dir: 'up' | 'down' | 'left' | 'right' | 'home' | 'end') {
-  const ta = textareaRef.value
-  if (!ta) return
-  const pos = ta.selectionStart
-  const val = ta.value
-  switch (dir) {
-    case 'left':
-      ta.selectionStart = ta.selectionEnd = Math.max(0, pos - 1); break
-    case 'right':
-      ta.selectionStart = ta.selectionEnd = Math.min(val.length, pos + 1); break
-    case 'home': {
-      const ls = val.lastIndexOf('\n', pos - 1) + 1
-      ta.selectionStart = ta.selectionEnd = ls; break
-    }
-    case 'end': {
-      let le = val.indexOf('\n', pos)
-      if (le === -1) le = val.length
-      ta.selectionStart = ta.selectionEnd = le; break
-    }
-    case 'up': {
-      const cls = val.lastIndexOf('\n', pos - 1) + 1
-      const col = pos - cls
-      const pls = val.lastIndexOf('\n', cls - 2) + 1
-      ta.selectionStart = ta.selectionEnd = Math.min(pls + col, Math.max(0, cls - 1)); break
-    }
-    case 'down': {
-      const csl = val.lastIndexOf('\n', pos - 1) + 1
-      const cp = pos - csl
-      let nls = val.indexOf('\n', pos)
-      if (nls === -1) break
-      nls += 1
-      let nle = val.indexOf('\n', nls)
-      if (nle === -1) nle = val.length
-      ta.selectionStart = ta.selectionEnd = Math.min(nls + cp, nle); break
-    }
-  }
-  focusWithoutViewportScroll(ta)
-}
-
-onMounted(async () => {
-  loadDraft()
-  // A host-supplied draft (ResourceDrawer 重发) takes precedence over the persisted
-  // local draft so the inserted prompt is what the user sees.
-  if (props.draft != null) text.value = props.draft
-  // 先加载服务端数据，再填充 snippets/history
-  await serverStore.load()
-  loadSnippets()
-  loadHistory()
-  await nextTick()
-  focusWithoutViewportScroll(textareaRef.value)
-  autoResize()
-  cleanupInputDiagnostics = attachCliInputDiagnostics(textareaRef.value, 'compose-textarea')
-  resetViewportScroll()
-})
-
-onUnmounted(() => {
-  // Save draft when component unmounts (switching panels)
-  saveDraft()
-  cleanupInputDiagnostics?.()
-  cleanupInputDiagnostics = null
-  if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
-  if (undoTimer) clearTimeout(undoTimer)
-  // Reset scroll on unmount to prevent residual gap
-  resetViewportScroll()
+const {
+  text, textareaRef,
+  showSnippets, showHistory, snippets, history,
+  copyFeedback, showUndo,
+  toggleSnippets, toggleHistory, saveSnippet, insertSnippet, deleteSnippet, clearHistory, insertFromHistory,
+  onInput, onTextareaFocus,
+  send, copyAll, clearAll, undoClear, moveCursor,
+} = useComposeBox({
+  maxLines: 5, // screen is scarce here — see ComposeBarDesktop.vue for why desktop's cap differs
+  diagnosticSurface: 'compose-textarea-mobile',
+  draft: () => props.draft,
+  focusEl: focusWithoutViewportScroll,
+  // iOS may keep a stale page scroll after the IME checkmark dismisses the keyboard. The app
+  // shell owns visual viewport height; compose only keeps the root scroll pinned so the textarea
+  // never creates its own spacer.
+  onFocusSideEffects: () => {
+    resetViewportScroll()
+    setTimeout(resetViewportScroll, 150)
+    setTimeout(resetViewportScroll, 400)
+  },
+  emit: { send: (t) => emit('send', t) },
 })
 </script>
 
