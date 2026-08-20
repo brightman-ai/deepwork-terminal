@@ -22,7 +22,7 @@ import { useServerStore } from './useServerStore'
  *  override machinery so it is configured and stored the same way. */
 export type ShortcutAction =
   | 'switchTab' | 'prevTab' | 'nextTab' | 'newTab' | 'closeTab'
-  | 'findInTerminal'
+  | 'findInTerminal' | 'toggleComposeDesktop'
 
 /**
  * A modifier (or modifier combo) that can serve as the global prefix.
@@ -45,6 +45,10 @@ export const ACTION_CODES: Record<Exclude<ShortcutAction, 'switchTab' | 'findInT
   nextTab: 'ArrowDown',
   newTab: 'KeyN',
   closeTab: 'KeyW',
+  // Desktop-only (mobile reaches the compose bar through its bottom toolbar — no keyboard to
+  // bind). Unlike findInTerminal, there is no OS/browser idiom to defer to here, so it just
+  // follows the user's own prefix like the tab actions above instead of a special-cased default.
+  toggleComposeDesktop: 'KeyI',
 }
 
 // Renaming a tab has NO binding, deliberately. It is a rare action, and any key it took would be

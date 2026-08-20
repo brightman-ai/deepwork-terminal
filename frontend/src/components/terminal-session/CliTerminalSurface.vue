@@ -113,6 +113,25 @@
         data-testid="surface-connection-status"
         @refresh="wsReconnect"
       />
+      <!-- Desktop-only compose toggle. Deliberately a SIBLING of ssr-main, not inside it: that
+           zone swaps between TmuxPaneBar and the non-tmux action row (surfaceActionBar.ts) and
+           hides whichever isn't current, but compose must stay reachable in BOTH — same as
+           mobile's compose toggle, which lives in its own always-present Toolbar row rather than
+           inside the tmux-conditional action bar. -->
+      <button
+        v-if="!isMobile"
+        class="ssr-compose-toggle"
+        type="button"
+        :class="{ 'is-active': desktopComposeOpen }"
+        aria-label="输入条"
+        :title="`输入条 (${composeShortcutLabel}) — 先在本地打好整段文字，发送时才一次性送进终端`"
+        data-testid="surface-compose-toggle"
+        @click="toggleDesktopCompose"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+        </svg>
+      </button>
     </div>
 
     <!-- 终端区域 -->
@@ -171,6 +190,17 @@
         @resize="onTerminalResize"
         @ready="onTerminalReady"
       />
+      <!-- Resync overlay: covers xterm's untouched (visually black) canvas between "socket open"
+           and "server's initial burst landed" so a slow/cellular reconnect reads as catching up,
+           not as the tab being gone. pointer-events:none — never steals the tap that would
+           otherwise focus/position the terminal underneath. See hasSyncedSinceConnect above. -->
+      <div
+        v-if="resyncOverlayVisible"
+        class="terminal-resync-overlay"
+        data-testid="terminal-resync-overlay"
+      >
+        <span class="terminal-resync-label">正在恢复终端内容…</span>
+      </div>
       <!-- 终端内查找 (Ctrl/Cmd+F 等价物, findInTerminal shortcut). v-if'd — a fresh instance each
            open, no state to leak across closes. Bottom-docked so it never fights the top-right
            notify/upload floats for the same pixels (see TerminalSearchBar.vue's own style note). -->
@@ -254,6 +284,15 @@
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
+
+    <!-- Desktop compose bar — real flex row (see ComposeBarDesktop.vue), sibling of .terminal-body
+         so it pushes the terminal up instead of covering it, same as mobile's bottom-bar above. -->
+    <ComposeBarDesktop
+      v-if="!isMobile && desktopComposeOpen"
+      :draft="desktopComposeDraft"
+      @send="onDesktopComposeSend"
+      @close="closeDesktopCompose"
+    />
 
     <!-- Dedicated paste-capture sheet (HTTP-only fallback). Its OWN focusable textarea — NOT
          the compose box — so the compose draft is never touched. inputmode="none" keeps the
@@ -418,6 +457,7 @@ import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer
 import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickSheet.vue'
 import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue'
 import ComposeBar from '@terminal/components/terminal-session/ComposeBar.vue'
+import ComposeBarDesktop from '@terminal/components/terminal-session/ComposeBarDesktop.vue'
 import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverlay.vue'
 import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
 import AttentionHud from '@terminal/components/terminal-session/AttentionHud.vue'
@@ -757,6 +797,13 @@ const surfaceEntry = computed(() => sessionEntry(props.sessionId))
 /** 只有"检测到 agent 且它在跑"才允许出现「中断」：裸 shell 的一个单击不该能中断任何东西。 */
 const surfaceAgentRunning = computed(
   () => !!surfaceEntry.value?.agentTool && sessionRawStatus(surfaceEntry.value) === 'running',
+)
+
+// Same idiom as findInTerminal just below: wording sourced from the user's own (rebindable)
+// config, via the SAME bindingLabel the Settings page uses — one formatting function, not two
+// places spelling the same shortcut differently.
+const composeShortcutLabel = computed(() =>
+  bindingLabel(bindingFor(shortcutsConfig.value, 'toggleComposeDesktop')),
 )
 
 const SURFACE_ACTION_ICON: Record<SurfaceActionId, Component> = {
@@ -1354,6 +1401,36 @@ function robustFitAndResize() {
 const runtimeDiag = ref('')
 let everConnected = false
 let diagInFlight = false
+
+// A (re)connect opens the socket before the server's replay/session_meta burst has arrived —
+// `wsStatus` flips to 'connected' on the WS handshake alone, not on "there is something to look
+// at yet". Between those two moments .terminal-body is xterm's untouched default background:
+// visually identical to broken, and on a slow/cellular reconnect (mobile picking up a tab that
+// was live on another device, replay up to 256KB) that gap is long enough to read as "this tab
+// is gone" rather than "still catching up". `session_meta` is the server's universal "I'm past
+// the initial burst" signal — sent after replay even when replay was empty — so it (or the first
+// binary frame, whichever lands first) is what ends the gap; a fresh connect's ~0 diff never
+// shows the overlay long enough to be seen, so no first-connect distinction is needed.
+const hasSyncedSinceConnect = ref(false)
+const showResyncOverlay = computed(() =>
+  !hasSyncedSinceConnect.value
+  && (wsStatus.value === 'connecting' || wsStatus.value === 'reconnecting' || wsStatus.value === 'connected'),
+)
+// Debounced reveal: a LAN (re)connect closes this gap in single-digit ms, and flashing a label
+// for one frame reads as a glitch, not a status. Only a gap that outlives the debounce is real.
+const resyncOverlayVisible = ref(false)
+let resyncOverlayTimer: ReturnType<typeof setTimeout> | null = null
+watch(showResyncOverlay, (should) => {
+  if (resyncOverlayTimer) {
+    clearTimeout(resyncOverlayTimer)
+    resyncOverlayTimer = null
+  }
+  if (should) {
+    resyncOverlayTimer = setTimeout(() => { resyncOverlayVisible.value = true }, 150)
+  } else {
+    resyncOverlayVisible.value = false
+  }
+}, { immediate: true })
 async function classifyFailure(): Promise<void> {
   if (diagInFlight || !props.isRemote || !props.diagnose || everConnected) return
   diagInFlight = true
@@ -1372,6 +1449,7 @@ const connDiagnostic = computed(() => props.connError || runtimeDiag.value)
 watch(wsStatus, (val) => {
   emit('connection-change', val)
   hud.updateSnapshot({ ws: val })
+  if (val === 'connecting' || val === 'reconnecting') hasSyncedSinceConnect.value = false
   if (val === 'connected') {
     const wasReconnect = everConnected // true here ⇒ we'd connected before ⇒ this is a RE-connect
     everConnected = true
@@ -1665,6 +1743,7 @@ onMounted(() => {
   window.addEventListener('focus', onWindowFocus)
   document.addEventListener('keydown', onKeydownDirect, { capture: true })
   document.addEventListener('keydown', onFindShortcutKeydown, { capture: true })
+  document.addEventListener('keydown', onComposeShortcutKeydown, { capture: true })
   document.addEventListener('paste', onClipboardPaste, { capture: true })
   terminalBodyRef.value?.addEventListener('touchmove', onTerminalBodyTouchMove, { passive: false })
   window.addEventListener('scroll', lockKeyboardViewportScroll, { passive: true })
@@ -1689,6 +1768,7 @@ onUnmounted(() => {
   terminalBodyRef.value?.removeEventListener('touchmove', onTerminalBodyTouchMove)
   document.removeEventListener('keydown', onKeydownDirect, { capture: true })
   document.removeEventListener('keydown', onFindShortcutKeydown, { capture: true })
+  document.removeEventListener('keydown', onComposeShortcutKeydown, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('blur', onWindowBlur)
@@ -1818,11 +1898,19 @@ function onTerminalReady(terminal: Terminal) {
   onMessage(
     (data: ArrayBuffer) => {
       const bytes = new Uint8Array(data)
+      hasSyncedSinceConnect.value = true
       inputTelemetry.recordOutput(bytes, 'ws-binary')
       xtermRef.value?.write(bytes)
       scheduleGhostRefresh()
     },
     (msg: WSControlMessage) => {
+      // ANY control message closes the resync gap, not just 'session_meta' specifically. A
+      // session that exits or gets preempted in the instant right after connect — before
+      // session_meta's write() completes — would otherwise leave the overlay's "正在恢复终端
+      // 内容…" stuck on top of the shell_exit/preempted notice this same switch is about to
+      // write into the terminal one line down. Narrow but real: session_meta and shell_exit are
+      // two separate server-side writes, not one atomic step, so ordering isn't guaranteed.
+      hasSyncedSinceConnect.value = true
       switch (msg.type) {
         case 'shell_exit': {
           xtermRef.value?.write('\r\n[进程已退出]\r\n')
@@ -2094,12 +2182,46 @@ function onClipboard(op: string) {
   }
 }
 
-function onComposeSend(text: string) {
+/** Shared by both compose skins' send handler — the actual "hand it to the PTY" step has nothing
+ *  device-specific about it; only what happens to each device's own open/draft state differs. */
+function sendComposedText(text: string): void {
   const chunks = composeSend.encode(text)
   for (const chunk of chunks) sendBinary(chunk)
+  hud.record('keyboard', `compose: ${text.length} chars`)
+}
+
+function onComposeSend(text: string) {
+  sendComposedText(text)
   activeMode.value = 'idle'
   composeDraft.value = undefined
-  hud.record('keyboard', `compose: ${text.length} chars`)
+}
+
+// ─── Desktop compose bar ────────────────────────────────────────────────────────────────────
+// Mobile reaches ComposeBar through activeMode==='compose' (toggled from its own bottom-bar,
+// which only mounts when isMobile). Desktop has no such toolbar, so it gets its own open flag +
+// draft, deliberately NOT folded into activeMode — that enum's other values (keyboard/numpad)
+// are mobile-only concepts, and cramming an unrelated desktop boolean into it would make it lie
+// about what it represents.
+const desktopComposeOpen = ref(false)
+const desktopComposeDraft = ref<string | undefined>(undefined)
+function toggleDesktopCompose(): void {
+  desktopComposeOpen.value = !desktopComposeOpen.value
+}
+function closeDesktopCompose(): void {
+  desktopComposeOpen.value = false
+}
+function onDesktopComposeSend(text: string) {
+  sendComposedText(text)
+  desktopComposeOpen.value = false
+}
+/** Mirrors onFindShortcutKeydown just below it — same shape, same registration, different
+ *  binding/action. Desktop-only: mobile has no keyboard to bind, it opens compose from its own
+ *  bottom-bar button instead. */
+function onComposeShortcutKeydown(e: KeyboardEvent): void {
+  if (isMobile.value || !props.active) return
+  if (!matchesBinding(e, bindingFor(shortcutsConfig.value, 'toggleComposeDesktop'))) return
+  e.preventDefault()
+  toggleDesktopCompose()
 }
 
 // Drawer "插入对话" — re-use an already-uploaded image/file. The drawer hands us the
@@ -2112,16 +2234,26 @@ function onDrawerInject(path: string) {
   hud.record('state', `inject: ${path}`)
 }
 
-// Drawer 重发 — open the ComposeBar with the past prompt inserted for editing (NOT a
+// Drawer 重发 — open the compose bar with the past prompt inserted for editing (NOT a
 // direct send). Reset the draft first so an identical re-send still re-triggers the
-// ComposeBar watcher on the next tick.
+// ComposeBar/ComposeBarDesktop watcher on the next tick. Device-routed: the drawer itself is
+// reachable from both, so 重发 must land wherever a compose box actually exists — routing it
+// unconditionally to the mobile-only ref would silently no-op on desktop.
 function onDrawerComposeDraft(text: string) {
   if (text == null) return
-  composeDraft.value = undefined
-  nextTick(() => {
-    composeDraft.value = text
-    activeMode.value = 'compose'
-  })
+  if (isMobile.value) {
+    composeDraft.value = undefined
+    nextTick(() => {
+      composeDraft.value = text
+      activeMode.value = 'compose'
+    })
+  } else {
+    desktopComposeDraft.value = undefined
+    nextTick(() => {
+      desktopComposeDraft.value = text
+      desktopComposeOpen.value = true
+    })
+  }
 }
 
 // ─── Touch interactions ───────────────────────────────────────────────────────
@@ -2366,6 +2498,29 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   background: #0e0b16;
 }
 
+/* Resync overlay — see hasSyncedSinceConnect. Below the overview overlay (z-index 15); not
+   fighting it, since the two are never true at once (overview only opens against a live, already
+   synced surface). No background of its own: xterm's own canvas is already the (visually black)
+   backdrop, this only adds the label so that backdrop reads as "loading" instead of "empty". */
+.terminal-resync-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.terminal-resync-label {
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+}
+
 /* Per-surface status row (SSOT for both hosts). A single horizontal bar above .terminal-body.
    ssr-main grows + scrolls (tmux windows / agent badge); ssr-health is PINNED to the trailing
    edge and never scrolls, so the heartbeat stays fully visible no matter how many tmux windows
@@ -2506,6 +2661,23 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   align-items: center;
   padding: 0 8px;
 }
+
+.ssr-compose-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 100%;
+  margin-right: 4px;
+  background: transparent;
+  border: none;
+  color: hsl(var(--muted-foreground, 240 4% 65%));
+  cursor: pointer;
+  transition: color 0.1s, background 0.1s;
+}
+.ssr-compose-toggle:hover { color: hsl(var(--foreground, 0 0% 95%)); background: rgba(255,255,255,0.06); }
+.ssr-compose-toggle.is-active { color: #4a80d8; background: rgba(74,128,216,0.14); }
 
 /* WS7 primary entries — float top-right above xterm; small and unobtrusive so they
    never cover terminal content the user is reading. A quick notify bell sits beside
