@@ -27,6 +27,36 @@ func resolveVersion() string {
 }
 
 func main() {
+	// Subcommand dispatch. `dw-terminal muxd` runs the session daemon in the foreground;
+	// the server spawns it automatically (connect-or-spawn, exactly like a tmux client),
+	// so this exists for supervision, debugging, and the isolated fixtures tests use.
+	//
+	// It is the SAME binary rather than a second one on purpose: the daemon and the
+	// server then always speak the same protocol version, and there is no way to install
+	// or upgrade one without the other.
+	// `attach` and `ls` are deliberately TOP-LEVEL rather than `muxd --attach`: attaching to
+	// your own terminal is an everyday user action, while `muxd` is where you go to operate
+	// the daemon. Filing them under the daemon would make the common case read like
+	// administration.
+	if len(os.Args) > 1 {
+		var run func([]string) error
+		switch os.Args[1] {
+		case "muxd":
+			run = runMuxd
+		case "attach":
+			run = runAttach
+		case "ls":
+			run = runList
+		}
+		if run != nil {
+			if err := run(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", os.Args[1], err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	// A self-explaining --help: an agent (or a human) running `dw-terminal --help` should be
 	// able to drive the tool from this text alone — what each flag means, and copy-pasteable
 	// examples for the common intents (LAN-only, public access, pinned code).

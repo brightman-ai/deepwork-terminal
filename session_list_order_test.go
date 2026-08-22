@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"github.com/brightman-ai/deepwork-terminal/muxd"
 	"os"
 	"os/exec"
 	"testing"
@@ -12,7 +13,7 @@ import (
 // sync.Map.Range 的遍历顺序未定义且每次都可能不同 —— 曾导致新建的终端落到第一位、
 // 显示成"终端1"（同时另一个更老的标签也显示"终端1"），且每次轮询都重新洗牌。
 // 管道假 PTY：这两条测试只关心 List() 的顺序，不需要真进程。
-func orderTestFactory(_ PTYStartOptions) (*os.File, *exec.Cmd, error) {
+func orderTestFactory(_ muxd.SpawnOptions) (*os.File, *exec.Cmd, error) {
 	r, _, err := os.Pipe()
 	if err != nil {
 		return nil, nil, err

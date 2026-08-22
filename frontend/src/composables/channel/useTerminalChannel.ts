@@ -71,6 +71,17 @@ export function useTerminalChannel(options: TerminalChannelOptions) {
           case 'agent_state':
             agentIntel.handleWSMessage(msg.payload)
             break
+          // 会话尺寸由服务端裁决（所有观看窗口的逐轴最小值），所以这不是自己那次 resize 的回声，
+          // 而且不照做就会画错：全屏 TUI 按绝对光标定位重绘，网格对不上就是一屏糊。
+          case 'resized': {
+            const p = msg.payload as { cols?: number; rows?: number } | null
+            const cols = p?.cols
+            const rows = p?.rows
+            if (typeof cols === 'number' && typeof rows === 'number' && cols >= 1 && rows >= 1) {
+              if (terminal.cols !== cols || terminal.rows !== rows) terminal.resize(cols, rows)
+            }
+            break
+          }
           case 'error':
             console.error('[TerminalChannel] WS error:', msg.payload)
             break

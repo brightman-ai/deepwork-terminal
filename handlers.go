@@ -184,9 +184,11 @@ func (s *Server) handleResize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SetPTYSize, not pty.Setsize: the session must RECORD the size, because the Agent
-	// Overview replays this session's bytes onto a grid of exactly that size (screen.go).
-	if err := sess.SetPTYSize(req.Cols, req.Rows); err != nil {
+	// RequestPTYSize, not SetViewerSize: an HTTP caller is not a window. It gets the
+	// daemon's fallback size — honoured while nothing attached has declared one, and
+	// deliberately ignored while a browser is watching, because a caller that cannot see
+	// the session cannot know what fits in it. See RequestPTYSize.
+	if err := sess.RequestPTYSize(req.Cols, req.Rows); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -262,16 +264,8 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess.mu.Lock()
-	ptyFile := sess.PTY
-	sess.mu.Unlock()
-	if ptyFile == nil {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "session has no PTY"})
-		return
-	}
-
 	observeTerminalInput(obs.WithStage(r.Context(), stgTerminalInput), id, data)
-	if _, writeErr := ptyFile.Write(data); writeErr != nil {
+	if writeErr := sess.WriteInput(data); writeErr != nil {
 		logger.Debug("pty write failed (http input)", "id", id, "error", writeErr)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "pty write failed"})
 		return
@@ -437,8 +431,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	subID := uuid.New().String()
 
-	// Subscribe to PTY output.
-	dataCh, unsub := s.mgr.Subscribe(sess, subID)
+	// Subscribe to PTY output. The grid comes back WITH the subscription, not from a
+	// separate read afterwards — see Subscribe.
+	dataCh, gridCols, gridRows, unsub := s.mgr.Subscribe(sess, subID)
 	defer unsub()
 
 	// Send replay buffer first. Strip terminal report-queries (DA/DSR/color/…): replaying them
@@ -465,6 +460,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			"sub_id", subID,
 			"duration_ms", time.Since(connectedAt).Milliseconds())
 	}()
+	// Tell this browser the grid BEFORE the replay, not after.
+	//
+	// The session may already be smaller than this window — another client is watching it
+	// through a narrower one — and the replay is a screen that was drawn at that size. Send
+	// it first and the browser reflows the scrollback of a terminal it has never seen at a
+	// width it never had; a full-screen TUI's repaint then lands on the wrong grid, which
+	// reads as a corrupt program rather than as a window that has not been told its size.
+	{
+		payload, _ := json.Marshal(ResizedPayload{Cols: gridCols, Rows: gridRows})
+		msg, _ := json.Marshal(WSControlMessage{Type: MsgTypeResized, Payload: payload})
+		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
+		_ = conn.Write(writeCtx, websocket.MessageText, msg)
+		writeCancel()
+	}
+
 	if len(replay) > 0 {
 		terminalWSReplayBytesTotal.Add(uint64(len(replay)))
 		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
@@ -509,9 +519,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve this session's shell PID once for tmux state scoping.
-	sess.mu.Lock()
+	//
+	// No lock here: ShellPID takes sess.mu itself. It used to read sess.Cmd directly and
+	// so needed the caller to hold the lock; now that the pid is a plain field the daemon
+	// reports, wrapping this call would be a self-deadlock (sync.Mutex is not reentrant).
 	wsShellPID := sess.ShellPID()
-	sess.mu.Unlock()
 
 	// Status frames (tmux topology / sessions overview / explicit signals) are produced on their
 	// OWN goroutine and handed to the writer already marshalled.
@@ -632,12 +644,22 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					logger.Debug("ws status frame write failed", "id", id, "error", err)
 					return
 				}
-			case data, ok := <-dataCh:
+			case frame, ok := <-dataCh:
 				if !ok {
 					return
 				}
+				// Output and resizes come down ONE channel, so they reach the browser in the
+				// order they happened. Two channels here would put the ordering back in the
+				// hands of a select, and "which grid were these bytes drawn for" is not a
+				// question a coin flip may answer — see viewerFrame.
+				msgType, payload := websocket.MessageBinary, frame.Data
+				if frame.Resize != nil {
+					p, _ := json.Marshal(ResizedPayload{Cols: frame.Resize[0], Rows: frame.Resize[1]})
+					payload, _ = json.Marshal(WSControlMessage{Type: MsgTypeResized, Payload: p})
+					msgType = websocket.MessageText
+				}
 				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-				err := conn.Write(writeCtx, websocket.MessageBinary, data)
+				err := conn.Write(writeCtx, msgType, payload)
 				writeCancel()
 				if err != nil {
 					logger.Debug("ws write failed", "id", id, "error", err)
@@ -691,12 +713,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		switch msgType {
 		case websocket.MessageBinary:
 			observeTerminalInput(inputLogCtx, id, data)
-			// Terminal input → write to PTY.
-			sess.mu.Lock()
-			ptyFile := sess.PTY
-			sess.mu.Unlock()
-			if ptyFile != nil {
-				_, writeErr := ptyFile.Write(data)
+			// Terminal input → write to the PTY (which the daemon holds).
+			{
+				writeErr := sess.WriteInput(data)
 				if writeErr != nil {
 					logger.Debug("pty write failed", "id", id, "error", writeErr)
 					break
@@ -715,7 +734,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				logger.Debug("invalid control message", "id", id, "error", err)
 				continue
 			}
-			s.handleControlMessage(ctx, conn, sess, ctrl)
+			s.handleControlMessage(ctx, conn, sess, subID, ctrl)
 		}
 	}
 
@@ -746,7 +765,12 @@ func (s *Server) executeTmuxNav(sess *Session, action string) {
 }
 
 // handleControlMessage processes a JSON control message from the client.
-func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn, sess *Session, ctrl WSControlMessage) {
+//
+// subID identifies WHICH viewer sent it. That matters for exactly one message today —
+// resize — but it matters absolutely: a resize is a statement about the sender's own
+// window, and a session with two browsers open cannot act on it without knowing whose
+// window changed.
+func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn, sess *Session, subID string, ctrl WSControlMessage) {
 	switch ctrl.Type {
 	case MsgTypeResize:
 		var payload ResizePayload
@@ -754,12 +778,21 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 			logger.Debug("invalid resize payload", "id", sess.ID, "error", err)
 			return
 		}
-		if payload.Cols < 1 || payload.Rows < 1 || payload.Cols > 500 || payload.Rows > 500 {
+		// 0×0 is a WITHDRAWAL, not garbage: "I am still connected and still want the output,
+		// but I am no longer displaying this session — stop sizing the PTY for me." A
+		// backgrounded tab says it, and without it the smallest window that ever looked at a
+		// session would keep constraining it after being closed. Anything else out of range
+		// is still nonsense and still refused.
+		withdraw := payload.Cols == 0 && payload.Rows == 0
+		if !withdraw && (payload.Cols < 1 || payload.Rows < 1 || payload.Cols > 500 || payload.Rows > 500) {
 			logger.Debug("resize out of bounds", "id", sess.ID, "cols", payload.Cols, "rows", payload.Rows)
 			return
 		}
-		if err := sess.SetPTYSize(payload.Cols, payload.Rows); err != nil {
-			logger.Debug("pty setsize failed", "id", sess.ID, "error", err)
+		// This declares the size of ONE window — this connection's — not the session's. The
+		// session is then fitted to the smallest window watching it, here and again in the
+		// daemon. See session_viewport.go.
+		if err := sess.SetViewerSize(subID, payload.Cols, payload.Rows); err != nil {
+			logger.Debug("declaring the viewer size failed", "id", sess.ID, "error", err)
 		}
 
 	case MsgTypeHeartbeat:
@@ -786,11 +819,8 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 			logger.Debug("invalid input payload", "id", sess.ID, "error", err)
 			return
 		}
-		sess.mu.Lock()
-		ptyFile := sess.PTY
-		sess.mu.Unlock()
-		if ptyFile != nil {
-			if _, writeErr := ptyFile.Write(payload.Data); writeErr != nil {
+		{
+			if writeErr := sess.WriteInput(payload.Data); writeErr != nil {
 				logger.Debug("pty write failed (text input)", "id", sess.ID, "error", writeErr)
 			}
 			sess.mu.Lock()

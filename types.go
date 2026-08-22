@@ -7,15 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/ansisignal"
-	"github.com/creack/pty"
-	"golang.org/x/sys/unix"
+	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
 // SessionStatus represents the lifecycle state of a terminal session.
@@ -30,30 +27,52 @@ const (
 // Session represents a single terminal session backed by a PTY.
 // [Ref: T5-B3]
 type Session struct {
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	Title      string        `json:"title"`
-	Engine     string        `json:"engine"`
-	CWD        string        `json:"cwd"`
-	ShellPath  string        `json:"-"`
-	PTY        *os.File      `json:"-"`
-	Cmd        *exec.Cmd     `json:"-"`
-	Buffer     *RingBuffer   `json:"-"`
+	ID        string      `json:"id"`
+	Name      string      `json:"name"`
+	Title     string      `json:"title"`
+	Engine    string      `json:"engine"`
+	CWD       string      `json:"cwd"`
+	ShellPath string      `json:"-"`
+	Buffer    *RingBuffer `json:"-"`
+
+	// mux is the daemon connection this session is reached through, and stream is this
+	// session's attached output channel. The PTY itself lives in the daemon — the server
+	// deliberately holds no file descriptor for it, which is what lets the server be
+	// restarted (or replaced) without the shell noticing.
+	mux    *muxd.Client
+	stream *muxd.Stream
+
+	// shellPID is reported by the daemon. The server cannot see the process, so this must
+	// arrive over the protocol rather than be re-derived from the process tree.
+	shellPID   int
 	Status     SessionStatus `json:"status"`
 	CreatedAt  time.Time     `json:"createdAt"`
 	LastActive time.Time     `json:"lastActive"`
 
-	// subscribers holds active WebSocket connections for this session.
-	// Protected by subMu.
-	subscribers map[string]chan []byte
-	subMu       sync.RWMutex
+	// viewers holds the active WebSocket connections watching this session, keyed by
+	// subscription id. Protected by subMu.
+	//
+	// The registry carries BOTH halves of what a viewer is — where its bytes go, and how big
+	// its window is — because they have exactly the same lifetime. Keeping the sizes in a
+	// second map next to this one would let the two drift, and the drift has a name: a viewer
+	// that disconnected but whose size is still constraining the session (see viewportLocked).
+	viewers map[string]*viewer
+	subMu   sync.RWMutex
+
+	// geomMu serializes "re-derive the smallest window and declare it to the daemon".
+	//
+	// It is a separate lock from mu and subMu on purpose: the declaration is I/O, and the
+	// two ends of a resize race must not be reordered on the wire. Whoever holds this lock
+	// reads the current minimum and pushes it, so the LAST push always carries the LATEST
+	// minimum. Lock order is geomMu → subMu / mu, never the reverse.
+	geomMu sync.Mutex
+	// declCols/declRows is the size this server last declared on its own attachment; 0 means
+	// "declared nothing", i.e. this server is an observer. Guarded by geomMu.
+	declCols, declRows int
 
 	// done is closed when the PTY read loop exits (shell exited or error).
 	done     chan struct{}
 	doneOnce sync.Once
-
-	// waitOnce guards the single legitimate call to Cmd.Wait — see Session.reap.
-	waitOnce sync.Once
 
 	// exitCode stores the shell exit code once the process exits.
 	exitCode int
@@ -64,8 +83,15 @@ type Session struct {
 	TmuxDetected bool `json:"tmuxDetected"`
 
 	// ptyCols/ptyRows are the PTY's CURRENT window size — the size the program on the other
-	// end believes it is drawing into. Seeded from spawnPTY's initial winsize and updated by
-	// SetPTYSize on every resize.
+	// end believes it is drawing into.
+	//
+	// It is a CACHE OF THE DAEMON'S ANSWER, never of our request. The daemon owns the size:
+	// it fits the session to every client watching it (smallest-wins), so the size a browser
+	// asks for and the size the session actually enters are routinely different numbers. This
+	// field used to be written optimistically at request time, which meant that in the exact
+	// case per-attachment geometry exists to handle — two windows of different sizes — the
+	// replay grid recorded a size the terminal never had. It is now written only where the
+	// answer arrives: AttachAck, MsgResized, and the reconcile summary.
 	//
 	// Why the session has to remember this at all: the Agent Overview reconstructs each card's
 	// preview by REPLAYING the PTY byte stream onto a character grid (screen.go). A TUI paints
@@ -106,36 +132,67 @@ func (s *Session) SetName(name string) {
 	s.mu.Lock()
 	s.Name = name
 	s.Title = ""
+	meta := sessionMeta{
+		Name: name, Engine: s.Engine, CWD: s.CWD,
+		ShellPath: s.ShellPath, CreatedAt: s.CreatedAt,
+	}
+	client := s.mux
 	s.mu.Unlock()
+
+	// PUSH IT TO THE DAEMON. The name lives in the daemon's metadata blob — that is what
+	// makes it survive a restart and what every other client reads — so a rename that only
+	// touches this process is a rename that has not really happened: `dw-terminal ls` keeps
+	// printing the old name, `attach <new name>` fails, another host never learns, and the
+	// next restore brings the old name back.
+	//
+	// A failure here is logged rather than returned: the tab is renamed on screen either
+	// way, and the next SetMeta or restart reconciles it. Refusing the rename over a
+	// transient daemon hiccup would be the worse trade.
+	if client != nil {
+		if err := client.SetMeta(s.ID, meta.encode()); err != nil {
+			logger.Warn("could not persist the new name to the daemon; other clients will "+
+				"keep showing the old one until the next reconcile", "id", s.ID, "error", err)
+		}
+	}
 }
 
-// SetPTYSize resizes the PTY **and** records the new size on the session.
+// RequestPTYSize asks for a session size on behalf of a caller that is NOT a window —
+// the REST endpoint and InProcessService, neither of which has a viewer behind it.
 //
-// The two halves are one operation on purpose. Every resize path used to call pty.Setsize
-// directly and drop the numbers on the floor (three call sites: the REST handler, the WS
-// control message, and InProcessService.Resize), which is how the screen replay ended up
-// guessing. Making the setter own both means a fourth resize path cannot forget the second
-// half — there is no way to change the PTY's size without the session learning it.
+// It goes to the daemon's control plane, which treats it as the FALLBACK size: the one used
+// while nothing attached has declared a size of its own. That is the honest place for it. A
+// caller that is not displaying the session cannot know what will fit in the windows that
+// are, so letting it overrule them would re-open the exact bug per-attachment geometry
+// closes — one client reflowing another's terminal. When a browser IS watching, this request
+// is therefore ignored, deliberately and silently, in the same way `tmux resize-window` is
+// clamped by the clients actually attached.
 //
-// Bounds are the caller's business (all three already reject <1 or >500); this only refuses
-// obvious nonsense so a bad value can't poison the replay grid.
-func (s *Session) SetPTYSize(cols, rows int) error {
+// Note what it does NOT do: write the size onto the session. The daemon decides the session's
+// size and reports it back (AttachAck / MsgResized); recording our request as if it were the
+// answer is what used to make the overview's replay grid disagree with the real terminal.
+func (s *Session) RequestPTYSize(cols, rows int) error {
 	if cols < 1 || rows < 1 {
 		return fmt.Errorf("pty size: cols/rows must be positive (%d×%d)", cols, rows)
 	}
 	s.mu.Lock()
-	ptyFile := s.PTY
+	client := s.mux
 	s.mu.Unlock()
-	if ptyFile == nil {
-		return fmt.Errorf("session %s has no PTY", s.ID)
+	if client == nil {
+		return fmt.Errorf("session %s is not attached to a daemon", s.ID)
 	}
-	if err := pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
-		return err
+	return client.Resize(s.ID, uint16(cols), uint16(rows))
+}
+
+// setPTYSizeFromDaemon records the size the DAEMON says this session is now running at.
+// This is the only writer of ptyCols/ptyRows — see the field comment for why there is
+// exactly one.
+func (s *Session) setPTYSizeFromDaemon(cols, rows int) {
+	if cols <= 0 || rows <= 0 {
+		return
 	}
 	s.mu.Lock()
 	s.ptyCols, s.ptyRows = cols, rows
 	s.mu.Unlock()
-	return nil
 }
 
 // PTYSize returns the PTY's current window size. Falls back to the spawn size when a session
@@ -179,21 +236,8 @@ func (s *Session) ClearSignal() {
 	s.mu.Unlock()
 }
 
-// reap waits for the shell process, exactly once.
-//
-// os/exec.Cmd.Wait is NOT safe for concurrent use, and two callers legitimately want to reap:
-// readLoop (the PTY hit EOF on its own) and Destroy (we killed it deliberately). Racing them
-// corrupts ProcessState and double-closes the same descriptors — `go test -race` caught it.
-//
-// sync.Once doubles as the barrier that makes this correct rather than merely deduplicated:
-// Once.Do guarantees no call returns until the single call to f has returned, so whichever
-// caller loses the race still blocks until Wait is done and may safely read ProcessState after.
-func (s *Session) reap() {
-	if s.Cmd == nil {
-		return
-	}
-	s.waitOnce.Do(func() { _ = s.Cmd.Wait() })
-}
+// (Session.reap is gone: the daemon owns the process, so the daemon does the waiting.
+// The server never had a legitimate reason to Wait on a process it no longer parents.)
 
 // Done returns a channel that is closed when the PTY read loop exits.
 func (s *Session) Done() <-chan struct{} {
@@ -233,23 +277,61 @@ func (s *Session) GetTmuxDetected() bool {
 // this is the defense-in-depth backend half of that guard.
 func (s *Session) ForceKillForeground() error {
 	s.mu.Lock()
-	ptyFile := s.PTY
+	client := s.mux
 	tmux := s.TmuxDetected
 	s.mu.Unlock()
 	if tmux {
 		return fmt.Errorf("session %s: force-kill not supported for tmux-attached sessions", s.ID)
 	}
-	if ptyFile == nil {
-		return fmt.Errorf("session %s has no active pty", s.ID)
+	if client == nil {
+		return fmt.Errorf("session %s is not attached to a daemon", s.ID)
 	}
-	pgid, err := unix.IoctlGetInt(int(ptyFile.Fd()), unix.TIOCGPGRP)
-	if err != nil {
-		return fmt.Errorf("session %s: TIOCGPGRP: %w", s.ID, err)
-	}
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		return fmt.Errorf("session %s: kill foreground pgid %d: %w", s.ID, pgid, err)
+	// The TIOCGPGRP read happens daemon-side now, because the PTY master fd lives there.
+	if err := client.KillForeground(s.ID, int(syscall.SIGKILL)); err != nil {
+		return fmt.Errorf("session %s: %w", s.ID, err)
 	}
 	return nil
+}
+
+// WriteInput sends bytes to the session's PTY, which lives in the daemon.
+//
+// It replaces every `sess.PTY.Write(...)` call site. Those used to reach a file
+// descriptor this process owned; now the bytes travel over the protocol. Keeping it as
+// one method means there is a single place where "type into this session" is defined,
+// rather than four callers each holding an fd.
+//
+// The attached stream is preferred when there is one — it is the hot path and carries
+// raw frames — with the control connection as the fallback for callers that never
+// attached (the HTTP input endpoint).
+func (s *Session) WriteInput(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	stream, client := s.stream, s.mux
+	s.mu.Unlock()
+	if stream != nil {
+		if err := stream.Write(data); err == nil {
+			s.touch()
+			return nil
+		}
+		// Fall through to the control connection: a broken stream must not swallow input.
+	}
+	if client == nil {
+		return fmt.Errorf("session %s is not attached to a daemon", s.ID)
+	}
+	if err := client.Input(s.ID, data); err != nil {
+		return err
+	}
+	s.touch()
+	return nil
+}
+
+// touch records activity.
+func (s *Session) touch() {
+	s.mu.Lock()
+	s.LastActive = time.Now()
+	s.mu.Unlock()
 }
 
 // GetStatus returns the session status (thread-safe).
@@ -262,10 +344,16 @@ func (s *Session) GetStatus() SessionStatus {
 
 // ShellPID returns the PID of the shell process running in the PTY.
 func (s *Session) ShellPID() int {
-	if s.Cmd != nil && s.Cmd.Process != nil {
-		return s.Cmd.Process.Pid
-	}
-	return 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shellPID
+}
+
+// setShellPID records the pid the daemon reported for this session.
+func (s *Session) setShellPID(pid int) {
+	s.mu.Lock()
+	s.shellPID = pid
+	s.mu.Unlock()
 }
 
 // WorkingDir returns the working directory of the session.
@@ -439,7 +527,19 @@ const (
 	// the same reason: a bell can ring in a background session that has no WebSocket of its
 	// own. See session_signal.go.
 	MsgTypeAgentSignal = "agent_signal"
+	// server → client: the session's grid is now this big. NOT an echo of the client's own
+	// resize — it is the size the session actually entered after fitting every window
+	// watching it, which is a different number whenever a smaller window is also attached.
+	// Sent once before the replay (so the replay lands on the right grid) and then whenever
+	// the size changes, in stream order with the output it applies to.
+	MsgTypeResized = "resized"
 )
+
+// ResizedPayload is the payload of a "resized" control message.
+type ResizedPayload struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
 
 // AgentSignalEntry is one session's currently-unanswered explicit signal.
 type AgentSignalEntry struct {

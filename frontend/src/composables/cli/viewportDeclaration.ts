@@ -23,17 +23,30 @@
  *   "我是最新的"，正在 PC 上打字的人眼睁睁看着窗口被压成 80 列。声明本该挂在"我是不是那个正在
  *   被看的人"上，而不是挂在"我的 socket 刚好重连了"上。
  *
- * ## 规则
+ * ## 规则变了：从"抢占"变成"如实描述自己"
  *
- * 见 shouldDeclareViewport。三句话，其中最反直觉的是第二句：**刚成为观看者时必须声明，哪怕本地
- * 网格一个像素都没变**——因为要纠正的从来不是我的网格，是服务端那份可能已经被别人写过的共享尺寸。
+ * 上面那段历史里，尺寸是一份**共享可变状态**，服务端只记得一个数字，所以"声明"才是一次抢占，
+ * 才需要一条纪律去决定谁有资格当最后一个写的人。
+ *
+ * 服务端已经不这么记了。每个 attachment（每个浏览器连接、每个 CLI attach）各自记自己的尺寸，
+ * 会话的尺寸是**所有正在显示它的窗口的逐轴最小值**——tmux 就是这么做的，理由也和 tmux 一样：
+ * 终端显示不下的东西就是显示不下。于是"我说我多大"不再影响别人的排版，只影响我自己那一票。
+ *
+ * 这条规则因此塌缩成一句话：**如实说自己**。
+ *
+ *   · 我在看 → 说我多大（`declare`）
+ *   · 我不看了 → 说我不算数（`withdraw`，即 0×0：还要输出，但别再为我裁剪 PTY）
+ *
+ * 撤回不是可选的礼貌，是这套机制能成立的前提。只能声明、不能撤回的最小值是个**棘轮**：某个手机
+ * 页面在后台挂着不动，它那 60 列就会永远压着 PC——而且它自己什么都没在显示。
  *
  * ## 为什么它对 tmux 和非 tmux 是同一条
  *
- * 两种模式在这一层是同一件事：浏览器视口 → xterm 网格 → WS resize → `SetPTYSize` → ioctl →
- * SIGWINCH。tmux 标签的接收方恰好是个 tmux 客户端（于是 tmux 再按 `window-size` 裁决一次），
- * 非 tmux 标签的接收方是应用自己。**同一条通路，同一条纪律**，所以这条规则写在两者共用的 surface
- * 上，而不是写进任何一侧的分支里——不是"顺便也覆盖了"，是它本来就只该有一份。
+ * 两种模式在这一层是同一件事：浏览器视口 → xterm 网格 → WS resize → 本 server 取自己所有浏览器
+ * 的最小值 → daemon 再取所有 client 的最小值 → ioctl → SIGWINCH。tmux 标签的接收方恰好是个
+ * tmux 客户端（于是 tmux 再按 `window-size` 裁决一次），非 tmux 标签的接收方是应用自己。
+ * **同一条通路，同一条纪律**，所以这条规则写在两者共用的 surface 上，而不是写进任何一侧的分支里
+ * ——不是"顺便也覆盖了"，是它本来就只该有一份。
  */
 
 /** 判断所需的全部输入。刻意只有两个：多一个都会让"我到底算不算在被看"变成一件要猜的事。 */
@@ -49,20 +62,33 @@ export function isViewer(s: ViewerState): boolean {
   return s.pageVisible && s.surfaceActive
 }
 
+/** 这一刻该对服务端说什么。 */
+export type ViewportIntent =
+  /** 「我在显示这个会话，我这么大」——参与最小值裁决。 */
+  | 'declare'
+  /** 「我还在，还要输出，但别再为我裁剪」——退出最小值裁决（线上是 0×0）。 */
+  | 'withdraw'
+  /** 什么都不用说：说了也不会改变服务端已知的事实。 */
+  | 'silent'
+
 /**
- * 该不该声明尺寸。
+ * 这一刻该说什么。
  *
  * @param was             上一次评估时是不是观看者
  * @param now             现在是不是
  * @param geometryChanged 本地网格是否真的变了（RO/fit 的结果）
  *
  * 三句话：
- *   1. 不是我在看 → 一个字都不许说。说了就是抢占正在用的人。
- *   2. 刚成为观看者 → 必须说，**哪怕网格没变**。服务端那份尺寸是共享的，可能已被别人改写。
- *   3. 一直在看 → 只有真的变了才说。没变还说，等于每次重连都对着别人喊"我是最新的"。
+ *   1. 刚成为观看者 → 必须声明，**哪怕网格没变**。我上次可能撤回过，服务端那边我现在是 0 票。
+ *   2. 一直在看 → 只有真的变了才说。没变还说，是一帧买不到任何东西的流量，而且服务端会把尺寸
+ *      变化广播给所有 attach 的客户端，等于让别人也白醒一次。
+ *   3. 不再是观看者 → 撤回，且只在**刚刚**不再是的那一刻撤（之后重复喊没有意义）。
  */
-export function shouldDeclareViewport(was: boolean, now: boolean, geometryChanged: boolean): boolean {
-  if (!now) return false
-  if (!was) return true
-  return geometryChanged
+export function viewportIntent(
+  was: boolean,
+  now: boolean,
+  geometryChanged: boolean,
+): ViewportIntent {
+  if (now) return !was || geometryChanged ? 'declare' : 'silent'
+  return was ? 'withdraw' : 'silent'
 }

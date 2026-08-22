@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
 // SafeWriteEnds provides thread-safe access to pipe write ends.
@@ -55,10 +57,15 @@ func (s *SafeWriteEnds) CloseAt(index int) {
 	}
 }
 
-// pipePTYFactoryFunc returns a PTYFactory that uses pipes and stores the write end.
+// pipePTYFactoryFunc returns a PTYFactory that uses pipes and stores the write end, so a
+// test can inject terminal output byte by byte.
+//
+// The factory now runs INSIDE an in-process daemon (see NewSessionManagerWithFactory):
+// the session still lives in muxd and is still reached over the real protocol, so these
+// fixtures exercise the same path production does — only the PTY behind it is fake.
 func pipePTYFactoryFunc() (PTYFactory, *SafeWriteEnds) {
 	writeEnds := &SafeWriteEnds{}
-	factory := func(_ PTYStartOptions) (*os.File, *exec.Cmd, error) {
+	factory := func(_ muxd.SpawnOptions) (*os.File, *exec.Cmd, error) {
 		r, w, err := os.Pipe()
 		if err != nil {
 			return nil, nil, err

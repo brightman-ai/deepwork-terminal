@@ -21,14 +21,13 @@ func TestRenderScreen_RealPTY_FullScreenTUI(t *testing.T) {
 		t.Skip("bash not available")
 	}
 
-	mgr := NewSessionManager(1<<20, "/bin/bash")
-	defer mgr.DestroyAll()
+	mgr := newRealPTYManager(t, 1<<20, "/bin/bash")
 
 	sess, err := mgr.Create("tui")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := sess.PTY.Write([]byte("top -d 1\n")); err != nil {
+	if err := sess.WriteInput([]byte("top -d 1\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// Let it paint a couple of frames.
