@@ -190,6 +190,11 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		"commit":        "dev",
 		"os":            runtime.GOOS,
 		"tmuxInstalled": s.tmuxInstalled(),
+		// The sessions do not live in this process any more, so "is the server up" stopped
+		// being the whole health story. If the daemon is unreachable the tab strip is empty
+		// and every keystroke goes nowhere, and nothing else the product exposes would say
+		// why. This is the one place that can.
+		"daemon": s.mgr.DaemonHealth(),
 	})
 }
 

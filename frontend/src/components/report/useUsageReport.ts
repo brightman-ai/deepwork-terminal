@@ -48,6 +48,25 @@ export interface UsageProviderRow {
   vendor_display?: string
   /** The CLI that made the request ('claude'|'codex'|'whale'|…). Data-driven, never an enum. */
   runtime: string
+  /**
+   * The endpoint that CLI dialled, in its own vocabulary ('openai', 'mimo2codex-kimi-coding').
+   * Empty when the transcript records none — Claude Code never does.
+   */
+  runtime_provider?: string
+  /**
+   * How `vendor` was decided — the evidence grade behind this row's heading:
+   *
+   *   confirmed  — the endpoint and the model id name the same vendor.
+   *   model      — no endpoint was recorded, so nothing could contradict the model id.
+   *   unverified — an endpoint was recorded but nothing here knows whose it is; the model id is
+   *                taken at face value.
+   *   endpoint   — they DISAGREE. The endpoint wins and the model id is decoration, which is also
+   *                why such requests carry no money: a rate card needs a real model, and
+   *                `gpt-5.6-sol` served by Kimi does not say which Kimi model answered.
+   *
+   * A row merging several requests reports the WEAKEST grade it contains — a bound, not a best case.
+   */
+  attribution_basis?: 'model' | 'confirmed' | 'endpoint' | 'unverified'
   billing_mode?: 'subscription' | 'api' | 'unknown'
   billing_coverage?: 'complete' | 'partial' | 'missing'
   input_tokens: number

@@ -25,19 +25,33 @@ import (
 const agentReportCacheTTL = 60 * time.Second
 
 // pricingSnapshot identifies everything that can change a price without the transcript changing:
-// the hand-authored catalog and the generated upstream table. An economic projection built under
-// one is reused until it differs, which is the whole point of recording it.
-var pricingSnapshot = pricing.CatalogVersion + "+" + pricing.GeneratedSnapshot
+// the hand-authored catalog, the generated upstream table, and the endpoint→vendor declarations.
+// An economic projection built under one is reused until it differs, which is the whole point of
+// recording it.
+//
+// It is a FUNCTION because the third input is not fixed at init. Declaring a relay for the first
+// time changes which requests may be priced at all (kit/usage/attribution.go), and a day that has
+// already been folded would otherwise keep yesterday's answer forever — the correction would land
+// only on days that happened to be re-read, leaving two windows of one report disagreeing.
+func pricingSnapshot() string {
+	return pricing.CatalogVersion + "+" + pricing.GeneratedSnapshot + "+" + kitusage.AttributionRevision()
+}
 
 // agentReportIndexSchema gates the persisted materialized view. BUMP IT whenever the transcript
 // parsers change what a fact MEANS, not just when this file's shape changes.
+//
+// v14: `Provider` stopped being defaulted on claude facts. It now means "the endpoint the producer
+// actually recorded", and empty means none was — which is what claude writes. Facts already on
+// disk carry the invented "anthropic", and a consumer that cross-checks the endpoint against the
+// model id reads those as contradictions, so every persisted GLM row would be misfiled until its
+// file happened to change. (v13 bumped for the mirror image of this: a DEFAULTED provider.)
 //
 // v13: codex fork/lineage handling. Facts projected by the previous parser were missing the
 // service_tier a thread inherited from its ancestors and carried a defaulted provider, and a
 // projection is only recomputed when its file changes — so without a bump the fix would have
 // reached nobody whose rollouts had gone quiet, while looking applied.
 const (
-	agentReportIndexVersion = "v13"
+	agentReportIndexVersion = "v14"
 	agentReportIndexSchema  = "agent-report-index." + agentReportIndexVersion
 )
 
@@ -207,7 +221,7 @@ func (a *agentReporter) scanLocked(ctx context.Context, window string) refreshSc
 	// alongside the projection, a restart under an unchanged table re-prices nothing at all.
 	for path := range scan.live {
 		cached, ok := a.files[path]
-		if !ok || cached.pricedWith == pricingSnapshot {
+		if !ok || cached.pricedWith == pricingSnapshot() {
 			continue
 		}
 		cached.reprice()
@@ -1048,7 +1062,7 @@ func activityWorkItemID(identity agentFileIdentity, run transcript.AgentRun) str
 // the prices in the projection.
 func (p *agentFileProjection) reprice() {
 	rebuildEconomicRequests(&p.dataset)
-	p.pricedWith = pricingSnapshot
+	p.pricedWith = pricingSnapshot()
 	// The daily fold carries money, so it is exactly as stale as the prices are. Dropping it
 	// here rather than rebuilding it keeps the timezone question where it belongs — with the
 	// caller that has one.

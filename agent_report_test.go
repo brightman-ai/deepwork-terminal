@@ -380,7 +380,7 @@ func TestAgentReporterIndexRoundTripAndSchemaGate(t *testing.T) {
 	}
 	a := newAgentReporter(dir)
 	projection := agentFileProjection{
-		size: 42, modUnixNano: 99, pricedWith: pricingSnapshot, generation: "gen", runtime: "codex", sessionID: "s1",
+		size: 42, modUnixNano: 99, pricedWith: pricingSnapshot(), generation: "gen", runtime: "codex", sessionID: "s1",
 		codexCursor: transcript.CodexRequestCursor{Offset: 42, SessionID: "s1", Model: "gpt-5.6-sol"},
 		dataset:     agentanalytics.ActivityDataset{WorkItems: []agentanalytics.ActivityWorkItem{{ID: "w1", Runtime: "codex"}}},
 	}
@@ -394,8 +394,8 @@ func TestAgentReporterIndexRoundTripAndSchemaGate(t *testing.T) {
 	}
 	// The pricing snapshot survives the round trip. Without it a restart would re-price
 	// every historical day against a table that has not moved.
-	if got.pricedWith != pricingSnapshot {
-		t.Fatalf("pricedWith=%q want %q", got.pricedWith, pricingSnapshot)
+	if got.pricedWith != pricingSnapshot() {
+		t.Fatalf("pricedWith=%q want %q", got.pricedWith, pricingSnapshot())
 	}
 
 	// A projection written by a different parser generation is neither loaded nor left to

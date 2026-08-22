@@ -91,3 +91,26 @@ describe('supersededNote', () => {
     expect(n).toContain('历史读数')
   })
 })
+
+describe('stalePresentation · 账号已切走', () => {
+  const stale = { ...base, stale: true, ageSeconds: 6 * 24 * 3600 }
+
+  it('说真正的原因（钱记在谁头上），不说症状（多久没上报）', () => {
+    const p = stalePresentation({ ...stale, billedToDisplay: 'Kimi For Coding' })
+    expect(p.hint).toContain('Kimi For Coding')
+    expect(p.hint).not.toContain('未收到')
+  })
+
+  it('徽标不与行首那枚归属 chip 重复：它只说自己的事实——读数旧了', () => {
+    expect(stalePresentation({ ...stale, billedToDisplay: 'Kimi For Coding' }).badge).toBe('读数较旧')
+    expect(stalePresentation(stale).badge).toBe('数据已过期')
+  })
+
+  it('换了账号 ≠ 这一行没信息：不因为归属就折叠掉（还剩多少、何时重置正是切回来的依据）', () => {
+    expect(stalePresentation({ ...stale, billedToDisplay: 'Kimi For Coding' }).collapse).toBe(false)
+  })
+
+  it('仍然给得出动作——想在切回来之前先看一眼是完全合理的', () => {
+    expect(stalePresentation({ ...stale, billedToDisplay: 'Kimi For Coding' }).hint).toContain('点击')
+  })
+})

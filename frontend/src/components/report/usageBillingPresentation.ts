@@ -30,58 +30,147 @@ export interface UsageMoneyPresentation {
   evidence: 'request' | 'current_subscription_fallback' | 'no_subscription_evidence'
 }
 
+/** One subscription this host actually holds, as reported by /usage/quota. */
+export interface SubscriptionAccount {
+  vendor: string
+  /**
+   * The endpoint ids this plan is spent through. EMPTY means no endpoint restriction — a
+   * first-party plan (the CLI's own login), which covers that vendor's traffic wholesale.
+   */
+  endpoints?: readonly string[]
+}
+
 /**
- * The first-party pairings: which CLI is the vendor's own front door.
+ * Whether this row's spend is covered by a subscription you actually hold.
  *
- * This enumeration is a statement about the world (Anthropic makes Claude Code), not a whitelist
- * of features, and it is the ONE place that knowledge lives. It is also the structural reason a
- * third-party vendor can never reach the subscription tab: no pairing, no path.
+ * Two things had to go into this, in order:
  *
- * Note this is the OPPOSITE of the caller axis, which must stay data-driven — any agent that
- * produces usage facts shows up under its vendor without a code change here.
+ * 1. VENDOR, not (runtime, vendor). A subscription is bought from a vendor; the runtime is merely
+ *    which CLI you spent it from, and the same Kimi plan is reachable from more than one. This
+ *    replaced a hardcoded table of first-party pairings, which structurally barred any
+ *    third-party plan from the subscription tab no matter what you had bought.
+ *
+ * 2. ENDPOINT, when the account declares one. Holding a Kimi PLAN and a Moonshot API KEY at the
+ *    same time is ordinary, and vendor-matching alone files both under the subscription — because
+ *    codex records a billing mode only for Fast turns and claude records none at all, so nearly
+ *    every row arrives as「unknown」. The plan is reached through a declared endpoint
+ *    ("mimo2codex-kimi-coding"); metered traffic is not. Matching the endpoint is evidence for
+ *    which of the two this row was, where matching the vendor is a coin flip that always lands on
+ *    "subscription".
+ *
+ * An account with no declared endpoints covers the vendor wholesale — that is the first-party
+ * case, where the plan IS the CLI's login and there is no separate endpoint to name.
  */
-const FIRST_PARTY_RUNTIME: Readonly<Record<string, string>> = {
-  anthropic: 'claude',
-  openai: 'codex',
-  google: 'gemini',
-}
-
-/** Whether this row is a first-party CLI talking to its own vendor. */
-export function isFirstPartyPair(vendor: string, runtime: string): boolean {
-  return !!vendor && FIRST_PARTY_RUNTIME[vendor] === runtime
+export function subscriptionCovers(
+  row: Pick<UsageProviderRow, 'vendor' | 'runtime_provider'>,
+  accounts: readonly SubscriptionAccount[],
+): boolean {
+  if (!row.vendor) return false
+  return accounts.some((account) => {
+    if (account.vendor !== row.vendor) return false
+    if (!account.endpoints?.length) return true
+    return account.endpoints.includes(row.runtime_provider ?? '')
+  })
 }
 
 /**
- * Place one usage row.
+ * Place one usage row. The two tabs are 订阅 and 纯 API, and the split is EXHAUSTIVE and
+ * DISJOINT — every row lands in exactly one, so no amount of money is ever shown twice.
  *
- * `currentSubscriptionRuntimes` is live account state from /usage/quota, kept OUT of the request
- * facts on purpose: what you are subscribed to today must not rewrite what a request cost last
- * week. It is used only to break the tie that request evidence leaves open — codex records a
- * billing mode only for Fast turns, and claude records none at all, so「unknown」is the common
- * case rather than the exotic one.
+ * `accounts` is live account state, kept OUT of the request facts on purpose: what you are
+ * subscribed to today must not rewrite what a request cost last week. It is used only to break
+ * the tie that request evidence leaves open — codex records a billing mode only for Fast turns,
+ * and claude records none at all, so「unknown」is the common case rather than the exotic one.
  *
- * The vendor condition is what makes that tie-break safe. Before it, "this runtime has a
- * subscription" alone sent a DeepSeek row to the subscription tab.
+ * Request evidence still wins where it exists: an explicit `api` row is metered spend and goes to
+ * the API tab even when you hold that vendor's plan, which is exactly how a Kimi plan and a
+ * Moonshot API key stay apart.
  */
 export function usageMoneyPresentation(
   provider: UsageProviderRow,
-  currentSubscriptionRuntimes: ReadonlySet<string>,
+  accounts: readonly SubscriptionAccount[],
 ): UsageMoneyPresentation {
-  const mode = provider.billing_mode ?? 'unknown'
-  const firstParty = isFirstPartyPair(provider.vendor, provider.runtime)
+  // `||`, not `??`. The model-bundle report path leaves billing_mode as an EMPTY STRING rather
+  // than omitting it, and `??` passes '' straight through — so every one of its rows failed the
+  // `=== 'unknown'` test and fell to the estimate branch, silently emptying the subscription tab
+  // for any host on that path.
+  const mode = provider.billing_mode || 'unknown'
 
-  if (firstParty && mode === 'subscription') {
-    return { tab: 'sub', semantics: 'api_equivalent', evidence: 'request' }
-  }
-  if (firstParty && mode === 'unknown' && currentSubscriptionRuntimes.has(provider.runtime)) {
-    return { tab: 'sub', semantics: 'api_equivalent', evidence: 'current_subscription_fallback' }
-  }
+  // Metered spend is metered spend. Checked BEFORE the subscription so a row the request itself
+  // calls `api` can never be swallowed by a plan you happen to hold with the same vendor.
   if (mode === 'api') {
     return { tab: 'api', semantics: 'api_paid', evidence: 'request' }
   }
+  const subscribed = subscriptionCovers(provider, accounts)
+  if (subscribed && mode === 'subscription') {
+    return { tab: 'sub', semantics: 'api_equivalent', evidence: 'request' }
+  }
+  if (subscribed) {
+    return { tab: 'sub', semantics: 'api_equivalent', evidence: 'current_subscription_fallback' }
+  }
   // Everything else is spend we cannot prove the shape of — including a `subscription`-flagged row
-  // from a THIRD-PARTY vendor, which cannot be an official subscription no matter what the flag
-  // says. It stays visible, in the tab where money that leaves your account belongs, labelled as
-  // an estimate.
+  // for a vendor no account here covers, which cannot be an official subscription no matter what
+  // the flag says. It stays visible, in the tab where money that leaves your account belongs,
+  // labelled as an estimate.
   return { tab: 'api', semantics: 'api_estimated', evidence: 'no_subscription_evidence' }
+}
+
+/** A short chip plus the sentence behind it. */
+export interface FacadeNote {
+  label: string
+  title: string
+}
+
+type AttributionEvidence = Pick<
+  UsageProviderRow,
+  'attribution_basis' | 'runtime_provider' | 'top_model' | 'requests' | 'priced_requests'
+>
+
+/**
+ * How much this row's heading can be trusted, when the answer is anything less than "fully".
+ * Returns null for `confirmed` and `model`, which need no caveat.
+ *
+ * Two different admissions, deliberately not merged:
+ *
+ *   endpoint   — a REFUSAL to price. The endpoint contradicted the model id, so the id is a facade
+ *                and cannot key a rate card. Real tokens beside a blank or short cost otherwise
+ *                read as a broken panel, and the user goes hunting for a bug that isn't there.
+ *   unverified — the row is priced and attributed from the model id alone, because nothing here
+ *                knows whose endpoint it came from. This is the residual gap: on a host with no
+ *                declaration for a relay, relayed traffic still lands under the vendor whose id the
+ *                relay borrowed. Saying so is what makes it fixable — the caveat names the very
+ *                endpoint the user would go and declare.
+ *
+ * WHOLE vs PART is a distinction real data forced. On this machine the relay served 2,318 turns of
+ * which only 199 wore a borrowed id, so the row does have money, just not all of it. A chip reading
+ *「门面 model」next to ¥1,950 would describe a row that does not exist.
+ */
+export function facadeNote(provider: AttributionEvidence): FacadeNote | null {
+  if (provider.attribution_basis === 'unverified') {
+    const endpoint = provider.runtime_provider
+    if (!endpoint) return null
+    return {
+      label: '端点未登记',
+      title: `这些请求发往「${endpoint}」，但本机没有登记它属于哪个厂商，`
+        + `所以这一行的厂商只能按 model id 认——如果它是个中转，这个归属和金额就都可能是错的。`
+        + `在订阅设置里把这个端点登记给对应厂商即可消除该不确定性。`,
+    }
+  }
+  if (provider.attribution_basis !== 'endpoint') return null
+  const requests = provider.requests ?? 0
+  const priced = provider.priced_requests ?? 0
+  const unpriced = Math.max(0, requests - priced)
+  const partial = priced > 0 && unpriced > 0
+  const endpoint = provider.runtime_provider
+  const where = endpoint ? `「${endpoint}」` : '一个中转端点'
+  const model = provider.top_model ? `「${provider.top_model}」` : '上游的 model id'
+  const scope = partial && requests > 0
+    ? `这一行 ${requests} 次请求里有 ${unpriced} 次`
+    : '这些请求'
+  return {
+    label: partial ? '含门面 model' : '门面 model',
+    title: `${scope}经 ${where} 中转，回显的 ${model} 是上游的门面，不是真正应答的模型。`
+      + `厂商认得出、具体模型认不出，没有(厂商, 模型)就没有费率——所以这部分不估算金额，而不是估成 0。`
+      + (partial ? '其余请求的 model id 是真的，已正常计价。' : ''),
+  }
 }
