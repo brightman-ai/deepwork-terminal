@@ -19,7 +19,7 @@ import { ref, computed } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { findTightestQuota } from './usageQuotaGroups'
-export { quotaGroupsFor, findTightestQuota } from './usageQuotaGroups'
+export { quotaGroupsFor, findTightestQuota, accountKey } from './usageQuotaGroups'
 
 export type Billing = 'subscription' | 'api' | 'unknown'
 
@@ -52,8 +52,44 @@ export interface QuotaGroup {
 }
 export interface ProbeResult {
   runtime: string
+  vendor?: string
+  display?: string
   status: 'ok' | 'failed' | 'not_supported'
   reason?: string
+}
+/** What was actually SPENT this window, for vendors that meter that way (OpenAI does; Kimi
+ *  meters in window percentage and sends nothing here). Always read from the vendor — a local
+ *  rate-card computation measured 2.5× low every day, because the Fast multiplier is not in the
+ *  transcript. `total` is absent when the window is too early to divide by. */
+export interface QuotaCredits {
+  used: number
+  /**
+   * What the PREVIOUS window consumed, end to end — a plain sum of the vendor's daily ledger.
+   *
+   * HISTORY, not this window's budget, and it must never be rendered as one. There is no budget
+   * field because there is no budget to be had: it used to be reverse-derived as spend ÷ used-%,
+   * and two measured windows put that ratio at 630.2 and 166.9 credits per point (3.78× apart),
+   * which produced「剩 4,716」on an account whose previous week had run to 63,025. "How much is
+   * left" is answered exactly by the percentage bar; restating it in credits required a
+   * denominator nobody publishes.
+   */
+  prior_window?: number
+  /** When that previous window opened (ISO-8601), so the figure can be labelled with real dates. */
+  prior_window_start?: string
+  source: 'api'
+  window_start?: string
+  days?: number
+  /** false ⟹ the window opened mid-day and `used` therefore over-counts the first day. */
+  whole_days?: boolean
+}
+/** Is the traffic being produced RIGHT NOW billed to this account? Absent ⟹ unknowable, which is
+ *  never rendered as「no」. */
+export interface QuotaAttribution {
+  active: boolean
+  vendor?: string
+  display?: string
+  /** The raw runtime-side provider id, when no vendor could be named for it. */
+  provider_id?: string
 }
 export interface RuntimeHealth {
   ok: boolean
@@ -61,10 +97,23 @@ export interface RuntimeHealth {
   version?: string
 }
 export interface RuntimeQuota {
-  runtime: string // 'claude' | 'codex' | 'gemini'
+  runtime: string // 'claude' | 'codex' | 'gemini' — which CLI produced the traffic
+  /** Who is BILLED. runtime+vendor is the account identity: one CLI can bill two vendors, so
+   *  keying a list or a lookup by runtime alone silently drops one of them. */
+  vendor?: string
+  /** The vendor's invoice name, served by the backend so a new vendor needs no frontend change. */
+  display?: string
   present: boolean
   evidence?: string[] // 'credentials' | 'snapshot' | 'sessions'
   billing?: Billing
+  /**
+   * The endpoint ids this SUBSCRIPTION is spent through (kit: Credential.RuntimeProviderIDs).
+   *
+   * Present so the money tabs can tell one vendor's plan from that same vendor's pay-per-token
+   * traffic — holding a Kimi plan and a Moonshot API key at once is ordinary. EMPTY means no
+   * endpoint restriction (a first-party plan is the CLI's own login), NOT "covers nothing".
+   */
+  endpoints?: string[]
   plan?: string
   // Family for the top-level compatibility-projection windows. New consumers use quota_groups
   // because independent Codex families can coexist and must not overwrite one another.
@@ -74,9 +123,12 @@ export interface RuntimeQuota {
   // Lossless view: each family owns its windows + provenance. Top-level fields above remain
   // the newest compatibility projection for servers/consumers predating UB-16.
   quota_groups?: QuotaGroup[]
+  credits?: QuotaCredits
   health: RuntimeHealth
+  attribution?: QuotaAttribution
   note?: string
 }
+
 
 export function useUsageQuota() {
   const { cliFetch } = useCliAuth()
@@ -174,9 +226,13 @@ export function useUsageQuota() {
     return quotas.value.find((q) => q.runtime === runtime)?.billing
   }
 
+  // The account currently being billed, if any account could tell us. This is a FIRST-HAND fact
+  // (the newest session's provider), which is why it beats inferring relevance from spend rows.
+  const activeAccount = computed(() => quotas.value.find((q) => q.attribution?.active) ?? null)
+
   return {
     quotas, subscriptions, apiRuntimes,
-    hasSubscription, hasApi, tightest, billingFor,
+    hasSubscription, hasApi, tightest, billingFor, activeAccount,
     loading, loaded, error, fetchedAt, probeNote, load, probe,
   }
 }

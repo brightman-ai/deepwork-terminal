@@ -23,14 +23,14 @@
  */
 import { nextTick, onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { Gauge } from 'lucide-vue-next'
-import { useUsageQuota, quotaGroupsFor, findTightestQuota, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
+import { useUsageQuota, quotaGroupsFor, findTightestQuota, accountKey, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
 import { useUsageReport, type UsageProviderRow } from './useUsageReport'
 import { useAgentReport } from './useAgentReport'
 import AgentReportDetail from './AgentReportDetail.vue'
 import { fmtTokens, fmtCost, fmtCredits } from './cost'
 import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
-import { usageMoneyPresentation, isFirstPartyPair, type UsageMoneySemantics } from './usageBillingPresentation'
+import { usageMoneyPresentation, subscriptionCovers, facadeNote, type UsageMoneySemantics, type SubscriptionAccount } from './usageBillingPresentation'
 import { groupByVendor, type UsageVendorGroup } from './usageVendorGroups'
 import type { UsageRateCard } from './useUsageReport'
 import { groupPresentation } from './quotaStaleness'
@@ -55,11 +55,37 @@ let placementObserver: ResizeObserver | null = null
 // have never heard of (pro's whale, tomorrow's agent) renders under its own id rather than being
 // dropped or shown as「其他」. The axis is data-driven; only the prettier spellings are listed.
 const runtimeLabel = (r: string) => (r === 'claude' ? 'Claude' : r === 'codex' ? 'Codex' : r === 'gemini' ? 'Gemini' : r)
-// In the 官方订阅 tab, the CLI name IS the vendor's name — that is what the tab means. Saying
-// 「官方」out loud is the whole rename: once the same CLI can also call Kimi, a bare「Codex」no
-// longer tells you whose bill you are looking at.
-const officialLabel = (r: string) => `${runtimeLabel(r)} 官方`
-const kindLabel = (k: string) => (k === '5h' ? '5小时' : k === '7d' ? '7天' : k)
+// The ACCOUNT's name, served by the backend. It is not derived from the runtime any more: the
+// same CLI can bill two vendors, so「Codex」names a program while「Codex 官方」and「Kimi For
+// Coding」name the two bills — and only the latter answers "whose money is this?".
+const accountLabel = (q: RuntimeQuota) => q.display || `${runtimeLabel(q.runtime)} 官方`
+// 用量/花费区的行名。这里曾经只能写「Codex 官方」这种 CLI 名，因为报表侧的 token 只带 model
+// 不带 model_provider，认不出账号——那条限制已经解除（后端按 endpoint 交叉核对 model id 定 vendor），
+// 所以这一区终于能和额度区叫同一个名字：你买的是「Kimi For Coding」，两处就都这么写。
+//
+// 取名顺序：本机账号的订阅产品名 → 厂商发票名 → CLI 名兜底。前两级都来自后端，新增一个厂商
+// 不需要改这里。
+const subscriptionNameByVendor = computed(() => {
+  const names = new Map<string, string>()
+  for (const q of quotas.value) {
+    if (q.vendor && q.display) names.set(q.vendor, q.display)
+  }
+  return names
+})
+const accountRowLabel = (row: UsageProviderRow) =>
+  subscriptionNameByVendor.value.get(row.vendor)
+  || row.vendor_display
+  || `${runtimeLabel(row.runtime)} 官方`
+// 「经由谁」。同一个订阅可能既被直连花掉、也被某个中转端点花掉，那是两笔不同的开销，
+// 后端已经分成两行；不写出端点，两行看起来就是重复的。
+const viaLabel = (row: UsageProviderRow) => {
+  const endpoint = row.runtime_provider
+  if (!endpoint || endpoint === row.vendor) return ''
+  return `${runtimeLabel(row.runtime)} · 经 ${endpoint}`
+}
+// 窗口长度的中文名。'30d' 是后来才有的——智谱把 MCP 工具配额按月给，而窗口标签由长度决定，
+// 所以标签表必须跟着后端的 windowKind 一起长，否则月窗会顶着「7天」的名字出现。
+const kindLabel = (k: string) => (k === '5h' ? '5小时' : k === '7d' ? '7天' : k === '30d' ? '30天' : k)
 
 // ── 花费区: 4 windows prefetched in PARALLEL, each into its OWN useUsageReport() instance
 // (isolated `report` ref) so switching windows is instant and concurrent fetches never race.
@@ -111,15 +137,23 @@ function pickTab(t: Tab) {
 
 // Request billing remains the fact SSOT. Unknown is never API-paid; a runtime currently proven
 // to be a subscription may show unknown historical rows only as API-equivalent value.
-const currentSubscriptionRuntimes = computed<ReadonlySet<string>>(() => new Set(
-  quotas.value.filter((quota) => quota.billing === 'subscription').map((quota) => quota.runtime),
-))
+// 本机真正持有的订阅，连同它各自的端点一起交给归属规则。
+//
+// 按 VENDOR 不按 runtime：订阅是跟厂商买的，runtime 只是你从哪个 CLI 花它 —— 同一份
+// Kimi For Coding 既能被 codex 花也能被 claude code 花。再按 ENDPOINT 收窄：同一个厂商
+// 同时有套餐和 API key 是常事，端点才分得开哪笔是套餐（`billing_mode` 绝大多数是 unknown，
+// 分不开）。present 是硬条件：没配 key 的厂商不算你有订阅。
+const subscriptionAccounts = computed<SubscriptionAccount[]>(() =>
+  quotas.value
+    .filter((quota) => quota.present && quota.billing === 'subscription' && quota.vendor)
+    .map((quota) => ({ vendor: quota.vendor as string, endpoints: quota.endpoints })),
+)
 const rowsInTab = (rows: UsageProviderRow[], which: 'sub' | 'api') =>
-  rows.filter((row) => usageMoneyPresentation(row, currentSubscriptionRuntimes.value).tab === which)
+  rows.filter((row) => usageMoneyPresentation(row, subscriptionAccounts.value).tab === which)
 
-// ── 官方订阅 tab: grain = the CLI, because in this tab the CLI IS the vendor ────────────────────
-// Nothing else can reach here — usageMoneyPresentation requires a first-party (vendor, runtime)
-// pair, so a third-party vendor is structurally excluded rather than merely absent today.
+// ── 官方订阅 tab: grain = the ACCOUNT (vendor × 端点) ──────────────────────────────────────────
+// 能到这里的只有「本机确有订阅账号的厂商」——第三方厂商不是被硬编码挡在门外，而是没有账号就没有
+// 门；配好一个 key，它自己就走进来了。
 const subProviders = computed<UsageProviderRow[]>(() => rowsInTab(providersFor(), 'sub'))
 
 // ── API 计费 tab: grain = the VENDOR, with the callers beneath ─────────────────────────────────
@@ -165,7 +199,7 @@ const BADGES: Record<UsageMoneySemantics, { text: string; cls: string; title: st
   },
 }
 function semanticsOf(row: UsageProviderRow): UsageMoneySemantics {
-  return usageMoneyPresentation(row, currentSubscriptionRuntimes.value).semantics
+  return usageMoneyPresentation(row, subscriptionAccounts.value).semantics
 }
 // The unit price, spelled out. A currency SYMBOL is not evidence: Moonshot sells k3 at both ¥20/M
 // and $3.00/M — the same price at its own 6.67 conversion — so「$85.93」alone cannot be checked, and
@@ -202,6 +236,21 @@ function vendorSemantics(g: UsageVendorGroup): UsageMoneySemantics {
   const kinds = new Set(g.rows.map(semanticsOf))
   return kinds.size === 1 ? [...kinds][0] : 'api_estimated'
 }
+// 一个厂商组里只要有一行是「门面 model」，这个组的金额就注定不全 —— 把那一行的原话拿上来，
+// 别让用户对着一个缺口自己猜。多行都缺时按整组的计价笔数重算措辞（部分 vs 全部）。
+const groupFacadeNote = (g: UsageVendorGroup) => {
+  const hit = g.rows.find((row) => row.attribution_basis === 'endpoint')
+    ?? g.rows.find((row) => facadeNote(row))
+  if (!hit) return null
+  if (hit.attribution_basis !== 'endpoint') return facadeNote(hit)
+  return facadeNote({
+    attribution_basis: 'endpoint',
+    runtime_provider: hit.runtime_provider,
+    top_model: hit.top_model,
+    requests: g.requests,
+    priced_requests: g.pricedRequests,
+  })
+}
 
 // ── pill ─────────────────────────────────────────────────────────────────────────────────
 // ── which subscription the pill speaks for ────────────────────────────────────────────────────
@@ -213,7 +262,7 @@ function vendorSemantics(g: UsageVendorGroup): UsageMoneySemantics {
 // touched the OpenAI subscription the 0% was about.
 //
 // So relevance is spend, not membership: a subscription speaks for the pill when there is recent
-// usage on its OWN first-party pair. isFirstPartyPair is the same predicate that decides tab
+// usage BILLED TO ITS VENDOR. subscriptionCovers is the same predicate that decides tab
 // placement, so「what counts as spending against this subscription」has one definition.
 //
 // Nothing is hidden by this. A quota that loses the headline keeps its bar, its percentage and its
@@ -222,20 +271,26 @@ function vendorSemantics(g: UsageVendorGroup): UsageMoneySemantics {
 // away rather than one discovery away.
 const spendingSubscriptions = computed<ReadonlySet<string>>(() => new Set(
   providersFor('24h')
-    .filter((row) => isFirstPartyPair(row.vendor, row.runtime) && (row.total_tokens ?? 0) > 0)
-    .map((row) => row.runtime),
+    .filter((row) => subscriptionCovers(row, subscriptionAccounts.value) && (row.total_tokens ?? 0) > 0)
+    .map((row) => row.vendor),
 ))
 // Falls back to every subscription when none has first-party spend today — a quiet day should show
 // the same reading it always did, not go blank.
+//
+// 归属是更强的信号，且是第一手的：后端能说出「最近一次会话记在谁头上」时，一个**明确没在计费**的
+// 账号就不该替这颗药丸说话——那正是截图里的处境（官方额度早已耗尽，人已改用 Kimi，而 chrome 还在
+// 用官方那条读数当头条）。但「不知道」绝不当「没在用」：claude 压根没有归属这一说，必须留下。
 const headline = computed(() => {
-  const spending = quotas.value.filter((q) => spendingSubscriptions.value.has(q.runtime))
-  return findTightestQuota(spending.length ? spending : quotas.value)
+  const relevant = quotas.value.filter((q) => q.attribution?.active !== false)
+  const pool = relevant.length ? relevant : quotas.value
+  const spending = pool.filter((q) => !!q.vendor && spendingSubscriptions.value.has(q.vendor))
+  return findTightestQuota(spending.length ? spending : pool)
 })
 // The tightest overall, kept only to warn about a subscription the headline is not speaking for.
 const overshadowed = computed(() => {
   const h = headline.value
   const t = tightest.value
-  if (!h || !t || t.runtime === h.runtime) return null
+  if (!h || !t || t.account === h.account) return null
   return t.window.remaining_percent < h.window.remaining_percent ? t : null
 })
 const pct = computed(() => (headline.value ? Math.round(headline.value.window.remaining_percent) : null))
@@ -273,7 +328,7 @@ const todayApi = computed<{ cost: number | null; currency: string }>(() => {
 const pillText = computed(() => {
   if (pct.value !== null) {
     const owner = subscriptions.value.length > 1 && headline.value
-      ? `${runtimeLabel(headline.value.runtime)} ` : ''
+      ? `${headline.value.display} ` : ''
     return `${owner}${pct.value}%`
   }
   if (hasApi.value) {
@@ -287,13 +342,13 @@ const pillTitle = computed(() => {
   const h = headline.value
   if (!h) return '订阅额度剩余 · 点开明细'
   // Say whose window this is and which window, so the number can be checked rather than trusted.
-  let text = `${runtimeLabel(h.runtime)} ${kindLabel(h.window.kind)}额度剩余 ${pct.value}%`
+  let text = `${h.display} ${kindLabel(h.window.kind)}额度剩余 ${pct.value}%`
   if (spendingSubscriptions.value.has(h.runtime)) text += '（近 24h 你在花的就是它）'
   // The louder number never disappears — it just stops being the headline for something you are
   // not spending against.
   const other = overshadowed.value
   if (other) {
-    text += ` · 另有 ${runtimeLabel(other.runtime)} ${kindLabel(other.window.kind)}仅剩 `
+    text += ` · 另有 ${other.display} ${kindLabel(other.window.kind)}仅剩 `
       + `${Math.round(other.window.remaining_percent)}%，但近 24h 没有走它的用量`
   }
   return `${text} · 点开明细`
@@ -365,12 +420,82 @@ function staleOf(q: RuntimeQuota, group: QuotaGroup) {
     stale: !!group.snapshot?.stale,
     ageSeconds: group.snapshot?.age_seconds ?? 0,
     allInferred: (group.windows || []).length > 0 && (group.windows || []).every((w) => !!w.inferred),
-    runtime: q.runtime,
-    canProbe: q.runtime === 'codex',
+    runtime: accountLabel(q),
+    // Served by the domain now. Hardcoding「codex 可以问」was already wrong the moment a second
+    // vendor appeared behind that same CLI, and it is the kind of wrong that shows a button
+    // which does nothing.
+    canProbe: !!q.can_probe,
     // q.family = 最新那条账号读数的 family = 当前生效的家族。与它不一致的分组是历史。
     groupFamily: group.family || '',
     activeFamily: q.family || '',
+    // 说真正的原因（"你在用 Kimi"）而不是症状（"6 天没有上报"）。
+    billedToDisplay: billedElsewhere(q),
   })
+}
+
+// ── 账号归属：这笔钱现在记在谁头上 ────────────────────────────────────────────────────────────
+//
+// 后端从「最新一次会话的 model_provider」直接给出答案（第一手），前端只做呈现。这解决的是截图里
+// 那个说不出口的状态：官方那行显示着一周前的读数，而用户这周的每一次调用其实都记在别人账上——
+// 页面既没说它旧、更没说钱去哪了，于是那一行看起来像坏了。
+//
+// 「不知道」永远不渲染成「不是」：后端拿不到归属时 attribution 缺席，两行都不挂徽标。
+const billedElsewhere = (q: RuntimeQuota): string | undefined => {
+  const a = q.attribution
+  if (!a || a.active) return undefined
+  return a.display || a.provider_id || undefined
+}
+interface AccountChip { text: string; cls: string; title: string }
+function accountChip(q: RuntimeQuota): AccountChip | null {
+  const a = q.attribution
+  if (!a) return null
+  if (a.active) {
+    return { text: '当前计费', cls: 'live', title: '本机最近一次会话的用量记在这个账号上' }
+  }
+  const who = billedElsewhere(q)
+  return who
+    ? { text: `记在 ${who}`, cls: 'idle', title: `本机最近一次会话经 ${who} 计费，不消耗本账号额度` }
+    : null
+}
+
+// 子限额降噪：账号池永远显示；per-model 子限额（GPT-5.3-Codex-Spark 之类）只有真的用掉了才占一行。
+// 判据是「这一组有话要说吗」——全 0% 的子限额没有。账号池即使 0% 也必须在，因为它是这一行的主语。
+function visibleGroups(q: RuntimeQuota): QuotaGroup[] {
+  const groups = quotaGroupsFor(q)
+  return groups.filter((group, i) => i === 0 || (group.windows ?? []).some((w) => w.used_percent > 0))
+}
+const familyLabelOf = (group: QuotaGroup) => group.family_label || group.family || ''
+
+// ── credits：厂商自己的消耗单位 ──────────────────────────────────────────────────────────────
+//
+// 只有官方接口给的数字才会到这里（kit/usage 拒绝本地折算——实测本地按费率卡算恒定低 2.5 倍，
+// 因为 Fast 倍率不在 transcript 里）。
+//
+// 这里【不再显示总额度】。它曾经由「已耗 ÷ 已用%」反推，而那个除法被两个完整窗口的实测证伪：
+// 上一周期跑满 100% 花了 63,025，每百分点 630.2；本周期 6% 花了 1,001，每百分点 166.9 ——
+// 差 3.78 倍。于是面板上出现过「剩 4,716」，而这个账号上一周烧掉了 63,025。
+// 「还剩多少」本来就有精确答案，就是上面那根百分比条；用 credits 再说一遍需要一个测不出来的
+// 分母，那不是更清楚，是多编一个数。
+function fmtCredits(n: number): string {
+  // 「0.0」看起来像坏了；「0」是个干净的事实（这个周期还没花钱）。小数只在真的有小数时才出现。
+  if (n === 0) return '0'
+  if (n >= 1000) return Math.round(n).toLocaleString('en-US')
+  return n >= 10 ? Math.round(n).toString() : n.toFixed(1)
+}
+function creditsTitle(c: NonNullable<RuntimeQuota['credits']>): string {
+  const parts = ['已耗来自账号官方用量接口，不是本地按费率卡的估算。']
+  if (c.whole_days === false) {
+    parts.push('本周期从当天中途开始，而接口按自然日汇总，首日含上一周期用量——已耗偏大。')
+  }
+  // 当日账本会滞后结算（实测：同一批活动 17:31 报 301、17:44 报 1,001）。不说的话，用户会以为
+  // 是自己看错了，或者以为面板在乱跳。
+  parts.push('当日数字由厂商按自然日结算，最近几十分钟的消耗可能还没并进来。')
+  if (c.prior_window) {
+    parts.push(`上一周期共 ${fmtCredits(c.prior_window)} credits——这是历史用量，不是本周期的额度：`
+      + '厂商从不陈述额度，而 credits 与上面的百分比是两个独立计量器（实测每百分点相差 3.78 倍），'
+      + '不能相除得出。')
+  }
+  return parts.join(' ')
 }
 
 function familyHint(group: QuotaGroup): string {
@@ -379,6 +504,19 @@ function familyHint(group: QuotaGroup): string {
     ? `独立额度组：${group.family}（${kinds}）。不同组分别计数，互不覆盖。`
     : `独立额度组：${group.family}`
 }
+// CLI 健康属于 RUNTIME，不属于账号：同一个 codex 二进制坏了，两个订阅行会同时挂上同一句
+// 「CLI 无响应」。同一句警告喊两遍不会让它更真，只会让人以为坏了两样东西。所以每个 runtime
+// 只由一行来承载它——正在计费的那一行优先（那是你此刻真会受影响的地方），否则第一行。
+const healthOwner = computed(() => {
+  const owner = new Map<string, string>()
+  for (const q of subscriptions.value) {
+    const key = accountKey(q)
+    if (!owner.has(q.runtime) || q.attribution?.active) owner.set(q.runtime, key)
+  }
+  return owner
+})
+const showsHealth = (q: RuntimeQuota) => healthOwner.value.get(q.runtime) === accountKey(q)
+
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
   if (q.health?.ok) return ''
@@ -469,11 +607,13 @@ function refreshAgent(): void {
   void loadAgentWindow(activeWindow.value, true)
 }
 
-// The ⟳ button goes further: it ASKS the provider. Re-reading the disk cannot always help —
-// codex only records the limit family of the model it is currently running, so while a session
-// works on a per-model plan the ACCOUNT limit stops being written, and its newest reading can
-// be hours old no matter how often you poll. That is why 刷新 used to move nothing.
-// One real provider request, only ever on this click.
+// The ⟳ button asks every account that can be asked, right now. Re-reading the disk cannot always
+// help — codex only writes the limit family of the model it is running, and a proxied session
+// writes no limits at all — so polling alone can be arbitrarily far behind.
+//
+// It no longer COSTS anything: the probe went from a real inference request to a plain read, which
+// is also why a background timer now keeps these numbers warm (usage_credentials.go). So this
+// button means "don't wait for the timer", not "spend some quota to find out".
 function refresh(): void {
   void probe()
   prefetchAll()
@@ -610,29 +750,50 @@ onUnmounted(() => {
 
         <!-- ── 官方订阅 tab 独有：额度条 / 重置 / 新鲜度（API 计费没有额度窗口，不伪造）── -->
         <template v-if="tab === 'sub'">
-          <div v-for="q in subscriptions" :key="q.runtime" class="uchip-rt">
+          <div
+            v-for="q in subscriptions"
+            :key="accountKey(q)"
+            class="uchip-rt"
+            :class="{ 'is-billing': q.attribution?.active, 'is-idle': !!billedElsewhere(q) }"
+          >
             <div class="uchip-rt-head">
-              <span>{{ officialLabel(q.runtime) }}</span>
+              <span class="uchip-rt-name">{{ accountLabel(q) }}</span>
               <span v-if="q.plan" class="uchip-plan">{{ q.plan }}</span>
-              <span v-if="healthLabel(q)" class="uchip-badge warn" :title="q.health?.reason">{{ healthLabel(q) }}</span>
+              <!-- 一眼看出这笔钱现在记在谁头上。这是整页最贵的一个事实：截图里官方那行挂着
+                   一周前的读数，而本周每一次调用其实都记在另一个账号上，页面从来没说过。 -->
+              <span
+                v-if="accountChip(q)"
+                class="uchip-acct"
+                :class="accountChip(q)!.cls"
+                :title="accountChip(q)!.title"
+                :data-testid="`uchip-acct-${accountKey(q)}`"
+              >{{ accountChip(q)!.text }}</span>
+              <span
+                v-if="healthLabel(q) && showsHealth(q)"
+                class="uchip-badge warn"
+                :title="q.health?.reason"
+              >{{ healthLabel(q) }}</span>
             </div>
 
             <div
-              v-for="(group, groupIndex) in quotaGroupsFor(q)"
+              v-for="(group, groupIndex) in visibleGroups(q)"
               :key="group.family || group.snapshot?.captured_at || groupIndex"
               class="uchip-group"
               :class="{ 'is-stale': staleOf(q, group).dim }"
             >
-              <div v-if="group.family || staleOf(q, group).badge" class="uchip-group-head">
-                <span v-if="group.family" class="uchip-plan uchip-family" :title="familyHint(group)">{{ group.family }}</span>
+              <!-- 主组（账号池）不再挂 family 标签：它就是这一行的主语，重复一遍只是噪音。
+                   子限额才需要自报家门，且用厂商给的名字（GPT-5.3-Codex-Spark），不是合并用的 id。 -->
+              <div v-if="(groupIndex > 0 && familyLabelOf(group)) || staleOf(q, group).badge" class="uchip-group-head">
+                <span v-if="groupIndex > 0" class="uchip-plan uchip-family" :title="familyHint(group)">{{ familyLabelOf(group) }}</span>
                 <!-- 「数据已过期」本身就是动作：点它直接向账号查询（probe，与 codex /status 同源）。
                      只说问题不给出路，等于把诊断丢回给用户。 -->
                 <button
                   v-if="staleOf(q, group).badge"
                   type="button"
                   class="uchip-badge stale is-action"
+                  :class="{ 'is-quiet': !!billedElsewhere(q) }"
                   :title="staleOf(q, group).hint"
-                  :data-testid="`uchip-stale-${q.runtime}`"
+                  :data-testid="`uchip-stale-${accountKey(q)}`"
                   :disabled="loading"
                   @click.stop="refresh"
                 >{{ staleOf(q, group).badge }}<span class="uchip-stale-go">↻</span></button>
@@ -642,7 +803,7 @@ onUnmounted(() => {
               <div
                 v-if="staleOf(q, group).collapse"
                 class="uchip-dim uchip-note"
-                :data-testid="`uchip-collapsed-${q.runtime}`"
+                :data-testid="`uchip-collapsed-${accountKey(q)}`"
               >{{ staleOf(q, group).note }}</div>
               <!-- key by INDEX: duplicate kinds are a domain contradiction; the backend drops
                    them before they reach this list. -->
@@ -657,6 +818,20 @@ onUnmounted(() => {
                 额度更新于 {{ fmtAt(group.snapshot.captured_at) }}
                 <span v-if="sourceLabel(group.snapshot.source)" class="uchip-src">· {{ sourceLabel(group.snapshot.source) }}</span>
               </div>
+            </div>
+
+            <!-- 厂商自己的消耗单位。百分比回答「还剩多少」，credits 回答「花了多少」——两个不同的
+                 问题，所以两行。只有厂商真有这个单位时才出现（Kimi 按窗口百分比计，就没有这一行，
+                 硬造一个才是把订阅和 API 计费搅在一起）。 -->
+            <div v-if="q.credits" class="uchip-credits" :title="creditsTitle(q.credits)">
+              <span class="uchip-credits-k">本周期已耗</span>
+              <span class="uchip-credits-v">
+                {{ fmtCredits(q.credits.used) }}<span class="uchip-credits-u"> credits</span>
+                <span v-if="q.credits.whole_days === false" class="uchip-credits-approx" title="窗口从当天中途开始，接口按自然日汇总，首日含上一周期用量">≈</span>
+              </span>
+              <span v-if="q.credits.prior_window" class="uchip-credits-of">
+                上一周期 {{ fmtCredits(q.credits.prior_window) }}
+              </span>
             </div>
 
             <!-- No reading at all: say so plainly. Never a fabricated 0%/100% bar. -->
@@ -686,15 +861,18 @@ onUnmounted(() => {
 
         <div v-if="activeLoading && !activeReport" class="uchip-dim uchip-loading">加载中…</div>
         <template v-else-if="activeReport?.available">
-          <!-- ── 官方订阅：一行一个官方 CLI。这里的 CLI 名就是厂商名，所以不再叠一层厂商轴 ── -->
+          <!-- ── 官方订阅：一行一个账号（厂商 × 端点）。名字与上面的额度区同源，两处不该各叫各的 ── -->
           <template v-if="tab === 'sub'">
-            <div v-for="row in subProviders" :key="`${row.runtime}:${row.billing_mode}`" class="uchip-prov">
+            <div v-for="row in subProviders" :key="`${row.vendor}:${row.runtime}:${row.runtime_provider ?? ''}:${row.billing_mode}`" class="uchip-prov">
               <div class="uchip-prov-head">
-                <span class="uchip-prov-name">{{ officialLabel(row.runtime) }}</span>
+                <span class="uchip-prov-name">{{ accountRowLabel(row) }}</span>
+                <span v-if="viaLabel(row)" class="uchip-prov-via">{{ viaLabel(row) }}</span>
                 <span class="uchip-badge" :class="BADGES[semanticsOf(row)].cls" :title="BADGES[semanticsOf(row)].title">{{ BADGES[semanticsOf(row)].text }}</span>
               </div>
               <div class="uchip-prov-glance">
                 <span class="uchip-prov-cost">{{ fmtCost(row.cost, row.currency, rowIncomplete(row)) }}</span>
+                <!-- 「—」旁边必须有一句解释，否则用户只会当成面板坏了。 -->
+                <span v-if="facadeNote(row)" class="uchip-prov-noprice" :title="facadeNote(row)!.title">{{ facadeNote(row)!.label }}</span>
                 <span class="uchip-prov-tok">{{ fmtTokens(row.total_tokens) }} tok</span>
                 <span class="uchip-prov-hit">缓存命中 {{ cacheHitRate(row.cache_read_tokens, row.input_tokens) }}</span>
               </div>
@@ -715,7 +893,7 @@ onUnmounted(() => {
               <div class="uchip-prov-head">
                 <span class="uchip-prov-name" :class="{ 'is-unknown': !group.vendor }" :title="vendorTitle(group)">{{ vendorLabel(group) }}</span>
                 <!-- 单一调用方时就地说明「经由谁」；多个才值得展开成子行（展开一行等于把主行抄一遍）。 -->
-                <span v-if="group.rows.length === 1" class="uchip-prov-via">经由 {{ runtimeLabel(group.rows[0].runtime) }}</span>
+                <span v-if="group.rows.length === 1" class="uchip-prov-via">经由 {{ viaLabel(group.rows[0]) || runtimeLabel(group.rows[0].runtime) }}</span>
                 <!-- 钱的「种类」徽标只在真有钱时才成立。一行金额是「—」却挂着「估算」，是在声称一个
                      并不存在的估算——旁边的「无价表」已经把这件事说完了。一个事实一个信号。 -->
                 <span v-if="group.pricedRequests > 0" class="uchip-badge" :class="BADGES[vendorSemantics(group)].cls" :title="BADGES[vendorSemantics(group)].title">{{ BADGES[vendorSemantics(group)].text }}</span>
@@ -723,7 +901,8 @@ onUnmounted(() => {
               <div class="uchip-prov-glance">
                 <span class="uchip-prov-cost">{{ fmtCost(group.cost, group.currency, !group.costComplete) }}</span>
                 <!-- 「—」旁边必须有一句解释。不解释的空值，用户只会当成坏了。 -->
-                <span v-if="group.pricedRequests === 0" class="uchip-prov-noprice" title="这些 model 不在内置价表里。宁可不给数字，也不拿同厂商的近似单价蒙一个——静默错数比空值糟。">无价表</span>
+                <span v-if="groupFacadeNote(group)" class="uchip-prov-noprice" :title="groupFacadeNote(group)!.title">{{ groupFacadeNote(group)!.label }}</span>
+                <span v-else-if="group.pricedRequests === 0" class="uchip-prov-noprice" title="这些 model 不在内置价表里。宁可不给数字，也不拿同厂商的近似单价蒙一个——静默错数比空值糟。">无价表</span>
                 <span class="uchip-prov-tok">{{ fmtTokens(group.totalTokens) }} tok</span>
                 <span class="uchip-prov-hit">缓存命中 {{ cacheHitRate(group.cacheReadTokens, group.inputTokens) }}</span>
               </div>
@@ -944,7 +1123,25 @@ onUnmounted(() => {
 .uchip-tabs button.on { background: #2a2d35; color: #e6e8ec; font-weight: 600; }
 
 .uchip-rt { margin-bottom: 10px; }
+/* 未在计费的账号整行降一档。它不是坏了——只是现在不是它在花钱。降权而不是隐藏：正因为你在
+   别处花钱，这条「还剩多少、何时重置」才是你决定什么时候切回来的依据。 */
+.uchip-rt.is-idle { opacity: 0.82; }
 .uchip-rt-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.uchip-rt-name { color: #e6e8ec; }
+/* 归属 chip 紧跟账号名，不靠右——它是名字的一部分（"哪个账号，以及它现在算不算数"），
+   不是行尾的状态角标。绿=正在发生；中性灰=陈述，不是警告（那一行没有任何东西需要你处理）。 */
+.uchip-acct { font-size: 9.5px; font-weight: 500; border-radius: 4px; padding: 1px 5px; cursor: help; }
+.uchip-acct.live { color: #4ade80; background: rgba(74,222,128,0.12); }
+.uchip-acct.idle { color: #9aa0aa; background: rgba(154,160,170,0.12); }
+
+/* credits：厂商自己的消耗单位。百分比答「还剩多少」，这一行答「花了多少」——把它排在额度条
+   下面、用同一套右对齐数字，两个问题一次读完，不必切页。 */
+.uchip-credits { display: flex; align-items: baseline; gap: 6px; font-size: 11px; margin-top: 4px; cursor: help; }
+.uchip-credits-k { color: #8b909a; font-size: 10.5px; flex-shrink: 0; }
+.uchip-credits-v { color: #e6e8ec; font-weight: 600; font-variant-numeric: tabular-nums; }
+.uchip-credits-u { color: #8b909a; font-weight: 400; font-size: 10px; }
+.uchip-credits-approx { color: #f59e0b; margin-left: 2px; }
+.uchip-credits-of { color: #7f858f; font-size: 10.5px; font-variant-numeric: tabular-nums; margin-left: auto; }
 .uchip-group { padding: 4px 0 5px; }
 .uchip-group + .uchip-group { border-top: 1px dashed #2a2d35; }
 /* 过期读数必须**看起来就是旧的**。此前只降了一点整体不透明度（0.72），主体仍是满格实心绿条 +
@@ -964,6 +1161,8 @@ onUnmounted(() => {
 .uchip-badge.stale.is-action { border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
 .uchip-badge.stale.is-action:hover:not(:disabled) { color: #e5e7eb; background: rgba(154,160,170,0.24); }
 .uchip-badge.stale.is-action:disabled { cursor: progress; opacity: 0.6; }
+/* 已经知道原因（你在用别的账号）时，这枚徽标只是个「想看新数就点」的入口，不该有提示的分量。 */
+.uchip-badge.stale.is-action.is-quiet { opacity: 0.7; font-weight: 400; }
 .uchip-stale-go { font-size: 10px; line-height: 1; }
 .uchip-group-head { display: flex; align-items: center; gap: 6px; min-height: 17px; margin-bottom: 1px; }
 .uchip-plan { font-size: 10px; color: #8b909a; font-weight: 400; }

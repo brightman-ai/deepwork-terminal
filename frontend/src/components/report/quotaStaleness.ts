@@ -54,24 +54,37 @@ export function stalePresentation(opts: {
   ageSeconds: number
   /** 该 family 的所有窗口是否都是推断值（无实测上报）。 */
   allInferred: boolean
-  /** 运行时名，进文案（"未收到 codex 的用量上报"）。 */
+  /** 账号名，进文案（"未收到 Codex 官方 的用量上报"）。 */
   runtime: string
   /** 能不能就地查（有 probe 通道才给动作；没有就只降权不给假按钮）。 */
   canProbe: boolean
+  /**
+   * 当前正在计费的**另一个**账号名（仅本账号未在计费时有值）。
+   *
+   * 这条是「说真正的原因」而不是「说症状」：用户主动切走的账号当然收不到上报，
+   * 此时写"本机已 6 天未收到上报"是在描述现象、让人以为哪里坏了；真正该说的是
+   * "这几天你在用 Kimi For Coding"。同一件事，一个让人排查，一个让人放心。
+   */
+  billedToDisplay?: string
 }): StalePresentation {
   if (!opts.stale) {
     return { dim: false, collapse: false, badge: '', hint: '' }
   }
   const age = humanAge(opts.ageSeconds)
-  const why = age
-    ? `本机已 ${age}未收到 ${opts.runtime} 的用量上报`
-    : `本机未收到 ${opts.runtime} 的用量上报`
+  const why = opts.billedToDisplay
+    ? `${age ? `近 ${age}` : '当前'}用量记在 ${opts.billedToDisplay}，本账号自然没有新上报`
+    : age
+      ? `本机已 ${age}未收到 ${opts.runtime} 的用量上报`
+      : `本机未收到 ${opts.runtime} 的用量上报`
   // 点不了就别写"点击"——一个点了没反应的提示比没有提示更糟。
   const how = opts.canProbe ? '，点击直接向账号查询' : '（在本机运行一次该工具即可刷新）'
   return {
     dim: true,
+    // 换了账号 ≠ 这一行没信息：正因为你在别处花钱，这条旧读数（还剩多少、何时重置）
+    // 才是你决定何时切回来的依据。只有"过期 + 值全是推断"才真的没信息。
     collapse: opts.allInferred && opts.ageSeconds >= COLLAPSE_AFTER_SECONDS,
-    badge: '数据已过期',
+    // 行首那枚 chip 已经说了「记在谁头上」；这里再说一遍是噪音。徽标只讲它自己的事实：读数旧了。
+    badge: opts.billedToDisplay ? '读数较旧' : '数据已过期',
     hint: why + how,
   }
 }
@@ -130,6 +143,7 @@ export function groupPresentation(opts: {
   canProbe: boolean
   groupFamily: string
   activeFamily: string
+  billedToDisplay?: string
 }): GroupPresentation {
   if (isSupersededFamily(opts.groupFamily, opts.activeFamily)) {
     // 已被取代：不给"点击刷新"，给"该看哪一行"。
