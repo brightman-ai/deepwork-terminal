@@ -63,14 +63,13 @@ func TestForceKillForeground_KillsSigtermIgnoringChild(t *testing.T) {
 		t.Skip("bash not available")
 	}
 	unsetTMUXForTest(t)
-	mgr := NewSessionManager(1<<16, "/bin/bash")
-	defer mgr.DestroyAll()
+	mgr := newRealPTYManager(t, 1<<16, "/bin/bash")
 	sess, err := mgr.Create("hang")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := sess.PTY.Write([]byte("sh -c 'trap \"\" TERM INT; exec sleep 999'\n")); err != nil {
+	if err := sess.WriteInput([]byte("sh -c 'trap \"\" TERM INT; exec sleep 999'\n")); err != nil {
 		t.Fatalf("write foreground job: %v", err)
 	}
 	// Give the shell time to fork/exec the foreground job and hand it the tty before we read pgid.
@@ -81,7 +80,7 @@ func TestForceKillForeground_KillsSigtermIgnoringChild(t *testing.T) {
 	}
 
 	// The shell must survive and regain the tty — proven by it executing a NEW command afterward.
-	if _, err := sess.PTY.Write([]byte("echo FORCE_KILL_OK_$$\n")); err != nil {
+	if err := sess.WriteInput([]byte("echo FORCE_KILL_OK_$$\n")); err != nil {
 		t.Fatalf("write follow-up command: %v", err)
 	}
 	waitForBufferContains(t, sess, "FORCE_KILL_OK_", 5*time.Second)
@@ -100,8 +99,7 @@ func TestForceKillForeground_NoForegroundChildKillsShellItself(t *testing.T) {
 		t.Skip("bash not available")
 	}
 	unsetTMUXForTest(t)
-	mgr := NewSessionManager(1<<16, "/bin/bash")
-	defer mgr.DestroyAll()
+	mgr := newRealPTYManager(t, 1<<16, "/bin/bash")
 	sess, err := mgr.Create("idle")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -150,8 +148,11 @@ func TestForceKillForeground_TmuxSessionRejected(t *testing.T) {
 }
 
 // TestForceKillForeground_NoPTYExplicitError covers AC-6's "PTY already gone" branch: a session
-// whose PTY was cleared (mirrors the state right after Destroy, or before a PTY is attached) must
-// return an explicit error, never panic on a nil *os.File.
+// that can no longer reach its PTY (mirrors the state right after Destroy, or before it is
+// attached) must return an explicit error, never panic.
+//
+// The unreachable state is now "no daemon connection" rather than "nil *os.File", because the
+// PTY lives in the daemon — but the branch under test, and the guarantee it makes, are the same.
 func TestForceKillForeground_NoPTYExplicitError(t *testing.T) {
 	_, sm := newOverviewTestServer(t)
 	sess, err := sm.Create("no-pty")
@@ -159,7 +160,7 @@ func TestForceKillForeground_NoPTYExplicitError(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	sess.mu.Lock()
-	sess.PTY = nil
+	sess.mux = nil
 	sess.mu.Unlock()
 
 	if err := sess.ForceKillForeground(); err == nil {

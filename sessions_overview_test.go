@@ -552,8 +552,10 @@ func TestOverviewRebuild_RealMachineCost(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(base, "claude-home"))
 	locator := agentintel.NewProjectLocator()
 
-	sm := NewSessionManager(1<<20, "/bin/sh")
-	t.Cleanup(sm.DestroyAll)
+	// Isolated daemon: this test spawns REAL PTYs, and an unisolated manager would
+	// connect-or-spawn against the developer's live daemon and then destroy sessions in
+	// cleanup. newRealPTYManager registers its own DestroyAll.
+	sm := newRealPTYManager(t, 1<<20, "/bin/sh")
 	srv, err := NewServer(WithConfig(Config{
 		Addr:         ":0",
 		DefaultShell: "/bin/sh",
@@ -597,12 +599,13 @@ func TestOverviewRebuild_RealMachineCost(t *testing.T) {
 			t.Fatalf("CreateWithOptions: %v", err)
 		}
 		// A real desktop grid, not the default — the replay cost scales with it.
-		if err := sess.SetPTYSize(200, 50); err != nil {
-			t.Fatalf("SetPTYSize: %v", err)
+		if err := sess.RequestPTYSize(200, 50); err != nil {
+			t.Fatalf("RequestPTYSize: %v", err)
 		}
+		waitForPTYSize(t, sess, 200, 50, 10*time.Second)
 		// Start the agent as a CHILD of this session's shell: detection walks descendants and
 		// never looks at the shell itself.
-		if _, err := sess.PTY.Write([]byte(fakeClaude + "\n")); err != nil {
+		if err := sess.WriteInput([]byte(fakeClaude + "\n")); err != nil {
 			t.Fatalf("write to pty: %v", err)
 		}
 		fixtures = append(fixtures, fixture{sess: sess, transcript: path})

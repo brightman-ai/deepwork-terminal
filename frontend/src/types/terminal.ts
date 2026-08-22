@@ -18,7 +18,7 @@ export interface TerminalSessionInfo {
 }
 
 export interface WSControlMessage {
-  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal'
+  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal' | 'resized'
   payload?: Record<string, unknown>
 }
 

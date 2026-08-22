@@ -549,8 +549,7 @@ func TestWorkbenchCWD_LiveProcessBeatsClientEcho(t *testing.T) {
 	}
 	_, _, srv := newDrawerTestServer(t)
 
-	realSM := NewSessionManagerWithFactory(4096, "/bin/sh", DefaultPTYFactory)
-	t.Cleanup(realSM.DestroyAll)
+	realSM := newRealPTYManager(t, 4096, "/bin/sh")
 	srv.mgr = realSM
 
 	shellDir := t.TempDir()

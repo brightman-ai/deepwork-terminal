@@ -470,7 +470,7 @@ import {
   type SurfaceActionId,
 } from '@terminal/components/terminal-session/surfaceActionBar'
 import { canMeasureTerminal } from '@terminal/components/terminal-session/terminalFit'
-import { isViewer, shouldDeclareViewport } from '@terminal/composables/cli/viewportDeclaration'
+import { isViewer, viewportIntent } from '@terminal/composables/cli/viewportDeclaration'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import {
   GHOST_ECHO_WINDOW,
@@ -1346,10 +1346,10 @@ function viewerNow(): boolean {
 }
 
 /**
- * fit + （够格时）声明尺寸。
+ * fit + 如实告诉服务端我这一票算不算数、算的话多大。
  *
- * fit 无条件做：它只改本地网格，不抢任何人的东西，而且让这个标签在被切回来时已经是量准的。
- * 声明才受规则约束——说出口等于「我是最新的」。
+ * fit 无条件做：它只改本地网格，不影响任何人，而且让这个标签在被切回来时已经是量准的。
+ * 说什么受规则约束——见 viewportDeclaration.ts。
  */
 function declareViewport(opts: { geometryChanged: boolean }): void {
   const xterm = xtermRef.value
@@ -1359,19 +1359,27 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
   if (!term || term.cols <= 0 || term.rows <= 0) return
 
   const now = viewerNow()
-  const declare = shouldDeclareViewport(wasViewer, now, opts.geometryChanged)
-  if (!declare) {
+  const intent = viewportIntent(wasViewer, now, opts.geometryChanged)
+  if (intent === 'silent') {
     wasViewer = now
     return
   }
 
-  // 「我声明过了」必须意味着**这句话真的发出去了**。把没发出去的记成已声明，等于把一笔还没还的
-  // 债划掉：下一次评估看到 was=true、几何没变，于是闭嘴，而服务端那份尺寸还停在别人写的值上。
+  // 「我说过了」必须意味着**这句话真的发出去了**。把没发出去的记成已说，等于把一笔还没还的债
+  // 划掉：下一次评估看到 was=true、几何没变，于是闭嘴，而服务端那边我这一票还停在旧值上。
   //
   // 判据取 sendResize 的**返回值**，不取 `wsStatus`——那是另一个问题，而且晚一拍：status 要等
   // `ws.onclose` 回调才离开 'connected'，而 reconnect()/disconnect() 是**同步**把 socket 关掉/
   // 置空的。那一拍之内 ref 还说 connected、帧已经被丢弃，于是又记了一笔没发生的声明。
   // 只有传输层知道自己发没发出去，所以由传输层说。
+  if (intent === 'withdraw') {
+    // 0×0 = 「还要输出，但别再为我裁剪 PTY」。发不出去也不必留债：socket 断了，这一票在服务端
+    // 会随连接一起消失，效果与撤回相同。
+    if (sendResize(0, 0)) hud.updateSnapshot({ pty: 'observer' })
+    wasViewer = false
+    return
+  }
+
   const sent = sendResize(term.cols, term.rows)
   if (!sent) {
     wasViewer = false // 债留到能说话的那一刻——重连梯队会立刻还上
@@ -1382,6 +1390,29 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
   // Ghosting guard: a resize/reflow (mobile keyboard show/hide, rotation, reattach) can leave
   // stale cells when a fullscreen TUI repaints differentially. Force a full repaint after the fit.
   term.refresh(0, term.rows - 1)
+}
+
+/**
+ * 服务端说会话现在这么大——照做。
+ *
+ * 这不是我那次 resize 的回声：会话的尺寸是**所有正在看它的窗口的逐轴最小值**，所以只要还有一个
+ * 更小的窗口attach 着，我拿到的就会小于我要的。不照做的后果不是"边上留白"，是**画错**：全屏 TUI
+ * 按绝对光标定位重绘，网格对不上时屏幕会糊成一片，而且看起来像里面那个程序的 bug。
+ *
+ * 刻意不回声一次 resize：我的网格没变（容器没变），下一次 fit 仍会按容器算出同样的数字报上去，
+ * 服务端算出同样的最小值、发现没变化就不再广播，于是自然收敛，不会来回震荡。
+ */
+function applyServerGrid(payload: unknown): void {
+  const p = payload as { cols?: number; rows?: number } | null
+  const cols = p?.cols
+  const rows = p?.rows
+  if (typeof cols !== 'number' || typeof rows !== 'number' || cols < 1 || rows < 1) return
+  const term = xtermRef.value?.terminal?.()
+  if (!term || (term.cols === cols && term.rows === rows)) return
+  term.resize(cols, rows)
+  terminalRows.value = term.rows
+  hud.updateSnapshot({ pty: `${cols}x${rows}` })
+  hud.record('resize', `server grid ${cols}x${rows}`)
 }
 
 // ─── Robust resize: fit + declare, retries to handle DOM layout settling ──
@@ -1923,6 +1954,10 @@ function onTerminalReady(terminal: Terminal) {
           break
         case 'agent_state':
           agentWSHandler(msg.payload)
+          break
+        // 会话现在多大——由服务端裁决（所有观看窗口的最小值），不是我那次 resize 的回声。
+        case 'resized':
+          applyServerGrid(msg.payload)
           break
         case 'tmux_state':
           tmux.handleWSMessage(msg.payload)

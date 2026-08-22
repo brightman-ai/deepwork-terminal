@@ -98,6 +98,13 @@ type Server struct {
 	// gated on "any channel enabled", not on any single channel. nil when not running.
 	notifier   *agentNotifier
 	notifierMu sync.Mutex
+
+	// watchCtx bounds the background daemon watcher (SessionManager.WatchDaemon). It is
+	// cancelled by Close so the watcher stops with the server rather than outliving it —
+	// an embedding host builds and tears down this subsystem repeatedly, and a watcher
+	// left running would keep re-subscribing on behalf of a server that no longer exists.
+	watchCtx    context.Context
+	watchCancel context.CancelFunc
 }
 
 // NewServer creates a terminal session server.
@@ -139,6 +146,11 @@ func NewServer(opts ...Option) (*Server, error) {
 	// only what was appended instead of re-deriving the tree from every rollout on disk.
 	agentintel.SetAgentIndexCacheDir(s.config.DataDir)
 	s.agentUsage = newAgentReporter(s.config.DataDir)
+	s.watchCtx, s.watchCancel = context.WithCancel(context.Background())
+	// Subscription quota: install this host's key store and keep every account's reading warm.
+	// Asking is a plain read now, so the freshness the user sees no longer depends on them
+	// having pressed a button (usage_credentials.go).
+	s.startQuotaWarmer(s.watchCtx)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Explicit-signal tap: a terminal program saying "I need you" out loud (BEL / OSC
 	// notification) is the only NON-inferred attention signal we get. Wired here, before any
@@ -146,6 +158,23 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.signals = newSignalGate()
 	s.hasAgent = s.sessionHasAgent
 	s.mgr.OnSignal = s.onSessionSignal
+	// Pick the user's existing sessions back up from the daemon.
+	//
+	// This is the half of "restarting no longer kills your terminals" that the user
+	// actually sees: the daemon kept the shells running, and this is what makes the tabs
+	// reappear — same ids, same names, same scrollback, same processes. It runs AFTER
+	// OnSignal is wired because restored sessions start streaming immediately.
+	//
+	// A failure here is logged, not fatal: the daemon may be mid-restart, and a server
+	// that refuses to start would be a worse outcome than one that starts with an empty
+	// tab strip and picks the sessions up on the next create.
+	if err := s.mgr.Restore(); err != nil {
+		logger.Warn("could not restore sessions from the session daemon", "error", err)
+	}
+	// Keep the view in step from here on. The daemon is per-user, so another host sharing
+	// it (standalone alongside the embedded build) can create or end sessions that this
+	// server must reflect without waiting for someone to hit refresh.
+	s.mgr.WatchDaemon(s.watchCtx)
 	// Default in-process tmux provider so standalone gets tmux state without a host.
 	// An injected provider (WithTmuxProvider) wins over the default.
 	if s.tmuxProvider == nil {
@@ -280,6 +309,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		srv.Close()
+		// Shut the subsystem down too, not just the HTTP listener.
+		//
+		// This call was missing, so on Ctrl-C the standalone binary stopped serving and
+		// then exited with the notifier still running and nothing released. It went
+		// unnoticed because process exit cleans up after a leaky shutdown — which is also
+		// why it now MATTERS: Close means "detach from the daemon", and the embedded host
+		// (pro) has always called it. Standalone and embedded had drifted into two
+		// different shutdown behaviours; this makes them one.
+		if err := s.Close(); err != nil {
+			logger.Warn("shutdown: close terminal subsystem", "error", err)
+		}
 		return nil
 	case err := <-serveErr:
 		return err
@@ -317,6 +357,9 @@ func (s *Server) Port() int {
 
 // Close shuts down all sessions and stops the background agent notifier.
 func (s *Server) Close() error {
+	if s.watchCancel != nil {
+		s.watchCancel()
+	}
 	s.stopNotifier()
 	return s.mgr.CloseAll()
 }

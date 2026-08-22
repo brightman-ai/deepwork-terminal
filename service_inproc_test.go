@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
 // newTestService creates an InProcessService with a pipe-based mock PTY.
@@ -20,7 +22,7 @@ func newTestService(t *testing.T) (*InProcessService, func(data []byte)) {
 	t.Helper()
 
 	var writeEnd *os.File
-	factory := func(_ PTYStartOptions) (*os.File, *exec.Cmd, error) {
+	factory := func(_ muxd.SpawnOptions) (*os.File, *exec.Cmd, error) {
 		r, w, err := os.Pipe()
 		if err != nil {
 			return nil, nil, err
@@ -39,7 +41,11 @@ func newTestService(t *testing.T) (*InProcessService, func(data []byte)) {
 	}
 
 	t.Cleanup(func() {
-		_ = svc.Close()
+		// DestroyAll, not svc.Close(): Close now DETACHES (it is the shutdown path, and
+		// shutting a server down must not end the user's sessions). Test cleanup wants the
+		// other meaning — actually destroy what this test created, and stop the fixture's
+		// in-process daemon — so it says so explicitly.
+		sm.DestroyAll()
 		if writeEnd != nil {
 			_ = writeEnd.Close()
 		}

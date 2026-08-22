@@ -66,8 +66,9 @@ func (s *InProcessService) Resize(_ context.Context, id string, cols, rows int) 
 	if err != nil {
 		return err
 	}
-	// SetPTYSize also records the size on the session — the overview's screen replay reads it.
-	return sess.SetPTYSize(cols, rows)
+	// The service API has no viewer behind it — it is a programmatic caller, not a window —
+	// so this is the daemon's fallback size, not a declaration. See RequestPTYSize.
+	return sess.RequestPTYSize(cols, rows)
 }
 
 // Input implements TerminalSessionService.
@@ -80,19 +81,9 @@ func (s *InProcessService) Input(_ context.Context, id string, data []byte) erro
 	if err != nil {
 		return err
 	}
-	sess.mu.Lock()
-	ptyFile := sess.PTY
-	sess.mu.Unlock()
-	if ptyFile == nil {
-		return fmt.Errorf("session %s has no PTY", id)
-	}
-	_, writeErr := ptyFile.Write(data)
-	if writeErr != nil {
+	if writeErr := sess.WriteInput(data); writeErr != nil {
 		return fmt.Errorf("pty write: %w", writeErr)
 	}
-	sess.mu.Lock()
-	sess.LastActive = time.Now()
-	sess.mu.Unlock()
 	return nil
 }
 
