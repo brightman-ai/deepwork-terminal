@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -46,6 +47,12 @@ type PTYFactory = muxd.PTYFactory
 type activeConnEntry struct {
 	conn   *websocket.Conn
 	cancel context.CancelFunc
+	// epoch orders connections against each other. Preemption, subscribing and taking the
+	// grid are three separate steps, so two browsers arriving together can interleave: A
+	// registers, B registers and preempts A, then A — still running its own handler —
+	// claims the grid it has already lost. A number that only ever goes up lets the loser
+	// recognise itself without holding a lock across all three steps. See SetViewerOwner.
+	epoch uint64
 }
 
 // SessionManager manages terminal sessions with PTY processes.
@@ -54,6 +61,7 @@ type activeConnEntry struct {
 type SessionManager struct {
 	sessions     sync.Map // map[string]*Session
 	activeConns  sync.Map // map[string]*activeConnEntry — one per session (BUG-3)
+	connEpoch    atomic.Uint64
 	bufferSize   int
 	defaultShell string
 
@@ -85,6 +93,36 @@ type SessionManager struct {
 	// concurrently, so assigning it later is a data race. It runs on the output hot path, so
 	// the implementation must not block — see onSessionSignal for how that is honoured.
 	OnSignal func(*Session, ansisignal.Signal)
+
+	// origin stamps every session this manager creates with "whose tab list owns me" — see
+	// sessionMeta.Origin. Set once by the server at construction, before any session exists,
+	// for the same reason OnSignal is. Empty in test fixtures, which is correct: a fixture has
+	// no shared daemon to disambiguate against.
+	origin string
+
+	// EnvSource answers "what environment should the NEXT shell start with". Called per create,
+	// never cached, because the whole point of the overlay behind it is that editing it takes
+	// effect on the next terminal WITHOUT restarting this process (see env_overlay.go).
+	//
+	// A hook rather than a direct call so this file keeps knowing nothing about where the
+	// overlay lives; nil falls back to this process's own environment, which is what every
+	// session got before the overlay existed.
+	EnvSource func() []string
+}
+
+// SetOrigin names the deployment this manager belongs to, so sessions it creates can be told
+// apart from those of another deployment sharing the same per-user daemon (see
+// sessionMeta.Origin). Must be called before the first Create.
+func (m *SessionManager) SetOrigin(origin string) { m.origin = origin }
+
+// ptyEnv resolves the environment for one new shell. See the EnvSource field.
+func (m *SessionManager) ptyEnv() []string {
+	if m.EnvSource != nil {
+		if env := m.EnvSource(); env != nil {
+			return env
+		}
+	}
+	return os.Environ()
 }
 
 // NewSessionManager creates a new SessionManager.
@@ -194,6 +232,7 @@ func (m *SessionManager) CreateWithOptions(opts CreateOptions) (*Session, error)
 		CWD:       cwd,
 		ShellPath: shellPath,
 		CreatedAt: now,
+		Origin:    m.origin,
 	}
 	prog, args := muxd.SplitShell(shellPath)
 	// The daemon assigns the id. That is what makes it survive a restart unchanged: an
@@ -202,6 +241,26 @@ func (m *SessionManager) CreateWithOptions(opts CreateOptions) (*Session, error)
 	id, shellPID, err := client.Create(muxd.CreateReq{
 		Argv: append([]string{prog}, args...),
 		Cwd:  cwd,
+		// THIS server's environment, not the daemon's.
+		//
+		// Omitting it does not mean "no environment" — muxd falls back to the daemon's own,
+		// and the daemon is a per-user process that outlives every host restart. So a shell
+		// opened today inherited whatever was set in the shell that first started the daemon,
+		// possibly days ago and possibly for a different host: a PATH the user has since
+		// changed, or credentials scoped to another deployment. Before the daemon existed the
+		// PTY was this process's child and got this process's environment; passing it
+		// explicitly restores that, and makes the source of a session's environment a
+		// decision rather than an accident of who spawned the daemon.
+		//
+		// muxd sanitises what it forwards (PTYEnv), so host-level session markers do not ride
+		// along.
+		//
+		// Through EnvSource rather than os.Environ() directly: this process's own environment is
+		// a snapshot frozen at startup, so a stray `ANTHROPIC_BASE_URL` in whatever shell
+		// launched the server used to poison every terminal opened afterwards, with a full
+		// restart as the only cure. The overlay behind this hook is the tmux answer — a mutable
+		// table consulted at spawn time (env_overlay.go).
+		Env:  m.ptyEnv(),
 		Cols: muxd.DefaultCols,
 		Rows: muxd.DefaultRows,
 		Meta: meta.encode(),
@@ -217,6 +276,7 @@ func (m *SessionManager) CreateWithOptions(opts CreateOptions) (*Session, error)
 		Engine:     engine,
 		CWD:        cwd,
 		ShellPath:  shellPath,
+		Origin:     m.origin,
 		Buffer:     NewRingBuffer(m.bufferSize),
 		Status:     StatusRunning,
 		CreatedAt:  now,
@@ -411,10 +471,11 @@ func (m *SessionManager) Subscribe(sess *Session, subID string) (<-chan viewerFr
 	sess.subMu.Lock()
 	sess.viewers[subID] = v
 	sess.mu.Lock()
-	cols, rows := sess.ptyCols, sess.ptyRows
+	grid := sess.pty
 	sess.mu.Unlock()
 	sess.subMu.Unlock()
-	if cols <= 0 || rows <= 0 {
+	cols, rows := grid.Cols, grid.Rows
+	if grid.Zero() {
 		cols, rows = spawnCols, spawnRows
 	}
 
@@ -445,8 +506,9 @@ func (m *SessionManager) Subscribe(sess *Session, subID string) (<-chan viewerFr
 
 // SetActiveConn registers a new active WS connection for a session, preempting any existing one.
 // BUG-3: Only one WS connection per session is allowed at a time.
-func (m *SessionManager) SetActiveConn(sessionID string, conn *websocket.Conn, cancel context.CancelFunc) {
-	newEntry := &activeConnEntry{conn: conn, cancel: cancel}
+func (m *SessionManager) SetActiveConn(sessionID string, conn *websocket.Conn, cancel context.CancelFunc) uint64 {
+	epoch := m.connEpoch.Add(1)
+	newEntry := &activeConnEntry{conn: conn, cancel: cancel, epoch: epoch}
 
 	if prev, loaded := m.activeConns.Swap(sessionID, newEntry); loaded {
 		terminalWSPreemptionsTotal.Inc()
@@ -468,6 +530,7 @@ func (m *SessionManager) SetActiveConn(sessionID string, conn *websocket.Conn, c
 		terminalLogger.Info(obs.WithStage(context.Background(), stgTerminalAttach), "cli ws preempted",
 			"session_id", sessionID)
 	}
+	return epoch
 }
 
 // ClearActiveConn removes the active connection entry for a session if it matches the given conn.

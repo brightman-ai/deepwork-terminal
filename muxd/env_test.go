@@ -87,3 +87,43 @@ func TestPTYEnvKeepsAgentConfigAndCredentials(t *testing.T) {
 		assert.Contains(t, got, item, "这是配置或凭据，不是血缘标记，必须原样传给子进程")
 	}
 }
+
+// TestPTYEnvStripsTheHostsTmuxIdentity: a host started inside a tmux pane carries $TMUX and
+// $TMUX_PANE forever, and every PTY it opens used to inherit them.
+//
+// The visible failure is `tmux attach` inside a web terminal being refused as a nested
+// client, which is a real, reported behaviour of this product and previously worked around by
+// each caller remembering `env -u TMUX`. Both directions are asserted: the lineage goes, and
+// TMUX_TMPDIR — which says where to find the socket rather than whose child you are — stays.
+func TestPTYEnvStripsTheHostsTmuxIdentity(t *testing.T) {
+	got := PTYEnv([]string{
+		"TMUX=/tmp/tmux-1001/default,4006573,0",
+		"TMUX_PANE=%2",
+		"TMUX_TMPDIR=/tmp/mine",
+		"PATH=/usr/bin",
+	})
+	for _, banned := range []string{"TMUX=", "TMUX_PANE="} {
+		for _, item := range got {
+			if strings.HasPrefix(item, banned) {
+				t.Errorf("PTYEnv kept %q — a PTY inheriting the host's tmux identity gets "+
+					"refused as a nested client when it runs `tmux attach`", item)
+			}
+		}
+	}
+	var keptTmpdir, keptPath bool
+	for _, item := range got {
+		if item == "TMUX_TMPDIR=/tmp/mine" {
+			keptTmpdir = true
+		}
+		if item == "PATH=/usr/bin" {
+			keptPath = true
+		}
+	}
+	if !keptTmpdir {
+		t.Error("PTYEnv dropped TMUX_TMPDIR — that is configuration (where the socket is), " +
+			"not lineage; without it a child cannot find the server the user is actually using")
+	}
+	if !keptPath {
+		t.Error("PTYEnv dropped an ordinary variable")
+	}
+}

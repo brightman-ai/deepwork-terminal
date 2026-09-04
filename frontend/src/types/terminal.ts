@@ -17,8 +17,40 @@ export interface TerminalSessionInfo {
   created_at?: string
 }
 
+/**
+ * 收到 `replay_reset` 后写给终端的清屏序列：CUP(归位) + ED2(清屏) + ED3(清 scrollback)。
+ *
+ * **不能用 xterm 的 `reset()`** —— 它的文档原文是 "Perform a full reset (RIS, aka '\x1bc')"，
+ * RIS 会把私有模式一并复位，包括鼠标跟踪 (1000/1002/1003/1006)。而 alt-screen 里的滚动**全靠**
+ * 把滚轮转成 SGR 鼠标序列转发给 app —— 复位掉它，屏幕看着没问题，滚动却死了，而且看起来像终端里
+ * 那个程序的 bug。这里只清内容，模式原样保留；服务端另外负责把 replay 截断丢掉的模式补回来
+ * (见 Go 侧 carriedOverModes)。
+ */
+export const REPLAY_RESET_SEQUENCE = '\x1b[H\x1b[2J\x1b[3J'
+
+/** 服务端宣布的网格尺寸。两个 payload 字段只有同时有效才有意义，所以一起解析、一起校验。 */
+export interface ServerGrid { cols: number; rows: number }
+
+/**
+ * 从 `resized` 帧里解出网格；形状不对就返回 null。
+ *
+ * 两个消费者（CliTerminalSurface 与 useTerminalChannel）此前各写了一遍同样的窄化 + 校验。
+ * 那不是巧合而是同一个契约被抄了两份：payload 是 `Record<string, unknown>`，所以「怎么把它
+ * 读成两个正整数」这件事必须有人做，而做两遍就会漂——一边加了下界检查另一边没加，症状是网格
+ * 偶尔被设成 0 然后整屏塌掉，而且只在其中一条路径上出现。
+ */
+export function parseServerGrid(payload: unknown): ServerGrid | null {
+  const p = payload as { cols?: unknown; rows?: unknown } | null
+  const cols = p?.cols
+  const rows = p?.rows
+  if (typeof cols !== 'number' || typeof rows !== 'number') return null
+  if (!Number.isInteger(cols) || !Number.isInteger(rows)) return null
+  if (cols < 1 || rows < 1) return null
+  return { cols, rows }
+}
+
 export interface WSControlMessage {
-  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal' | 'resized'
+  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal' | 'resized' | 'replay_reset'
   payload?: Record<string, unknown>
 }
 

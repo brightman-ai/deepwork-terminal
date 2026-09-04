@@ -112,13 +112,13 @@ func waitForPTYSize(t *testing.T, sess *Session, cols, rows int, timeout time.Du
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		gotC, gotR := sess.PTYSize()
-		if gotC == cols && gotR == rows {
+		got := sess.PTYSize()
+		if got.Cols == cols && got.Rows == rows {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("session %s size = %dx%d, want %dx%d after %s",
-				sess.ID, gotC, gotR, cols, rows, timeout)
+			t.Fatalf("session %s size = %s, want %dx%d after %s",
+				sess.ID, got, cols, rows, timeout)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

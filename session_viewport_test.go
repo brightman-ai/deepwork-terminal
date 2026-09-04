@@ -3,6 +3,8 @@ package terminal
 import (
 	"testing"
 	"time"
+
+	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
 // TestViewportMinimumIsComponentWise is the pure rule, with no daemon in the way.
@@ -13,13 +15,12 @@ import (
 // that let the last writer win, would produce one of the inputs and be caught here.
 func TestViewportMinimumIsComponentWise(t *testing.T) {
 	s := &Session{viewers: map[string]*viewer{
-		"wide":     {cols: 100, rows: 30},
-		"tall":     {cols: 80, rows: 50},
-		"observer": {cols: 0, rows: 0},
+		"wide":     {size: muxd.Grid{Cols: 100, Rows: 30}},
+		"tall":     {size: muxd.Grid{Cols: 80, Rows: 50}},
+		"observer": {size: muxd.Grid{Cols: 0, Rows: 0}},
 	}}
-	cols, rows := s.Viewport()
-	if cols != 80 || rows != 30 {
-		t.Fatalf("viewport = %dx%d, want 80x30 (min per axis, observers ignored)", cols, rows)
+	if got := s.Viewport(); got != (muxd.Grid{Cols: 80, Rows: 30}) {
+		t.Fatalf("viewport = %s, want 80x30 (min per axis, observers ignored)", got)
 	}
 }
 
@@ -28,11 +29,11 @@ func TestViewportMinimumIsComponentWise(t *testing.T) {
 // constraining a PTY nobody is looking at.
 func TestViewportIgnoresObservers(t *testing.T) {
 	s := &Session{viewers: map[string]*viewer{
-		"a": {cols: 0, rows: 0},
-		"b": {cols: 0, rows: 0},
+		"a": {size: muxd.Grid{Cols: 0, Rows: 0}},
+		"b": {size: muxd.Grid{Cols: 0, Rows: 0}},
 	}}
-	if cols, rows := s.Viewport(); cols != 0 || rows != 0 {
-		t.Fatalf("viewport = %dx%d, want 0x0 — observers must impose no constraint", cols, rows)
+	if got := s.Viewport(); !got.Zero() {
+		t.Fatalf("viewport = %s, want 0x0 — observers must impose no constraint", got)
 	}
 }
 
@@ -40,12 +41,12 @@ func TestViewportIgnoresObservers(t *testing.T) {
 // window ever means that, and treating it literally would let a viewport of 0×50 pin the
 // session's rows while claiming no opinion on columns.
 func TestViewportHalfWithdrawalIsFull(t *testing.T) {
-	sess := &Session{ID: "x", viewers: map[string]*viewer{"a": {cols: 90, rows: 40}}}
+	sess := &Session{ID: "x", viewers: map[string]*viewer{"a": {size: muxd.Grid{Cols: 90, Rows: 40}}}}
 	if err := sess.SetViewerSize("a", 0, 40); err != nil {
 		t.Fatalf("SetViewerSize: %v", err)
 	}
-	if cols, rows := sess.Viewport(); cols != 0 || rows != 0 {
-		t.Fatalf("viewport = %dx%d, want 0x0 — half a withdrawal is a withdrawal", cols, rows)
+	if got := sess.Viewport(); !got.Zero() {
+		t.Fatalf("viewport = %s, want 0x0 — half a withdrawal is a withdrawal", got)
 	}
 }
 
@@ -187,9 +188,9 @@ func TestAnonymousResizeLosesToAWatchingBrowser(t *testing.T) {
 	// Give a wrong implementation time to be wrong: without a wait this passes by simply
 	// reading the value before the bad write lands.
 	time.Sleep(300 * time.Millisecond)
-	if cols, rows := sess.PTYSize(); cols != 90 || rows != 25 {
-		t.Fatalf("size = %dx%d after an anonymous resize, want 90x25 — the watching browser "+
-			"must not be reflowed by a caller that cannot see the session", cols, rows)
+	if got := sess.PTYSize(); got != (muxd.Grid{Cols: 90, Rows: 25}) {
+		t.Fatalf("size = %s after an anonymous resize, want 90x25 — the watching browser "+
+			"must not be reflowed by a caller that cannot see the session", got)
 	}
 }
 
@@ -228,9 +229,9 @@ func TestPTYSizeReportsTheDaemonsAnswerNotOurRequest(t *testing.T) {
 	// it even once is proof, and never seeing it cannot be faked by timing.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if cols, rows := sess.PTYSize(); cols == 200 || rows == 60 {
-			t.Fatalf("size = %dx%d — that is what a viewer ASKED for; the recorded grid must "+
-				"only ever be what the daemon says the session entered", cols, rows)
+		if got := sess.PTYSize(); got.Cols == 200 || got.Rows == 60 {
+			t.Fatalf("size = %s — that is what a viewer ASKED for; the recorded grid must "+
+				"only ever be what the daemon says the session entered", got)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -248,7 +249,7 @@ func TestResizeReachesViewersInStreamOrder(t *testing.T) {
 	sess.viewers["a"] = v
 
 	sess.fanOutData([]byte("BEFORE"))
-	sess.applyGrid(80, 24)
+	sess.applyGrid(muxd.Grid{Cols: 80, Rows: 24})
 	sess.fanOutData([]byte("AFTER"))
 
 	var got []string
@@ -286,13 +287,13 @@ func TestControlFramesAreNeverEvictedForLaterOnes(t *testing.T) {
 	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+4)}
 	sess.viewers["stuck"] = v
 
-	sess.applyGrid(80, 24)
+	sess.applyGrid(muxd.Grid{Cols: 80, Rows: 24})
 	for i := 0; i < 40; i++ { // far more output than the queue can hold
 		sess.fanOutData([]byte("bytes drawn at 80"))
 	}
-	sess.applyGrid(100, 30)
+	sess.applyGrid(muxd.Grid{Cols: 100, Rows: 30})
 
-	var grids [][2]int
+	var grids []muxd.Grid
 	var outputs int
 	for len(v.ch) > 0 {
 		f := <-v.ch
@@ -307,7 +308,7 @@ func TestControlFramesAreNeverEvictedForLaterOnes(t *testing.T) {
 			"the later one, so the output queued between them paints onto a grid the viewer "+
 			"was never given", len(grids), grids)
 	}
-	if grids[0] != [2]int{80, 24} || grids[1] != [2]int{100, 30} {
+	if grids[0] != (muxd.Grid{Cols: 80, Rows: 24}) || grids[1] != (muxd.Grid{Cols: 100, Rows: 30}) {
 		t.Fatalf("grids arrived as %v, want [[80 24] [100 30]] in that order", grids)
 	}
 	if outputs == 0 {
@@ -409,11 +410,210 @@ func sawResize(ch <-chan viewerFrame, cols, rows int, timeout time.Duration) boo
 			if !ok {
 				return false
 			}
-			if f.Resize != nil && f.Resize[0] == cols && f.Resize[1] == rows {
+			if f.Resize != nil && f.Resize.Cols == cols && f.Resize.Rows == rows {
 				return true
 			}
 		case <-deadline:
 			return false
 		}
+	}
+}
+
+// TestTheOwnerAloneSizesTheSession is the rule that replaced smallest-wins at this level.
+//
+// The two viewers are deliberately the same pair as TestTwoBrowsersSmallestWins, and the
+// expected answer is deliberately the OPPOSITE: 120×40 is the owner's box, not the
+// component-wise minimum (60×20) and not the minimum of the two boxes (60×20 either way).
+// An implementation that still mins here produces the phone's numbers and is caught.
+//
+// Why this is the right answer and the minimum was not: a viewer that is registered but does
+// not own the session is not being drawn into — attaching preempts, so the loser has been
+// told it was taken over and its socket is closing. Sizing the PTY to a window nobody is
+// looking at is what made the grid oscillate on every tab switch.
+func TestTheOwnerAloneSizesTheSession(t *testing.T) {
+	s := &Session{
+		viewers: map[string]*viewer{
+			"desktop": {size: muxd.Grid{Cols: 120, Rows: 40}},
+			"phone":   {size: muxd.Grid{Cols: 60, Rows: 20}},
+		},
+		activeViewer: "desktop",
+	}
+	if got := s.Viewport(); got != (muxd.Grid{Cols: 120, Rows: 40}) {
+		t.Fatalf("viewport = %s, want 120x40 — the owner's window, not the minimum", got)
+	}
+}
+
+// TestAnOwnerThatHasNotMeasuredItselfConstrainsNothing: the gap between subscribing and the
+// first resize is not a licence to fall back on somebody else's box.
+//
+// This is the exact instant a replay is sent, so the size read here becomes the grid the
+// replay is drawn for. Answering with the departing viewer's box would hand the newcomer a
+// screen rendered for a window it does not have — the corruption this whole change exists to
+// remove, arriving in the one gap where it is least visible.
+func TestAnOwnerThatHasNotMeasuredItselfConstrainsNothing(t *testing.T) {
+	s := &Session{
+		viewers: map[string]*viewer{
+			"newcomer": {size: muxd.Grid{Cols: 0, Rows: 0}},
+			"leaving":  {size: muxd.Grid{Cols: 60, Rows: 20}},
+		},
+		activeViewer: "newcomer",
+	}
+	if got := s.Viewport(); !got.Zero() {
+		t.Fatalf("viewport = %s, want 0x0 — an owner that has not measured itself says nothing", got)
+	}
+}
+
+// TestPreemptionMovesTheGridAndTheLoserCannotTakeItBack reproduces the reported failure end
+// to end, on a real PTY.
+//
+// The ordering is the one a live preemption produces and is the whole point: the new socket
+// subscribes and takes ownership while the old one is still registered, because the loser
+// unsubscribes from its own handler's defer, which has not run yet. Under smallest-wins that
+// overlap sized the session to the smaller window — and then the loser's teardown sized it
+// back — so a user switching tabs saw the grid change twice per switch, each change appending
+// a repaint at a width the next replay would not be using.
+func TestPreemptionMovesTheGridAndTheLoserCannotTakeItBack(t *testing.T) {
+	sm := newRealPTYManager(t, 1<<16, "/bin/sh")
+	sess, err := sm.Create("preempt-grid")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, _, _, unsubDesktop := sm.Subscribe(sess, "desktop")
+	defer unsubDesktop()
+	sess.SetViewerOwner("desktop", 1)
+	if err := sess.SetViewerSize("desktop", 120, 40); err != nil {
+		t.Fatalf("desktop declare: %v", err)
+	}
+	waitForPTYSize(t, sess, 120, 40, 10*time.Second)
+
+	// The phone attaches: it preempts, so it owns the grid from this moment — while the
+	// desktop is still in the map.
+	_, _, _, unsubPhone := sm.Subscribe(sess, "phone")
+	defer unsubPhone()
+	sess.SetViewerOwner("phone", 2)
+	if err := sess.SetViewerSize("phone", 60, 20); err != nil {
+		t.Fatalf("phone declare: %v", err)
+	}
+	waitForPTYSize(t, sess, 60, 20, 10*time.Second)
+
+	// Now the desktop's handler finally tears down. It is not the owner any more, so neither
+	// its departure nor its release may move the grid.
+	sess.ReleaseViewerOwner("desktop")
+	unsubDesktop()
+	time.Sleep(200 * time.Millisecond)
+	if got := sess.PTYSize(); got != (muxd.Grid{Cols: 60, Rows: 20}) {
+		t.Fatalf("pty = %s after the preempted viewer left, want 60x20 — a departing "+
+			"non-owner must not take the grid from its successor", got)
+	}
+	if got := sess.activeViewer; got != "phone" {
+		t.Fatalf("activeViewer = %q, want \"phone\" — release by a non-owner cleared the owner", got)
+	}
+}
+
+// TestReplayStopsAtTheGridBoundary: a replay may not cross a resize.
+//
+// Two assertions, and the first one is the precondition that makes the second mean anything:
+// a session that has only ever LEARNED its size (0 → 80×24, which is the AttachAck, not a
+// resize) must still replay everything, or a freshly started session would come up blank.
+// The second is the actual rule.
+func TestReplayStopsAtTheGridBoundary(t *testing.T) {
+	s := &Session{ID: "epoch", Buffer: NewRingBuffer(1 << 16)}
+
+	s.setPTYSizeFromDaemon(muxd.Grid{Cols: 80, Rows: 24}) // learning the spawn size — not an epoch boundary
+	early := []byte("printed before anyone asked the size")
+	_, _ = s.Buffer.Write(early)
+	if _, got := s.ReplayTail(1 << 20); got != len(early) {
+		t.Fatalf("replayable = %d, want %d — learning the first size must not discard the "+
+			"screen a session started with", got, len(early))
+	}
+
+	s.setPTYSizeFromDaemon(muxd.Grid{Cols: 200, Rows: 50}) // a real resize: everything above is another geometry
+	after := []byte("repainted at 200 columns")
+	_, _ = s.Buffer.Write(after)
+	data, got := s.ReplayTail(1 << 20)
+	if got != len(after) {
+		t.Fatalf("replayable = %d, want %d — bytes drawn for the previous grid must not be "+
+			"replayed onto this one", got, len(after))
+	}
+	// The count indexes into the data the SAME call returned; a caller slicing with a length
+	// obtained separately is the bug ReplayTail exists to make impossible.
+	if string(data[len(data)-got:]) != string(after) {
+		t.Fatalf("the current-grid tail is %q, want %q", data[len(data)-got:], after)
+	}
+}
+
+// TestTheOnlyViewerCanStillWithdraw covers the single-tab background/foreground round trip:
+// one phone, no second viewer, going away and coming back.
+//
+// WHAT IT DOES NOT PROVE, stated because the obvious reading is wrong. It looks like a test
+// of the owner branch in viewportLocked, and it is not: withdrawal zeroes the viewer's OWN
+// size, so the owner branch (0×0 → yield) and the minimum loop (0×0 → `continue`, nothing
+// left → 0,0) return the same answer. Sabotaging the owner branch leaves this green, checked.
+//
+// That is worth knowing rather than fixing: it means the single-tab path was never at risk
+// from the switch to exclusive ownership — the two mechanisms agree wherever a lone viewer
+// withdraws. The branch itself is held by TestAnOwnerThatHasNotMeasuredItselfConstrainsNothing,
+// where the owner is silent and ANOTHER viewer has a size to fall through to; that is the only
+// shape in which the two rules disagree, and it is the one that had to be pinned.
+//
+// What this test does hold is the user-visible round trip, which nothing else covered:
+// backgrounding must not pin the PTY at the size the tab had when it was last visible, and
+// withdrawal must not be a one-way door.
+func TestTheOnlyViewerCanStillWithdraw(t *testing.T) {
+	sess := &Session{
+		ID:           "solo-withdraw",
+		viewers:      map[string]*viewer{"phone": {size: muxd.Grid{Cols: 80, Rows: 24}}},
+		activeViewer: "phone",
+	}
+	if got := sess.Viewport(); got != (muxd.Grid{Cols: 80, Rows: 24}) {
+		t.Fatalf("viewport = %s before withdrawing, want 80x24 — precondition failed, "+
+			"the rest of this test would prove nothing", got)
+	}
+
+	// The tab goes to the background: still connected, still receiving output, no longer shown.
+	if err := sess.SetViewerSize("phone", 0, 0); err != nil {
+		t.Fatalf("SetViewerSize(0,0): %v", err)
+	}
+	if got := sess.Viewport(); !got.Zero() {
+		t.Fatalf("viewport = %s after the sole owner withdrew, want 0x0 — an owner that is "+
+			"not displaying the session must impose no constraint", got)
+	}
+
+	// And it can come back: withdrawal is not a one-way door.
+	if err := sess.SetViewerSize("phone", 120, 40); err != nil {
+		t.Fatalf("SetViewerSize(120,40): %v", err)
+	}
+	if got := sess.Viewport(); got != (muxd.Grid{Cols: 120, Rows: 40}) {
+		t.Fatalf("viewport = %s after the owner returned, want 120x40", got)
+	}
+}
+
+// TestAPreemptedConnectionCannotTakeTheGridBack is the race codex found by reading, not by
+// running: preemption, subscribing and claiming the grid are three separate steps, so two
+// browsers arriving together interleave across them.
+//
+// The order below is the losing interleaving, spelled out: A registers (epoch 1), B registers
+// and preempts it (epoch 2), B takes the grid — and only THEN does A's handler, still running,
+// reach its own SetViewerOwner. Without the epoch guard A wins that call, and the session
+// sizes itself to a window whose socket is already closing.
+func TestAPreemptedConnectionCannotTakeTheGridBack(t *testing.T) {
+	sess := &Session{
+		ID: "interleaved",
+		viewers: map[string]*viewer{
+			"A": {size: muxd.Grid{Cols: 60, Rows: 20}},
+			"B": {size: muxd.Grid{Cols: 200, Rows: 60}},
+		},
+	}
+
+	sess.SetViewerOwner("B", 2) // the newer connection wins the race to claim ownership
+	sess.SetViewerOwner("A", 1) // …and the older one arrives late with a stale claim
+
+	if got := sess.activeViewer; got != "B" {
+		t.Fatalf("activeViewer = %q, want \"B\" — a connection that was already preempted "+
+			"took the grid back from the one that replaced it", got)
+	}
+	if got := sess.Viewport(); got != (muxd.Grid{Cols: 200, Rows: 60}) {
+		t.Fatalf("viewport = %s, want 200x60 — the session sized itself to the window that lost", got)
 	}
 }

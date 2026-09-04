@@ -32,6 +32,19 @@ const (
 	tmuxStatePollInterval = 1 * time.Second
 )
 
+// writeWS sends one WebSocket message under the standard write timeout.
+//
+// The three lines it replaces (derive a context, write, cancel) appeared ten times in this
+// file, and the shape is exactly the kind that rots quietly: forget the cancel and the
+// context leaks until the parent dies, which for a terminal socket is "until the user closes
+// the tab". Having it once also means the timeout is one constant in one place rather than a
+// convention ten call sites are trusted to remember.
+func writeWS(ctx context.Context, conn *websocket.Conn, typ websocket.MessageType, data []byte) error {
+	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+	defer cancel()
+	return conn.Write(wctx, typ, data)
+}
+
 // writeJSON writes a JSON response with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -56,7 +69,27 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		LastActive  string        `json:"lastActive"`
 		AgentTool   string        `json:"agentTool,omitempty"`
 		AgentStatus string        `json:"agentStatus,omitempty"`
+		// OwnedHere answers "does this session belong to THIS deployment's tab list" — see
+		// sessionMeta.Origin. The client needs it to decide whether a session that no tab
+		// points at is its own lost record (adopt it) or the other deployment's business
+		// (leave it). The origin itself is a filesystem path and stays server-side; the
+		// client only ever needs the verdict.
+		//
+		// NO omitempty, deliberately: false is the load-bearing value here (it is what stops
+		// an adoption), and omitempty deletes false from the wire — a bug this repo has
+		// already paid for once.
+		OwnedHere bool `json:"ownedHere"`
+		// ExitCode is meaningful only when Status is "exited". The client applies the SAME
+		// policy to a shell that died while nobody was watching as to one that died on its
+		// watch (clean exit closes the tab, a crash keeps it and explains itself) — and it
+		// cannot do that without knowing how it died.
+		//
+		// NO omitempty for the same reason as OwnedHere, and here it is even sharper: 0 IS
+		// the interesting value (a clean `exit`), and omitempty would delete exactly that
+		// case from the wire, leaving every clean exit indistinguishable from a crash.
+		ExitCode int `json:"exitCode"`
 	}
+	myOrigin := s.dataDir()
 	// Agent state comes from the SAME per-tick snapshot the overview cards render, so the tab dot
 	// and the card can never disagree — they are one computation, not two that happen to match.
 	agents := s.sessionAgentStatuses(r.Context())
@@ -75,6 +108,13 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:  formatCLITime(sess.CreatedAt),
 			LastSeen:   formatCLITime(sess.LastActive),
 			LastActive: sess.LastActive.Format("2006-01-02T15:04:05Z07:00"),
+			// Empty origin counts as ours: it means the session predates the field, and
+			// stranding a live shell forever is worse than showing it in one extra tab strip.
+			// New sessions always carry an origin, so this leniency expires with them.
+			OwnedHere: sess.Origin == "" || sess.Origin == myOrigin,
+			// Read under the same lock as Status: the two are one fact ("how did this end"),
+			// and sampling them separately could report a live session's stale exit code.
+			ExitCode: sess.exitCode,
 		}
 		sess.mu.Unlock()
 
@@ -426,7 +466,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	connectedAt := time.Now()
 
 	// BUG-3: Register as active connection — preempts any existing WS for this session.
-	s.mgr.SetActiveConn(id, conn, cancel)
+	connEpoch := s.mgr.SetActiveConn(id, conn, cancel)
 	defer s.mgr.ClearActiveConn(id, conn)
 
 	subID := uuid.New().String()
@@ -436,11 +476,24 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	dataCh, gridCols, gridRows, unsub := s.mgr.Subscribe(sess, subID)
 	defer unsub()
 
+	// This connection preempted whoever was here (SetActiveConn, above), so it also takes the
+	// grid: one browser receives the output, the same browser sizes the session. Released
+	// conditionally, because by the time this handler tears down the owner is routinely
+	// somebody else — see ReleaseViewerOwner.
+	sess.SetViewerOwner(subID, connEpoch)
+	defer sess.ReleaseViewerOwner(subID)
+
 	// Send replay buffer first. Strip terminal report-queries (DA/DSR/color/…): replaying them
 	// would make the browser terminal re-answer, and on a reconnect into tmux copy-mode those
 	// stray answers are read as keys (the mysterious "(search up)"). See stripDeviceQueries.
+	//
+	// Capped at the current grid epoch: bytes older than the last resize were drawn for a
+	// window this browser is not on, and re-executing them here is what stacked a copy of the
+	// screen per resize. See Session.gridSeq.
 	bufferBytes := sess.Buffer.Len()
-	replayRaw := sess.Buffer.ReadTail(wsReplayMaxBytes)
+	// One call, so the bytes and the grid boundary describe the same instant — see ReplayTail.
+	full, keep := sess.ReplayTail(wsReplayMaxBytes)
+	replayRaw := full[len(full)-keep:]
 	replayTruncated := bufferBytes > len(replayRaw)
 	replay := stripDeviceQueries(replayRaw)
 	terminalWSConnectionsTotal.Inc()
@@ -470,16 +523,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	{
 		payload, _ := json.Marshal(ResizedPayload{Cols: gridCols, Rows: gridRows})
 		msg, _ := json.Marshal(WSControlMessage{Type: MsgTypeResized, Payload: payload})
-		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-		_ = conn.Write(writeCtx, websocket.MessageText, msg)
-		writeCancel()
+		_ = writeWS(ctx, conn, websocket.MessageText, msg)
+	}
+
+	// Then: everything after this frame is a fresh screen, not a continuation.
+	//
+	// Sent even when the replay is empty. An empty replay means the grid changed and nothing
+	// has been drawn at the new one yet — precisely the case where whatever the browser is
+	// still showing was drawn for a window it is no longer on. Keeping it would be keeping the
+	// corruption; clearing costs one repaint, which any full-screen program does anyway.
+	{
+		msg, _ := json.Marshal(WSControlMessage{Type: MsgTypeReplayReset})
+		_ = writeWS(ctx, conn, websocket.MessageText, msg)
 	}
 
 	if len(replay) > 0 {
 		terminalWSReplayBytesTotal.Add(uint64(len(replay)))
-		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-		err = conn.Write(writeCtx, websocket.MessageBinary, replay)
-		writeCancel()
+		err = writeWS(ctx, conn, websocket.MessageBinary, replay)
 		if err != nil {
 			logger.Debug("ws replay write failed", "id", id, "error", err)
 			return
@@ -501,9 +561,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	metaPayload, _ := json.Marshal(SessionMetaPayload{TmuxDetected: tmuxDetected})
 	metaMsg, _ := json.Marshal(WSControlMessage{Type: MsgTypeSessionMeta, Payload: metaPayload})
 	{
-		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-		_ = conn.Write(writeCtx, websocket.MessageText, metaMsg)
-		writeCancel()
+		_ = writeWS(ctx, conn, websocket.MessageText, metaMsg)
 	}
 
 	// Subscribe to agent state changes (if available) — replaces independent SSE connection.
@@ -637,9 +695,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case msg := <-statusCh:
-				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-				err := conn.Write(writeCtx, websocket.MessageText, msg)
-				writeCancel()
+				err := writeWS(ctx, conn, websocket.MessageText, msg)
 				if err != nil {
 					logger.Debug("ws status frame write failed", "id", id, "error", err)
 					return
@@ -654,13 +710,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				// question a coin flip may answer — see viewerFrame.
 				msgType, payload := websocket.MessageBinary, frame.Data
 				if frame.Resize != nil {
-					p, _ := json.Marshal(ResizedPayload{Cols: frame.Resize[0], Rows: frame.Resize[1]})
+					p, _ := json.Marshal(ResizedPayload{Cols: frame.Resize.Cols, Rows: frame.Resize.Rows})
 					payload, _ = json.Marshal(WSControlMessage{Type: MsgTypeResized, Payload: p})
 					msgType = websocket.MessageText
 				}
-				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-				err := conn.Write(writeCtx, msgType, payload)
-				writeCancel()
+				err := writeWS(ctx, conn, msgType, payload)
 				if err != nil {
 					logger.Debug("ws write failed", "id", id, "error", err)
 					return
@@ -674,9 +728,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					Type:    MsgTypeAgentState,
 					Payload: agentData,
 				})
-				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-				err := conn.Write(writeCtx, websocket.MessageText, msg)
-				writeCancel()
+				err := writeWS(ctx, conn, websocket.MessageText, msg)
 				if err != nil {
 					logger.Debug("ws agent_state write failed", "id", id, "error", err)
 					return
@@ -691,9 +743,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					Type:    MsgTypeShellExit,
 					Payload: payload,
 				})
-				writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-				_ = conn.Write(writeCtx, websocket.MessageText, msg)
-				writeCancel()
+				_ = writeWS(ctx, conn, websocket.MessageText, msg)
 				return
 			case <-ctx.Done():
 				return
@@ -798,15 +848,11 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 	case MsgTypeHeartbeat:
 		// Echo payload (contains client sentAt for RTT measurement).
 		ack, _ := json.Marshal(WSControlMessage{Type: MsgTypeHeartbeatAck, Payload: ctrl.Payload})
-		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-		_ = conn.Write(writeCtx, websocket.MessageText, ack)
-		writeCancel()
+		_ = writeWS(ctx, conn, websocket.MessageText, ack)
 
 	case MsgTypePing:
 		pong, _ := json.Marshal(WSControlMessage{Type: MsgTypePong, Payload: ctrl.Payload})
-		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-		_ = conn.Write(writeCtx, websocket.MessageText, pong)
-		writeCancel()
+		_ = writeWS(ctx, conn, websocket.MessageText, pong)
 
 	case MsgTypeAuthRefresh:
 		// Token refresh — just acknowledge.
@@ -854,9 +900,7 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 			Type:    MsgTypeError,
 			Payload: errPayload,
 		})
-		writeCtx, writeCancel := context.WithTimeout(ctx, wsWriteTimeout)
-		_ = conn.Write(writeCtx, websocket.MessageText, errMsg)
-		writeCancel()
+		_ = writeWS(ctx, conn, websocket.MessageText, errMsg)
 	}
 }
 

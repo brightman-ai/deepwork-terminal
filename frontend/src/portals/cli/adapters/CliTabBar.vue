@@ -296,7 +296,7 @@ function tabTitle(tab: WorkbenchTab): string {
   const l = notLive(tab.id)
   if (l) parts.push(LIVENESS_LABEL[l])
   // 小标只有两个字，放不下「为什么」——完整那句话在这里补上（终端里也写了同样一句）。
-  if (reopened(tab.id)) parts.push('上一个进程已随服务重启结束，这是一个新的 shell')
+  if (reopened(tab.id)) parts.push('上一个进程已经结束，这是一个新的 shell')
   const said = agentSaidText(signalFor(tab.sessionId), sessionEntry(tab.sessionId)?.agentTool)
   if (said) parts.push(said)
   return parts.join(' · ')

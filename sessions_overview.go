@@ -124,10 +124,10 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// The grid is sized to THIS session's PTY, not to a constant. A TUI addresses rows
 		// absolutely, so replaying a 52-row screen onto a 48-row grid doesn't crop it — rows
 		// 49-52 all clamp onto row 48 and overwrite each other into one mashed line.
-		cols, rows := sess.PTYSize()
+		grid := sess.PTYSize()
 		var screen []string
 		if buf != nil {
-			screen = s.sessionScreen(sess.ID, buf, cols, rows)
+			screen = s.sessionScreen(sess.ID, buf, grid.Cols, grid.Rows)
 		}
 
 		// One screen, two readers: the tracker inspects the RAW screen because a permission

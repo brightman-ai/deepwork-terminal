@@ -30,15 +30,27 @@ type Client struct {
 	// "client is closed" — a state no retry can leave, which is the "you have to restart
 	// the server" experience this whole package exists to abolish.
 	closed bool
+	// peer is what the daemon said about itself in the handshake, refreshed on every
+	// reconnect. Kept here rather than returned once at Connect because a reconnect can
+	// land on a DIFFERENT daemon — someone restarted it, possibly onto another build —
+	// and a capability answer from the process that died is worse than none.
+	peer Hello
+}
+
+// Peer reports what the daemon said about itself in the most recent handshake.
+func (c *Client) Peer() Hello {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.peer
 }
 
 // Connect opens a control connection to an already-running daemon.
 func Connect(path string) (*Client, error) {
-	c, err := Dial(path)
+	c, peer, err := DialInfo(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{path: path, conn: c}, nil
+	return &Client{path: path, conn: c, peer: peer}, nil
 }
 
 // SpawnTimeout bounds how long ConnectOrSpawn waits for a freshly started daemon to
@@ -68,57 +80,57 @@ const SpawnTimeout = 10 * time.Second
 // typed error is returned for the caller to surface ("restarting the daemon will end N
 // live sessions").
 func ConnectOrSpawn(path string) (*Client, error) {
-	conn, err := dialOrSpawn(path)
+	conn, peer, err := dialOrSpawn(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{path: path, conn: conn}, nil
+	return &Client{path: path, conn: conn, peer: peer}, nil
 }
 
 // dialOrSpawn returns a live, handshaken connection, starting a daemon if none answers.
 // It is shared by ConnectOrSpawn and by reconnect so "how do I get a connection" has one
 // implementation rather than two that drift.
-func dialOrSpawn(path string) (net.Conn, error) {
-	if conn, err := Dial(path); err == nil {
-		return conn, nil
+func dialOrSpawn(path string) (net.Conn, Hello, error) {
+	if conn, peer, err := DialInfo(path); err == nil {
+		return conn, peer, nil
 	} else if isVersionMismatch(err) {
-		return nil, err
+		return nil, Hello{}, err
 	}
 
 	// The socket directory must exist before either the lock file or the daemon log can
 	// be created there. It is created here, explicitly, rather than as a side effect of
 	// taking the lock.
 	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
-		return nil, fmt.Errorf("muxd: create socket dir: %w", err)
+		return nil, Hello{}, fmt.Errorf("muxd: create socket dir: %w", err)
 	}
 
 	unlock, err := lockSpawn(path)
 	if err != nil {
-		return nil, err
+		return nil, Hello{}, err
 	}
 	defer unlock()
 
 	// Someone may have won the race while we waited for the lock.
-	if conn, err := Dial(path); err == nil {
-		return conn, nil
+	if conn, peer, err := DialInfo(path); err == nil {
+		return conn, peer, nil
 	} else if isVersionMismatch(err) {
-		return nil, err
+		return nil, Hello{}, err
 	}
 
 	if err := spawnDaemon(path); err != nil {
-		return nil, err
+		return nil, Hello{}, err
 	}
 
 	deadline := time.Now().Add(SpawnTimeout)
 	for time.Now().Before(deadline) {
-		if conn, err := Dial(path); err == nil {
-			return conn, nil
+		if conn, peer, err := DialInfo(path); err == nil {
+			return conn, peer, nil
 		} else if isVersionMismatch(err) {
-			return nil, err
+			return nil, Hello{}, err
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("muxd: daemon did not start listening on %s within %s (see %s)",
+	return nil, Hello{}, fmt.Errorf("muxd: daemon did not start listening on %s within %s (see %s)",
 		path, SpawnTimeout, LogPath(path))
 }
 
@@ -336,17 +348,23 @@ func (c *Client) reconnectLocked(policy connectPolicy) error {
 	}
 	var (
 		conn net.Conn
+		peer Hello
 		err  error
 	)
 	if policy == spawnIfAbsent {
-		conn, err = dialOrSpawn(c.path)
+		conn, peer, err = dialOrSpawn(c.path)
 	} else {
-		conn, err = Dial(c.path)
+		conn, peer, err = DialInfo(c.path)
 	}
 	if err != nil {
 		return err
 	}
 	c.conn = conn
+	// Refreshed, not merged: whoever is answering now is the authority on what it can do.
+	// A reconnect crosses a daemon restart routinely — that is the upgrade path — and
+	// carrying the dead process's capabilities forward would report the old answer about
+	// the new daemon, in exactly the situation this field exists to describe.
+	c.peer = peer
 	return nil
 }
 
@@ -582,7 +600,7 @@ type StreamEvent struct {
 	Data []byte
 	// Resize is the session's new grid, as of this point in the stream — everything after
 	// it was drawn at this size.
-	Resize *[2]uint16
+	Resize *Grid
 	// Exit is the process's exit code. It is the last event on the stream.
 	Exit *int
 	// Gap means bytes were lost before this point, so the stream's resume point can no
@@ -702,8 +720,8 @@ func (c *Client) Attach(id string, opts AttachOptions) (*Stream, error) {
 				if err := json.Unmarshal(payload, &p); err != nil {
 					continue
 				}
-				sz := [2]uint16{p.Cols, p.Rows}
-				pushEvent(events, StreamEvent{Resize: &sz})
+				g := gridFromWire(p.Cols, p.Rows)
+				pushEvent(events, StreamEvent{Resize: &g})
 			case MsgExited:
 				var p ExitedPayload
 				_ = json.Unmarshal(payload, &p)
@@ -741,19 +759,7 @@ func (s *Stream) Close() error { return s.conn.Close() }
 // the consumer painting onto the wrong grid, losing a gap leaves it trusting a bad resume
 // point, and losing an exit leaves it waiting for a session that has already ended.
 func pushEvent(ch chan StreamEvent, ev StreamEvent) {
-	select {
-	case ch <- ev:
-		return
-	default:
-	}
-	select {
-	case <-ch:
-	default:
-	}
-	select {
-	case ch <- ev:
-	default:
-	}
+	PushNewestOnFull(ch, ev)
 }
 
 // pushNewest delivers ev, discarding the oldest queued event if the buffer is full.
@@ -771,17 +777,5 @@ func pushEvent(ch chan StreamEvent, ev StreamEvent) {
 // stream, recency is worth strictly more than completeness: the authoritative answer is
 // always a fresh List, and only the prompt to fetch it can be lost.
 func pushNewest(ch chan Event, ev Event) {
-	select {
-	case ch <- ev:
-		return
-	default:
-	}
-	select {
-	case <-ch: // make room by discarding the oldest
-	default:
-	}
-	select {
-	case ch <- ev:
-	default: // a concurrent producer refilled it; the sequence still reveals the loss
-	}
+	PushNewestOnFull(ch, ev)
 }

@@ -2,32 +2,29 @@ package terminal
 
 // Viewport aggregation — the server's half of per-attachment geometry.
 //
-// ## The rule, and why it is this one
+// ## Two levels, two different rules, because the two levels mean different things
 //
-// A session's size is the component-wise MINIMUM over every window displaying it. That is
-// tmux's rule and it has tmux's reason: a terminal cannot display what does not fit. If two
-// people watch one shell and the grid is sized to the larger window, the smaller one shows a
-// wrapped, truncated lie of a screen — and a TUI, which paints by absolute cursor address,
-// does not degrade gracefully into "slightly wrong". It degrades into garbage that looks like
-// a bug in the program the user is running.
+//	browsers ──owner wins──> this server's attachment ──min──> the PTY
+//	          (here)                                   (muxd/session.go)
 //
-// ## Why the minimum is taken TWICE
+// The daemon mins across ITS clients — this server, another host's server, a
+// `dw-terminal attach` CLI — because those are genuinely simultaneous windows onto one shell,
+// and a terminal cannot display what does not fit. That is tmux's rule and it keeps tmux's
+// reason.
 //
-// The daemon owns the PTY and mins across its clients (this server, another host's server,
-// a `dw-terminal attach` CLI). But ONE server can have many browsers open on the same
-// session, and to the daemon they are a single attachment — the daemon cannot see them and
-// has no business knowing they exist. So the server mins over its own browsers first and
-// declares that one number as its attachment's size.
+// Browsers on THIS server are not simultaneous. Attaching preempts (SessionManager.
+// SetActiveConn): the previous connection is told it was taken over and closed. Minimising
+// across a set whose extra members are, by construction, no longer being drawn into gives the
+// vote to windows nobody is looking at — and because the preemption is asynchronous, the
+// losing viewer stays registered for the length of its own teardown, which was long enough
+// for every tab switch to drag the session down to the smaller of the two and back. So this
+// level is exclusive: the owner's window is the size, and the daemon still gets exactly one
+// number from us. See Viewport.
 //
-//	browsers ──min──> this server's attachment ──min──> the PTY
-//	                  (here)                            (muxd/session.go)
-//
-// Two levels, one rule, applied where the knowledge is. Before this existed the server kept a
-// single shared size and the last browser to resize simply overwrote it, so opening a phone
-// on a session reflowed the desktop that was already watching it — and the frontend had grown
-// a whole discipline (viewportDeclaration.ts) to decide who was allowed to be the last writer.
-// That discipline was a workaround for shared mutable state; with per-owner state the rule
-// collapses back into "every window tells the truth about itself".
+// Before any of this the server kept a single shared size and the last browser to resize
+// simply overwrote it — the frontend had grown a whole discipline (viewportDeclaration.ts) to
+// decide who was allowed to be the last writer. Per-viewer state plus explicit ownership
+// replaces that: every window tells the truth about itself, and exactly one of them counts.
 //
 // ## Withdrawal is half the design
 //
@@ -38,7 +35,11 @@ package terminal
 // does when it goes to the background. An observer still receives output; it just no longer
 // gets a vote on the size.
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/brightman-ai/deepwork-terminal/muxd"
+)
 
 // viewer is one WebSocket connection watching this session: where its bytes go, and how big
 // the window it is drawn in is.
@@ -48,8 +49,10 @@ import "fmt"
 // reading: guessing a size for a window we have never measured would let a tab that is not
 // even visible shrink the session for everyone who can see it.
 type viewer struct {
-	ch         chan viewerFrame
-	cols, rows int
+	ch chan viewerFrame
+	// size is the window this browser is displaying the session in; the zero Grid means
+	// OBSERVER — still receiving output, no longer voting on the size.
+	size muxd.Grid
 }
 
 // viewerFrame is one thing that happened on this session, carried to a viewer in the order
@@ -62,36 +65,124 @@ type viewer struct {
 // Either way the user sees a corrupted picture and blames the program inside the terminal.
 type viewerFrame struct {
 	Data   []byte
-	Resize *[2]int // the session's grid is now this big, as of this point in the stream
+	Resize *muxd.Grid // the session's grid is now this big, as of this point in the stream
 }
 
-// Viewport returns the smallest window currently watching this session — the size this
-// server declares on its attachment — or 0,0 when no viewer has declared one.
+// Viewport returns the size this server declares on its attachment: the window of the
+// viewer that OWNS the session, or 0,0 when no browser owns it.
 //
-// Columns and rows are minimised independently, matching the daemon (effectiveSizeLocked).
-// A 100×24 window and an 80×50 one therefore yield 80×24: the largest grid that fits in
-// both. Picking one viewer's box wholesale would leave the other one overflowing on the
-// axis it was smaller on, which is the case this whole mechanism exists to prevent.
-func (s *Session) Viewport() (cols, rows int) {
+// ## Why ownership rather than the minimum
+//
+// This used to min over every viewer, on tmux's rule and tmux's reason. It does not any
+// more, because this server is not tmux: a browser attaching here already PREEMPTS whoever
+// held the session (SetActiveConn, and the "Session 已被其他设备接管" banner that goes with
+// it). Only one browser can be receiving output at a time, so minimising across the others
+// gave the vote to windows that were no longer being drawn into — and worse, the preemption
+// is asynchronous: the losing connection unsubscribes from its own defer, so for the length
+// of one handler teardown BOTH viewers were in the map and the session took the smaller.
+//
+// The result was a grid that oscillated on every tab switch. Each oscillation makes the
+// program inside repaint at the new size, appending a screen's worth of bytes to the ring at
+// a width the next replay will not be using — see gridSeq for what that does to the picture.
+// A phone opening the same session reflowed the desktop watching it, then handed it back on
+// disconnect, and neither window ever settled.
+//
+// So: exclusive. The owner's window is the session's size, and a viewer that has been
+// preempted has no vote — it is not displaying the session any more, which is exactly the
+// condition SetViewerSize's 0×0 already describes. The daemon still mins across its own
+// clients (another host's server, a `dw-terminal attach` CLI): those genuinely ARE
+// simultaneous, and smallest-wins remains right where windows really do coexist.
+func (s *Session) Viewport() muxd.Grid {
 	s.subMu.RLock()
 	defer s.subMu.RUnlock()
 	return s.viewportLocked()
 }
 
 // viewportLocked requires subMu (read or write) to be held.
-func (s *Session) viewportLocked() (cols, rows int) {
+func (s *Session) viewportLocked() muxd.Grid {
+	if s.activeViewer != "" {
+		// The owner speaks alone — including when it has not spoken yet. Falling back to
+		// another viewer's size here would reintroduce the oscillation through the back
+		// door, in the exact window where it hurts: between the new browser subscribing and
+		// its first resize, which is when the replay it is about to receive gets its grid.
+		v, ok := s.viewers[s.activeViewer]
+		if !ok || v.size.Zero() {
+			return muxd.Grid{}
+		}
+		return v.size
+	}
+	// No browser owns this session. Something may still be watching it through the daemon,
+	// and any viewer registered here without owning it (a preempted connection still tearing
+	// down) is not displaying anything — so the old minimum survives only as the answer to
+	// "what is the largest grid that fits everyone still registered", which with no owner is
+	// the most honest thing we can say.
+	var g muxd.Grid
 	for _, v := range s.viewers {
-		if v.cols <= 0 || v.rows <= 0 {
+		if v.size.Zero() {
 			continue // an observer: watching, not constraining
 		}
-		if cols == 0 || v.cols < cols {
-			cols = v.cols
+		if g.Cols == 0 || v.size.Cols < g.Cols {
+			g.Cols = v.size.Cols
 		}
-		if rows == 0 || v.rows < rows {
-			rows = v.rows
+		if g.Rows == 0 || v.size.Rows < g.Rows {
+			g.Rows = v.size.Rows
 		}
 	}
-	return cols, rows
+	return g
+}
+
+// SetViewerOwner makes one viewer the session's sole owner of the grid, or clears ownership
+// when subID is empty, and re-declares the resulting size.
+//
+// Called where preemption already happens, so that "who receives the output" and "whose
+// window sizes the session" cannot answer differently — they are the same question asked
+// twice, and the whole failure this replaces came from letting them drift.
+func (s *Session) SetViewerOwner(subID string, epoch uint64) {
+	s.subMu.Lock()
+	if epoch < s.ownerEpoch {
+		// A NEWER connection already took the grid. This one registered first, was preempted
+		// while it was still subscribing, and is now claiming ownership it has already lost —
+		// preemption, subscribing and this call are three steps, and two browsers arriving
+		// together interleave across them. Without this the loser wins, and the session sizes
+		// itself to a window whose socket is closing.
+		s.subMu.Unlock()
+		return
+	}
+	if subID != "" {
+		if _, ok := s.viewers[subID]; !ok {
+			// Ownership of a viewer that is not registered would freeze the session at 0×0
+			// until the next subscribe.
+			s.subMu.Unlock()
+			return
+		}
+	}
+	s.activeViewer, s.ownerEpoch = subID, epoch
+	s.subMu.Unlock()
+
+	if _, err := s.syncViewport(); err != nil {
+		logger.Debug("could not re-declare the viewport after an ownership change",
+			"id", s.ID, "sub_id", subID, "error", err)
+	}
+}
+
+// ReleaseViewerOwner drops ownership if subID still holds it, and re-declares.
+//
+// Conditional because a departing viewer is routinely NOT the owner any more: preemption
+// hands ownership to the new connection first, and the old one's teardown runs afterwards.
+// An unconditional clear there would take the grid away from the browser that just won it.
+func (s *Session) ReleaseViewerOwner(subID string) {
+	s.subMu.Lock()
+	if s.activeViewer != subID {
+		s.subMu.Unlock()
+		return
+	}
+	s.activeViewer = ""
+	s.subMu.Unlock()
+
+	if _, err := s.syncViewport(); err != nil {
+		logger.Debug("could not re-declare the viewport after the owner left",
+			"id", s.ID, "sub_id", subID, "error", err)
+	}
 }
 
 // SetViewerSize records the size of ONE viewer's window and re-declares this server's
@@ -117,7 +208,7 @@ func (s *Session) SetViewerSize(subID string, cols, rows int) error {
 	s.subMu.Lock()
 	v, ok := s.viewers[subID]
 	if ok {
-		v.cols, v.rows = cols, rows
+		v.size = muxd.Grid{Cols: cols, Rows: rows}
 	}
 	s.subMu.Unlock()
 	if !ok {
@@ -139,19 +230,19 @@ func (s *Session) SetViewerSize(subID string, cols, rows int) error {
 	// When we DID push, the daemon answers instead — including the case where it clamps us
 	// against another host's smaller window. See the MsgResize handler in muxd/daemon.go.
 	if !pushed && cols > 0 && rows > 0 {
-		if gc, gr := s.PTYSize(); gc != cols || gr != rows {
-			s.tellViewer(subID, gc, gr)
+		if got := s.PTYSize(); got != (muxd.Grid{Cols: cols, Rows: rows}) {
+			s.tellViewer(subID, got)
 		}
 	}
 	return nil
 }
 
 // tellViewer hands the current grid to ONE viewer, in order with its own output.
-func (s *Session) tellViewer(subID string, cols, rows int) {
+func (s *Session) tellViewer(subID string, g muxd.Grid) {
 	s.subMu.RLock()
 	defer s.subMu.RUnlock()
 	if v, ok := s.viewers[subID]; ok {
-		pushViewerControl(v.ch, viewerFrame{Resize: &[2]int{cols, rows}})
+		pushViewerControl(v.ch, viewerFrame{Resize: &g})
 	}
 }
 
@@ -165,8 +256,8 @@ func (s *Session) syncViewport() (pushed bool, err error) {
 	s.geomMu.Lock()
 	defer s.geomMu.Unlock()
 
-	cols, rows := s.Viewport()
-	if cols == s.declCols && rows == s.declRows {
+	want := s.Viewport()
+	if want == s.declared {
 		// Nothing to say. The browser re-declares its size on every reconnect and on every
 		// tab switch, and a resize the daemon already knows about is a frame that buys
 		// nothing — while still costing a wakeup on every attached client, since the daemon
@@ -197,18 +288,19 @@ func (s *Session) syncViewport() (pushed bool, err error) {
 	// did before this feature existed. Recording the declaration anyway is right: the next
 	// real size a viewer declares differs from it and is therefore sent, so a stale
 	// constraint cannot outlive the next resize. Restarting the daemon ends the degradation.
-	if err := stream.Resize(s.ID, uint16(cols), uint16(rows)); err != nil {
+	c, r := want.Wire()
+	if err := stream.Resize(s.ID, c, r); err != nil {
 		return false, err
 	}
-	s.declCols, s.declRows = cols, rows
+	s.declared = want
 	return true, nil
 }
 
 // noteDeclared records a size that was declared out of band — by attach(), which passes the
 // viewport in the attach request rather than paying a second round trip for it.
-func (s *Session) noteDeclared(cols, rows int) {
+func (s *Session) noteDeclared(g muxd.Grid) {
 	s.geomMu.Lock()
-	s.declCols, s.declRows = cols, rows
+	s.declared = g
 	s.geomMu.Unlock()
 }
 
@@ -239,17 +331,20 @@ func (s *Session) fanOutData(data []byte) {
 // for a full-screen TUI is a scrambled screen, not a slightly-off one. Subscribe takes the
 // same locks in the same order, so a viewer either joins before this and receives the
 // resize frame, or joins after it and reads the new size. There is no third case.
-func (s *Session) applyGrid(cols, rows int) {
-	if cols <= 0 || rows <= 0 {
+func (s *Session) applyGrid(g muxd.Grid) {
+	if g.Zero() {
 		return
 	}
 	s.subMu.RLock()
 	defer s.subMu.RUnlock()
-	s.mu.Lock()
-	s.ptyCols, s.ptyRows = cols, rows
-	s.mu.Unlock()
+	// Through the one writer, so that the grid-epoch mark cannot be skipped by whichever
+	// path happened to learn the new size first.
+	s.setPTYSizeFromDaemon(g)
+	// One pointer, shared by every viewer on purpose: a Grid is a value nobody mutates
+	// after it is announced, and handing out N copies of the same two numbers only invites
+	// someone to wonder whether they can differ.
 	for _, v := range s.viewers {
-		pushViewerControl(v.ch, viewerFrame{Resize: &[2]int{cols, rows}})
+		pushViewerControl(v.ch, viewerFrame{Resize: &g})
 	}
 }
 
@@ -264,13 +359,7 @@ const viewerControlReserve = 8
 
 // admitViewerOutput reports whether there is room for one more expendable frame.
 func admitViewerOutput(ch chan viewerFrame) bool {
-	room := cap(ch) - viewerControlReserve
-	if room < 1 {
-		// See admitOutput in the daemon: a queue smaller than the reserve must still carry
-		// output, or the reserve turns into a silent mute.
-		room = 1
-	}
-	return len(ch) < room
+	return muxd.AdmitExpendable(ch, viewerControlReserve)
 }
 
 // pushViewerControl delivers a frame that must not be lost. The reserve above means this
@@ -279,17 +368,5 @@ func admitViewerOutput(ch chan viewerFrame) bool {
 // blocks: a viewer whose reader has stopped entirely must not stall the output pump for
 // everyone else.
 func pushViewerControl(ch chan viewerFrame, f viewerFrame) {
-	select {
-	case ch <- f:
-		return
-	default:
-	}
-	select {
-	case <-ch:
-	default:
-	}
-	select {
-	case ch <- f:
-	default:
-	}
+	muxd.PushNewestOnFull(ch, f)
 }

@@ -31,6 +31,15 @@ export interface WorkbenchConfig {
   activeGroupId: string
   activeTabId: string
   lastSaved: string   // ISO 8601
+  /** 服务端所有的乐观并发版本号。客户端**只负责原样回传**它 load 到的那个值，从不自己加一
+   *  —— 加一是服务端接受一次写入时做的事（见 settings.go withWorkbenchRev）。
+   *
+   *  它存在的理由：这份文档是整份读写的，两台设备各拿一份副本各自演化；没有它，后写的那一方
+   *  会静默抹掉前一方的标签（连同还活着的 session 的绑定）。PUT 带着它 → 服务端发现基准已经
+   *  移动就回 409 + 当前文档 → 客户端三方合并后重试（见 workbenchMerge.ts）。
+   *
+   *  可选：首次使用（服务端 404）与旧版本存下来的文档都没有这个字段。 */
+  rev?: number
 }
 
 function genId(): string {

@@ -530,8 +530,8 @@ func TestSmallestAttachmentWins(t *testing.T) {
 	defer small.Close()
 	waitForSize(t, sess, 80, 50, "the component-wise minimum of both viewers")
 
-	if sz := waitForResizeEvent(t, big, 5*time.Second); sz[0] != 80 || sz[1] != 50 {
-		t.Errorf("the first client was told %dx%d, want 80x50", sz[0], sz[1])
+	if sz := waitForResizeEvent(t, big, 5*time.Second); sz != (Grid{Cols: 80, Rows: 50}) {
+		t.Errorf("the first client was told %s, want 80x50", sz)
 	}
 
 	// The narrow viewer leaves. Its constraint leaves with it, and the session grows back
@@ -597,38 +597,39 @@ func TestObserverImposesNoSize(t *testing.T) {
 	defer observer.Close()
 
 	time.Sleep(300 * time.Millisecond)
-	if cols, rows := sessionSize(sess); cols != 240 || rows != 60 {
-		t.Errorf("session became %dx%d after an OBSERVER attached; merely looking must not "+
-			"reflow the terminal someone is working in", cols, rows)
+	if got := sessionSize(sess); got != (Grid{Cols: 240, Rows: 60}) {
+		t.Errorf("session became %s after an OBSERVER attached; merely looking must not "+
+			"reflow the terminal someone is working in", got)
 	}
 	select {
 	case ev := <-worker.Events:
 		if ev.Resize != nil {
 			t.Errorf("the working client was told the grid changed to %dx%d; nothing changed",
-				ev.Resize[0], ev.Resize[1])
+				ev.Resize.Cols, ev.Resize.Rows)
 		}
 	default:
 	}
 }
 
-func sessionSize(s *Session) (uint16, uint16) {
+func sessionSize(s *Session) Grid {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cols, s.rows
+	return s.size
 }
 
 func waitForSize(t *testing.T, s *Session, cols, rows uint16, why string) {
 	t.Helper()
+	want := Grid{Cols: int(cols), Rows: int(rows)}
 	deadline := time.Now().Add(5 * time.Second)
-	var gotC, gotR uint16
+	var got Grid
 	for time.Now().Before(deadline) {
-		gotC, gotR = sessionSize(s)
-		if gotC == cols && gotR == rows {
+		got = sessionSize(s)
+		if got == want {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("session is %dx%d, want %dx%d (%s)", gotC, gotR, cols, rows, why)
+	t.Fatalf("session is %s, want %s (%s)", got, want, why)
 }
 
 // TestAttachedCountIsReported gives the operator the number that separates two failures
@@ -715,7 +716,7 @@ func waitForAttached(t *testing.T, c *Client, id string, want int) {
 }
 
 // waitForResizeEvent returns the next resize carried on the stream, skipping output.
-func waitForResizeEvent(t *testing.T, s *Stream, budget time.Duration) [2]uint16 {
+func waitForResizeEvent(t *testing.T, s *Stream, budget time.Duration) Grid {
 	t.Helper()
 	deadline := time.After(budget)
 	for {
@@ -792,7 +793,7 @@ func TestResizeIsOrderedWithTheOutputItAffects(t *testing.T) {
 		t.Fatalf("write before: %v", err)
 	}
 	waitForBytes(t, sess, 6)
-	sess.SetAttachSize(subIDOf(t, sess), 80, 24)
+	sess.SetAttachSize(subIDOf(t, sess), Grid{Cols: 80, Rows: 24})
 	waitForSize(t, sess, 80, 24, "the resized attachment")
 	if _, err := writeEnd.Write([]byte("AFTER")); err != nil {
 		t.Fatalf("write after: %v", err)
@@ -809,7 +810,7 @@ collect:
 			}
 			switch {
 			case ev.Resize != nil:
-				order = append(order, fmt.Sprintf("resize=%dx%d", ev.Resize[0], ev.Resize[1]))
+				order = append(order, fmt.Sprintf("resize=%s", ev.Resize))
 			case ev.Data != nil:
 				order = append(order, string(ev.Data))
 			}
@@ -948,7 +949,7 @@ func TestALosingClientIsTold(t *testing.T) {
 			if ev.Resize == nil {
 				continue
 			}
-			if *ev.Resize != [2]uint16{70, 20} {
+			if *ev.Resize != (Grid{Cols: 70, Rows: 20}) {
 				t.Fatalf("answered %v, want [70 20] — the size the session is actually at", *ev.Resize)
 			}
 			return
@@ -1011,4 +1012,89 @@ func TestResizeDoesNotRaceDestroy(t *testing.T) {
 		s.Destroy()
 		wg.Wait()
 	}
+}
+
+// TestAnUnannouncedCapabilityIsTreatedAsAbsent: a daemon predating the Features field is
+// indistinguishable from one that supports nothing, and that is the required reading.
+//
+// This is the ONLY case that matters in practice — every daemon in the field on the day
+// this shipped omits the field entirely — so if the check were lenient about the empty
+// case it would be lenient about the entire population it exists to detect.
+func TestAnUnannouncedCapabilityIsTreatedAsAbsent(t *testing.T) {
+	old := Hello{Version: ProtoVersion, PID: 4242, Sessions: 9} // a daemon from before this field
+	missing := old.MissingFeatures()
+	if len(missing) == 0 {
+		t.Fatal("a daemon that advertised nothing was accepted as capable — every daemon " +
+			"running at upgrade time looks exactly like this one")
+	}
+	if !contains(missing, FeaturePerAttachmentGeometry) {
+		t.Fatalf("missing = %v, want it to name %q", missing, FeaturePerAttachmentGeometry)
+	}
+	if old.Has(FeaturePerAttachmentGeometry) {
+		t.Fatal("Has reported a capability that was never advertised")
+	}
+}
+
+// TestThisBuildSatisfiesItsOwnRequirements: the two lists are separate so they CAN diverge
+// across versions; they must not diverge within one build, or every client refuses every
+// daemon compiled from the same source.
+func TestThisBuildSatisfiesItsOwnRequirements(t *testing.T) {
+	self := Hello{Version: ProtoVersion, Features: DaemonFeatures}
+	if missing := self.MissingFeatures(); len(missing) > 0 {
+		t.Fatalf("a daemon from this source cannot satisfy a client from this source: missing %v", missing)
+	}
+}
+
+// TestHandshakeCarriesCapabilitiesToTheClient is the end-to-end half: the list has to
+// survive the wire and land where the decision is made (Client.Peer), not merely exist as
+// a constant on both sides.
+//
+// Sabotage that proves it bites: drop Features from Daemon.identity() and this goes red.
+func TestHandshakeCarriesCapabilitiesToTheClient(t *testing.T) {
+	path := isolatedSocket(t)
+	ln, err := Listen(path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+	d := NewDaemonWith(1<<16, -1, nil)
+	go func() { _ = d.Serve(context.Background(), ln) }()
+	defer d.DestroyAll()
+	waitFor(t, 2*time.Second, "daemon to accept", func() bool { return SocketAlive(path) })
+
+	c, err := Connect(path)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	peer := c.Peer()
+	if peer.PID == 0 {
+		t.Fatal("handshake did not reach Client.Peer at all — the rest of this test proves nothing")
+	}
+	if missing := peer.MissingFeatures(); len(missing) > 0 {
+		t.Fatalf("a live daemon from this source was reported as missing %v", missing)
+	}
+	if !peer.Has(FeaturePerAttachmentGeometry) {
+		t.Fatalf("peer features = %v, want %q among them", peer.Features, FeaturePerAttachmentGeometry)
+	}
+
+	// Inspect is the other door to the same answer — DaemonHealth uses it, and it dials
+	// separately rather than reusing the client, so it can regress on its own.
+	info, err := Inspect(path)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !info.Has(FeaturePerAttachmentGeometry) {
+		t.Fatalf("Inspect features = %v, want %q among them", info.Features, FeaturePerAttachmentGeometry)
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

@@ -1,4 +1,4 @@
-import { ref, computed, onMounted, reactive, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, reactive, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkbench } from '@terminal/composables/cli/useWorkbench'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -59,7 +59,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
 
   const {
     loading, error, groups, activeTab, allTabs, showGroupHeaders,
-    load, addTab, setTabCwd, removeTab, renameTab, adoptRemoteTabName, setActiveTab,
+    load, resync, addTab, setTabCwd, removeTab, renameTab, adoptRemoteTabName, setActiveTab,
     toggleGroupCollapsed, bindSession, unbindSession,
   } = useWorkbench()
 
@@ -335,6 +335,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     copy: (text) => copyTextToClipboard(text),
     tabCount: () => visibleTabIds.value.length,
     forceKillForeground: (id) => { void forceKillForegroundTab(id) },
+    applyEnvHere: (id) => { void applyEnvToTab(id) },
   })
 
   function openTabMenu(e: MouseEvent, tabId: string): void {
@@ -355,7 +356,68 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // ─── Surface event handlers ───────────────────────────────────────────────────
   function onTabAgentState(tabId: string, state: AgentState | null) { ensureRuntime(tabId).agentState = state }
   function onTabAgentNotifications(tabId: string, states: AgentState[]) { ensureRuntime(tabId).agentNotifications = states }
-  function onTabSessionExit(tabId: string, _exitCode: number) { ensureRuntime(tabId).wsStatus = 'disconnected' }
+  /**
+   * 这个标签背后的 shell 刚刚退出了（人敲了 `exit`、程序跑完、崩溃、被杀）。
+   *
+   * 这里曾经只有一句 `wsStatus = 'disconnected'` —— **事件被显示了，却没有被处置**。标签仍然绑着
+   * 那条已经死掉的 sessionId，而 detachedCard 的判据恰恰是「这个标签没有绑着 session」，所以那张
+   * "进程已结束"的卡永远不出现：用户看到的是一个写着 `[进程已退出]` 的死终端，敲什么都没反应，
+   * 一直卡到下次刷新页面（reconcileSessions 只在 onMounted 跑）。用户报的就是这个。
+   *
+   * 处置按**退出码**分两种（对标 tmux：`remain-on-exit` 默认 off，pane 直接消失）：
+   *
+   *  • **干净退出（0）→ 关掉这个标签。** 这就是 `exit` 本来的意思。留一个空壳标签在那儿、等人再点
+   *    一次"关闭"，是纯粹多出来的一步。
+   *  • **非零 → 留下标签、解绑、让卡出现。** 崩了或被杀时，退出码和它所在的目录正是用户要看的
+   *    东西；把标签连同名字和目录一起吞掉，等于把出事现场清理干净了。
+   *
+   * 不必担心这条被历史事件误触发：WS 层对已经退出的 session **直接拒绝升级**（410 Gone，见
+   * handleWebSocket），所以 `shell_exit` 只可能来自"在这条连接眼前刚死的"那一次，不存在重放。
+   */
+  async function onTabSessionExit(tabId: string, exitCode: number): Promise<void> {
+    ensureRuntime(tabId).wsStatus = 'disconnected'
+    await settleExitedTab(tabId, exitCode)
+  }
+
+  /**
+   * 一个标签背后的 shell 已经结束了，把这个标签**处置掉**。
+   *
+   * 两条入口共用这一处，这是刻意的：
+   *   • 实时 —— 有浏览器盯着时收到的 `shell_exit` 帧（onTabSessionExit）
+   *   • 事后 —— 挂载/恢复时才发现它已经退了（reconcileSessions）
+   *
+   * 第二条入口原先根本不存在，于是"没人看着的时候退出"的标签会**永久卡成 disconnected**：
+   * `/sessions` 把已退出的会话也一并返回，而对账把"在清单里"当成了"还活着"，所以既不解绑、也不
+   * 出卡片，界面就一直连一个已经死掉的 session（WS 对它直接 410）。这和当初 `exit` 卡住是同一个
+   * 缺陷的两半——**两条路径只修一条等于没修**，这个仓库为这句话付过学费（见 session_manager.go
+   * 里 PTYFactory 那段注释）。
+   *
+   * 策略按退出码分，和 tmux `remain-on-exit off` 一致：
+   *   • 0    —— 干净退出（人敲了 `exit` / 程序跑完）→ 关掉标签。
+   *   • 非 0 —— 崩了 / 被杀 → 留下标签、解绑，让"进程已结束"的卡出现。退出码和目录正是用户此刻
+   *            要看的东西，把标签吞掉等于把现场清理干净了。
+   */
+  async function settleExitedTab(tabId: string, exitCode: number): Promise<void> {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab) return
+
+    if (exitCode === 0) {
+      await closeTab(tabId)
+      // 关掉最后一个标签会留下一个空门户 —— onMounted 里那条兜底只在挂载时跑一次。
+      if (allTabs.value.length === 0) await createTabSilent({ name: nextTabName(), cwd: '~' })
+      return
+    }
+
+    setTabLiveness(tabId, 'detached')
+    if (tab.sessionId) {
+      // 顺手把 daemon 里那条已死的 session 收掉，否则它会以 exited 状态一直留在清单里（既占
+      // `dw-terminal muxd --status` 的版面，也让孤儿认领每轮都要跳过它）。
+      const conn = remotePeers.resolveTabConnection(tab)
+      try { await tabFetch(conn, `/sessions/${tab.sessionId}`, { method: 'DELETE' }) } catch { /* silent */ }
+      forgetTerminalNotice(tab.sessionId)
+      unbindSession(tabId)
+    }
+  }
   function onTabConnectionChange(tabId: string, status: WSConnectionStatus) { ensureRuntime(tabId).wsStatus = status }
 
   // ─── Tab bar operations ───────────────────────────────────────────────────────
@@ -373,6 +435,53 @@ export function useCliState(runtime: PortalRuntimeResult) {
     delete tabLiveness[tabId]
     forgetTerminalNotice(tab?.sessionId)
     removeTab(tabId)
+  }
+
+  // ─── 轻提示（一次性、不阻塞）────────────────────────────────────────────────
+  //
+  // 刻意不用 window.alert/confirm：原生弹窗在 headless CDP 下会**阻塞整个 JS 线程**，于是这条路
+  // 就变成了永远验收不了的路（cli-tabs 的 REQ-004 已经被 window.confirm 卡死过一次，那条验收至今
+  // 是未完成状态）。一个能被截图看见的行内提示，既是给用户的反馈，也是给验收的证据。
+  //
+  // 也不写进 xterm：注入被拒的那一刻，终端里正跑着一个可能处于 alt-screen 的程序（那正是被拒的
+  // 原因），往它的画面上写字会把那一屏搞乱。
+  const notice = ref('')
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null
+  function showNotice(text: string): void {
+    notice.value = text
+    if (noticeTimer) clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(() => { notice.value = '' }, 6000)
+  }
+
+  /**
+   * 把设置页里那份「新终端的环境变量」应用到这个**已经在跑**的终端。
+   *
+   * 那份配置是 spawn 时套用的，所以只影响新建的终端 —— 和 tmux `set-environment` 一样（实测：改完
+   * 之后同一个 pane 读到的还是旧值，只有新开的 window 是新值）。已在跑的 shell 的环境在它自己的
+   * 内存里，外部改不了，唯一能改它的是 shell 自己执行一条命令。所以这里做的事就是把 `unset` /
+   * `export` 敲进去，**让用户在终端里看得见**。
+   *
+   * 先 switchTab 再注入：这条命令的正当性完全来自"你看得见它被敲进去"。往一个看不见的标签里注入
+   * 命令，就成了背着用户在他自己的 shell 里跑东西。
+   *
+   * 服务端会在前台有程序时拒绝（否则这几行字会被打进那个程序的 stdin —— 比如打进你正在对话的
+   * claude 里），拒绝理由原样端到提示里。
+   */
+  async function applyEnvToTab(tabId: string): Promise<void> {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab?.sessionId) { showNotice('这个标签还没有连上终端'); return }
+    switchTab(tabId)
+    const conn = remotePeers.resolveTabConnection(tab)
+    try {
+      const resp = await tabFetch(conn, `/sessions/${tab.sessionId}/apply-env`, { method: 'POST' })
+      const data = await resp.json().catch(() => ({})) as { applied?: string[]; note?: string; error?: string }
+      if (!resp.ok) { showNotice(data.error || `应用失败（HTTP ${resp.status}）`); return }
+      if (data.note) { showNotice(data.note); return }
+      const n = data.applied?.length ?? 0
+      showNotice(n ? `已把 ${n} 条命令敲进这个终端，看终端里的回显` : '没有可应用的环境变量')
+    } catch {
+      showNotice('应用失败（网络错误）')
+    }
   }
 
   /** SIGKILL the tab's current PTY foreground process group — see useTabContextMenu's
@@ -446,34 +555,91 @@ export function useCliState(runtime: PortalRuntimeResult) {
    * DetachedTerminalCard 把话讲清楚、把选择交还用户——那种处境里对面的 agent 可能正跑着。
    */
   async function reconcileSessions() {
-    if (allTabs.value.length === 0) return
-    await reconcileTabs(
-      allTabs.value.map((t: WorkbenchTab) => ({ id: t.id, sessionId: t.sessionId, remotePeerId: t.remotePeerId })),
-      {
-        listLocalSessions: () => fetchSessionIds(() => cliFetch(cliApi('/sessions'))),
-        listPeerSessions: (peerId: string) => {
-          // Peer 解析不出来（已删除 / 缺认证码 / scheme 不对）= 问不到，不是"它上面没有终端"。
-          const conn = remotePeers.resolveTabConnection({ remotePeerId: peerId })
-          if (conn.error || !conn.authToken) return Promise.resolve(null)
-          return fetchSessionIds(() => tabFetch(conn, '/sessions'))
+    // 本机清单只取一次，两个方向共用：标签→session 的对账（reconcileTabs），以及
+    // session→标签 的认领（adoptOrphanSessions）。**必须在 allTabs 为空时也取**——标签列表整份
+    // 丢掉恰恰是认领要救的那种情形，早退会让唯一的自救通道在最需要它的时候关着。
+    const localSessions = await fetchLocalSessions()
+
+    // 先结算「没人看着的时候就已经退出」的会话，再做对账。
+    //
+    // 顺序是承重的：结算走的是退出码策略（0 关标签 / 非 0 留卡片），而对账之后的
+    // reopenDetachedTabs 会给任何 detached 的本机标签**自动开一个新 shell**。让它先跑，用户敲过
+    // `exit` 的标签就会被"恢复"成一个新 shell，并配上一句"上一个进程已随服务重启结束"——服务根本
+    // 没重启，那是句谎话。所以已结算的标签要从重开候选里摘掉。
+    const settled = new Set<string>()
+    if (localSessions) {
+      const exited = new Map(localSessions.filter(s => s.exited).map(s => [s.id, s.exitCode]))
+      // 快照迭代：settleExitedTab 在干净退出时会关掉标签，边遍历边改 allTabs 会漏项。
+      for (const t of allTabs.value.slice()) {
+        if (!t.sessionId || t.remotePeerId) continue
+        const code = exited.get(t.sessionId)
+        if (code === undefined) continue
+        settled.add(t.id)
+        await settleExitedTab(t.id, code)
+      }
+    }
+
+    // 存活集合**只含真的还活着的**。此前是不分状态全收，于是一个已退出的 session 仍被判成 live
+    // ——标签不解绑、卡片不出现、终端永远连不上（tab 10 的 disconnected 就是这么来的）。
+    const localIds = localSessions ? new Set(localSessions.filter(s => !s.exited).map(s => s.id)) : null
+
+    if (allTabs.value.length > 0) {
+      await reconcileTabs(
+        allTabs.value.map((t: WorkbenchTab) => ({ id: t.id, sessionId: t.sessionId, remotePeerId: t.remotePeerId })),
+        {
+          listLocalSessions: () => Promise.resolve(localIds),
+          listPeerSessions: (peerId: string) => {
+            // Peer 解析不出来（已删除 / 缺认证码 / scheme 不对）= 问不到，不是"它上面没有终端"。
+            const conn = remotePeers.resolveTabConnection({ remotePeerId: peerId })
+            if (conn.error || !conn.authToken) return Promise.resolve(null)
+            return fetchSessionIds(() => tabFetch(conn, '/sessions'))
+          },
+          setLiveness: (tabId, liveness) => {
+            setTabLiveness(tabId, liveness)
+            // 还活着的标签要有 runtime 槽位（agentState/wsStatus 挂在这上面）；已结束的没有进程可挂。
+            if (liveness === 'live') ensureRuntime(tabId)
+          },
+          unbindSession,
         },
-        setLiveness: (tabId, liveness) => {
-          setTabLiveness(tabId, liveness)
-          // 还活着的标签要有 runtime 槽位（agentState/wsStatus 挂在这上面）；已结束的没有进程可挂。
-          if (liveness === 'live') ensureRuntime(tabId)
-        },
-        unbindSession,
-      },
-    )
-    await reopenDetachedTabs(reopenCandidates(), {
-      createSession: (tab) => createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~' }),
-      adopt: adoptReopened,
-    })
+      )
+      await reopenDetachedTabs(reopenCandidates(settled), {
+        createSession: (tab) => createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~' }),
+        adopt: adoptReopened,
+      })
+    }
+
+    // 反方向，最后跑：上面那一步可能刚给 detached 标签接上新 shell，那些新 session 不在
+    // localSessions 这份快照里，所以不会被误当成孤儿。
+    adoptOrphanSessions(localSessions)
+    ensureActiveTab()
   }
 
-  /** 当前所有标签的「自动重开候选」视图。判定（谁该重开）在 reopenDetached.ts，这里只搬数据。 */
-  function reopenCandidates(): ReopenCandidate[] {
-    return allTabs.value.map((t: WorkbenchTab) => ({
+  /**
+   * 保证「有标签就一定有一个是活跃的」。
+   *
+   * 这一轮里有两处会把 activeTabId 留空，而界面对空活跃标签是**整块空白**：终端区不渲染（没有
+   * 当前标签），连"进程已结束"那张卡也不出现（detachedCard 的第一个判据就是 activeTab 存在）。
+   *
+   *   ① 孤儿认领用 `activate: false`（不该抢用户正在看的终端）—— 但当标签**全部**来自认领时，
+   *     就没有任何人被激活过。刚好就是"标签记录整份丢掉后自救"那个场景，也就是最需要它好用的
+   *     那一刻。
+   *   ② settleExitedTab 关掉的恰好是当时的活跃标签。
+   *
+   * 由夹具实测抓到（`will-exit-0` 被关掉后整页空白），不是推演出来的。
+   */
+  function ensureActiveTab(): void {
+    if (activeTab.value) return
+    const first = visibleTabIds.value[0] ?? allTabs.value[0]?.id
+    if (first) setActiveTab(first)
+  }
+
+  /** 当前所有标签的「自动重开候选」视图。判定（谁该重开）在 reopenDetached.ts，这里只搬数据。
+   *
+   *  `exclude` 是**本轮已按退出码结算过**的标签（见 settleExitedTab）。它们不该再被自动重开：
+   *  自动重开交付的是一个新 shell 加一句"上一个进程已随服务重启结束"，而这些标签的进程是自己
+   *  退出的、服务好好的——那句话会是谎话，而这个模块存在的全部理由就是不撒那种谎。 */
+  function reopenCandidates(exclude: ReadonlySet<string> = new Set()): ReopenCandidate[] {
+    return allTabs.value.filter((t: WorkbenchTab) => !exclude.has(t.id)).map((t: WorkbenchTab) => ({
       id: t.id,
       name: t.name,
       cwd: t.cwd,
@@ -514,6 +680,89 @@ export function useCliState(runtime: PortalRuntimeResult) {
       return out
     } catch {
       return null
+    }
+  }
+
+  /** 本机一条 session 里，对账 + 认领需要用到的部分。 */
+  interface LocalSessionBrief {
+    id: string
+    name: string
+    cwd: string
+    exited: boolean
+    /** 只在 `exited` 时有意义。决定这个标签该被关掉（干净退出）还是留下来说明情况（崩了），
+     *  和实时 `shell_exit` 帧走的是同一条策略 —— 见 settleExitedTab。 */
+    exitCode: number
+    /** 这条 session 属于本部署的标签列表吗。daemon 是 per-user 的，standalone(:18074) 与
+     *  pro embed(:8087) 共用一个，各自却有各自的 workbench.json —— 没有这一位，"活着但没有标签"
+     *  就分不清是「我的标签记录丢了」还是「那是另一个部署的终端」。见 Go 侧 sessionMeta.Origin。 */
+    ownedHere: boolean
+  }
+
+  /** 本机 session 全量清单，或 null（没问到）。比 fetchSessionIds 多取 name/cwd/status/ownedHere
+   *  —— 孤儿认领要靠它们把标签建得像原来那条，而不是一个叫"终端"的空壳。 */
+  async function fetchLocalSessions(): Promise<LocalSessionBrief[] | null> {
+    try {
+      const resp = await cliFetch(cliApi('/sessions'))
+      if (!resp.ok) return null
+      const list = await resp.json() as Array<Record<string, unknown>>
+      const out: LocalSessionBrief[] = []
+      for (const s of list) {
+        const id = (typeof s.id === 'string' && s.id) || (typeof s.session_id === 'string' && s.session_id)
+        if (!id) continue
+        out.push({
+          id,
+          name: typeof s.name === 'string' ? s.name : '',
+          cwd: typeof s.cwd === 'string' ? s.cwd : '',
+          exited: s.status === 'exited',
+          // 旧服务端根本不发这个键 → 当作"是我的"。判据写成 `!== false` 而不是真值判断：
+          // 服务端刻意不给这个布尔加 omitempty，false 是有意义的值，必须能过 wire。
+          ownedHere: s.ownedHere !== false,
+          // 缺这个键（旧服务端）时按**非零**处理：宁可留下标签让用户自己决定，也不要凭一个
+          // 猜出来的 0 把标签连同它的名字和目录一起关掉。
+          exitCode: typeof s.exitCode === 'number' ? s.exitCode : 1,
+        })
+      }
+      return out
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 认领「活着、属于本部署、但没有任何标签指着它」的 session。
+   *
+   * 这是标签对账的**反方向**，此前完全缺失。reconcileTabs 只问「我这条标签背后的进程还活着吗」；
+   * 没人问过「这个还活着的进程还有标签指着它吗」。于是一旦标签记录丢了（见 useWorkbench 文件头
+   * 那次真实事故：陈旧副本整份覆盖），那条 session 就永久隐身——尽管 daemon（"什么终端存在"的
+   * 唯一真相）还好好地拿着它，进程还在跑。
+   *
+   * 它同时是那次数据丢失的**安全网**：即便 rev 并发控制哪天又被绕开，最坏结果也只是标签暂时消失，
+   * 下次挂载自动回来，而不是一个正在对话的 agent 永久失联。
+   *
+   * 刻意的几个选择：
+   *  • `null`（没问到）直接返回。请求失败不是"没有孤儿"的证据（同 tabLiveness 的 null ≠ 空集合）。
+   *  • 跳过已退出的：那不是失联的终端，只是垃圾，认领它等于凭空造一个死标签。
+   *  • `activate: false`：这是后台对账顺手做的事，不该把用户正在看的终端切走。
+   *  • 不往终端里写任何"已恢复"的痕迹。reopenDetached 那条痕迹存在的理由是它交付的是一个**新的
+   *    空 shell**（假装恢复是那次的原罪）；这里交付的是**原来那个真进程**，无需自证。
+   */
+  function adoptOrphanSessions(sessions: LocalSessionBrief[] | null): void {
+    if (!sessions) return
+    const bound = new Set<string>()
+    for (const t of allTabs.value) if (t.sessionId) bound.add(t.sessionId)
+    const orphans = sessions.filter(s => s.ownedHere && !s.exited && !bound.has(s.id))
+    if (!orphans.length) return
+    const gid = groups.value[0]?.id
+    if (!gid) return
+    for (const s of orphans) {
+      const tab = addTab(gid, {
+        name: s.name || nextTabName(),
+        cwd: s.cwd || '~',
+        activate: false,
+      })
+      bindSession(tab.id, s.id)
+      ensureRuntime(tab.id)
+      setTabLiveness(tab.id, 'live')
     }
   }
 
@@ -652,7 +901,35 @@ export function useCliState(runtime: PortalRuntimeResult) {
       await createTabSilent({ name: nextTabName(), cwd: '~' })
     }
     scenario.send('TABS_READY')
+    document.addEventListener('visibilitychange', onPageVisible)
   })
+  onBeforeUnmount(() => document.removeEventListener('visibilitychange', onPageVisible))
+
+  /**
+   * 页面重新可见时：先把服务端的标签列表合并进来，再对一次账。
+   *
+   * 补的是「这份共享文档一辈子只在挂载时读一次」这个洞。手机上一个后台挂了两小时的页面，本地那份
+   * 列表已经陈旧得离谱，而它随时会因为一次**完全自动的** setTabCwd（sessions_overview 推送帧
+   * 触发）把陈旧内容写回服务端 —— 那正是那次真实事故的最后一步。rev 并发控制会挡住覆盖，但挡住
+   * 之后总得有人去合并；让合并发生在**用户看到界面之前**，好过让它发生在一次失败的写之后。
+   *
+   * 顺带对账：离开的这段时间里进程可能已经结束或被别处关了，回来第一眼该是真相，不是两小时前的
+   * 快照。
+   */
+  let resuming = false
+  async function onPageVisible(): Promise<void> {
+    if (document.visibilityState !== 'visible') return
+    // 切前后台可能连着来好几次（切 Space、锁屏、PWA 恢复）。一次跑完再接下一次：并发跑两遍只会
+    // 让合并基准前后错位。
+    if (resuming) return
+    resuming = true
+    try {
+      await resync()
+      await reconcileSessions()
+    } finally {
+      resuming = false
+    }
+  }
 
   return {
     scenario, breakpoint,
@@ -679,5 +956,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     openShortcutsSettings,
     // tab context menu (right-click) — same action table as the shortcuts
     tabMenu, openTabMenu,
+    // 一次性轻提示（环境变量注入的结果/拒绝理由）。不是 alert：见 showNotice。
+    notice,
   }
 }

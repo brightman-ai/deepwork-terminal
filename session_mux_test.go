@@ -155,10 +155,8 @@ func TestRestoreCarriesScrollbackAndGeometry(t *testing.T) {
 		t.Errorf("scrollback did not come back from the daemon (missing %q)", marker)
 	}
 
-	cols, rows := restored.PTYSize()
-	if cols != 133 || rows != 41 {
-		t.Errorf("geometry = %dx%d, want 133x41 — the replay grid would not match the real terminal",
-			cols, rows)
+	if got := restored.PTYSize(); got != (muxd.Grid{Cols: 133, Rows: 41}) {
+		t.Errorf("geometry = %s, want 133x41 — the replay grid would not match the real terminal", got)
 	}
 }
 

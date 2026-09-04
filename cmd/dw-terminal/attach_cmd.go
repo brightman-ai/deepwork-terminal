@@ -186,7 +186,7 @@ func attachTo(c *muxd.Client, sum muxd.SessionSummary, declareSize bool, stdin, 
 				// moved under us. Nothing to do locally — our own terminal is our own size —
 				// but say it, because a screen that suddenly reflows with no explanation
 				// looks like a bug in whatever is running inside.
-				fmt.Fprintf(stdout, "\r\n[session resized to %dx%d]\r\n", ev.Resize[0], ev.Resize[1])
+				fmt.Fprintf(stdout, "\r\n[session resized to %s]\r\n", ev.Resize)
 			case ev.Gap:
 				fmt.Fprint(stdout, "\r\n[output was lost — this view has a gap in it]\r\n")
 			default:
@@ -210,7 +210,7 @@ func attachTo(c *muxd.Client, sum muxd.SessionSummary, declareSize bool, stdin, 
 // unreachable by the prefix.
 func escapeState(pending bool, in []byte) (out []byte, stillPending, detach bool) {
 	out = make([]byte, 0, len(in)+1)
-	for i, b := range in {
+	for _, b := range in {
 		switch {
 		case pending && b == 'd':
 			return out, false, true
@@ -225,7 +225,6 @@ func escapeState(pending bool, in []byte) (out []byte, stillPending, detach bool
 		default:
 			out = append(out, b)
 		}
-		_ = i
 	}
 	return out, pending, false
 }
