@@ -93,6 +93,10 @@
     <!-- Remote-terminal picker (mesh): add/select a peer, then open a tab connected to it. -->
     <RemoteTermDialog v-model:open="remoteDialogOpen" :on-connect="createRemoteTab" />
 
+    <!-- 一次性轻提示。用行内元素而不是 window.alert：原生弹窗在 headless 下阻塞 JS 线程，
+         那条路就再也验收不了（见 useCliState 的 showNotice）。 -->
+    <div v-if="notice" class="cli-notice" data-testid="cli-notice">{{ notice }}</div>
+
     <!-- D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output.
          One component, two data sources (tmux topology / sessions_overview frame). -->
     <!-- 关闭只有一处实现（closeOverview）：遮罩、Esc、点中卡片走的是同一个动作，模板里不再各留
@@ -147,6 +151,7 @@ const {
   overviewOpen, toggleOverview, closeOverview, overviewGroups, overviewRollup,
   selectOverviewIndex, openShortcutsSettings,
   tabMenu, openTabMenu,
+  notice,
   // leader 等待态 + 它的键名。键名走 bindingLabel（绑定措辞的 SSOT），所以提示条和设置页
   // 显示的是同一个结果，不会写成两种样子。
   leaderPending, leaderLabel,
@@ -193,5 +198,25 @@ const {
     --workbench-tab-active-bg: #f5f5f5;
     --workbench-strip-bg: #ededed;
   }
+}
+
+/* 一次性轻提示：环境变量注入的结果 / 被拒的理由。悬浮在底部中间，6s 自动消失，不拦交互。 */
+.cli-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  max-width: min(92vw, 560px);
+  z-index: 60;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(20, 20, 20, 0.94);
+  color: #f2f2f2;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  /* 提示是"读的"，不是"点的"：挡住下面终端的点击会让它从帮助变成障碍。 */
+  pointer-events: none;
 }
 </style>

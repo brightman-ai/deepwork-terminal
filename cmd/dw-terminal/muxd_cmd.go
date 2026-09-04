@@ -127,6 +127,12 @@ func restartDaemon(path string, assumeYes bool, in io.Reader, out io.Writer) err
 	default:
 		fmt.Fprintf(out, "  sessions  %d live\n", info.Sessions)
 	}
+	// The reason a restart is being asked for is usually invisible: same protocol, no
+	// error, different behaviour. Say it here, where the person deciding is looking.
+	if missing := info.MissingFeatures(); len(missing) > 0 {
+		fmt.Fprintf(out, "  missing   %s — this daemon predates that, so terminal sizing is wrong\n",
+			strings.Join(missing, ", "))
+	}
 	fmt.Fprintf(out, "\nRestarting ends every one of those sessions. Their shells, and anything\n"+
 		"running inside them, will be terminated.\n\n")
 
@@ -220,7 +226,20 @@ func printStatus(path string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("daemon on %s — %d session(s), protocol v%d\n", path, len(sessions), muxd.ProtoVersion)
+	// The daemon's OWN version, not ours. Printing muxd.ProtoVersion here described the
+	// binary running this command — always the newest one — so a status page whose whole
+	// job is reporting the other process reported itself instead.
+	peer := c.Peer()
+	proto := peer.Version
+	if proto == 0 {
+		proto = muxd.ProtoVersion // too old to say; ours is the only number available
+	}
+	fmt.Printf("daemon on %s — %d session(s), protocol v%d\n", path, len(sessions), proto)
+	if missing := peer.MissingFeatures(); len(missing) > 0 {
+		fmt.Printf("  ⚠ this daemon predates %s — it is older than the binary you just ran,\n"+
+			"    so terminal sizing is wrong until you run: dw-terminal muxd --restart\n",
+			strings.Join(missing, ", "))
+	}
 	for _, s := range sessions {
 		state := "exited"
 		if s.Alive {

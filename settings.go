@@ -17,6 +17,31 @@ import (
 // deepwork-pro all speak the same codes. Callers use authgate.Generate() directly.
 
 // workbench persistence — stores tab layout as JSON file
+//
+// # Why this one is rev-guarded and the store next door is merged
+//
+// Both files had the same wound — a whole-document PUT from a client holding a stale copy
+// silently deleted everything it did not know about. For the store a per-key merge was enough,
+// because its top-level keys (history / remotePeers / snippets) are independent and a client
+// that knows nothing about a key has no opinion about it.
+//
+// That does not transfer here. The workbench's entire payload hangs off ONE key, `groups`, and
+// the thing being lost is a tab INSIDE it. Merging `groups` wholesale is the same replace under
+// a different name; unioning tabs by id is worse than the bug, because it resurrects tabs the
+// user deliberately closed. "Absent" is genuinely ambiguous at tab granularity — deleted here,
+// or never seen here? — and no server-side rule can tell the two apart.
+//
+// So the server stops guessing and starts refusing: every document carries a server-owned `rev`,
+// a PUT must name the rev it edited, and a PUT built on a rev that has moved is rejected with the
+// current document attached. The client is the only party that knows what it changed, so it is the
+// only party that can resolve the conflict — it three-way merges against the base it loaded and
+// retries (see workbenchMerge.ts). Deleted-here and never-seen-here are distinguishable there,
+// and nowhere else.
+//
+// A PUT with NO rev field is a pre-rev client (a page that loaded the old bundle before this
+// change). It is accepted as a plain replace, because rejecting it would brick that page's saves
+// entirely; such a page keeps the old clobbering behaviour until it reloads, which the asset-hash
+// updater makes it do on its own.
 var (
 	workbenchMu   sync.Mutex
 	workbenchData json.RawMessage
@@ -24,13 +49,15 @@ var (
 
 func (s *Server) handleGetWorkbench(w http.ResponseWriter, r *http.Request) {
 	workbenchMu.Lock()
+	if workbenchData == nil {
+		// Hydrate the in-memory cache from disk ONCE, and keep it — the old code read the file
+		// and dropped it on the floor, so every GET re-read the disk and, worse, the rev compare
+		// in handleSaveWorkbench would have had nothing to compare against after a restart.
+		workbenchData = s.loadWorkbenchFromDisk()
+	}
 	data := workbenchData
 	workbenchMu.Unlock()
 
-	if data == nil {
-		// Try loading from disk
-		data = s.loadWorkbenchFromDisk()
-	}
 	if data == nil {
 		http.NotFound(w, r)
 		return
@@ -49,22 +76,90 @@ func (s *Server) handleSaveWorkbench(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+
 	workbenchMu.Lock()
-	workbenchData = raw
+	if workbenchData == nil {
+		workbenchData = s.loadWorkbenchFromDisk()
+	}
+	current := workbenchData
+	claimed, claimedOK := workbenchRev(raw)
+	if claimedOK {
+		if have, _ := workbenchRev(current); claimed != have {
+			// Stale base. Hand back what is actually stored (rev included) so the client can
+			// three-way merge onto it instead of guessing, and do NOT touch the stored doc.
+			workbenchMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			if current == nil {
+				w.Write([]byte("{}")) //nolint:errcheck
+			} else {
+				w.Write(current) //nolint:errcheck
+			}
+			return
+		}
+	}
+	have, _ := workbenchRev(current)
+	next := have + 1
+	stamped := withWorkbenchRev(raw, next)
+	workbenchData = stamped
 	workbenchMu.Unlock()
 
 	// Persist to disk
-	s.saveWorkbenchToDisk(raw)
-	w.WriteHeader(http.StatusNoContent)
+	s.saveWorkbenchToDisk(stamped)
+	writeJSON(w, http.StatusOK, map[string]any{"rev": next})
+}
+
+// workbenchRev reads the server-owned revision out of a workbench document. The second return
+// distinguishes "this document declares a rev" from "it does not" — the caller needs that to tell
+// a pre-rev client (no opinion, accept its write) from a client claiming rev 0 (a document that
+// has never been saved, which must still be compared).
+func workbenchRev(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var probe struct {
+		Rev *int64 `json:"rev"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || probe.Rev == nil {
+		return 0, false
+	}
+	return *probe.Rev, true
+}
+
+// withWorkbenchRev returns doc with `rev` set to n, preserving every other key verbatim. Falls
+// back to the document unchanged if it is not a JSON object, so a malformed body can never fail
+// a save in a way that loses the user's tabs.
+func withWorkbenchRev(doc json.RawMessage, n int64) json.RawMessage {
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(doc, &m); err != nil {
+		return doc
+	}
+	stamped, err := json.Marshal(n)
+	if err != nil {
+		return doc
+	}
+	m["rev"] = stamped
+	out, err := json.Marshal(m)
+	if err != nil {
+		return doc
+	}
+	return out
+}
+
+// dataDir is where this deployment's own files live. It doubles as this deployment's IDENTITY
+// (see sessionMeta.Origin): standalone and the pro embed share one per-user daemon but keep
+// separate data dirs, and the data dir is exactly what makes their tab lists separate — so it is
+// the honest answer to "whose tab list owns this session".
+func (s *Server) dataDir() string {
+	if dir := s.config.DataDir; dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".dw-terminal")
 }
 
 func (s *Server) workbenchPath() string {
-	dir := s.config.DataDir
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".dw-terminal")
-	}
-	return filepath.Join(dir, "workbench.json")
+	return filepath.Join(s.dataDir(), "workbench.json")
 }
 
 func (s *Server) loadWorkbenchFromDisk() json.RawMessage {
@@ -158,12 +253,7 @@ func mergeStoreJSON(base, patch json.RawMessage) json.RawMessage {
 }
 
 func (s *Server) storePath() string {
-	dir := s.config.DataDir
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".dw-terminal")
-	}
-	return filepath.Join(dir, "store.json")
+	return filepath.Join(s.dataDir(), "store.json")
 }
 
 func (s *Server) loadStoreFromDisk() json.RawMessage {

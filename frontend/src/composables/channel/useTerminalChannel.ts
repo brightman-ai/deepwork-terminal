@@ -16,6 +16,7 @@ import { Terminal } from '@xterm/xterm'
 import { useWebSocketClient, type WebSocketClientOptions } from '@terminal/composables/cli/useWebSocketClient'
 import { useAgentIntel } from '@terminal/composables/cli/useAgentIntel'
 import type { AgentState, WSControlMessage } from '@terminal/types/terminal'
+import { REPLAY_RESET_SEQUENCE, parseServerGrid } from '@terminal/types/terminal'
 
 export interface TerminalChannelOptions {
   /** Reactive session ID (null = no active session) */
@@ -59,7 +60,13 @@ export function useTerminalChannel(options: TerminalChannelOptions) {
         switch (msg.type) {
           case 'shell_exit': {
             const payload = msg.payload as Record<string, unknown>
-            const exitCode = payload?.exit_code
+            // `exitCode`, not `exit_code`: the server marshals ShellExitPayload with
+            // `json:"exitCode"` (types.go). Reading the snake_case name meant this branch
+            // silently reported 0 for EVERY exit — a crash and a clean `exit` looked
+            // identical — and nothing anywhere would have said so. (The other consumer,
+            // CliTerminalSurface, always read the right key, which is exactly why the
+            // divergence survived: one of the two copies worked.)
+            const exitCode = payload?.exitCode
             const code = typeof exitCode === 'number' ? exitCode : 0
             terminal.write('\r\n[进程已退出]\r\n')
             _onShellExit?.(code)
@@ -71,14 +78,21 @@ export function useTerminalChannel(options: TerminalChannelOptions) {
           case 'agent_state':
             agentIntel.handleWSMessage(msg.payload)
             break
-          // 会话尺寸由服务端裁决（所有观看窗口的逐轴最小值），所以这不是自己那次 resize 的回声，
-          // 而且不照做就会画错：全屏 TUI 按绝对光标定位重绘，网格对不上就是一屏糊。
+          // 服务端说"接下来是一屏重放，不是你正在看的那屏的续写"。
+          //
+          // 必须清：重放的字节会把整屏重新画一遍，而当前屏上还留着上一次 attach 画的同一批内容
+          // ——两份叠在一起就是用户看到的"重复的底行"。重放帧和实时输出都是 binary，收到时分不
+          // 出来，所以边界只能由服务端明说（见 MsgTypeReplayReset）。
+          case 'replay_reset':
+            terminal.write(REPLAY_RESET_SEQUENCE)
+            break
+          // 会话尺寸由服务端裁决（本机浏览器里由持有连接的那个独占，daemon 再对跨主机的客户端取
+          // 最小值），所以这不是自己那次 resize 的回声，而且不照做就会画错：全屏 TUI 按绝对光标
+          // 定位重绘，网格对不上就是一屏糊。
           case 'resized': {
-            const p = msg.payload as { cols?: number; rows?: number } | null
-            const cols = p?.cols
-            const rows = p?.rows
-            if (typeof cols === 'number' && typeof rows === 'number' && cols >= 1 && rows >= 1) {
-              if (terminal.cols !== cols || terminal.rows !== rows) terminal.resize(cols, rows)
+            const grid = parseServerGrid(msg.payload)
+            if (grid && (terminal.cols !== grid.cols || terminal.rows !== grid.rows)) {
+              terminal.resize(grid.cols, grid.rows)
             }
             break
           }

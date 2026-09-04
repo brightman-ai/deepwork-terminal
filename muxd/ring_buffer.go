@@ -105,7 +105,11 @@ func (rb *RingBuffer) Read() []byte {
 func (rb *RingBuffer) ReadTail(n int) []byte {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
+	return rb.readTailLocked(n)
+}
 
+// readTailLocked requires rb.mu.
+func (rb *RingBuffer) readTailLocked(n int) []byte {
 	total := rb.writePos
 	if rb.full {
 		total = rb.capacity
@@ -135,6 +139,21 @@ func (rb *RingBuffer) ReadTail(n int) []byte {
 		}
 	}
 	return result
+}
+
+// ReadTailAt returns the last n bytes together with the seq those bytes END at, both read
+// under one lock.
+//
+// The two are useless apart. A caller deciding where a replay may start compares seq against
+// a mark taken elsewhere (a grid change, a resume point); reading the bytes and the counter
+// in two calls lets a write land in between, so the arithmetic is done on a length from one
+// moment and a counter from another. The result is a boundary off by exactly the bytes that
+// arrived in the gap — which is to say, a replay that begins mid-escape-sequence or carries a
+// few frames drawn for the previous grid.
+func (rb *RingBuffer) ReadTailAt(n int) (data []byte, seq uint64) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	return rb.readTailLocked(n), rb.seq
 }
 
 // Len returns the number of valid bytes currently stored.

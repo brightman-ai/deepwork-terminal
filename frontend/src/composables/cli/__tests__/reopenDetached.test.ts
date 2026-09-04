@@ -47,7 +47,10 @@ describe('reopenDetachedTabs — 自动重开必须留痕', () => {
     expect(h.adopted).toHaveLength(1)
     expect(h.adopted[0].sessionId).toBe('new-session')
     // 痕迹本身：说清「之前那个哪去了」+「现在这个是什么」+「在哪个目录」。
-    expect(h.adopted[0].notice).toContain('上一个进程已随服务重启结束')
+    expect(h.adopted[0].notice).toContain('上一个进程已经结束')
+    // 痕迹必须说清**已知**的事，且不得断言一个我们并不知道的死因。自从 PTY 归常驻 daemon 持有，
+    // "服务重启"已不再是进程结束的常见原因（用户敲 exit / 程序崩了才是），断言它就是撒谎。
+    expect(h.adopted[0].notice).not.toContain('服务重启')
     expect(h.adopted[0].notice).toContain('新的 shell')
     expect(h.adopted[0].notice).toContain('/home/u/proj')
   })

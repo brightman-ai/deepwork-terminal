@@ -18,13 +18,14 @@ type Session struct {
 	ID        string
 	CreatedAt time.Time
 
-	mu       sync.Mutex
-	pty      *os.File
-	cmd      *exec.Cmd
-	ring     *RingBuffer
-	meta     []byte // opaque; the daemon never looks inside
-	cols     uint16
-	rows     uint16
+	mu   sync.Mutex
+	pty  *os.File
+	cmd  *exec.Cmd
+	ring *RingBuffer
+	meta []byte // opaque; the daemon never looks inside
+	// size is what the PTY is currently running at — the grid its scrollback was written
+	// in, and therefore the grid a replay must be rendered onto.
+	size     Grid
 	alive    bool
 	exitCode int
 	shellPID int
@@ -41,12 +42,11 @@ type Session struct {
 	subs      map[int]*subscription
 	nextSubID int
 
-	// manualCols/manualRows are the size set by a control-plane resize — a caller that is
-	// not attached and therefore has no view to fit. It is the FALLBACK, used only while
-	// no attachment declares a size, because a claim from something that is watching
-	// always beats a claim from something that is not.
-	manualCols uint16
-	manualRows uint16
+	// manual is the size set by a control-plane resize — a caller that is not attached and
+	// therefore has no view to fit. It is the FALLBACK, used only while no attachment
+	// declares a size, because a claim from something that is watching always beats a
+	// claim from something that is not.
+	manual Grid
 
 	onExit func(id string, code int)
 
@@ -134,8 +134,7 @@ func SpawnWith(id string, opts SpawnOptions, factory PTYFactory, onExit func(str
 		cmd:       cmd,
 		ring:      NewRingBuffer(opts.Cap),
 		meta:      append([]byte(nil), opts.Meta...),
-		cols:      opts.Cols,
-		rows:      opts.Rows,
+		size:      gridFromWire(opts.Cols, opts.Rows),
 		alive:     true,
 		exitCode:  -1,
 		subs:      map[int]*subscription{},
@@ -261,7 +260,7 @@ func (s *Session) Summary() SessionSummary {
 	defer s.mu.Unlock()
 	viewers := 0
 	for _, sub := range s.subs {
-		if sub.cols > 0 && sub.rows > 0 {
+		if !sub.size.Zero() {
 			viewers++
 		}
 	}
@@ -271,8 +270,8 @@ func (s *Session) Summary() SessionSummary {
 		ID:        s.ID,
 		Alive:     s.alive,
 		ExitCode:  s.exitCode,
-		Cols:      s.cols,
-		Rows:      s.rows,
+		Cols:      uint16(s.size.Cols),
+		Rows:      uint16(s.size.Rows),
 		Meta:      append([]byte(nil), s.meta...),
 		ShellPID:  s.shellPID,
 		CreatedAt: s.CreatedAt,
@@ -312,7 +311,7 @@ func (s *Session) Resize(cols, rows uint16) error {
 		// changing the grid under it produces a different screen, not a resized one.
 		return nil
 	}
-	s.manualCols, s.manualRows = cols, rows
+	s.manual = gridFromWire(cols, rows)
 	s.applySizeLocked()
 	return nil
 }
@@ -445,7 +444,7 @@ func (s *Session) ShellPID() int {
 // Replay and subscription happen under one lock on purpose: taking them separately
 // would leave a window where output written in between is in neither, and the client
 // would silently lose a chunk of its terminal.
-func (s *Session) Subscribe(since *int64, cols, rows uint16) (replay []byte, offset int64, outCols, outRows uint16, sub *subscription, cancel func()) {
+func (s *Session) Subscribe(since *int64, want Grid) (replay []byte, offset int64, grid Grid, sub *subscription, cancel func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -461,7 +460,7 @@ func (s *Session) Subscribe(since *int64, cols, rows uint16) (replay []byte, off
 	}
 
 	if !s.alive {
-		return replay, seq, s.cols, s.rows, nil, func() {}
+		return replay, seq, s.size, nil, func() {}
 	}
 
 	id := s.nextSubID
@@ -469,14 +468,14 @@ func (s *Session) Subscribe(since *int64, cols, rows uint16) (replay []byte, off
 	sub = &subscription{
 		id:   id,
 		ch:   make(chan subFrame, 256),
-		cols: cols, rows: rows,
+		size: want,
 	}
 	s.subs[id] = sub
 	// A new viewer can shrink the session immediately — that is smallest-wins working, and
 	// it must happen before the replay geometry is reported or the client would render the
 	// scrollback onto a grid the session is about to leave.
 	s.applySizeLocked()
-	return replay, seq, s.cols, s.rows, sub, func() {
+	return replay, seq, s.size, sub, func() {
 		s.mu.Lock()
 		if existing, ok := s.subs[id]; ok {
 			delete(s.subs, id)
@@ -503,15 +502,17 @@ func (s *Session) Subscribe(since *int64, cols, rows uint16) (replay []byte, off
 // by absolute cursor address — that is not a cosmetic ordering detail, it decides whether
 // the picture is right.
 type subFrame struct {
-	Data   []byte     // PTY output
-	Resize *[2]uint16 // the session's grid changed, as of this point in the stream
-	Gap    bool       // output was dropped just before this point
+	Data   []byte // PTY output
+	Resize *Grid  // the session's grid changed, as of this point in the stream
+	Gap    bool   // output was dropped just before this point
 }
 
 type subscription struct {
-	id         int
-	ch         chan subFrame
-	cols, rows uint16 // 0 = an observer that imposes no constraint
+	id int
+	ch chan subFrame
+	// size is the window this attachment is displayed in; the zero Grid is an OBSERVER,
+	// watching without imposing a constraint.
+	size Grid
 }
 
 // controlReserve is how many slots at the top of a subscription's queue are held back for
@@ -533,14 +534,7 @@ const controlReserve = 8
 // slow to keep up misses live bytes and re-attaches for them, but a resize or gap notice it
 // misses has nothing scheduled to re-send it.
 func admitOutput(ch chan subFrame) bool {
-	room := cap(ch) - controlReserve
-	if room < 1 {
-		// A queue smaller than the reserve would otherwise admit NOTHING — silent total
-		// output loss, which is exactly the kind of failure this repo keeps getting bitten
-		// by. Production queues are far larger; this only keeps a small one honest.
-		room = 1
-	}
-	return len(ch) < room
+	return AdmitExpendable(ch, controlReserve)
 }
 
 // pushControl delivers a frame that must not be lost.
@@ -550,19 +544,7 @@ func admitOutput(ch chan subFrame) bool {
 // frames — at which point the newest grid is the one worth keeping, because it is the one
 // the client will still be wrong about after everything queued has been drained.
 func pushControl(ch chan subFrame, f subFrame) {
-	select {
-	case ch <- f:
-		return
-	default:
-	}
-	select {
-	case <-ch:
-	default:
-	}
-	select {
-	case ch <- f:
-	default:
-	}
+	PushNewestOnFull(ch, f)
 }
 
 // effectiveSizeLocked computes the size the PTY should actually be.
@@ -580,26 +562,29 @@ func pushControl(ch chan subFrame, f subFrame) {
 // With nothing attached, the manual size applies; failing that the current size stands. A
 // session with no viewers keeps its geometry rather than collapsing, because its
 // scrollback was drawn at that size and will be replayed at it.
-func (s *Session) effectiveSizeLocked() (uint16, uint16) {
-	var cols, rows uint16
+func (s *Session) effectiveSizeLocked() Grid {
+	var g Grid
 	for _, sub := range s.subs {
-		if sub.cols == 0 || sub.rows == 0 {
+		if sub.size.Zero() {
 			continue
 		}
-		if cols == 0 || sub.cols < cols {
-			cols = sub.cols
+		// Minimised per axis, not "pick the smallest window": a 100×24 and an 80×50 yield
+		// 80×24, the largest grid that fits in both. Picking one window wholesale would
+		// leave the other overflowing on the axis it was smaller on.
+		if g.Cols == 0 || sub.size.Cols < g.Cols {
+			g.Cols = sub.size.Cols
 		}
-		if rows == 0 || sub.rows < rows {
-			rows = sub.rows
+		if g.Rows == 0 || sub.size.Rows < g.Rows {
+			g.Rows = sub.size.Rows
 		}
 	}
-	if cols == 0 || rows == 0 {
-		if s.manualCols > 0 && s.manualRows > 0 {
-			return s.manualCols, s.manualRows
+	if g.Zero() {
+		if !s.manual.Zero() {
+			return s.manual
 		}
-		return s.cols, s.rows
+		return s.size
 	}
-	return cols, rows
+	return g
 }
 
 // applySizeLocked recomputes the effective size and, if it changed, resizes the PTY and
@@ -622,8 +607,8 @@ func (s *Session) applySizeLocked() {
 	if !s.alive {
 		return
 	}
-	cols, rows := s.effectiveSizeLocked()
-	if cols == 0 || rows == 0 || (cols == s.cols && rows == s.rows) {
+	next := s.effectiveSizeLocked()
+	if next.Zero() || next == s.size {
 		return
 	}
 	if s.pty != nil && !s.ptyClosed {
@@ -632,12 +617,15 @@ func (s *Session) applySizeLocked() {
 		// reads. The case where it would be actively WRONG — a descriptor that has been
 		// closed, whose number the kernel may already have reassigned — is excluded by the
 		// flag, not by the liveness check: close happens before the process is reaped.
-		_ = pty.Setsize(s.pty, &pty.Winsize{Cols: cols, Rows: rows})
+		c, r := next.Wire()
+		_ = pty.Setsize(s.pty, &pty.Winsize{Cols: c, Rows: r})
 	}
-	s.cols, s.rows = cols, rows
+	s.size = next
+	// One pointer for every subscriber: a Grid is a value nobody mutates after it is
+	// announced, so N copies of the same two numbers would only invite the question of
+	// whether they can differ.
 	for _, sub := range s.subs {
-		sz := [2]uint16{cols, rows}
-		pushControl(sub.ch, subFrame{Resize: &sz})
+		pushControl(sub.ch, subFrame{Resize: &next})
 	}
 }
 
@@ -657,29 +645,29 @@ func (s *Session) applySizeLocked() {
 // Answering here rather than in the connection loop is not organisational tidiness: the
 // subscription's channel is closed under this same lock when the session ends, so a push
 // from outside it races that close — send-on-closed-channel, not merely a stale read.
-func (s *Session) SetAttachSize(subID int, cols, rows uint16) {
+func (s *Session) SetAttachSize(subID int, want Grid) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sub, ok := s.subs[subID]
 	if !ok {
 		return
 	}
-	beforeCols, beforeRows := s.cols, s.rows
-	sub.cols, sub.rows = cols, rows
+	before := s.size
+	sub.size = want
 	s.applySizeLocked()
-	if s.cols == beforeCols && s.rows == beforeRows && // nothing was broadcast…
-		s.cols > 0 && s.rows > 0 &&
-		(s.cols != cols || s.rows != rows) { // …and this client did not get what it asked for
-		sz := [2]uint16{s.cols, s.rows}
-		pushControl(sub.ch, subFrame{Resize: &sz})
+	if s.size == before && // nothing was broadcast…
+		!s.size.Zero() &&
+		s.size != want { // …and this client did not get what it asked for
+		got := s.size
+		pushControl(sub.ch, subFrame{Resize: &got})
 	}
 }
 
 // Scrollback returns everything the ring currently holds, with the geometry needed to
 // render it. Both travel together because a screen replayed onto the wrong grid is the
 // drift this API exists to prevent.
-func (s *Session) Scrollback() (data []byte, cols, rows uint16) {
+func (s *Session) Scrollback() (data []byte, grid Grid) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ring.Read(), s.cols, s.rows
+	return s.ring.Read(), s.size
 }

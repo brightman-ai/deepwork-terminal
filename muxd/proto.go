@@ -220,6 +220,67 @@ type Hello struct {
 	PID         int   `json:"pid,omitempty"`
 	Sessions    int   `json:"sessions,omitempty"`
 	StartedUnix int64 `json:"started,omitempty"`
+
+	// Features is what this daemon can DO, as opposed to what shape its frames have.
+	//
+	// The version number cannot answer this question. It is deliberately not bumped for
+	// wire-compatible additions — that is the promise that let a live daemon keep ten
+	// sessions across an upgrade — so "same version" says the frames parse, and nothing
+	// about whether the behaviour behind them is the same. A daemon built before
+	// per-attachment geometry speaks v2 exactly as well as one built after it, routes the
+	// resize somewhere else, and never says so. That silence is the failure mode: the
+	// browser's size stops arriving and the only symptom is a corrupted screen inside a
+	// program that is not at fault.
+	//
+	// Features closes it WITHOUT a version bump, and does so for daemons that predate the
+	// field: they simply omit it, an absent capability reads as unsupported, and the client
+	// can say which one is missing and what to do. Capabilities are additive and permanent
+	// — a name here is a promise about behaviour, so it is never reused with a new meaning.
+	Features []string `json:"features,omitempty"`
+}
+
+// Capability names. Additive and permanent: add one when behaviour a client can DEPEND on
+// appears, never redefine an existing one.
+const (
+	// FeaturePerAttachmentGeometry: this daemon sizes a session from its clients'
+	// per-attachment declarations (smallest-wins across attachments), honours a 0×0
+	// withdrawal, and broadcasts the resulting grid. A daemon without it keeps one shared
+	// size, so a viewer's size is silently dropped the moment anything else is attached.
+	FeaturePerAttachmentGeometry = "per-attachment-geometry"
+)
+
+// DaemonFeatures is what a daemon built from THIS source advertises.
+var DaemonFeatures = []string{FeaturePerAttachmentGeometry}
+
+// RequiredDaemonFeatures is what a client built from this source needs the daemon to do.
+//
+// Separate from DaemonFeatures on purpose: they are equal today only because both halves
+// ship together, and the whole problem being solved here is the day they do not.
+var RequiredDaemonFeatures = []string{FeaturePerAttachmentGeometry}
+
+// Has reports whether the daemon advertised a capability.
+func (h Hello) Has(feature string) bool {
+	for _, f := range h.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
+}
+
+// MissingFeatures lists what this client needs and the daemon did not advertise.
+//
+// Returns nil when nothing is missing, so a caller can branch on the slice itself. Note
+// that a daemon predating the field is indistinguishable from one that supports nothing,
+// which is the correct reading: neither can be relied on to do it.
+func (h Hello) MissingFeatures() []string {
+	var missing []string
+	for _, want := range RequiredDaemonFeatures {
+		if !h.Has(want) {
+			missing = append(missing, want)
+		}
+	}
+	return missing
 }
 
 // StartedAt reports when the daemon started, or the zero time if it did not say.
@@ -460,11 +521,18 @@ type InputReq struct {
 // vanished, host B kept showing it forever.
 //
 // Consumers MUST tolerate unknown kinds (ignore + log), so future kinds stay additive.
+
+// EventKind names a lifecycle transition. A named type rather than a bare string so that a
+// switch over it reads as a closed set and a typo in a comparison is a compile error — while
+// still being a string on the wire, because the openness is the point: a consumer meeting a
+// kind from a newer daemon must ignore it, not fail.
+type EventKind string
+
 const (
-	EventCreated     = "created"
-	EventExited      = "exited"
-	EventDestroyed   = "destroyed"
-	EventMetaChanged = "meta-changed"
+	EventCreated     EventKind = "created"
+	EventExited      EventKind = "exited"
+	EventDestroyed   EventKind = "destroyed"
+	EventMetaChanged EventKind = "meta-changed"
 )
 
 // Event is a lifecycle notification on a subscribed connection.
@@ -481,11 +549,11 @@ const (
 // full list. So the events are a hint that something changed, the sequence is a hint that
 // something was MISSED, and the authoritative answer is always a List.
 type Event struct {
-	Kind     string `json:"kind"`
-	ID       string `json:"id"`
-	Seq      uint64 `json:"seq,omitempty"`
-	ExitCode int    `json:"exit_code,omitempty"`
-	Meta     []byte `json:"meta,omitempty"`
+	Kind     EventKind `json:"kind"`
+	ID       string    `json:"id"`
+	Seq      uint64    `json:"seq,omitempty"`
+	ExitCode int       `json:"exit_code,omitempty"`
+	Meta     []byte    `json:"meta,omitempty"`
 }
 
 // ExitedPayload is sent on an attached stream when its session's process ends.

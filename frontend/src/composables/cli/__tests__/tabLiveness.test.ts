@@ -55,10 +55,14 @@ describe('livenessCopy — 按钮文案必须说清点下去会发生什么', ()
     expect(c.headline).not.toContain('恢复')
   })
 
-  it('已确认结束：说清"随服务重启结束了 + 没在后台继续跑"', () => {
+  it('已确认结束：说清"结束了 + 没在后台继续跑"，且不编造死因', () => {
     const c = livenessCopy('detached', {})
-    expect(c.body).toContain('服务重启')
+    expect(c.body).toContain('已经结束')
     expect(c.body).toContain('没有在后台继续跑')
+    // 这张卡的全部职责就是讲实话，所以它不许断言一个自己并不知道的死因。原文写死了"随服务重启
+    // 一起结束"——自从 PTY 归常驻 daemon 持有（muxd），服务重启恰恰**不再**会结束进程，最常见的
+    // 原因反倒是用户自己敲了 `exit` 或者程序崩了。
+    expect(c.body).not.toContain('服务重启')
   })
 
   it('目录未知（比如 pro 不持久化每个终端的目录）时不硬凑一个假路径', () => {

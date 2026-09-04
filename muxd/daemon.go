@@ -139,7 +139,13 @@ func (d *Daemon) identity() Hello {
 		}
 	}
 	d.mu.Unlock()
-	return Hello{PID: os.Getpid(), Sessions: live, StartedUnix: d.startedAt.Unix()}
+	return Hello{
+		PID:         os.Getpid(),
+		Sessions:    live,
+		StartedUnix: d.startedAt.Unix(),
+		// What this build can do, which the version number deliberately does not say.
+		Features: DaemonFeatures,
+	}
 }
 
 // watchIdle exits the daemon once it has held no live sessions and no client
@@ -395,12 +401,13 @@ func (d *Daemon) handleConn(c net.Conn) {
 				detachSub = nil
 			}
 			waitDone(attachedDone)
-			replay, offset, cols, rows, sub, cancel := s.Subscribe(req.Since, req.Cols, req.Rows)
+			replay, offset, grid, sub, cancel := s.Subscribe(req.Since, gridFromWire(req.Cols, req.Rows))
 			attached, detachSub = s, cancel
 			attachedSub = sub
 			attachedDone = make(chan struct{})
+			ackCols, ackRows := grid.Wire()
 			_ = write(MsgAttachAck, AttachAck{
-				Cols: cols, Rows: rows, Offset: offset, Alive: s.Alive(),
+				Cols: ackCols, Rows: ackRows, Offset: offset, Alive: s.Alive(),
 				ReplayBytes: int64(len(replay)),
 			})
 			if len(replay) > 0 {
@@ -420,7 +427,8 @@ func (d *Daemon) handleConn(c net.Conn) {
 								return
 							}
 						case f.Resize != nil:
-							if err := write(MsgResized, ResizedPayload{Cols: f.Resize[0], Rows: f.Resize[1]}); err != nil {
+							c, r := f.Resize.Wire()
+							if err := write(MsgResized, ResizedPayload{Cols: c, Rows: r}); err != nil {
 								return
 							}
 						default:
@@ -487,7 +495,7 @@ func (d *Daemon) handleConn(c net.Conn) {
 				// SetAttachSize also ANSWERS this client when it did not get what it asked
 				// for — on its subscription, so the answer stays in order with its output,
 				// and under the session lock, so it cannot race the channel's close.
-				attached.SetAttachSize(attachedSub.id, req.Cols, req.Rows)
+				attached.SetAttachSize(attachedSub.id, gridFromWire(req.Cols, req.Rows))
 				_ = write(MsgOK, struct{}{})
 				continue
 			}

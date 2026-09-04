@@ -35,6 +35,13 @@ type Session struct {
 	ShellPath string      `json:"-"`
 	Buffer    *RingBuffer `json:"-"`
 
+	// Origin is which deployment's tab list owns this session — see sessionMeta.Origin for
+	// why one daemon serves two tab lists. Carried on the struct (not just in the meta blob)
+	// because SetName rewrites the whole meta from these fields: a rename would otherwise
+	// quietly blank it, and a session with no origin is a session orphan adoption has to guess
+	// about.
+	Origin string `json:"origin,omitempty"`
+
 	// mux is the daemon connection this session is reached through, and stream is this
 	// session's attached output channel. The PTY itself lives in the daemon — the server
 	// deliberately holds no file descriptor for it, which is what lets the server be
@@ -57,7 +64,16 @@ type Session struct {
 	// second map next to this one would let the two drift, and the drift has a name: a viewer
 	// that disconnected but whose size is still constraining the session (see viewportLocked).
 	viewers map[string]*viewer
-	subMu   sync.RWMutex
+	// activeViewer is the subscription id of the ONE viewer that currently sizes this
+	// session — the browser holding the active WebSocket (see SetActiveConn). Empty when no
+	// browser is attached. Protected by subMu, in the same map's lock, for the same reason
+	// the sizes are: a stale id here is a viewer sizing a session it has already left.
+	activeViewer string
+	// ownerEpoch is the connection epoch that last set activeViewer (see
+	// SessionManager.SetActiveConn). It only goes up, so a connection that was preempted
+	// mid-handshake cannot take the grid back from the one that replaced it.
+	ownerEpoch uint64
+	subMu      sync.RWMutex
 
 	// geomMu serializes "re-derive the smallest window and declare it to the daemon".
 	//
@@ -66,9 +82,9 @@ type Session struct {
 	// reads the current minimum and pushes it, so the LAST push always carries the LATEST
 	// minimum. Lock order is geomMu → subMu / mu, never the reverse.
 	geomMu sync.Mutex
-	// declCols/declRows is the size this server last declared on its own attachment; 0 means
-	// "declared nothing", i.e. this server is an observer. Guarded by geomMu.
-	declCols, declRows int
+	// declared is the size this server last declared on its own attachment; the zero Grid
+	// means "declared nothing", i.e. this server is an observer. Guarded by geomMu.
+	declared muxd.Grid
 
 	// done is closed when the PTY read loop exits (shell exited or error).
 	done     chan struct{}
@@ -82,8 +98,8 @@ type Session struct {
 	// [Ref: BUG-6, DDC-13]
 	TmuxDetected bool `json:"tmuxDetected"`
 
-	// ptyCols/ptyRows are the PTY's CURRENT window size — the size the program on the other
-	// end believes it is drawing into.
+	// pty is the PTY's CURRENT window size — the size the program on the other end believes
+	// it is drawing into.
 	//
 	// It is a CACHE OF THE DAEMON'S ANSWER, never of our request. The daemon owns the size:
 	// it fits the session to every client watching it (smallest-wins), so the size a browser
@@ -104,8 +120,45 @@ type Session struct {
 	// wrapped here but not in reality, shifting every row below it.
 	//
 	// Protected by mu.
-	ptyCols int
-	ptyRows int
+	pty muxd.Grid
+
+	// gridSeq is the ring buffer's byte count AT THE MOMENT the grid last changed — the
+	// boundary between bytes drawn for the previous window size and bytes drawn for the
+	// current one.
+	//
+	// The ring is a byte stream, not a screen. Replaying it means re-executing every escape
+	// sequence it holds against ONE grid: the one the browser is on now. Bytes written when
+	// the session was 110 columns wide carry absolute cursor addresses, erase-to-end-of-line
+	// and wrap points that only mean what they meant at 110 columns. Re-run them at 219 and
+	// each one lands somewhere else — a status bar redrawn at the old width does not overwrite
+	// the new one, it settles a row below it, and the screen accumulates a copy of itself per
+	// resize. That is the "duplicated bottom line" and the scrambled screen, and it is not a
+	// transient: nothing repaints a scrollback.
+	//
+	// So a replay starts HERE, never earlier. Losing the scrollback above the last resize is a
+	// visible, honest loss; a screen assembled out of two incompatible grids is a plausible
+	// picture of something that never existed.
+	//
+	// WHAT ABOUT THE MODES THE CUT ALSO DROPS — measured, and the answer is "nothing". A byte
+	// stream carries state as well as content: mouse reporting (DECSET 1000/1002/1003/1006),
+	// the alternate screen, bracketed paste. A cut past the byte that enabled one of them
+	// looks like it would leave a correct screen whose wheel is dead.
+	//
+	// It does not, because of what moves this mark: only a resize does, a resize is a
+	// SIGWINCH, and a full-screen program answering SIGWINCH repaints — tmux re-issues its
+	// private modes as part of that repaint, so they land AFTER the cut and survive. Verified
+	// end to end on an isolated fixture: replay truncated from 52045 bytes to 2369, and the
+	// wheel still reached tmux (pane_in_mode 0 → 1) with no compensation of any kind.
+	//
+	// A version of this code carried the dropped prefix's modes forward. It was deleted: it
+	// guarded a scenario nobody has observed, and code that exists for an unobserved scenario
+	// reads to the next person as though the scenario is real. If a program is ever found that
+	// repaints on SIGWINCH WITHOUT restating its modes, this is the place — scan the dropped
+	// prefix for `ESC [ ? … h|l`, re-send the final state of each, both directions (autowrap
+	// and cursor visibility default to ON, so a dropped DECRST matters too).
+	//
+	// Protected by mu.
+	gridSeq uint64
 
 	// lastSignal is the most recent UNANSWERED explicit signal from the program in this
 	// session — a BEL or an OSC desktop notification (see ansisignal). It is deliberately
@@ -119,7 +172,7 @@ type Session struct {
 	// NEW one" rather than the same one still standing.
 	lastSignalSeq uint64
 
-	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*, ptyCols/ptyRows, Name/Title
+	mu sync.Mutex // protects Status, LastActive, exitCode, TmuxDetected, lastSignal*, pty, gridSeq, Name/Title
 }
 
 // SetName renames the session (thread-safe). Clears Title too: sessionTitle()
@@ -135,6 +188,10 @@ func (s *Session) SetName(name string) {
 	meta := sessionMeta{
 		Name: name, Engine: s.Engine, CWD: s.CWD,
 		ShellPath: s.ShellPath, CreatedAt: s.CreatedAt,
+		// Carried through, not re-derived: this rewrites the ENTIRE meta blob, so any field
+		// omitted here is a field erased in the daemon. Dropping Origin would make a renamed
+		// session look like it belongs to nobody.
+		Origin: s.Origin,
 	}
 	client := s.mux
 	s.mu.Unlock()
@@ -184,26 +241,81 @@ func (s *Session) RequestPTYSize(cols, rows int) error {
 }
 
 // setPTYSizeFromDaemon records the size the DAEMON says this session is now running at.
-// This is the only writer of ptyCols/ptyRows — see the field comment for why there is
+// This is the only writer of s.pty — see the field comment for why there is
 // exactly one.
-func (s *Session) setPTYSizeFromDaemon(cols, rows int) {
-	if cols <= 0 || rows <= 0 {
+func (s *Session) setPTYSizeFromDaemon(g muxd.Grid) {
+	if g.Zero() {
 		return
 	}
 	s.mu.Lock()
-	s.ptyCols, s.ptyRows = cols, rows
+	// Only a change BETWEEN two known sizes is an epoch boundary. The first size a session
+	// ever learns is not a resize — it is the daemon finally telling us what the PTY was
+	// spawned at — and treating it as one would discard everything the shell printed before
+	// the AttachAck, which is the entire screen of a session that has just started.
+	if !s.pty.Zero() && s.pty != g && s.Buffer != nil {
+		// Mark where the old grid's bytes end, BEFORE recording the new size: the ring is
+		// still receiving output drawn at the previous width, and the repaint the program is
+		// about to do has not started. Erring early keeps the whole repaint inside the new
+		// epoch — erring late would clip its leading clear-screen and replay a repaint that
+		// starts halfway through. See the gridSeq field for why a replay must not cross this
+		// boundary at all.
+		s.gridSeq = s.Buffer.Seq()
+	}
+	s.pty = g
 	s.mu.Unlock()
+}
+
+// ReplayTail returns up to max bytes of scrollback and says how many of them at the END were
+// drawn for the CURRENT grid — everything a replay may send without mixing two geometries.
+//
+// The bytes and the boundary are computed together on purpose. Reading the ring's contents,
+// its byte counter, and the grid mark in three separate calls lets a write or a resize land
+// between them, and the arithmetic then mixes a length from one moment with a counter from
+// another — producing a cut that is off by exactly the bytes that arrived in the gap. The
+// ring hands back its data and its counter under one lock (ReadTailAt); the grid mark is read
+// AFTER, so the two possible orderings both have an honest answer:
+//
+//   - mark ≤ seq: the mark is inside what we just read; keep everything after it.
+//   - mark > seq: the resize happened after our read, so every byte we hold predates the
+//     current grid. Keep none of it, and let the program's own repaint fill the screen.
+//
+// A session that has never resized has no boundary to respect: its whole ring is one epoch.
+func (s *Session) ReplayTail(max int) (data []byte, currentGrid int) {
+	if s.Buffer == nil {
+		return nil, 0
+	}
+	data, seq := s.Buffer.ReadTailAt(max)
+	s.mu.Lock()
+	since := s.gridSeq
+	s.mu.Unlock()
+
+	switch {
+	case since == 0:
+		// Never resized — or the ring was Reset() out from under the mark. Either way the
+		// buffer's contents are the only epoch we can honestly claim to know about.
+		return data, len(data)
+	case since > seq:
+		// A resize landed after the read: nothing we are holding belongs to the grid this
+		// client is about to be on.
+		return data, 0
+	}
+	n := int(seq - since)
+	if n > len(data) {
+		// The epoch is older than the slice is long: all of it is current-grid.
+		n = len(data)
+	}
+	return data, n
 }
 
 // PTYSize returns the PTY's current window size. Falls back to the spawn size when a session
 // predates any resize — never zero, because the replay grid must always have dimensions.
-func (s *Session) PTYSize() (cols, rows int) {
+func (s *Session) PTYSize() muxd.Grid {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ptyCols > 0 && s.ptyRows > 0 {
-		return s.ptyCols, s.ptyRows
+	if !s.pty.Zero() {
+		return s.pty
 	}
-	return spawnCols, spawnRows
+	return muxd.Grid{Cols: spawnCols, Rows: spawnRows}
 }
 
 // RecordSignal stores an explicit out-of-band signal as this session's pending
@@ -533,6 +645,20 @@ const (
 	// Sent once before the replay (so the replay lands on the right grid) and then whenever
 	// the size changes, in stream order with the output it applies to.
 	MsgTypeResized = "resized"
+
+	// MsgTypeReplayReset tells a client to clear its terminal because what follows is a
+	// REPLAY — the session's screen from the beginning of the current grid epoch — not a
+	// continuation of what it is already showing.
+	//
+	// Without it a browser that switches away and back writes a second copy of the screen
+	// underneath the first, and the two copies are what a user reports as "duplicated bottom
+	// line". The frames are indistinguishable once they arrive (replay and live output are
+	// both binary), so the boundary has to be stated, not inferred.
+	//
+	// A client that does not know this type ignores it and keeps the old behaviour, which is
+	// why it is a separate frame rather than a field on "resized": an old page must not have
+	// its resize silently changed shape underneath it.
+	MsgTypeReplayReset = "replay_reset"
 )
 
 // ResizedPayload is the payload of a "resized" control message.

@@ -43,6 +43,19 @@ export interface TabMenuActions {
    *  drift bug this file exists to prevent (see file header), and this command's whole point is
    *  being there exactly when the user is stuck and reaching for it. */
   forceKillForeground(id: string): void
+  /** 把「新终端的环境变量」配置（设置页里那份 overlay）**敲进这个已经在跑的 shell**。
+   *
+   *  为什么需要这一项：那份配置是在 spawn 时套用的，所以它只影响新建的终端 —— 和 tmux 的
+   *  `set-environment` 一样（实测过：改完之后同一个 pane 读到的还是旧值）。根因是操作系统层面
+   *  就没法从外部改一个已在运行的进程的环境。
+   *
+   *  唯一诚实的办法就是"从里面改"：往 PTY 里写 `export` / `unset` 命令行，让 shell 自己执行。
+   *  它**必须是可见的**（用户在终端里看得见那几行命令被敲进去、看得见结果），这是本仓库既定的
+   *  "注入可见 PTY，绝不黑盒"范式；偷偷执行等于替用户在他自己的 shell 里跑了他没看见的命令。
+   *
+   *  和「新建终端」是两条路而不是一条：这条不杀任何进程（你正在跑的东西继续跑），代价是它只对
+   *  这个 shell 之后启动的子进程生效 —— 已经在跑的那个 `claude` 不会因此换供应商。 */
+  applyEnvHere(id: string): void
 }
 
 export interface TabMenuItem {
@@ -98,6 +111,13 @@ export function useTabContextMenu(actions: TabMenuActions) {
       { key: 'rename', label: '重命名', hint: '双击标签', run: () => run(() => actions.rename(t.id)) },
       { key: 'copy-cwd', label: '复制目录路径', disabled: !t.cwd, run: () => run(() => { void actions.copy(t.cwd || '') }) },
       { key: 'new', label: '新建终端', run: () => run(() => actions.create()) },
+      // 紧跟「新建终端」：两者是同一个问题的两个答案（"要新环境"→ 新建一个；"这个终端也要"→
+      // 就地注入）。放在 danger 分组之前，因为它什么都不结束。
+      {
+        key: 'apply-env',
+        label: '把环境变量应用到此终端',
+        run: () => run(() => actions.applyEnvHere(t.id)),
+      },
     ]
     // Not offered for tmux tabs: see TabMenuTarget.isTmux. Absent rather than disabled — a
     // disabled entry still implies "this could work here", which isn't true for tmux.

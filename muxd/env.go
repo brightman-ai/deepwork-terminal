@@ -42,6 +42,20 @@ var agentSessionMarkers = []string{
 	// Codex —— 变量名取自 codex 主二进制里的字符串表 + 本机实测，不是猜的。
 	"CODEX_THREAD_ID",            // 线程/会话身份
 	"CODEX_COMPANION_SESSION_ID", // codex companion 的 session 身份
+	// tmux —— 同一条判据下的同一类东西：它回答的是「我是谁的孩子」（我跑在哪个 tmux client
+	// 的哪个 pane 里），不是「我该怎么工作」。宿主如果本身是在一个 tmux pane 里被拉起来的
+	// （run_cli.sh 的常规用法就是），这两个变量就永久沾在它的进程环境上，然后顺着进程树传给
+	// 它开出的每一个 PTY。
+	//
+	// 后果实测过、且写进了本工程的 CONFIG：PTY 里再跑 `tmux attach` 会被 tmux 以「拒绝嵌套」
+	// 挡下来，因为它从 $TMUX 认定自己已经在一个 client 里了。既有的绕法是每个调用方各自记得
+	// 写 `env -u TMUX`——那正是「每个宿主各自记得洗一遍」，本文件开头那段说明了为什么该洗在
+	// 库里。
+	//
+	// 不摘 TMUX_TMPDIR：它说的是「去哪儿找 socket」，是配置不是血缘，摘掉会让子进程找不到
+	// 使用者真正在用的那个 tmux server。
+	"TMUX",
+	"TMUX_PANE",
 }
 
 // 下面这几个**刻意不摘**，尽管它们的名字看起来同族 —— 记在这里，免得下一个人"顺手补全"：

@@ -28,6 +28,26 @@ type sessionMeta struct {
 	CWD       string    `json:"cwd"`
 	ShellPath string    `json:"shell"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// Origin names WHICH DEPLOYMENT's tab list this session belongs to.
+	//
+	// The daemon is per-USER, not per-server: standalone (:18074) and the pro embed (:8087)
+	// share one daemon and therefore see each other's sessions. That is deliberate — a shell
+	// started in one is reachable from the other. But each deployment keeps its OWN tab list
+	// (a different workbench.json under a different data dir), and "reachable" must not become
+	// "silently appears as a tab over there".
+	//
+	// It exists for orphan adoption: a live session that NO tab points at is either this
+	// deployment's tab record having been lost (adopt it — that is the whole point) or simply
+	// the other deployment's session (leave it alone). Without this field those two are
+	// indistinguishable, and adopting blindly would spray one deployment's terminals across
+	// the other's tab strip.
+	//
+	// Empty means "written before this field existed". Those ARE adopted: the recovery case is
+	// the reason this was added, and the alternative — stranding a live session forever because
+	// its meta predates the fix — is the worse failure. New sessions always carry it, so the
+	// ambiguity does not outlive the sessions that predate this change.
+	Origin string `json:"origin,omitempty"`
 }
 
 func (m sessionMeta) encode() []byte {
@@ -128,6 +148,7 @@ func (m *SessionManager) client() (*muxd.Client, error) {
 		return nil, fmt.Errorf("terminal: connect to session daemon: %w", err)
 	}
 	m.mux = c
+	warnIfDaemonIsOlderThanUs(c)
 	return c, nil
 }
 
@@ -161,7 +182,30 @@ func (m *SessionManager) existingClient() (*muxd.Client, error) {
 		return nil, err
 	}
 	m.mux = c
+	warnIfDaemonIsOlderThanUs(c)
 	return c, nil
+}
+
+// warnIfDaemonIsOlderThanUs says once, at the log, what DaemonHealth says on demand.
+//
+// Both are needed and neither replaces the other: the health field is what a UI can show a
+// user who is already looking, and the log line is what exists when nobody was. This is the
+// one failure in this package that produces no error, no exception and no failed request —
+// the daemon answers every frame correctly and simply does something else with it — so if
+// it is not stated at the moment of connection, the first evidence is a user reporting that
+// their screen looks wrong.
+func warnIfDaemonIsOlderThanUs(c *muxd.Client) {
+	peer := c.Peer()
+	missing := peer.MissingFeatures()
+	if len(missing) == 0 {
+		return
+	}
+	logger.Warn("session daemon predates this build; terminal sizing will be wrong until it is restarted",
+		"missing", strings.Join(missing, ","),
+		"daemonPID", peer.PID,
+		"daemonStarted", peer.StartedAt().Format(time.RFC3339),
+		"sessions", peer.Sessions,
+		"remedy", "dw-terminal muxd --restart")
 }
 
 // socketPathLocked resolves the daemon socket once and caches it. Caller holds muxMu.
@@ -202,8 +246,12 @@ type DaemonHealth struct {
 	Proto     int        `json:"proto,omitempty"`
 	Sessions  int        `json:"sessions,omitempty"`
 	StartedAt *time.Time `json:"startedAt,omitempty"`
-	Problem   string     `json:"problem,omitempty"`
-	Remedy    string     `json:"remedy,omitempty"`
+	// Missing names the capabilities this build needs and the running daemon does not
+	// advertise. Carried separately from Problem because it is the machine-readable half:
+	// prose is for the user, this is for anything that wants to decide something.
+	Missing []string `json:"missing,omitempty"`
+	Problem string   `json:"problem,omitempty"`
+	Remedy  string   `json:"remedy,omitempty"`
 }
 
 // DaemonHealth probes the daemon WITHOUT starting one.
@@ -241,6 +289,23 @@ func (m *SessionManager) DaemonHealth() DaemonHealth {
 	h.PID, h.Proto, h.Sessions = info.PID, info.Version, info.Sessions
 	if started := info.StartedAt(); !started.IsZero() {
 		h.StartedAt = &started
+	}
+
+	// A daemon that parses our frames but does not do what we need is the failure this
+	// check exists for, and it is invisible from every other angle: the version matches
+	// (deliberately — that is what let it keep the user's sessions across the upgrade),
+	// nothing errors, and the only symptom is a corrupted screen in whatever program the
+	// user is running. Reported even when Problem is already set: a caller comparing
+	// builds wants the list either way.
+	if h.Connected {
+		if missing := info.MissingFeatures(); len(missing) > 0 {
+			h.Missing = missing
+			h.Problem = fmt.Sprintf(
+				"the running session daemon predates this build: it cannot %s. "+
+					"Terminal sizing will be wrong until it is restarted.",
+				strings.Join(missing, ", "))
+			h.Remedy = "dw-terminal muxd --restart"
+		}
 	}
 	return h
 }
@@ -290,9 +355,10 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 	// It rides in the attach request rather than following as a resize because a size that
 	// arrives second is a size the daemon spent a round trip not knowing: the replay
 	// geometry reported in the ack would describe a grid the session is about to leave.
-	cols, rows := sess.Viewport()
+	viewport := sess.Viewport()
+	vc, vr := viewport.Wire()
 	stream, err := client.Attach(sess.ID, muxd.AttachOptions{
-		Since: since, Cols: uint16(cols), Rows: uint16(rows),
+		Since: since, Cols: vc, Rows: vr,
 	})
 	if err != nil {
 		return err
@@ -324,8 +390,8 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 	// Adopt the geometry the daemon reports. This is the size the program on the other
 	// end actually believes it is drawing into, and the replay grid must match it — a
 	// second guess here is precisely how the overview's screen replay drifted before.
-	sess.setPTYSizeFromDaemon(int(stream.Cols), int(stream.Rows))
-	sess.noteDeclared(cols, rows)
+	sess.setPTYSizeFromDaemon(muxd.Grid{Cols: int(stream.Cols), Rows: int(stream.Rows)})
+	sess.noteDeclared(viewport)
 	go m.pumpStream(sess, stream)
 
 	// A viewer may have resized while the attach was in flight — its syncViewport would
@@ -364,7 +430,7 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 			// wrapped, overlapping mess — and it looks like a bug in whatever program is
 			// running, not like a resize that never arrived. See applyGrid for why the
 			// record and the hand-off cannot be two steps.
-			sess.applyGrid(int(ev.Resize[0]), int(ev.Resize[1]))
+			sess.applyGrid(*ev.Resize)
 
 		case ev.Gap:
 			// Nothing to do here — Stream.Holed already records it, and the re-attach path
@@ -473,7 +539,7 @@ func (m *SessionManager) reattach(sess *Session, since int64, holed bool) {
 			// that swallows every keystroke.
 			logger.Info("session is gone from the daemon; marking it ended",
 				"id", sess.ID, "reason", err)
-			m.markEnded(sess)
+			sess.markEnded()
 			return
 		}
 		logger.Debug("re-attach attempt failed", "id", sess.ID, "error", err)
@@ -483,7 +549,7 @@ func (m *SessionManager) reattach(sess *Session, since int64, holed bool) {
 		"id", sess.ID)
 }
 
-// markEnded records that a session is over, without an exit code.
+// markEnded records that this session is over, without an exit code.
 //
 // Three sites move a session to Exited, and they are not interchangeable: the pump does
 // it when the daemon SAYS the process exited (with the real code), Destroy does it because
@@ -491,12 +557,15 @@ func (m *SessionManager) reattach(sess *Session, since int64, holed bool) {
 // the daemon and no exit notification is ever coming. All three funnel through the same
 // sync.Once so the transition happens exactly once, but "single place" was never true and
 // claiming it here hid the fact that the three can disagree about the exit code.
-func (m *SessionManager) markEnded(sess *Session) {
-	sess.doneOnce.Do(func() {
-		sess.mu.Lock()
-		sess.Status = StatusExited
-		sess.mu.Unlock()
-		close(sess.done)
+//
+// A method on Session, not on SessionManager: it reads and writes only this session's own
+// state, and hanging it off the manager suggested a coordination that does not exist.
+func (s *Session) markEnded() {
+	s.doneOnce.Do(func() {
+		s.mu.Lock()
+		s.Status = StatusExited
+		s.mu.Unlock()
+		close(s.done)
 	})
 }
 
@@ -608,7 +677,7 @@ func (m *SessionManager) applyEvent(ev muxd.Event) {
 			sess.mu.Lock()
 			sess.exitCode = ev.ExitCode
 			sess.mu.Unlock()
-			m.markEnded(sess)
+			sess.markEnded()
 		}
 	case muxd.EventDestroyed:
 		// Deleted — here or on another host. Distinct from exited: an exited session is
@@ -616,7 +685,7 @@ func (m *SessionManager) applyEvent(ev muxd.Event) {
 		if v, known := m.sessions.Load(ev.ID); known {
 			sess := v.(*Session)
 			m.sessions.Delete(ev.ID)
-			m.markEnded(sess)
+			sess.markEnded()
 			terminalActive.Sub(1)
 			logger.Info("session destroyed elsewhere; dropping it from this view", "id", ev.ID)
 		}
@@ -730,6 +799,10 @@ func (m *SessionManager) reconcile() error {
 			Engine:     engine,
 			CWD:        meta.CWD,
 			ShellPath:  meta.ShellPath,
+			// From the BLOB, not from m.origin: this session may well belong to the other
+			// deployment sharing this daemon. Stamping it with ours here is precisely how
+			// one deployment's terminals would start claiming to be the other's.
+			Origin:     meta.Origin,
 			Buffer:     NewRingBuffer(m.bufferSize),
 			Status:     status,
 			CreatedAt:  createdAt,
@@ -738,8 +811,7 @@ func (m *SessionManager) reconcile() error {
 			done:       make(chan struct{}),
 			mux:        client,
 			shellPID:   sum.ShellPID,
-			ptyCols:    int(sum.Cols),
-			ptyRows:    int(sum.Rows),
+			pty:        muxd.Grid{Cols: int(sum.Cols), Rows: int(sum.Rows)},
 		}
 		if !sum.Alive {
 			sess.exitCode = sum.ExitCode
@@ -779,8 +851,11 @@ func refreshFromDaemon(sess *Session, sum muxd.SessionSummary) {
 	if meta.CWD != "" {
 		sess.CWD = meta.CWD
 	}
-	if sum.Cols > 0 && sum.Rows > 0 {
-		sess.ptyCols, sess.ptyRows = int(sum.Cols), int(sum.Rows)
+	if meta.Origin != "" {
+		sess.Origin = meta.Origin
+	}
+	if g := (muxd.Grid{Cols: int(sum.Cols), Rows: int(sum.Rows)}); !g.Zero() {
+		sess.pty = g
 	}
 	sess.mu.Unlock()
 	if !sum.Alive {
@@ -811,7 +886,7 @@ func (m *SessionManager) forgetVanished(held map[string]bool) {
 		}
 		sess := v.(*Session)
 		m.sessions.Delete(id)
-		m.markEnded(sess)
+		sess.markEnded()
 		terminalActive.Sub(1)
 		logger.Info("session is gone from the daemon; dropping it from this view", "id", id)
 		return true

@@ -214,20 +214,46 @@ function rateLabel(card: UsageRateCard): string {
   const s = rateSymbol(card.currency)
   return `${s}${card.input_per_m}/${s}${card.output_per_m} 每 1M`
 }
-function unitPriceLine(g: UsageVendorGroup): string {
-  const [primary, ...rest] = g.unitPrices
-  if (!primary) return ''
-  const others = rest.map((c) => `${rateSymbol(c.currency)}${c.input_per_m}/${rateSymbol(c.currency)}${c.output_per_m}`)
-  return others.length ? `${rateLabel(primary)}（另一官方价 ${others.join(' · ')}）` : rateLabel(primary)
+// 分档的单价必须**整套**说出来，不能只报最便宜那一档。
+//
+// 这里曾经只印第一张卡：gpt-5.6-sol 写着 $5/$30，而编码会话里占绝大多数的长上下文请求
+// 实收 $10/$45 —— 读者拿这个单价怎么算都对不上总额，而且看不出为什么。单价这一行存在的
+// 唯一理由就是让总额可核对，报错档等于把它反过来用。
+const THRESHOLD_TEXT = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`)
+const bandLabel = (c: UsageRateCard): string => {
+  if (c.band === 'long_context') return `上下文≥${THRESHOLD_TEXT(c.threshold ?? 0)}`
+  if (c.band === 'long_output') return `回答≥${THRESHOLD_TEXT(c.threshold ?? 0)}`
+  return c.band === 'base' ? '基础' : ''
 }
-function unitPriceTitle(g: UsageVendorGroup): string {
-  const lines = g.unitPrices.map((c) => {
+const shortRate = (c: UsageRateCard) => {
+  const s = rateSymbol(c.currency)
+  return `${s}${c.input_per_m}/${s}${c.output_per_m}`
+}
+function unitPriceLine(cards: UsageRateCard[]): string {
+  const mine = cards.filter((c) => c.primary !== false)
+  const others = cards.filter((c) => c.primary === false)
+  if (!mine.length) return ''
+  // 单一价格：照旧一行说完。分档：每档带上它的条件，读者才知道总额是几档的混合。
+  const head = mine.length === 1 && !mine[0].band
+    ? rateLabel(mine[0])
+    : mine.map((c) => `${bandLabel(c)} ${shortRate(c)}`).join(' · ') + ` 每 1M`
+  if (!others.length) return head
+  return `${head}（另一官方价 ${others.map(shortRate).join(' · ')}）`
+}
+function unitPriceTitle(topModel: string, cards: UsageRateCard[]): string {
+  const banded = cards.some((c) => !!c.band)
+  const lines = cards.map((c) => {
     const s = rateSymbol(c.currency)
-    const which = c.primary ? '本行金额按此价计算' : '厂商另一平台的官方价，仅供对照'
+    const which = c.primary === false
+      ? '厂商另一平台的官方价，仅供对照'
+      : (c.band ? `${bandLabel(c)} 时按此价` : '本行金额按此价计算')
     return `${c.currency}：输入 ${s}${c.input_per_m} / 输出 ${s}${c.output_per_m} / 缓存读 ${s}${c.cache_read_per_m} 每 1M —— ${which}`
   })
-  lines.push('两套都是厂商公布的标价，不是汇率换算——本系统不持有任何汇率。')
-  return `${g.topModel}\n${lines.join('\n')}`
+  if (banded) {
+    lines.push('这个模型按长度分档计价，所以本行总额是几档的混合，不能用任何单独一档去乘总 token 数。')
+  }
+  lines.push('列出的都是厂商公布的标价，不是汇率换算——本系统不持有任何汇率。')
+  return `${topModel}\n${lines.join('\n')}`
 }
 
 // A vendor group inherits its callers' semantics only when they agree; a mix means the honest
@@ -435,11 +461,17 @@ function staleOf(q: RuntimeQuota, group: QuotaGroup) {
 
 // ── 账号归属：这笔钱现在记在谁头上 ────────────────────────────────────────────────────────────
 //
-// 后端从「最新一次会话的 model_provider」直接给出答案（第一手），前端只做呈现。这解决的是截图里
-// 那个说不出口的状态：官方那行显示着一周前的读数，而用户这周的每一次调用其实都记在别人账上——
-// 页面既没说它旧、更没说钱去哪了，于是那一行看起来像坏了。
+// 后端看的是【最近 30 分钟内】的会话证据（第一手），前端只做呈现。这解决的是截图里那个说不出口的
+// 状态：官方那行显示着一周前的读数，而用户这周的每一次调用其实都记在别人账上——页面既没说它旧、
+// 更没说钱去哪了，于是那一行看起来像坏了。
 //
-// 「不知道」永远不渲染成「不是」：后端拿不到归属时 attribution 缺席，两行都不挂徽标。
+// 三种呈现，对应三种事实：
+//   窗口内只有本厂商的流量        →「当前计费」
+//   窗口内只有别家厂商的流量      →「记在 X 名下」——唯一一种点名是信息而非猜测的情形
+//   窗口内多家并发（含本厂商）    → 各自挂「当前计费」，谁也不指认谁；实测一台机器一小时里
+//                                   131 条 GLM 消息与 2 条 Anthropic 消息同时流淌，宣称唯一
+//                                   付款方是每秒都可能翻面的假话
+// 窗口外无流量 / 后端拿不到归属 → 不挂徽标。「不知道」永远不渲染成「不是」。
 const billedElsewhere = (q: RuntimeQuota): string | undefined => {
   const a = q.attribution
   if (!a || a.active) return undefined
@@ -450,11 +482,11 @@ function accountChip(q: RuntimeQuota): AccountChip | null {
   const a = q.attribution
   if (!a) return null
   if (a.active) {
-    return { text: '当前计费', cls: 'live', title: '本机最近一次会话的用量记在这个账号上' }
+    return { text: '当前计费', cls: 'live', title: '最近 30 分钟内有会话的用量记在这个账号上（并发时多个账号可同时成立）' }
   }
   const who = billedElsewhere(q)
   return who
-    ? { text: `记在 ${who}`, cls: 'idle', title: `本机最近一次会话经 ${who} 计费，不消耗本账号额度` }
+    ? { text: `记在 ${who}`, cls: 'idle', title: `最近 30 分钟的会话经 ${who} 计费，不消耗本账号额度` }
     : null
 }
 
@@ -884,6 +916,12 @@ onUnmounted(() => {
                 <span class="uchip-prov-model">{{ row.top_model || '—' }}</span>
                 <Spark :bars="row.spark ?? []" />
               </div>
+              <!-- 订阅这一区同样是钱（按 API 价折算的等价值），同样要能被核对。此前单价只印在
+                   API tab，而这台机器的 API tab 是空的——于是最大的几笔金额旁边一个单价都没有。 -->
+              <div v-if="unitPriceLine(row.unit_prices ?? [])" class="uchip-dim uchip-unitprice"
+                   :title="unitPriceTitle(row.top_model ?? '', row.unit_prices ?? [])">
+                {{ unitPriceLine(row.unit_prices ?? []) }}
+              </div>
             </div>
           </template>
 
@@ -925,8 +963,8 @@ onUnmounted(() => {
               </div>
               <!-- 价格会变，内置表不会自己知道。所以它公布自己的年龄——这是读的人唯一的防线。 -->
               <!-- 单价写出来，金额才可被核对。厂商有两套官方价时并列，绝不做汇率换算。 -->
-              <div v-if="unitPriceLine(group)" class="uchip-dim uchip-unitprice" :title="unitPriceTitle(group)">
-                {{ unitPriceLine(group) }}
+              <div v-if="unitPriceLine(group.unitPrices)" class="uchip-dim uchip-unitprice" :title="unitPriceTitle(group.topModel, group.unitPrices)">
+                {{ unitPriceLine(group.unitPrices) }}
               </div>
               <div v-if="group.priceVerifiedAt" class="uchip-dim uchip-priceage" title="内置价表最后一次与厂商价目页核对的日期（取本行最旧的一条）。此后厂商若调价，这个数字会偏。">
                 价表核对于 {{ group.priceVerifiedAt }}

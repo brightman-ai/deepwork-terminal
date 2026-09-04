@@ -23,6 +23,7 @@ function harness(overrides: Partial<TabMenuActions> = {}, count = 3) {
     copy: (t) => { log.push(`copy:${t}`) },
     tabCount: () => count,
     forceKillForeground: (id) => log.push(`forceKillForeground:${id}`),
+    applyEnvHere: (id) => log.push(`applyEnvHere:${id}`),
     ...overrides,
   }
   return { menu: useTabContextMenu(actions), log }
@@ -77,7 +78,7 @@ describe('useTabContextMenu', () => {
     // every time, which costs more than one greyed row.
     expect(item(menu, 'close-others').disabled).toBe(true)
     expect(menu.items.value.map((i) => i.key))
-      .toEqual(['rename', 'copy-cwd', 'new', 'force-kill-fg', 'close-others', 'close'])
+      .toEqual(['rename', 'copy-cwd', 'new', 'apply-env', 'force-kill-fg', 'close-others', 'close'])
   })
 
   it('omits 关闭其他 entirely when the host cannot do it', () => {
@@ -117,5 +118,37 @@ describe('useTabContextMenu', () => {
     expect(menu.items.value).toEqual([])
     close.run() // a stale handler from the closed menu must be inert
     expect(log).toEqual([])
+  })
+})
+
+describe('useTabContextMenu — 把环境变量应用到此终端', () => {
+  it('对普通标签和 tmux 标签都提供（和环境无关，只和"这个 shell"有关）', () => {
+    for (const isTmux of [false, true]) {
+      const { menu } = harness()
+      const { e } = fakeEvent()
+      menu.openAt(e, { id: 't1', name: '终端 1', isTmux })
+      expect(item(menu, 'apply-env').disabled ?? false).toBe(false)
+    }
+  })
+
+  it('紧跟「新建终端」，且排在所有 danger 项之前', () => {
+    const { menu } = harness()
+    const { e } = fakeEvent()
+    menu.openAt(e, { id: 't1', name: '终端 1' })
+    const keys = menu.items.value.map(i => i.key)
+    expect(keys.indexOf('apply-env')).toBe(keys.indexOf('new') + 1)
+    // 它什么都不结束，所以既不该是 danger 色，也不该混进结束/关闭那一组里。
+    expect(item(menu, 'apply-env').danger ?? false).toBe(false)
+    const firstDanger = menu.items.value.findIndex(i => i.danger)
+    expect(keys.indexOf('apply-env')).toBeLessThan(firstDanger)
+  })
+
+  it('点了就派发到宿主并关闭菜单', () => {
+    const { menu, log } = harness()
+    const { e } = fakeEvent()
+    menu.openAt(e, { id: 't7', name: '终端 7' })
+    item(menu, 'apply-env').run()
+    expect(log).toEqual(['applyEnvHere:t7'])
+    expect(menu.open.value).toBe(false)
   })
 })

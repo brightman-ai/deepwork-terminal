@@ -53,7 +53,13 @@ export interface ReopenPorts {
 export function reopenNoticeLine(cwd?: string): string {
   const dir = cwd && cwd !== '~' ? cwd : ''
   const where = dir ? `已切回 ${dir}` : '已回到主目录 ~'
-  return `\r\n[上一个进程已随服务重启结束，这是一个新的 shell（${where}）]\r\n`
+  // 刻意**不说死是什么原因**。这行字原本写的是"上一个进程已随服务重启结束"，那在写下它的时候是
+  // 唯一的原因；自从 PTY 归常驻 daemon 持有（muxd），服务重启恰恰**不再**会结束进程，于是同一句
+  // 话在最常见的两种情形下都成了谎：用户自己敲了 `exit`、或者程序崩了。
+  //
+  // 这个模块存在的全部理由就是不撒"看起来恢复了"的谎，那它自己更不能撒一句关于死因的。说清
+  // **已知**的事（上一个没了、这是新的、你在哪个目录），把不知道的留白。
+  return `\r\n[上一个进程已经结束，这是一个新的 shell（${where}）]\r\n`
 }
 
 /**

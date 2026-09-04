@@ -509,6 +509,7 @@ import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset
 import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
 import type { AgentState, AgentTool, TmuxWindowState, TmuxPaneState } from '@terminal/types/terminal'
+import { REPLAY_RESET_SEQUENCE, parseServerGrid } from '@terminal/types/terminal'
 
 // ─── Props & Emits ────────────────────────────────────────────────────────────
 
@@ -1395,18 +1396,19 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
 /**
  * 服务端说会话现在这么大——照做。
  *
- * 这不是我那次 resize 的回声：会话的尺寸是**所有正在看它的窗口的逐轴最小值**，所以只要还有一个
- * 更小的窗口attach 着，我拿到的就会小于我要的。不照做的后果不是"边上留白"，是**画错**：全屏 TUI
- * 按绝对光标定位重绘，网格对不上时屏幕会糊成一片，而且看起来像里面那个程序的 bug。
+ * 这不是我那次 resize 的回声。本机浏览器之间是**抢占式独占**——谁持有连接谁定尺寸，所以正常情况
+ * 下服务端报回来的就是我刚报上去的；但 daemon 仍会对**跨主机**的客户端（另一台机器的 server、
+ * `dw-terminal attach` CLI）取逐轴最小值，那些窗口是真的同时存在的，于是我拿到的可能小于我要的。
+ * 不照做的后果不是"边上留白"，是**画错**：全屏 TUI 按绝对光标定位重绘，网格对不上时屏幕会糊成
+ * 一片，而且看起来像里面那个程序的 bug。
  *
  * 刻意不回声一次 resize：我的网格没变（容器没变），下一次 fit 仍会按容器算出同样的数字报上去，
  * 服务端算出同样的最小值、发现没变化就不再广播，于是自然收敛，不会来回震荡。
  */
 function applyServerGrid(payload: unknown): void {
-  const p = payload as { cols?: number; rows?: number } | null
-  const cols = p?.cols
-  const rows = p?.rows
-  if (typeof cols !== 'number' || typeof rows !== 'number' || cols < 1 || rows < 1) return
+  const grid = parseServerGrid(payload)
+  if (!grid) return
+  const { cols, rows } = grid
   const term = xtermRef.value?.terminal?.()
   if (!term || (term.cols === cols && term.rows === rows)) return
   term.resize(cols, rows)
@@ -1955,7 +1957,17 @@ function onTerminalReady(terminal: Terminal) {
         case 'agent_state':
           agentWSHandler(msg.payload)
           break
-        // 会话现在多大——由服务端裁决（所有观看窗口的最小值），不是我那次 resize 的回声。
+        // 接下来是一屏重放，不是我正在显示的那屏的续写——先清，否则两份叠在一起。
+        //
+        // 每次 attach 服务端都会把 ring buffer 的尾部重放一遍（那是"回来还能看见刚才的屏"所依赖
+        // 的机制）。屏上此刻留着的是上一次 attach 重放的同一批内容，再写一遍就是同一个界面画两遍
+        // ——用户看到的"重复的底行"。重放帧和实时输出都是 binary，收到时分不出来，所以边界只能由
+        // 服务端明说（见 Go 侧 MsgTypeReplayReset）。
+        case 'replay_reset':
+          xtermRef.value?.write(REPLAY_RESET_SEQUENCE)
+          break
+        // 会话现在多大——由服务端裁决（本机浏览器里由持有连接的那个独占；daemon 再对跨主机的客户端
+        // 取最小值），不是我那次 resize 的回声。
         case 'resized':
           applyServerGrid(msg.payload)
           break

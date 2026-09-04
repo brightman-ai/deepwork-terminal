@@ -103,8 +103,19 @@ export interface UsageRateCard {
   output_per_m: number
   cache_read_per_m: number
   source_url?: string
-  /** The card this row's money was actually computed with. Others are context. */
+  /** The LIST this row's money was computed from. A banded model contributes several. */
   primary?: boolean
+  /**
+   * Which band of a length-priced model this card is. Absent ⟹ the model has ONE price.
+   *
+   * Vendors that price by length publish two or three rates for one model, and a card naming only
+   * the cheapest is worse than no card: the reader is handed an arithmetic that cannot close.
+   * Measured before this existed — gpt-5.6-sol advertised $5/$30 while the long-context requests
+   * that dominate a coding session were charged $10/$45.
+   */
+  band?: 'base' | 'long_output' | 'long_context'
+  /** Token count this band applies AT OR ABOVE, in the vendor's own notation (32k, not 31,999). */
+  threshold?: number
 }
 export interface UsageReportData {
   window: string

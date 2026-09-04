@@ -152,6 +152,16 @@ func NewServer(opts ...Option) (*Server, error) {
 	// having pressed a button (usage_credentials.go).
 	s.startQuotaWarmer(s.watchCtx)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
+	// Which tab list owns the sessions this server creates. One daemon serves both deployments
+	// (standalone and the pro embed), so without this a live session with no tab is
+	// indistinguishable from the other deployment's session — and orphan adoption would spray
+	// one deployment's terminals into the other's tab strip. Set before any session exists,
+	// same reason as OnSignal below. See sessionMeta.Origin.
+	s.mgr.SetOrigin(s.dataDir())
+	// What a NEW terminal's environment is. Resolved per create, so editing the overlay takes
+	// effect on the next tab without restarting this process — the tmux `set-environment`
+	// property that plain os.Environ() inheritance could never have (env_overlay.go).
+	s.mgr.EnvSource = s.ptyEnviron
 	// Explicit-signal tap: a terminal program saying "I need you" out loud (BEL / OSC
 	// notification) is the only NON-inferred attention signal we get. Wired here, before any
 	// session can exist, because the read loops that call it run concurrently.
@@ -405,6 +415,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /workbench", wrap(s.handleSaveWorkbench))
 	s.mux.HandleFunc("GET /store", wrap(s.handleGetStore))
 	s.mux.HandleFunc("PUT /store", wrap(s.handleSaveStore))
+	// Terminal environment overlay: what a NEW shell starts with, editable without a restart
+	// (env_overlay.go). The per-session route reports what a shell is ACTUALLY running with,
+	// read from the process — the only answer that stays true after someone types `export`.
+	s.mux.HandleFunc("GET /env", wrap(s.handleGetEnvOverlay))
+	s.mux.HandleFunc("PUT /env", wrap(s.handleSaveEnvOverlay))
+	s.mux.HandleFunc("GET /sessions/{id}/env", wrap(s.handleSessionEnv))
+	s.mux.HandleFunc("POST /sessions/{id}/apply-env", wrap(s.handleApplyEnvHere))
 	s.mux.HandleFunc("GET /tmux/state", wrap(s.handleTmuxState))
 	s.mux.HandleFunc("GET /tmux/prefix", wrap(s.handleTmuxPrefix))
 	s.mux.HandleFunc("POST /tmux/copy-motion", wrap(s.handleTmuxCopyMotion))

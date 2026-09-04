@@ -238,10 +238,10 @@ func TestOverviewScreen_ReplaysOnlyWhenTheBufferMoved(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	sess.Buffer.Write([]byte("hello\r\n"))
-	cols, rows := sess.PTYSize()
+	grid := sess.PTYSize()
 
-	first := srv.sessionScreen(sess.ID, sess.Buffer, cols, rows)
-	again := srv.sessionScreen(sess.ID, sess.Buffer, cols, rows)
+	first := srv.sessionScreen(sess.ID, sess.Buffer, grid.Cols, grid.Rows)
+	again := srv.sessionScreen(sess.ID, sess.Buffer, grid.Cols, grid.Rows)
 	// Identity, not equality: an equal-but-rebuilt grid is exactly the work being skipped, and
 	// only pointer identity can tell the two apart.
 	if len(first) == 0 || &first[0] != &again[0] {
@@ -249,7 +249,7 @@ func TestOverviewScreen_ReplaysOnlyWhenTheBufferMoved(t *testing.T) {
 	}
 
 	sess.Buffer.Write([]byte("world\r\n"))
-	after := srv.sessionScreen(sess.ID, sess.Buffer, cols, rows)
+	after := srv.sessionScreen(sess.ID, sess.Buffer, grid.Cols, grid.Rows)
 	if len(after) > 0 && len(first) > 0 && &after[0] == &first[0] {
 		t.Fatal("new output served a stale screen — the card would show the past")
 	}
@@ -259,7 +259,7 @@ func TestOverviewScreen_ReplaysOnlyWhenTheBufferMoved(t *testing.T) {
 
 	// A resize repaints the SAME bytes onto a different grid, so the seq alone must not be taken
 	// as permission to reuse.
-	resized := srv.sessionScreen(sess.ID, sess.Buffer, cols/2, rows)
+	resized := srv.sessionScreen(sess.ID, sess.Buffer, grid.Cols/2, grid.Rows)
 	if len(resized) > 0 && len(after) > 0 && &resized[0] == &after[0] {
 		t.Fatal("a resized grid reused the old screen — the card would keep the old wrapping")
 	}
