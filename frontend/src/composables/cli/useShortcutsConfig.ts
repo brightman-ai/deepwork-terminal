@@ -85,7 +85,7 @@ export const DEFAULT_FIND_IN_TERMINAL_BINDING = IS_MAC_PLATFORM ? 'Meta+KeyF' : 
 export const DEFAULT_LEADER = 'Ctrl+KeyB'
 
 /** leader 能触发的动作。比 ShortcutAction 多两个：它们本来就没有单修饰键绑定可给。 */
-export type LeaderAction = Exclude<ShortcutAction, 'findInTerminal'> | 'overview' | 'rename'
+export type LeaderAction = Exclude<ShortcutAction, 'findInTerminal'> | 'overview' | 'rename' | 'copyMode'
 
 /**
  * leader 之后按哪个键。**照抄 tmux**，因为要的就是"和 tmux 一样的快捷键"，而且第二段已经不受
@@ -116,6 +116,10 @@ export const LEADER_BINDINGS: ReadonlyArray<{
   { code: 'KeyW', action: 'overview', key: 'w', hint: '概览' },
   { code: 'KeyX', action: 'closeTab', key: 'x', hint: '关闭' },
   { code: 'Comma', action: 'rename', key: ',', hint: '重命名' },
+  // `[` 是 tmux 自己的 copy-mode 键。这里用同一个键做同一件事（进入只读回看），是因为要的就是
+  // 「和 tmux 一样的手感」—— 而这条 leader 唯一生效的场景恰恰是**没有 tmux** 的标签（attach 了
+  // tmux 时整个 leader 让位，见 useTabShortcuts.leaderEnabled），所以两者永远不会争这个键。
+  { code: 'BracketLeft', action: 'copyMode', key: '[', hint: '回看历史' },
 ]
 
 /** code → action 的查表。**从 LEADER_BINDINGS 派生**，不另手写一份。数字族单独处理，不进这张表。 */

@@ -7,7 +7,7 @@ mock.module('@terminal/api/store', () => ({
   saveStore: (d: Record<string, unknown>) => { saveSpy(d); return Promise.resolve() },
 }))
 
-const { useShortcutsConfig, bindingFor, isDerived, leaderCostNote, DEFAULT_SHORTCUTS_CONFIG, DEFAULT_FIND_IN_TERMINAL_BINDING, DEFAULT_LEADER } = await import('../useShortcutsConfig')
+const { useShortcutsConfig, bindingFor, isDerived, leaderCostNote, leaderHintText, LEADER_BINDINGS, LEADER_CODES, DEFAULT_SHORTCUTS_CONFIG, DEFAULT_FIND_IN_TERMINAL_BINDING, DEFAULT_LEADER } = await import('../useShortcutsConfig')
 
 // NOTE: useShortcutsConfig sits on useServerStore, a MODULE-LEVEL singleton (same caveat as
 // useServerStore.test.ts) — these share hydration and run in order.
@@ -146,5 +146,34 @@ describe('leader', () => {
   it('带额外修饰键的组合不套用 readline 键位表', () => {
     expect(leaderCostNote('Ctrl+Shift+KeyB').text).toBe('')
     expect(leaderCostNote('Alt+KeyB').text).toBe('')
+  })
+})
+
+/**
+ * 设置页那份「leader 之后能按什么」的清单是**从键位表派生**的，不是手抄的。这一组把这条约定钉死：
+ * 加一个 leader 动作，设置页必须自动列出来 —— 否则屏幕上会开始教人按一个不存在的键，或者一个真
+ * 存在的键永远不被人发现。
+ */
+describe('leader 键位表 → 设置页清单是派生的', () => {
+  it('新增的 [ 回看历史 出现在提示里', () => {
+    const hint = leaderHintText()
+    expect(hint).toContain('[')
+    expect(hint).toContain('回看历史')
+  })
+
+  it('LEADER_CODES 由键位表派生，两者不会分家', () => {
+    for (const b of LEADER_BINDINGS) {
+      if (b.action === 'switchTab') continue // 数字族单独处理，不进这张表
+      expect(LEADER_CODES[b.code]).toBe(b.action)
+    }
+    expect(Object.keys(LEADER_CODES).length).toBe(LEADER_BINDINGS.length - 1)
+  })
+
+  it('每个键位都有印给人看的字符和动作名（缺了就是一行空提示）', () => {
+    for (const b of LEADER_BINDINGS) {
+      expect(b.key.length).toBeGreaterThan(0)
+      expect(b.hint.length).toBeGreaterThan(0)
+      expect(b.code.length).toBeGreaterThan(0)
+    }
   })
 })
