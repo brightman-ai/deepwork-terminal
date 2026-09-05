@@ -229,4 +229,31 @@ describe('leader 只吞它真的能执行的键', () => {
   })
 })
 
-const ALL_ACTIONS = new Set(['switchTab', 'nextTab', 'prevTab', 'newTab', 'closeTab', 'overview', 'rename'] as const)
+const ALL_ACTIONS = new Set(['switchTab', 'nextTab', 'prevTab', 'newTab', 'closeTab', 'overview', 'rename', 'copyMode'] as const)
+
+/**
+ * `[` = 回看历史，和 tmux 的 copy-mode 同一个键。
+ *
+ * 借用 tmux 的键位在这里是**没有代价**的：这条 leader 唯一生效的场景恰恰是没有 tmux 的标签
+ * （attach 上 tmux 时整个 leader 让位，见 leaderEnabled），所以两者永远不会争这个键。
+ */
+describe('leader + [ = 回看历史', () => {
+  const L = DEFAULT_LEADER
+
+  it('实现了就吞，映射到 copyMode', () => {
+    expect(resolveLeaderKey(key({ code: 'BracketLeft', key: '[' }), L, ALL_ACTIONS))
+      .toEqual({ type: 'action', action: 'copyMode' })
+  })
+
+  it('宿主没实现 → 原样放行，绝不「吞掉又不做事」', () => {
+    const NO_COPY = new Set(['switchTab', 'newTab', 'closeTab'] as const)
+    expect(resolveLeaderKey(key({ code: 'BracketLeft', key: '[' }), L, NO_COPY))
+      .toEqual({ type: 'passthrough' })
+  })
+
+  it('物理键位匹配：非美式布局上 `[` 打出别的字符也照样命中', () => {
+    // 德语布局上 BracketLeft 打出的是 `ü`。匹配 key 而不是 code，就是这条 leader 在半个欧洲失效。
+    expect(resolveLeaderKey(key({ code: 'BracketLeft', key: 'ü' }), L, ALL_ACTIONS))
+      .toEqual({ type: 'action', action: 'copyMode' })
+  })
+})

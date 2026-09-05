@@ -58,6 +58,8 @@ export interface TabShortcutsAdapter {
   /** leader 专属动作 —— 它们本来就没有单修饰键绑定可给。不给 = 那个键不响应，也不吞。 */
   onOverview?: () => void
   onRename?: (id: string) => void
+  /** 进入只读回看（复制模式）。不提供 = leader + `[` 原样放行给 shell。 */
+  onCopyMode?: () => void
 }
 
 interface ParsedBinding {
@@ -222,6 +224,7 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
     'switchTab', 'nextTab', 'prevTab', 'newTab', 'closeTab',
     ...(adapter.onOverview ? (['overview'] as const) : []),
     ...(adapter.onRename ? (['rename'] as const) : []),
+    ...(adapter.onCopyMode ? (['copyMode'] as const) : []),
   ])
 
   /**
@@ -279,6 +282,7 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
       case 'closeTab': if (activeId) adapter.onClose(activeId); break
       case 'overview': adapter.onOverview?.(); break
       case 'rename': if (activeId) adapter.onRename?.(activeId); break
+      case 'copyMode': adapter.onCopyMode?.(); break
     }
   }
 

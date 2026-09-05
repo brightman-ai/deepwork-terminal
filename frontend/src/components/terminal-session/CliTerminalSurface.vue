@@ -201,6 +201,14 @@
       >
         <span class="terminal-resync-label">正在恢复终端内容…</span>
       </div>
+      <!-- 复制模式：只读回看视口。放在 .terminal-body 里、盖住 xterm，但 xterm 仍然挂载着 —— 
+           退出时不需要重连、不需要重放，位置也没动过。 -->
+      <CopyModeView
+        v-if="copyModeOpen"
+        :history="terminalHistory"
+        :title="props.sessionName"
+        @close="closeCopyMode"
+      />
       <!-- 终端内查找 (Ctrl/Cmd+F 等价物, findInTerminal shortcut). v-if'd — a fresh instance each
            open, no state to leak across closes. Bottom-docked so it never fights the top-right
            notify/upload floats for the same pixels (see TerminalSearchBar.vue's own style note). -->
@@ -462,6 +470,7 @@ import KeyCastrOverlay from '@terminal/components/terminal-session/KeyCastrOverl
 import UploadProgressFloat from '@terminal/components/terminal-session/UploadProgressFloat.vue'
 import AttentionHud from '@terminal/components/terminal-session/AttentionHud.vue'
 import TerminalSearchBar from '@terminal/components/terminal-session/TerminalSearchBar.vue'
+import CopyModeView from '@terminal/components/terminal-session/CopyModeView.vue'
 import type { TerminalFindOptions } from '@terminal/components/terminal-session/terminalSearchOptions'
 import { handleFindShortcut } from '@terminal/components/terminal-session/terminalFindShortcut'
 import {
@@ -470,6 +479,7 @@ import {
   type SurfaceActionId,
 } from '@terminal/components/terminal-session/surfaceActionBar'
 import { canMeasureTerminal } from '@terminal/components/terminal-session/terminalFit'
+import { pageKeyOf, pageKeyTarget } from '@terminal/components/terminal-session/pageKeyRouting'
 import { isViewer, viewportIntent } from '@terminal/composables/cli/viewportDeclaration'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
 import {
@@ -479,6 +489,7 @@ import {
   ghostRefreshWait,
 } from '@terminal/composables/cli/ghostRefresh'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
+import { useTerminalHistory } from '@terminal/composables/cli/useTerminalHistory'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { useFocusStateMachine } from '@terminal/composables/cli/useFocusStateMachine'
@@ -2002,9 +2013,30 @@ function onTerminalData(data: Uint8Array) {
 }
 
 function sendTerminalData(data: Uint8Array) {
+  // 复制模式开着时，一个字节都不许进 PTY。
+  //
+  // CopyModeView 已经在 document 的捕获阶段吞 keydown，但那**不够**，而且不是理论上的不够：真机
+  // 上实测到 `jkabcgGn` 全部漏进了 shell。原因是有好几条输入路径根本不产生可被 preventDefault 的
+  // keydown —— CDP 的 char 事件、IME 组字（compositionend → onData）、移动端软键盘、粘贴。
+  //
+  // 这里是**所有**输入路径的汇合点（下面那行注释本来就是这么写的），所以这才是那条约束唯一能被
+  // 完整表达的地方。keydown 那层留着，因为它还负责把翻页/搜索这些键变成模式内的动作。
+  if (copyModeOpen.value) {
+    hud.record('keyboard', '回看历史中，按键未进入终端')
+    return
+  }
   // Every input route ends here, so this is where "the user is typing" is known. See
   // GHOST_TYPING_QUIET: a keystroke buys the terminal quiet from full-screen resends.
   ghostLastInputAt = Date.now()
+  // PgUp/PgDn from a PHYSICAL keyboard land here, and until now they went straight to the PTY —
+  // where, in a normal buffer outside tmux, nothing is listening. The key was simply DEAD, while
+  // the correct buffer-aware behaviour existed only on the on-screen buttons' path (onSendKey):
+  // one rule with two implementations, and only one of them written. Route both through the same
+  // function so they cannot drift apart again.
+  if (pageKeyOf(data)) {
+    onSendKey(data[2] === 0x35 ? '\x1b[5~' : '\x1b[6~')
+    return
+  }
   if (data.length === 1) {
     let byte = data[0]
     // Ctrl-sticky + v/V → real OS-clipboard paste (universal Ctrl+V muscle memory),
@@ -2152,7 +2184,11 @@ function onSendKey(key: string) {
     // PgUp），按下去只会什么都不发生。这里改滚 xterm 自己的 scrollback —— 也就是这块屏幕上唯一
     // 真的存着历史的地方。主 Toolbar 的 PgU/PgD 和这条 bar 的按钮走的都是这一处，所以同一屏上
     // 两个同名键不会有两种行为。
-    if (!tmuxAttached.value && term.buffer.active.type !== 'alternate') {
+    // 判断挪到 pageKeyRouting，物理键盘那条路调的是同一个函数——见那个文件的头注释。
+    if (pageKeyTarget({
+      altScreen: term.buffer.active.type === 'alternate',
+      tmuxAttached: tmuxAttached.value,
+    }) === 'local') {
       scrollGesture(term, dir, Math.max(1, term.rows - 1))
       hud.record('keyboard', `${dir < 0 ? 'PgUp' : 'PgDn'} (scrollback)`)
       return
@@ -2514,7 +2550,47 @@ function openInstallGuide() { notifyQuickOpen.value = true }
 // `tmuxAttached` 对外，是为了让**拥有标签的那一层**能回答一个只有这里知道的问题：当前这个标签的
 // shell 是不是在 tmux 里。leader 键的让位就靠它 —— 一旦 attach，Ctrl+B 整个属于 tmux，dw 一个键
 // 都不碰（见 useTabShortcuts 的 leaderEnabled）。判据只有这一个，和底栏那一行二选一用的是同一个。
-defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached })
+/**
+ * ── 复制模式（回看历史）──────────────────────────────────────────────────────────────────────────
+ *
+ * 覆盖在终端上的一个**只读视口**，看的是常驻进程里那份按行存的历史（见 useTerminalHistory）。
+ * 下面这个 xterm 原封不动地留着：实时输出照收，滚动位置一格没动，Esc 一按就回到原样 —— 这正是
+ * 「不重放整段历史」这条约束在 UI 上的样子。
+ *
+ * attach 了 tmux 的标签**不开**：那时 `Ctrl+B` 整个归 tmux，它自己的 copy-mode 就是这件事的原生
+ * 实现，我们再叠一层只会打架。
+ */
+const copyModeOpen = ref(false)
+// cliFetch，不是裸 fetch：认证头和 401/429 的处理只有那一处（useCliAuth）。这里再写一份的下场是
+// 复制模式永远是空的，而且页面上一个报错都没有。
+const terminalHistory = useTerminalHistory(() => props.sessionId, (path) => cliFetch(path))
+
+/**
+ * 打开回看历史。返回**空串 = 打开了**，否则是一句给人看的拒绝理由。
+ *
+ * 返回理由而不是自己弹提示：判断只有这里做得了（`tmuxAttached` 是表面才知道的），而提示归拥有标签
+ * 列表的那一层（useCliState 有 showNotice）。一处判断、一处显示，两边都不重复。
+ */
+function openCopyMode(): string {
+  // attach 了 tmux 的标签整个让位：那时 `Ctrl+B` 归 tmux，它自己的 copy-mode 就是这件事的原生
+  // 实现，再叠一层只会打架。这条路径上 leader 本来也不会触发（leaderEnabled），这是第二道。
+  if (tmuxAttached.value) return '这个终端在 tmux 里，请用 tmux 自己的复制模式（前缀 + [）'
+  // 远程标签本轮不支持：会话住在别人机器上，历史也在那台机器的常驻进程里，而这里问的是本机 API
+  // —— 不拦就会打开一个永远空着的视口，让人以为"这个终端没有历史"。说清楚比装作能用好。
+  if (props.isRemote) return '远程终端暂不支持回看历史（历史存在那台机器的常驻进程里）'
+  terminalHistory.reset()
+  copyModeOpen.value = true
+  hud.record('state', '进入回看历史')
+  return ''
+}
+
+function closeCopyMode(): void {
+  copyModeOpen.value = false
+  // 焦点必须还给终端，否则键盘敲下去没有接收者——和搜索条关闭时同一条规则。
+  void nextTick(() => xtermRef.value?.terminal?.()?.focus())
+}
+
+defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, openCopyMode })
 </script>
 
 <style scoped>

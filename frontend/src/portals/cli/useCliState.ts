@@ -201,6 +201,17 @@ export function useCliState(runtime: PortalRuntimeResult) {
     leaderEnabled: () => !(activeTab.value ? surfaceRefs[activeTab.value.id]?.tmuxAttached : false),
     onOverview: toggleOverview,
     onRename: startRenameTab,
+    // 前缀 + `[` = 进入只读回看，和 tmux 的 copy-mode 同一个键。动作住在终端表面上（只有它拿得到
+    // 那个会话的历史），这里只是把 leader 转给当前标签——和 onSendKey / netStats 走的是同一条既有
+    // 通路，不新拉线。
+    onCopyMode: () => {
+      const id = activeTab.value?.id
+      if (!id) return
+      // 表面返回拒绝理由（tmux 标签 / 远程标签），这一层负责说出来 —— 一个按下去毫无反应的
+      // 快捷键，使用者只会以为是自己按错了。
+      const why = surfaceRefs[id]?.openCopyMode?.()
+      if (why) showNotice(why)
+    },
   })
 
   // D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output —
