@@ -37,12 +37,15 @@ type Daemon struct {
 	conns    int // in-flight client connections; a daemon with clients is not idle
 	lastIdle time.Time
 
-	ringCap     int
-	idleTimeout time.Duration
-	factory     PTYFactory
-	startedAt   time.Time
-	stop        chan struct{}
-	stopOnce    sync.Once
+	ringCap int
+	// historyLines is the scrollback depth handed to every session this daemon spawns. Set once
+	// before Serve (see SetHistoryLines) and read only on the create path, so it needs no lock.
+	historyLines int
+	idleTimeout  time.Duration
+	factory      PTYFactory
+	startedAt    time.Time
+	stop         chan struct{}
+	stopOnce     sync.Once
 }
 
 // NewDaemon builds a daemon. ringCap of 0 means DefaultBufferCapacity; idleTimeout of
@@ -68,6 +71,16 @@ func NewDaemonWith(ringCap int, idleTimeout time.Duration, factory PTYFactory) *
 		stop:        make(chan struct{}),
 	}
 }
+
+// SetHistoryLines sets how many scrolled-off lines each new session keeps: 0 for
+// DefaultHistoryLines, negative to disable scrollback entirely.
+//
+// A setter rather than another positional argument to NewDaemon, because that constructor is
+// called from the command line entry point and from a dozen tests, and a third `int` in a row —
+// after a byte count and before a duration — is exactly the signature that gets called with its
+// arguments swapped. It applies to sessions created AFTER the call; the daemon is not serving yet
+// when the one production caller makes it, so there is nothing to race with.
+func (d *Daemon) SetHistoryLines(n int) { d.historyLines = n }
 
 // Serve accepts connections until ctx is cancelled, Stop is called, or the daemon has
 // been idle past its timeout.
@@ -208,13 +221,14 @@ func newSessionID() string {
 func (d *Daemon) create(req CreateReq) (string, int, error) {
 	id := newSessionID()
 	s, err := SpawnWith(id, SpawnOptions{
-		Argv: req.Argv,
-		Cwd:  req.Cwd,
-		Env:  req.Env,
-		Cols: req.Cols,
-		Rows: req.Rows,
-		Meta: req.Meta,
-		Cap:  d.ringCap,
+		Argv:         req.Argv,
+		Cwd:          req.Cwd,
+		Env:          req.Env,
+		Cols:         req.Cols,
+		Rows:         req.Rows,
+		Meta:         req.Meta,
+		Cap:          d.ringCap,
+		HistoryLines: d.historyLines,
 	}, d.factory, d.onSessionExit)
 	if err != nil {
 		return "", 0, err
@@ -460,6 +474,54 @@ func (d *Daemon) handleConn(c net.Conn) {
 			if err := attached.Write(payload); err != nil {
 				fail(ErrCodeInternal, err.Error())
 			}
+
+		case MsgHistory:
+			var req HistoryReq
+			if err := json.Unmarshal(payload, &req); err != nil {
+				fail(ErrCodeBadFrame, err.Error())
+				continue
+			}
+			s, ok := d.Get(req.ID)
+			if !ok {
+				fail(ErrCodeNotFound, "no such session: "+req.ID)
+				continue
+			}
+			// A session with history disabled answers `enabled:false` rather than an error: the
+			// caller asked a reasonable question and the answer is "this one keeps none", which
+			// is information, not a failure.
+			h := s.History()
+			ack := HistoryAck{Enabled: h != nil}
+			if h != nil {
+				var st HistoryStats
+				if req.Screen {
+					ack.Lines, st = h.Screen()
+				} else {
+					ack.Lines, st = h.Read(req.From, req.Count)
+				}
+				ack.Base, ack.Total, ack.Broken = st.Base, st.Total, st.Broken
+				ack.Styles, ack.StylesTotal = h.StylesFrom(req.StylesFrom)
+			}
+			_ = write(MsgHistoryAck, ack)
+
+		case MsgHistorySearch:
+			var req HistorySearchReq
+			if err := json.Unmarshal(payload, &req); err != nil {
+				fail(ErrCodeBadFrame, err.Error())
+				continue
+			}
+			s, ok := d.Get(req.ID)
+			if !ok {
+				fail(ErrCodeNotFound, "no such session: "+req.ID)
+				continue
+			}
+			h := s.History()
+			ack := HistorySearchAck{Enabled: h != nil}
+			if h != nil {
+				var st HistoryStats
+				ack.Matches, st = h.Search(req.Query, req.From, req.Backward, req.Limit, req.IgnoreCase)
+				ack.Base, ack.Total = st.Base, st.Total
+			}
+			_ = write(MsgHistorySearchAck, ack)
 
 		case MsgInputTo:
 			var req InputReq
