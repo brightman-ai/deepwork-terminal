@@ -381,6 +381,35 @@ func (s *Session) GetTmuxDetected() bool {
 // When the foreground process IS the shell itself (no interactive child running), the shell's
 // own process group gets killed too — the tab disconnects rather than no-op'ing. A "kill
 // whatever's in front" command with no foreground child left to kill has nothing else
+// History reads a page of this session's scrollback from the daemon that owns it.
+//
+// The server does NOT cache the result. It already keeps a duplicate of every session's byte
+// stream (see Session.Buffer); adding a third copy of the same content in a different shape would
+// give the same bug three places to disagree, and the daemon can answer a page in microseconds
+// from memory it already has.
+func (s *Session) History(req muxd.HistoryReq) (muxd.HistoryAck, error) {
+	s.mu.Lock()
+	client := s.mux
+	s.mu.Unlock()
+	if client == nil {
+		return muxd.HistoryAck{}, fmt.Errorf("session %s is not attached to a daemon", s.ID)
+	}
+	req.ID = s.ID
+	return client.History(req)
+}
+
+// SearchHistory finds text in this session's scrollback, IN THE DAEMON.
+func (s *Session) SearchHistory(req muxd.HistorySearchReq) (muxd.HistorySearchAck, error) {
+	s.mu.Lock()
+	client := s.mux
+	s.mu.Unlock()
+	if client == nil {
+		return muxd.HistorySearchAck{}, fmt.Errorf("session %s is not attached to a daemon", s.ID)
+	}
+	req.ID = s.ID
+	return client.SearchHistory(req)
+}
+
 // meaningful to do, and pretending to succeed while leaving the user still stuck would be worse.
 //
 // Not offered for tmux-attached sessions: the PTY's foreground pgid there belongs to tmux's own

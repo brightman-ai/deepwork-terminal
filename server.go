@@ -420,6 +420,8 @@ func (s *Server) registerRoutes() {
 	// read from the process — the only answer that stays true after someone types `export`.
 	s.mux.HandleFunc("GET /env", wrap(s.handleGetEnvOverlay))
 	s.mux.HandleFunc("PUT /env", wrap(s.handleSaveEnvOverlay))
+	s.mux.HandleFunc("GET /sessions/{id}/history", wrap(s.handleSessionHistory))
+	s.mux.HandleFunc("GET /sessions/{id}/history/search", wrap(s.handleSessionHistorySearch))
 	s.mux.HandleFunc("GET /sessions/{id}/env", wrap(s.handleSessionEnv))
 	s.mux.HandleFunc("POST /sessions/{id}/apply-env", wrap(s.handleApplyEnvHere))
 	s.mux.HandleFunc("GET /tmux/state", wrap(s.handleTmuxState))

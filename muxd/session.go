@@ -18,6 +18,14 @@ type Session struct {
 	ID        string
 	CreatedAt time.Time
 
+	// history is this session's scrollback: the lines that have left the top of the screen, with
+	// their colour. Nil when disabled.
+	//
+	// Set once at spawn and never reassigned, so it needs no lock of its own to READ — and it has
+	// its own lock INSIDE for its contents, deliberately not this one: a client paging through
+	// history must not be able to hold the lock the PTY's read loop takes. See History.
+	history *History
+
 	mu   sync.Mutex
 	pty  *os.File
 	cmd  *exec.Cmd
@@ -72,6 +80,10 @@ type SpawnOptions struct {
 	Rows uint16
 	Meta []byte
 	Cap  int // ring capacity; 0 means DefaultBufferCapacity
+	// HistoryLines is how many scrolled-off lines to keep. 0 means DefaultHistoryLines;
+	// NEGATIVE disables scrollback for this session entirely, which is what tests that only care
+	// about the byte stream use so they do not pay for a screen model they never read.
+	HistoryLines int
 }
 
 // DefaultCols/DefaultRows are the geometry a PTY is born with, before a client attaches
@@ -139,6 +151,9 @@ func SpawnWith(id string, opts SpawnOptions, factory PTYFactory, onExit func(str
 		exitCode:  -1,
 		subs:      map[int]*subscription{},
 		onExit:    onExit,
+	}
+	if opts.HistoryLines >= 0 {
+		s.history = NewHistory(s.size, opts.HistoryLines)
 	}
 	// cmd is nil for pipe-backed factories (there is no child process to report a pid
 	// for), so both hops must be checked — not just the inner one.
@@ -218,6 +233,20 @@ func (s *Session) readLoop() {
 				// queued output: it is the one frame that must not itself be lost.
 				pushControl(sub.ch, subFrame{Gap: true})
 			}
+			// Scrollback last, and deliberately so.
+			//
+			// AFTER the fan-out, because parsing the chunk into a screen model is the only
+			// non-trivial work in this loop and no byte may wait behind it on its way to a
+			// terminal. INSIDE the lock, because applySizeLocked hands the model its resizes from
+			// under this same mutex, and a resize that overtakes the output it was supposed to
+			// follow lays the next lines out on the wrong width.
+			//
+			// It cannot fail loudly: History.Write recovers from anything the model or the store
+			// does and switches that session's history off. By this point the bytes are already in
+			// the ring and already queued to every client, so a broken historian costs history and
+			// nothing else. (History.Write takes its own lock; nothing ever takes this one while
+			// holding that one, so the nesting is one-directional.)
+			s.history.Write(chunk)
 			s.mu.Unlock()
 		}
 		if err != nil {
@@ -256,6 +285,10 @@ func (s *Session) finish() {
 
 // Summary renders the session for List.
 func (s *Session) Summary() SessionSummary {
+	// History's stats come from BEFORE s.mu is taken. Reading them under it would nest this
+	// mutex around the historian's, and the only reason to allow that nesting anywhere is the
+	// read loop, which has no choice. Nowhere else needs to add to that.
+	hist := s.history.Stats()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	viewers := 0
@@ -275,6 +308,11 @@ func (s *Session) Summary() SessionSummary {
 		Meta:      append([]byte(nil), s.meta...),
 		ShellPID:  s.shellPID,
 		CreatedAt: s.CreatedAt,
+
+		HistoryEnabled: s.history != nil,
+		HistoryLines:   hist.Total - hist.Base,
+		HistoryBytes:   hist.Bytes,
+		HistoryBroken:  hist.Broken,
 	}
 }
 
@@ -437,6 +475,15 @@ func (s *Session) ShellPID() int {
 	defer s.mu.Unlock()
 	return s.shellPID
 }
+
+// History is this session's scrollback, or nil if it was spawned without one.
+//
+// No lock: the field is written once during Spawn, before the session is reachable by anyone else,
+// and never reassigned. Taking s.mu here would be worse than pointless — it would put the PTY's
+// mutex on the path of every history read, which is the exact coupling History's own lock exists
+// to avoid. The returned value is safe for concurrent use and tolerates a nil receiver, so callers
+// do not have to branch.
+func (s *Session) History() *History { return s.history }
 
 // Subscribe registers a live-output channel and returns the replay bytes that precede
 // it, the ring offset those bytes end at, plus the session geometry.
@@ -621,6 +668,9 @@ func (s *Session) applySizeLocked() {
 		_ = pty.Setsize(s.pty, &pty.Winsize{Cols: c, Rows: r})
 	}
 	s.size = next
+	// The screen model has to learn the new shape from the same place the PTY does, or its grid
+	// and the terminal's disagree and every subsequent line is laid out at the wrong width.
+	s.history.Resize(next)
 	// One pointer for every subscriber: a Grid is a value nobody mutates after it is
 	// announced, so N copies of the same two numbers would only invite the question of
 	// whether they can differ.

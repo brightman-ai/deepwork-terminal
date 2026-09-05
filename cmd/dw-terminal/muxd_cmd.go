@@ -38,6 +38,8 @@ func runMuxd(args []string) error {
 	socket := fs.String("socket", "", "unix socket path (default: $XDG_RUNTIME_DIR/dw-muxd/<uid>.sock)")
 	idle := fs.Duration("idle-timeout", muxd.DefaultIdleTimeout,
 		"exit after this long with no live sessions and no clients; 0 disables")
+	historyLines := fs.Int("history-lines", muxd.DefaultHistoryLines,
+		"scrollback kept per session, in lines; 0 uses the default, negative disables it")
 	status := fs.Bool("status", false, "print what the running daemon holds, then exit")
 	restart := fs.Bool("restart", false,
 		"stop the running daemon and start a fresh one — ENDS every session it holds")
@@ -73,15 +75,32 @@ func runMuxd(args []string) error {
 		idleTimeout = -1 // negative disables the idle watchdog
 	}
 	d := muxd.NewDaemon(0, idleTimeout)
+	d.SetHistoryLines(*historyLines)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	fmt.Printf("dw-muxd listening on %s (idle timeout %s, protocol v%d)\n",
-		path, idleTimeout, muxd.ProtoVersion)
+	fmt.Printf("dw-muxd listening on %s (idle timeout %s, scrollback %s, protocol v%d)\n",
+		path, idleTimeout, historyLinesLabel(*historyLines), muxd.ProtoVersion)
 	err = d.Serve(ctx, ln)
 	fmt.Printf("dw-muxd exiting at %s\n", time.Now().Format(time.RFC3339))
 	return err
+}
+
+// historyLinesLabel renders the scrollback setting for the startup line.
+//
+// The startup line is the one place an operator can see what a running daemon was configured with
+// — `muxd --status` talks to a daemon that may predate the flag — so "disabled" has to be spelled
+// out rather than printed as "-1", which reads like a bug.
+func historyLinesLabel(n int) string {
+	switch {
+	case n < 0:
+		return "disabled"
+	case n == 0:
+		return fmt.Sprintf("%d lines/session", muxd.DefaultHistoryLines)
+	default:
+		return fmt.Sprintf("%d lines/session", n)
+	}
 }
 
 // restartDaemon is the ONLY sanctioned way to end a daemon that is holding live
@@ -245,9 +264,29 @@ func printStatus(path string) error {
 		if s.Alive {
 			state = "alive"
 		}
-		fmt.Printf("  %s  %-6s  pid=%-7d  %dx%d  %d viewer(s)/%d attached  meta=%dB  since %s\n",
+		fmt.Printf("  %s  %-6s  pid=%-7d  %dx%d  %d viewer(s)/%d attached  meta=%dB  %s  since %s\n",
 			s.ID, state, s.ShellPID, s.Cols, s.Rows, s.Viewers, s.Attached, len(s.Meta),
-			s.CreatedAt.Format(time.RFC3339))
+			scrollbackLabel(s), s.CreatedAt.Format(time.RFC3339))
 	}
 	return nil
+}
+
+// scrollbackLabel describes one session's history for `--status`.
+//
+// It exists because scrollback lives in the daemon's memory and is therefore invisible from
+// everywhere else: no file to inspect, and until a client asks for a page there is nothing on the
+// wire either. This line is how the memory ceiling the feature was accepted under gets checked
+// against a running daemon instead of trusted.
+//
+// "off" and "0 lines" are printed as different things on purpose — the first says this session
+// keeps no history, the second that nothing has scrolled off it yet.
+func scrollbackLabel(s muxd.SessionSummary) string {
+	switch {
+	case !s.HistoryEnabled:
+		return "scrollback=off"
+	case s.HistoryBroken:
+		return fmt.Sprintf("scrollback=BROKEN(%d lines held)", s.HistoryLines)
+	default:
+		return fmt.Sprintf("scrollback=%d lines/%dKB", s.HistoryLines, s.HistoryBytes/1024)
+	}
 }

@@ -114,6 +114,21 @@ const (
 	// path stays raw: the common case must not pay for JSON on every keystroke.
 	MsgInputTo MsgType = 33
 
+	// Scrollback. Reading a session's history is a control-plane request/response like any
+	// other; it deliberately does NOT ride the attached stream, because a client reads history
+	// while scrolled back and its terminal keeps receiving live output at the same time.
+	//
+	// These did NOT cost a ProtoVersion bump, and that was the whole point of choosing the
+	// capability mechanism over one: a bump refuses to talk to a mismatched daemon, which would
+	// have ended every live session on this machine just to add a feature that nothing depends
+	// on. Instead the daemon advertises FeatureScrollback and a client that does not see it
+	// never sends these frames — so an old daemon is never asked a question it would answer
+	// with bad_frame. See Hello.Features.
+	MsgHistory          MsgType = 34
+	MsgHistoryAck       MsgType = 35
+	MsgHistorySearch    MsgType = 36
+	MsgHistorySearchAck MsgType = 37
+
 	// Stream-scoped lifecycle notice on an attached connection.
 	MsgExited MsgType = 32 // daemon → client: {"exit_code":N}
 )
@@ -247,10 +262,20 @@ const (
 	// withdrawal, and broadcasts the resulting grid. A daemon without it keeps one shared
 	// size, so a viewer's size is silently dropped the moment anything else is attached.
 	FeaturePerAttachmentGeometry = "per-attachment-geometry"
+
+	// FeatureScrollback: this daemon keeps a per-session, line-based, colour-preserving
+	// scrollback and answers MsgHistory / MsgHistorySearch.
+	//
+	// It is advertised but NOT required (see RequiredDaemonFeatures): a daemon without it runs
+	// terminals perfectly well, it simply has no history to offer. That asymmetry is the point
+	// — making it required would print an upgrade warning at every user whose daemon predates
+	// the feature, for a capability nothing they are doing depends on, and the only cure for
+	// that warning is a restart that ends all their sessions.
+	FeatureScrollback = "scrollback"
 )
 
 // DaemonFeatures is what a daemon built from THIS source advertises.
-var DaemonFeatures = []string{FeaturePerAttachmentGeometry}
+var DaemonFeatures = []string{FeaturePerAttachmentGeometry, FeatureScrollback}
 
 // RequiredDaemonFeatures is what a client built from this source needs the daemon to do.
 //
@@ -380,6 +405,24 @@ type SessionSummary struct {
 	ShellPID  int       `json:"shell_pid"`
 	CreatedAt time.Time `json:"created_at"`
 
+	// HistoryEnabled says whether this session keeps scrollback at all, and the rest describe
+	// what it holds: HistoryLines is how many scrolled-off lines are available NOW, HistoryBytes
+	// what they cost, HistoryBroken that the historian switched itself off after an internal error
+	// (the terminal is unaffected — see History).
+	//
+	// Deliberately WITHOUT omitempty on the first three. `history_enabled: false` is the whole
+	// point of the field, and `history_lines: 0` is a real answer ("nothing has scrolled off
+	// yet"); omitempty deletes exactly those from the wire and leaves a reader unable to tell "no
+	// history" from "this daemon is too old to have the field". This codebase has already paid for
+	// that once. HistoryBroken keeps omitempty because there the NOTABLE value is true.
+	//
+	// A daemon predating these fields simply omits them, which decodes to enabled=false — honest
+	// for a client's purposes: that daemon has no history to offer.
+	HistoryEnabled bool  `json:"history_enabled"`
+	HistoryLines   int64 `json:"history_lines"`
+	HistoryBytes   int   `json:"history_bytes"`
+	HistoryBroken  bool  `json:"history_broken,omitempty"`
+
 	// Viewers is how many attachments declare a size — the ones that actually have a window
 	// this session must fit. Attached counts every attachment, including OBSERVERS.
 	//
@@ -403,6 +446,87 @@ type SessionSummary struct {
 // ListAck carries every session the daemon holds.
 type ListAck struct {
 	Sessions []SessionSummary `json:"sessions"`
+}
+
+// HistoryReq asks for a page of a session's scrollback.
+//
+// From/Count page through it; From below what is still held is clamped to the oldest line
+// rather than refused, because the caller is scrolling and "here is the oldest I still have,
+// and here is its number" is the useful answer.
+//
+// Screen asks for the live visible grid instead, numbered as if it continued the scrollback.
+// A viewer needs both to render a continuous surface — without it there is a screen-sized hole
+// between the last scrolled-off line and what the terminal is showing, and the client would
+// have to guess its size.
+type HistoryReq struct {
+	ID     string `json:"id"`
+	From   int64  `json:"from"`
+	Count  int    `json:"count"`
+	Screen bool   `json:"screen,omitempty"`
+
+	// StylesFrom is how many style-table entries the client already has. The daemon returns
+	// only the ones after it.
+	//
+	// Style ids are append-only and never reused for the life of a session, so a client
+	// holding a PREFIX of the table can resolve every id it has ever been sent. That is what
+	// makes the incremental transfer safe rather than merely smaller: there is no version to
+	// get wrong and no invalidation to miss.
+	StylesFrom int `json:"styles_from,omitempty"`
+}
+
+// HistoryAck is a page of scrollback plus the range it was taken from.
+type HistoryAck struct {
+	Lines []Line `json:"lines"`
+	// Base is the oldest line still held and Total the number ever produced, so a client can
+	// tell "you have reached the beginning" from "the beginning was evicted".
+	Base  int64 `json:"base"`
+	Total int64 `json:"total"`
+
+	// Styles are the table entries from HistoryReq.StylesFrom onward; StylesTotal is the
+	// table's full length, which is what the client passes back next time.
+	Styles      []Style `json:"styles,omitempty"`
+	StylesTotal int     `json:"styles_total"`
+
+	// Enabled is false when this session keeps no scrollback at all; Broken that its historian
+	// hit an internal error and switched itself off. Neither affects the terminal. Both are
+	// reported rather than collapsed into "no lines", because a viewer that cannot tell them
+	// apart from an empty history will tell the user the wrong thing.
+	//
+	// No omitempty on Enabled: false is the case worth transmitting.
+	Enabled bool `json:"enabled"`
+	Broken  bool `json:"broken,omitempty"`
+}
+
+// HistorySearchReq looks for text in a session's scrollback, IN THE DAEMON.
+//
+// Searching where the history lives is the difference between shipping one page of results and
+// shipping fifty thousand lines to a browser so it can search them locally — which would spend
+// exactly the bandwidth this whole design exists to save.
+type HistorySearchReq struct {
+	ID    string `json:"id"`
+	Query string `json:"query"`
+	// From is where to start scanning; Backward searches towards older lines, which is what a
+	// person pressing "previous match" means.
+	From       int64 `json:"from"`
+	Backward   bool  `json:"backward,omitempty"`
+	Limit      int   `json:"limit,omitempty"`
+	IgnoreCase bool  `json:"ignore_case,omitempty"`
+}
+
+// HistoryMatch is one hit: which line, where in it, and the line itself for a preview list.
+type HistoryMatch struct {
+	N int64 `json:"n"`
+	// Col is the BYTE offset of the match within Text, matching Span.Start's convention.
+	Col  int    `json:"col"`
+	Text string `json:"text"`
+}
+
+// HistorySearchAck carries the hits and the range that was searched.
+type HistorySearchAck struct {
+	Matches []HistoryMatch `json:"matches"`
+	Base    int64          `json:"base"`
+	Total   int64          `json:"total"`
+	Enabled bool           `json:"enabled"`
 }
 
 // AttachReq turns the current connection into a stream bound to one session.

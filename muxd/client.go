@@ -410,6 +410,42 @@ func (c *Client) Input(id string, data []byte) error {
 	return c.roundTrip(requireDaemon, MsgInputTo, InputReq{ID: id, Data: data}, MsgOK, nil)
 }
 
+// ErrNoScrollback is returned when the daemon does not keep history.
+//
+// A distinct error rather than an empty result, because those mean opposite things to whoever is
+// looking: an empty page says "nothing has scrolled off yet", and this says "this daemon cannot
+// answer that question" — which for a daemon predating the feature is the honest answer and has a
+// completely different remedy (restart it, at the cost of every live session).
+var ErrNoScrollback = errors.New("muxd: this daemon keeps no scrollback")
+
+// History reads a page of a session's scrollback, or its live screen when req.Screen is set.
+//
+// It checks the daemon's advertised capability BEFORE sending: a daemon that predates scrollback
+// answers an unknown frame with bad_frame, and turning that into a protocol error at the call site
+// would make "your daemon is older than your binary" look like a bug.
+func (c *Client) History(req HistoryReq) (HistoryAck, error) {
+	if !c.Peer().Has(FeatureScrollback) {
+		return HistoryAck{}, ErrNoScrollback
+	}
+	var ack HistoryAck
+	if err := c.roundTrip(requireDaemon, MsgHistory, req, MsgHistoryAck, &ack); err != nil {
+		return HistoryAck{}, err
+	}
+	return ack, nil
+}
+
+// SearchHistory finds text in a session's scrollback, in the daemon.
+func (c *Client) SearchHistory(req HistorySearchReq) (HistorySearchAck, error) {
+	if !c.Peer().Has(FeatureScrollback) {
+		return HistorySearchAck{}, ErrNoScrollback
+	}
+	var ack HistorySearchAck
+	if err := c.roundTrip(requireDaemon, MsgHistorySearch, req, MsgHistorySearchAck, &ack); err != nil {
+		return HistorySearchAck{}, err
+	}
+	return ack, nil
+}
+
 // Resize sets a session's window size.
 func (c *Client) Resize(id string, cols, rows uint16) error {
 	return c.roundTrip(requireDaemon, MsgResize, ResizeReq{ID: id, Cols: cols, Rows: rows}, MsgOK, nil)
