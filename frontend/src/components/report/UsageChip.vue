@@ -514,6 +514,40 @@ function fmtCredits(n: number): string {
   if (n >= 1000) return Math.round(n).toLocaleString('en-US')
   return n >= 10 ? Math.round(n).toString() : n.toFixed(1)
 }
+/**
+ * 本周期的已耗到底能不能给一个数。
+ *
+ * 厂商的日账是【按自然日结算】的，而当天那一行它还在写。窗口只有一天时（刚重置/刚开周期），
+ * `used` 就 100% 由未结清的数据组成 —— 实测 2026-09-05：一个一天大的窗口报 1,153.45 credits、
+ * 0 turns，同期仪表从 65% 爬到 74%。那个 1,153 不是「花得少」，是【账本还没写】。
+ *
+ * 给一个这样的数，比不给更糟：它带着小数点，看起来是个答案。
+ */
+function creditsSettlement(c: NonNullable<RuntimeQuota['credits']>): 'none' | 'partial' | 'full' {
+  const days = c.days ?? 0
+  const unsettled = c.unsettled_days ?? 0
+  if (days > 0 && unsettled >= days) return 'none'
+  return unsettled > 0 ? 'partial' : 'full'
+}
+
+/**
+ * 「上一周期」还是「过去 N 天」。
+ *
+ * 两者数值可能一样，含义完全不同：只有观测到边界过去，那段区间才真的是一个计费周期。
+ * 提前重置（codex 重置卡）会把上一周期截短，而按固定跨度往回数会伸进【再上一个】周期里 ——
+ * 那不是算错了一个数，是给一段区间贴了它不配的标签。
+ */
+function priorLabel(c: NonNullable<RuntimeQuota['credits']>): string {
+  if (c.prior_is_cycle) return '上一周期'
+  // 区间长度直接由两个起点相减得出——不猜「大概是一周」，说出它实际覆盖了几天。
+  const from = c.prior_window_start ? Date.parse(c.prior_window_start) : NaN
+  const to = c.window_start ? Date.parse(c.window_start) : NaN
+  const days = Number.isFinite(from) && Number.isFinite(to)
+    ? Math.max(1, Math.round((to - from) / 86400000))
+    : 0
+  return days > 0 ? `此前 ${days} 天` : '此前一段'
+}
+
 function creditsTitle(c: NonNullable<RuntimeQuota['credits']>): string {
   const parts = ['已耗来自账号官方用量接口，不是本地按费率卡的估算。']
   if (c.whole_days === false) {
@@ -522,10 +556,21 @@ function creditsTitle(c: NonNullable<RuntimeQuota['credits']>): string {
   // 当日账本会滞后结算（实测：同一批活动 17:31 报 301、17:44 报 1,001）。不说的话，用户会以为
   // 是自己看错了，或者以为面板在乱跳。
   parts.push('当日数字由厂商按自然日结算，最近几十分钟的消耗可能还没并进来。')
+  const settle = creditsSettlement(c)
+  if (settle === 'none') {
+    parts.push('本周期的每一天厂商都还没结清，所以这里不给数字——'
+      + '实测过一次一天大的窗口报 1,153 credits / 0 turns，同期仪表从 65% 涨到 74%：'
+      + '那不是花得少，是账本还没写。')
+  } else if (settle === 'partial') {
+    parts.push(`本周期 ${c.days ?? 0} 天里有 ${c.unsettled_days} 天厂商还没结清，已耗会继续往上走。`)
+  }
   if (c.prior_window) {
-    parts.push(`上一周期共 ${fmtCredits(c.prior_window)} credits——这是历史用量，不是本周期的额度：`
-      + '厂商从不陈述额度，而 credits 与上面的百分比是两个独立计量器（实测每百分点相差 3.78 倍），'
-      + '不能相除得出。')
+    const cycle = c.prior_is_cycle
+    parts.push(`${priorLabel(c)}共 ${fmtCredits(c.prior_window)} credits——这是历史用量，不是本周期的额度：`
+      + '厂商从不陈述额度，而 credits 与上面的百分比是两个独立计量器（实测每百分点相差 630/167/16 倍不等），'
+      + '不能相除得出。'
+      + (cycle ? '' : '（这段区间是按窗口长度往回数的，不一定正好是上一个计费周期——'
+        + '提前重置会把周期截短，而我们没有观测到那次边界。）'))
   }
   return parts.join(' ')
 }
@@ -857,13 +902,28 @@ onUnmounted(() => {
                  硬造一个才是把订阅和 API 计费搅在一起）。 -->
             <div v-if="q.credits" class="uchip-credits" :title="creditsTitle(q.credits)">
               <span class="uchip-credits-k">本周期已耗</span>
-              <span class="uchip-credits-v">
+              <!-- 一天都没结清 ⟹ 不给数字。给一个带小数点的 1,153 比空着更糟：它看起来是个答案，
+                   而实测那正是「账本还没写」的样子（1,153 credits / 0 turns，同期仪表 65%→74%）。 -->
+              <span v-if="creditsSettlement(q.credits) === 'none'" class="uchip-credits-pending">
+                账本尚未结算
+              </span>
+              <span v-else class="uchip-credits-v">
                 {{ fmtCredits(q.credits.used) }}<span class="uchip-credits-u"> credits</span>
                 <span v-if="q.credits.whole_days === false" class="uchip-credits-approx" title="窗口从当天中途开始，接口按自然日汇总，首日含上一周期用量">≈</span>
+                <span
+                  v-if="creditsSettlement(q.credits) === 'partial'"
+                  class="uchip-credits-approx"
+                  :title="`本周期 ${q.credits.days} 天里有 ${q.credits.unsettled_days} 天厂商还没结清，这个数还会往上走`"
+                >+</span>
               </span>
-              <span v-if="q.credits.prior_window" class="uchip-credits-of">
-                上一周期 {{ fmtCredits(q.credits.prior_window) }}
-              </span>
+              <!-- 「上一周期」下沉成缩进的二级行。它此前与本周期同单位、同一行、右对齐——
+                   版式本身就在说「1.2k / 134.4k」，而这两个数一个未结清、一个已结清，
+                   甚至可能不是同一个计费周期。tooltip 赢不了版式，所以改版式。 -->
+            </div>
+            <div v-if="q.credits && q.credits.prior_window" class="uchip-credits-prior" :title="creditsTitle(q.credits)">
+              <span class="uchip-credits-prior-k">└ {{ priorLabel(q.credits) }}</span>
+              <span class="uchip-credits-prior-v">{{ fmtCredits(q.credits.prior_window) }} credits</span>
+              <span v-if="!q.credits.prior_is_cycle" class="uchip-credits-prior-note">按窗口长度回溯，未必是完整周期</span>
             </div>
 
             <!-- No reading at all: say so plainly. Never a fabricated 0%/100% bar. -->
@@ -1180,6 +1240,20 @@ onUnmounted(() => {
 .uchip-credits-u { color: #8b909a; font-weight: 400; font-size: 10px; }
 .uchip-credits-approx { color: #f59e0b; margin-left: 2px; }
 .uchip-credits-of { color: #7f858f; font-size: 10.5px; font-variant-numeric: tabular-nums; margin-left: auto; }
+
+/* 未结清：不是一个数，所以不用数字的排版（无 tabular-nums、非加粗），别让它读起来像个值。 */
+.uchip-credits-pending { color: #8b909a; font-size: 11px; font-style: italic; }
+
+/* 「上一周期/此前 N 天」自己一行、缩进、更暗。
+   它此前与本周期同行同单位右对齐，版式本身在说「1.2k / 134.4k」——而那两个数一个未结清、
+   一个已结清，甚至可能不属于同一个计费周期。这里靠层级而不是靠 tooltip 来阻止那个读法。 */
+.uchip-credits-prior {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 10.5px; margin-top: 2px; padding-left: 10px; cursor: help;
+}
+.uchip-credits-prior-k { color: #6f757f; flex-shrink: 0; }
+.uchip-credits-prior-v { color: #9aa0aa; font-variant-numeric: tabular-nums; }
+.uchip-credits-prior-note { color: #6f757f; margin-left: auto; }
 .uchip-group { padding: 4px 0 5px; }
 .uchip-group + .uchip-group { border-top: 1px dashed #2a2d35; }
 /* 过期读数必须**看起来就是旧的**。此前只降了一点整体不透明度（0.72），主体仍是满格实心绿条 +

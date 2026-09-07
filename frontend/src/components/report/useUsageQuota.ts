@@ -74,8 +74,32 @@ export interface QuotaCredits {
    * denominator nobody publishes.
    */
   prior_window?: number
-  /** When that previous window opened (ISO-8601), so the figure can be labelled with real dates. */
+  /** When that previous span opened (ISO-8601), so the figure can be labelled with real dates. */
   prior_window_start?: string
+  /**
+   * Whether `prior_window` covers an actual billing CYCLE, or merely one window length before
+   * this cycle began.
+   *
+   * They come apart whenever a cycle ends EARLY — codex sells a reset card that restarts the
+   * weekly window on the spot, and this account used one on 2026-09-05 after running to 100%.
+   * A cycle cut short is shorter than a window, so counting one window backwards reaches into
+   * the cycle before it. True only when the boundary was observed and recorded.
+   *
+   * The UI must say「过去 N 天」when this is false and「上一周期」only when it is true. Both
+   * numbers are useful; only one of them is a cycle.
+   */
+  prior_is_cycle?: boolean
+  /**
+   * How many days inside `used` the vendor is still writing.
+   *
+   * Without it, "spent almost nothing" and "the ledger has not caught up" are the same picture.
+   * Measured 2026-09-05: a one-day-old window read 1,153.45 credits against 0 turns while the
+   * rate-limit meter climbed 65% → 74% over twenty minutes — 100% unsettled, presenting as a
+   * small bill. When this equals `days`, `used` carries no information at all.
+   */
+  unsettled_days?: number
+  /** The last day inside this window the vendor has finished writing. Absent ⟹ none has. */
+  settled_through?: string
   source: 'api'
   window_start?: string
   days?: number
