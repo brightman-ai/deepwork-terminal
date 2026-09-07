@@ -4,8 +4,9 @@
  *
  * Two sub-tabs over ONE session's working tree:
  *   · 最近文件 — files agents recently wrote/edited (GET /files/recent, tool_use signal).
- *   · 目录树   — a navigable single-level tree (GET /files/tree), breadcrumb to ascend.
- * Clicking a file previews it inline (GET /files/raw → text | binary | tooLarge).
+ *   · 目录树   — 钻入式导航（GET /files/tree）：目录行单击=把视图根重定位到该目录（面包屑+返回栈），
+ *     chevron=原地展开；全树=面包屑根段。全端统一（手机无双击）。
+ * Clicking a file previews it inline (GET /files/raw → text | image | docx | binary | tooLarge).
  * Every path carries a copy affordance; previews + recent rows bubble inject /
  * compose-draft up to the host exactly like the existing drawer tabs.
  *
@@ -24,6 +25,7 @@ import {
   filesTree,
   filesSearch,
   filesRaw,
+  filesRawBytes,
   filesRawRenderUrl,
   filesDownloadUrl,
   filesMkdir,
@@ -39,6 +41,8 @@ import { useTreeUpload } from '@terminal/composables/cli/useTreeUpload'
 import { nextTick } from 'vue'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
+import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
+import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
 import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
 
 // cwd is the drawer's EFFECTIVE pane working directory, OWNED by ResourceDrawer (CHG:
@@ -75,13 +79,29 @@ async function loadRecent(): Promise<void> {
 // as image/* and rendered inline. Keep the two lists in step. svg stays under style (it's
 // XML, previewed as text).
 const CAT_EXT: Record<string, string[]> = {
-  doc: ['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'org'],
+  doc: ['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'org', 'pdf', 'docx', 'pptx', 'ppt'],
   code: ['go', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'vue', 'py', 'rs', 'rb', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'cc', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'sql', 'proto'],
   config: ['json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'env', 'xml', 'lock', 'dockerfile'],
   style: ['css', 'scss', 'less', 'html', 'svg'],
   image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif'],
 }
 const CAT_LABEL: Record<string, string> = { all: '全部', doc: '文档', code: '代码', config: '配置', style: '样式', image: '图片', other: '其他' }
+// Per-category tint for icon + ext badge, keyed off the same catOf SSOT as the chips/filter —
+// one source of category truth, so a row can never claim a type the chips disagree with.
+const CAT_TINT: Record<string, string> = {
+  doc: 'text-sky-500 bg-sky-500/10',
+  code: 'text-emerald-500 bg-emerald-500/10',
+  config: 'text-amber-500 bg-amber-500/10',
+  style: 'text-pink-500 bg-pink-500/10',
+  image: 'text-violet-500 bg-violet-500/10',
+  other: 'text-muted-foreground bg-muted',
+}
+function catBadgeClass(name: string): string {
+  return CAT_TINT[catOf(name)] || CAT_TINT.other
+}
+function catTextClass(name: string): string {
+  return (CAT_TINT[catOf(name)] || CAT_TINT.other).split(' ')[0]
+}
 function fileExt(name: string): string {
   if (name.toLowerCase() === 'dockerfile') return 'dockerfile'
   const parts = name.split('.')
@@ -124,6 +144,47 @@ watch(recentCats, (cats) => {
 const treeCwd = ref('')
 const treeLoading = ref(false)
 
+// ── 钻入导航（drill-in）──
+// treeRootRel = 当前视图根（'' = 会话 cwd 全树）。钻入一个目录 = 把视图根重定位到它，来路压
+// 返回栈；面包屑随时可跳（也压栈，back 恒指上一视图）。一切 rel 仍相对 cwd —— 只换渲染的子树
+// 切片，CRUD/上传/键盘导航按 rel 工作，天然不受影响。全端统一：目录行单击=钻入，chevron=原地
+// 展开（兄弟目录概览），面包屑根段=回全树（手机无双击，两套语义必漂移 —— 只留一套）。
+const treeRootRel = ref('')
+const backStack = ref<string[]>([])
+const canGoBack = computed(() => backStack.value.length > 0)
+const crumbs = computed(() => {
+  const segs = treeRootRel.value.split('/').filter(Boolean)
+  const out = [{ rel: '', name: treeCwd.value ? baseName(treeCwd.value) : '根' }]
+  let acc = ''
+  for (const s of segs) {
+    acc = acc ? `${acc}/${s}` : s
+    out.push({ rel: acc, name: s })
+  }
+  return out
+})
+async function reRoot(rel: string, push: boolean): Promise<void> {
+  if (rel === treeRootRel.value) return
+  if (push) backStack.value.push(treeRootRel.value)
+  treeRootRel.value = rel
+  roots.value = []
+  focusedRel.value = null
+  await loadView()
+}
+function drillTo(rel: string): void { void reRoot(rel, true) }
+// 当前视图根的绝对路径（cwd 锚 + rel）——头部第二行显示的就是它。
+const viewAbsPath = computed(() => {
+  const base = treeCwd.value.replace(/\/+$/, '')
+  return treeRootRel.value ? `${base}/${treeRootRel.value}` : base
+})
+async function goBack(): Promise<void> {
+  const prev = backStack.value.pop()
+  if (prev === undefined) return
+  treeRootRel.value = prev
+  roots.value = []
+  focusedRel.value = null
+  await loadView()
+}
+
 // VSCode 式嵌套 lazy 展开树：每个目录节点首次展开时按需拉子目录（GET /files/tree?path=<rel>）。
 // children=null → 目录未加载；[] → 空目录或文件。roots=cwd 顶层。
 interface TreeNode {
@@ -157,13 +218,14 @@ function reconcile(old: TreeNode[] | null, entries: TreeEntry[], parentRel: stri
   })
 }
 
-async function loadRoot(): Promise<void> {
+async function loadView(): Promise<void> {
   treeLoading.value = true
   try {
-    const resp = await filesTree(props.sessionId, '', props.cwd)
+    const resp = await filesTree(props.sessionId, treeRootRel.value, props.cwd)
     if (resp) {
-      treeCwd.value = resp.cwd
-      roots.value = reconcile(roots.value, resp.entries, '', 0)
+      // cwd 锚只在【真根】查询时更新：子目录查询的 resp.cwd 是那个目录的路径，不是会话锚。
+      if (!treeRootRel.value) treeCwd.value = resp.cwd
+      roots.value = reconcile(roots.value, resp.entries, treeRootRel.value, 0)
     } else {
       roots.value = []
     }
@@ -173,14 +235,14 @@ async function loadRoot(): Promise<void> {
   }
 }
 
-// refreshDir：重拉某目录一层（null=root），reconcile 保留展开态。上传/建/删/改名后调用。
+// refreshDir：重拉某目录一层（null=当前视图根），reconcile 保留展开态。上传/建/删/改名后调用。
 async function refreshDir(node: TreeNode | null): Promise<void> {
-  const rel = node ? node.rel : ''
+  const rel = node ? node.rel : treeRootRel.value
   const resp = await filesTree(props.sessionId, rel, props.cwd)
   if (!resp) return
   if (!node) {
-    treeCwd.value = resp.cwd
-    roots.value = reconcile(roots.value, resp.entries, '', 0)
+    if (!treeRootRel.value) treeCwd.value = resp.cwd
+    roots.value = reconcile(roots.value, resp.entries, treeRootRel.value, 0)
   } else {
     node.children = reconcile(node.children, resp.entries, node.rel, node.depth + 1)
   }
@@ -244,22 +306,6 @@ function collapseAll(): void {
   bumpTree()
 }
 
-// revealPath：展开到某 rel（搜索命中"下钻"用）——逐层 ensure + expand 祖先。
-async function revealPath(rel: string): Promise<void> {
-  const segs = rel.split('/').filter(Boolean)
-  let level = roots.value
-  for (const seg of segs) {
-    const node = level.find((n) => n.entry.name === seg)
-    if (!node) return
-    if (node.entry.isDir) {
-      await ensureChildren(node)
-      node.expanded = true
-      level = node.children || []
-    }
-  }
-  bumpTree()
-}
-
 // basename of an absolute path ('' / '/' → '/'). Used so the breadcrumb's root segment
 // reads as the actual anchored directory (e.g. "deepwork-terminal"), not a generic label.
 function baseName(path: string): string {
@@ -317,7 +363,7 @@ function onTreeUploadPicked(e: Event): void {
   const input = e.target as HTMLInputElement
   const files = Array.from(input.files || [])
   input.value = '' // let the same file be re-picked later
-  if (files.length) treeUpload.enqueue(files, '.') // 顶部按钮 → cwd 根
+  if (files.length) treeUpload.enqueue(files, treeRootRel.value || '.') // 顶部按钮 → 当前视图根
 }
 
 // ════ 目录树 CRUD（slice 2）════════════════════════════════════════════════════════════
@@ -468,14 +514,15 @@ const showCheats = ref(false)
 // preventScroll 避免 focus 触发跳动。容器 @click 也调它，保证点树任意处都能接管键盘。
 function focusTree(): void { treeScrollEl.value?.focus({ preventScroll: true }) }
 
-// 行点击：聚焦该行（键盘从此接管）+ 目录切展开/折叠、文件预览。
+// 行点击：聚焦该行（键盘从此接管）+ 目录【钻入】该目录视图、文件预览。
+// chevron 才是原地展开（Q4：全端统一单击钻入 —— 手机无双击，双套语义必漂移）。
 // suppressClick 让长按开菜单后随之而来的 tap 不再触发。
 let suppressClick = false
 function onRowClick(node: TreeNode): void {
   if (suppressClick) { suppressClick = false; return }
   focusedRel.value = node.rel
   focusTree()
-  if (node.entry.isDir) void toggleNode(node)
+  if (node.entry.isDir) drillTo(node.rel)
   else void previewTreeFile(node)
 }
 // 长按（触屏）→ 上下文菜单；滚动（pointermove 超阈值）取消，不误触发。
@@ -549,7 +596,12 @@ async function onTreeKeydown(e: KeyboardEvent): Promise<void> {
       break
     case 'Enter': case 'o':
       e.preventDefault()
-      if (node) { if (node.entry.isDir) void toggleNode(node); else void previewTreeFile(node) }
+      // 与行单击同语义：目录=钻入（chevron/h/l 才是原地展开）
+      if (node) { if (node.entry.isDir) drillTo(node.rel); else void previewTreeFile(node) }
+      break
+    case 'Backspace':
+      e.preventDefault()
+      void goBack() // 钻入来路：上一视图根
       break
     case 'a': e.preventDefault(); void startCreate(targetDirOf(node), 'file'); break
     case 'A': e.preventDefault(); void startCreate(targetDirOf(node), 'dir'); break
@@ -567,7 +619,8 @@ async function onTreeKeydown(e: KeyboardEvent): Promise<void> {
 const CHEATS: { k: string; d: string }[] = [
   { k: 'j / k', d: '上下移动' },
   { k: 'h / l', d: '折叠 / 展开（或跳父/进子）' },
-  { k: 'Enter', d: '打开（目录展开 / 文件预览）' },
+  { k: 'Enter', d: '打开（目录钻入 / 文件预览）' },
+  { k: 'Backspace', d: '返回上一目录视图' },
   { k: 'a / A', d: '新建 文件 / 目录' },
   { k: 'r', d: '重命名' },
   { k: 'd', d: '删除' },
@@ -647,11 +700,12 @@ function searchAbsPath(entry: SearchEntry): string {
   const base = (treeCwd.value || props.cwd || '').replace(/\/+$/, '')
   return base ? `${base}/${entry.rel}` : entry.rel
 }
-// Click a FILE hit → preview by its rel path. Click a DIR hit → browse into it + clear search.
+// Click a FILE hit → preview by its rel path. Click a DIR hit → 钻入该目录（视图根重定位 +
+// 清搜索），不再回主树内定位展开 —— 深目录里那一下会把视野扯走，且没有来路。
 function onSearchHit(entry: SearchEntry): void {
   if (entry.isDir) {
     treeQuery.value = ''
-    void revealPath(entry.rel)
+    drillTo(entry.rel)
   } else {
     void previewRel(entry.name, searchAbsPath(entry), entry.rel)
   }
@@ -680,8 +734,19 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   previewLoading.value = true
   preview.value = { name, absPath, rel, result: { kind: 'text', text: '' } }
   try {
-    const result = await filesRaw(props.sessionId, rel, props.cwd)
-    preview.value = { name, absPath, rel, result }
+    // docx/pdf 走独立取数：普通 /files/raw 分支对二进制只回 {binary:true} 哨兵——
+    // 取 download 分支的真字节，交给客户端渲染器（DocxPreview / PdfPreview）。
+    // pptx 走服务端 libreoffice 转 pdf（&pdf=1，缓存命中即时）后复用 PdfPreview。
+    const ext = fileExt(name)
+    if (ext === 'docx' || ext === 'pdf' || ext === 'pptx') {
+      const r = await filesRawBytes(props.sessionId, rel, props.cwd, { convertPdf: ext === 'pptx' })
+      preview.value = r.ok
+        ? { name, absPath, rel, result: { kind: ext === 'docx' ? 'docx' : 'pdf', data: r.data, size: r.size } }
+        : { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
+    } else {
+      const result = await filesRaw(props.sessionId, rel, props.cwd)
+      preview.value = { name, absPath, rel, result }
+    }
   } finally {
     previewLoading.value = false
   }
@@ -836,7 +901,7 @@ function reanchor(): void {
   searching.value = false
   closePreview()
   if (props.mode === 'recent') void loadRecent()
-  else { void loadRoot(); void loadRecent() } // tree also loads recent → agent-edit highlight
+  else { void loadView(); void loadRecent() } // tree also loads recent → agent-edit highlight
 }
 watch(() => props.sessionId, reanchor)
 watch(() => props.cwd, reanchor)
@@ -845,7 +910,7 @@ watch(() => props.cwd, reanchor)
 // "agent just touched this" highlight (see recentEditedAt). recent mode only needs the list.
 onMounted(() => {
   if (props.mode === 'recent') { void loadRecent(); return }
-  void loadRoot(); void loadRecent(); void loadUploadLimit() // tree: 也预取上传限额
+  void loadView(); void loadRecent(); void loadUploadLimit() // tree: 也预取上传限额
 })
 
 defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
@@ -928,22 +993,42 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
         class="shrink-0 border-b border-border/40 px-2 py-1.5"
       />
 
-      <!-- root header：cwd 名 + 绝对路径 + 操作（浏览模式）——嵌套树下钻靠就地展开，不需面包屑 -->
+      <!-- root header：钻入导航（返回 + 面包屑）+ 操作（浏览模式）——工具条作用于当前视图根 -->
       <div v-show="!treeQuery.trim()" class="shrink-0 flex flex-col border-b border-border">
         <div class="flex items-center gap-1 px-2 py-1.5">
-          <Folder class="size-3.5 shrink-0 text-primary/80" />
-          <span class="min-w-0 flex-1 text-[0.72rem] font-medium text-foreground truncate" :title="treeCwd">{{ treeCwd ? baseName(treeCwd) : '目录树' }}</span>
+          <button
+            v-if="canGoBack"
+            class="shrink-0 p-1 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            type="button" title="返回上一目录（Backspace）"
+            data-testid="fp-tree-back"
+            @click="goBack"
+          ><ChevronRight class="size-4 rotate-180" /></button>
+          <Folder class="size-3.5 shrink-0 text-primary/80" :class="{ 'opacity-0': treeRootRel }" />
+          <!-- 面包屑：根段=回全树；每段可跳（压返回栈） -->
+          <nav class="min-w-0 flex-1 flex items-center gap-0.5 overflow-x-auto" data-testid="fp-tree-crumbs" aria-label="目录路径">
+            <template v-for="(c, i) in crumbs" :key="c.rel">
+              <button
+                class="shrink-0 text-[0.72rem] rounded px-1 py-0.5 hover:bg-muted/50 transition-colors"
+                :class="i === crumbs.length - 1 ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
+                type="button"
+                :data-testid="`fp-crumb-${c.rel || 'root'}`"
+                :title="c.rel ? (treeCwd.replace(/\/+$/, '') + '/' + c.rel) : treeCwd"
+                @click="i === crumbs.length - 1 ? undefined : reRoot(c.rel, true)"
+              >{{ c.name }}</button>
+              <ChevronRight v-if="i < crumbs.length - 1" class="size-3 shrink-0 text-muted-foreground/40" />
+            </template>
+          </nav>
           <button
             class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
-            type="button" title="在根目录新建文件"
+            type="button" title="在当前目录新建文件"
             data-testid="fp-tree-new-file"
-            @click="startCreate('', 'file')"
+            @click="startCreate(treeRootRel, 'file')"
           ><FilePlus class="size-3.5" /></button>
           <button
             class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
-            type="button" title="在根目录新建文件夹"
+            type="button" title="在当前目录新建文件夹"
             data-testid="fp-tree-new-folder"
-            @click="startCreate('', 'dir')"
+            @click="startCreate(treeRootRel, 'dir')"
           ><FolderPlus class="size-3.5" /></button>
           <button
             class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
@@ -984,9 +1069,9 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
         <div
           v-if="treeCwd"
           class="px-2 pb-1 text-[0.56rem] text-muted-foreground/50 truncate select-all"
-          :title="treeCwd"
+          :title="viewAbsPath"
           data-testid="fp-tree-cwd-abs"
-        >{{ treeCwd }}</div>
+        >{{ viewAbsPath }}</div>
       </div>
 
       <!-- 新建 文件/目录 输入条 -->
@@ -1078,8 +1163,8 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
             :data-testid="`fp-search-${e.rel}`"
           >
             <Folder v-if="e.isDir" class="size-4 shrink-0 text-primary/80" />
-            <ImageIcon v-else-if="isImage(e.name)" class="size-4 shrink-0 text-muted-foreground" />
-            <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
+            <ImageIcon v-else-if="isImage(e.name)" class="size-4 shrink-0 text-violet-500" />
+            <FileText v-else class="size-4 shrink-0" :class="catTextClass(e.name)" />
             <button
               class="min-w-0 flex-1 text-left"
               type="button"
@@ -1089,6 +1174,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
               <span class="block text-xs truncate" :class="e.isDir ? 'text-foreground font-medium' : 'text-foreground'">{{ e.name }}<span v-if="e.isDir" class="text-muted-foreground/60">/</span></span>
               <span v-if="parentRel(e.rel)" class="block text-[0.58rem] text-muted-foreground/60 truncate">{{ parentRel(e.rel) }}</span>
             </button>
+            <!-- 文件类型角标：扩展名 + 类别同色（catOf SSOT），扫一眼可分 md/go/png/… -->
+            <span
+              v-if="!e.isDir"
+              class="shrink-0 rounded px-1 py-px text-[0.54rem] font-medium uppercase leading-none tabular-nums"
+              :class="catBadgeClass(e.name)"
+              :data-testid="`fp-search-type-${e.rel}`"
+            >{{ fileExt(e.name) || '?' }}</span>
             <span v-if="!e.isDir" class="text-[0.58rem] text-muted-foreground/70 tabular-nums shrink-0">{{ fmtSize(e.size) }}</span>
             <button
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
@@ -1141,25 +1233,34 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
                 @pointerdown.stop
               />
             </div>
-            <!-- 常规行：整行可点（大触控区，修"箭头点不中"）——目录切展开/折叠，文件预览 -->
+            <!-- 常规行：目录行单击=钻入、文件行=预览；chevron 才是原地展开（Q4 全端统一）。
+                 缩进包在外层容器上，chevron/行钮各占独立点击区（触控目标分离）。 -->
             <template v-else>
-              <button
-                type="button"
-                class="min-w-0 flex-1 flex items-center gap-1.5 py-1.5 text-left"
-                :style="{ paddingLeft: `${6 + n.depth * 14}px` }"
-                :data-testid="`fp-tree-row-${n.rel}`"
-                @click="onRowClick(n)"
-              >
-                <span v-if="n.entry.isDir" class="shrink-0 w-4 flex items-center justify-center text-muted-foreground">
+              <div class="min-w-0 flex-1 flex items-center" :style="{ paddingLeft: `${6 + n.depth * 14}px` }">
+                <button
+                  v-if="n.entry.isDir"
+                  type="button"
+                  class="shrink-0 w-5 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded"
+                  :title="n.expanded ? '折叠（原地）' : '展开（原地，不钻入）'"
+                  :data-testid="`fp-tree-caret-${n.rel}`"
+                  @click.stop="toggleNode(n)"
+                >
                   <Loader2 v-if="n.loading" class="size-3.5 animate-spin" />
                   <ChevronRight v-else class="size-3.5 transition-transform" :class="{ 'rotate-90': n.expanded }" />
-                </span>
-                <span v-else class="shrink-0 w-4"></span>
-                <Folder v-if="n.entry.isDir" class="size-4 shrink-0 text-primary/80" />
-                <ImageIcon v-else-if="isImage(n.entry.name)" class="size-4 shrink-0 text-muted-foreground" />
-                <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(n) ? 'text-primary/80' : ''" />
-                <span class="min-w-0 flex-1 truncate text-xs" :class="n.entry.isDir ? 'text-foreground font-medium' : 'text-foreground'">{{ n.entry.name }}<span v-if="n.entry.isDir" class="text-muted-foreground/60">/</span></span>
-              </button>
+                </button>
+                <span v-else class="shrink-0 w-5"></span>
+                <button
+                  type="button"
+                  class="min-w-0 flex-1 flex items-center gap-1.5 py-1.5 text-left"
+                  :data-testid="`fp-tree-row-${n.rel}`"
+                  @click="onRowClick(n)"
+                >
+                  <Folder v-if="n.entry.isDir" class="size-4 shrink-0 text-primary/80" />
+                  <ImageIcon v-else-if="isImage(n.entry.name)" class="size-4 shrink-0 text-violet-500" />
+                  <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(n) ? 'text-primary/80' : catTextClass(n.entry.name)" />
+                  <span class="min-w-0 flex-1 truncate text-xs" :class="n.entry.isDir ? 'text-foreground font-medium' : 'text-foreground'">{{ n.entry.name }}<span v-if="n.entry.isDir" class="text-muted-foreground/60">/</span></span>
+                </button>
+              </div>
               <!-- agent 刚碰过徽标 / 文件大小 -->
               <span v-if="recentEditedAt(n)" class="shrink-0 px-1 text-[0.56rem] text-primary/80 tabular-nums" title="agent 最近修改">{{ relTime(recentEditedAt(n)!) }}</span>
               <span v-else-if="!n.entry.isDir" class="shrink-0 px-1 text-[0.56rem] text-muted-foreground/70 tabular-nums opacity-0 group-hover:opacity-100">{{ fmtSize(n.entry.size) }}</span>
@@ -1183,7 +1284,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
-          <span class="min-w-0 flex-1 text-xs font-medium truncate text-foreground" :title="preview.absPath">{{ preview.name }}</span>
+          <span class="min-w-0 flex-1 text-xs font-medium truncate text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title">{{ preview.name }}</span>
           <!-- 复制内容 (primary — a content preview's copy means "copy what I'm reading") -->
           <button
             v-if="preview.result.kind === 'text'"
@@ -1223,10 +1324,12 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
         </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :render-src="previewRenderSrc" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
+          <DocxPreview v-else-if="preview.result.kind === 'docx'" :name="preview.name" :data="preview.result.data" />
+          <PdfPreview v-else-if="preview.result.kind === 'pdf'" :name="preview.name" :data="preview.result.data" />
           <div v-else-if="preview.result.kind === 'binary'" class="flex flex-col items-center justify-center gap-2 h-full px-4 text-center">
             <Download class="size-7 text-muted-foreground/60" />
             <p class="text-xs text-muted-foreground">二进制文件，无法预览</p>

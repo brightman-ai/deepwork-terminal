@@ -24,6 +24,7 @@ import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { renderMarkdown } from '@terminal/utils/markdown'
 import { highlightCode, addCopyButtons, renderDiagrams, renderMath, loadHljs } from '@terminal/utils/markdownEnhance'
+import { filesRawImageUrl } from '@terminal/api/files'
 
 const props = defineProps<{
   name: string
@@ -31,6 +32,10 @@ const props = defineProps<{
   path?: string
   /** /files/raw?…&render=1 URL for .html/.htm — enables the 源码/渲染 toggle when present. */
   renderSrc?: string
+  /** Session identity for doc-relative image resolution (→ /files/raw URLs). */
+  sessionId?: string
+  /** Session cwd — anchors the raw URL exactly like the preview's own fetch. */
+  cwd?: string
 }>()
 const emit = defineEmits<{
   (e: 'navigate', absPath: string): void
@@ -71,7 +76,18 @@ watch(() => [props.name, props.renderSrc], () => { htmlRendered.value = false })
 const showHtmlFrame = computed(() => canRenderHtml.value && htmlRendered.value)
 
 // ── markdown pipeline ──────────────────────────────────────────────────────────────
-const rendered = computed(() => (kind.value === 'markdown' ? renderMarkdown(props.text) : { html: '', toc: [] }))
+// Doc-relative images (`fig.png`, `../a/fig.png`) resolve against the doc's dir — the same
+// joinPath the wikilink nav uses — into an authed /files/raw URL the <img> can actually fetch.
+// Without a sessionId there is no URL to build: the href stands verbatim (legacy behaviour).
+const resolveImage = computed<((href: string) => string) | undefined>(() => {
+  if (!props.sessionId) return undefined
+  return (href: string): string => {
+    const decoded = decodeURIComponent(href)
+    const abs = decoded.startsWith('/') ? decoded : joinPath(docDir(), decoded)
+    return filesRawImageUrl(props.sessionId as string, abs, props.cwd)
+  }
+})
+const rendered = computed(() => (kind.value === 'markdown' ? renderMarkdown(props.text, { resolveImage: resolveImage.value }) : { html: '', toc: [] }))
 const mdHtml = computed(() => rendered.value.html)
 const toc = computed(() => rendered.value.toc)
 
@@ -235,6 +251,21 @@ function wireImages(root: HTMLElement): void {
     if (img.dataset.wired === '1') return
     img.dataset.wired = '1'
     img.addEventListener('click', () => { lightboxSrc.value = img.src })
+    // A broken reference (moved file, >preview-size-cap image, bad path) would otherwise be a
+    // silent torn-image icon. Swap in a named placeholder so the reader knows WHAT is missing
+    // and that the rest of the doc is unaffected.
+    img.addEventListener('error', () => {
+      if (img.dataset.broken === '1') return
+      img.dataset.broken = '1'
+      const note = document.createElement('div')
+      note.className = 'dw-img-missing'
+      let label = img.getAttribute('alt') || ''
+      if (!label) {
+        try { label = decodeURIComponent(new URL(img.src, location.href).pathname.split('/').pop() || '') } catch { /* keep empty */ }
+      }
+      note.textContent = `图片未加载（可能已被移动或超出预览大小上限）：${label || '未命名图片'}`
+      img.replaceWith(note)
+    })
   })
 }
 
@@ -710,7 +741,9 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
 
 /* ── image lightbox ── */
 .fp-lightbox {
-  position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+  /* z 必须盖过抽屉（scrim 300）——首版 40 在分栏下被抽屉压住，图只显半边（同 docx-zoom 的
+     2026-09-07 修复）；500 = 抽屉家族之上、fab(2500) 之下。 */
+  position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center;
   background: rgba(4, 3, 8, 0.92); padding: 16px;
 }
 .fp-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
@@ -812,6 +845,11 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
 .fp-md :deep(th) { background: var(--fp-surface); color: var(--fp-heading); font-weight: 600; }
 .fp-md :deep(hr) { border: none; border-top: 1px solid var(--fp-border); margin: 1.1em 0; }
 .fp-md :deep(img) { max-width: 100%; border-radius: 6px; cursor: zoom-in; }
+/* broken image reference → named placeholder (injected by wireImages' error pass) */
+.fp-md :deep(.dw-img-missing) {
+  margin: 0.6em 0; padding: 0.45em 0.8em; border: 1px dashed var(--fp-border); border-radius: 8px;
+  font-size: 0.72rem; color: var(--fp-muted); background: var(--fp-surface-soft);
+}
 /* in-document find highlight */
 .fp-md :deep(mark.dw-find), .fp-code :deep(mark.dw-find) { background: var(--fp-mark); color: inherit; border-radius: 2px; }
 .fp-md :deep(mark.dw-find.is-current), .fp-code :deep(mark.dw-find.is-current) { background: var(--fp-mark-on); color: var(--fp-mark-on-fg); }

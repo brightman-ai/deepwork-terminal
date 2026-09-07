@@ -57,12 +57,22 @@ function slugify(text: string, used: Map<string, number>): string {
   return n === 0 ? base : `${base}-${n}`
 }
 
+export interface RenderMarkdownOpts {
+  /**
+   * Rewrites an image href that is NOT an external URL (http:, data:, …) into a fetchable
+   * src. Doc-relative references (`fig.png`, `../img/a.png`) resolve against the FILE's
+   * directory by the caller, which knows it — the pipeline only sees markdown text.
+   * Absent/unhandled → the href is left verbatim (previous behaviour).
+   */
+  resolveImage?: (href: string) => string
+}
+
 /**
  * renderMarkdown parses `src` to sanitised HTML + a flat TOC. A FRESH Marked instance (and
  * fresh toc/slug state) per call keeps concurrent/repeated renders isolated — no shared mutable
  * renderer state to race.
  */
-export function renderMarkdown(src: string): RenderedMarkdown {
+export function renderMarkdown(src: string, opts?: RenderMarkdownOpts): RenderedMarkdown {
   const toc: TocItem[] = []
   const usedSlugs = new Map<string, number>()
   const marked = new Marked({ gfm: true, breaks: false })
@@ -153,6 +163,19 @@ export function renderMarkdown(src: string): RenderedMarkdown {
         }
         // Relative path / bare .md → internal doc link; the reader resolves + opens it in-app.
         return `<a class="dw-link" data-internal="1" data-href="${escapeHtml(href)}">${inner}</a>`
+      },
+      // Images: doc-relative refs (`fig.png`) resolve against the file's dir by the CALLER's
+      // resolveImage (the pipeline has no path context). Without one — or for external URLs —
+      // the href stands verbatim, which against the SPA base is how relative images used to 404.
+      image(token: Tokens.Image) {
+        const href = token.href || ''
+        const external = /^[a-z][a-z0-9+.-]*:/i.test(href)
+        let src = href
+        if (!external && opts?.resolveImage) {
+          const resolved = opts.resolveImage(href)
+          if (resolved) src = resolved
+        }
+        return `<img class="dw-img" src="${escapeHtml(src)}" alt="${escapeHtml(token.text ?? '')}">`
       },
       blockquote(token: Tokens.Blockquote) {
         const body = this.parser.parse(token.tokens)

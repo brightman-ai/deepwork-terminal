@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -468,6 +469,41 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	if info.IsDir() {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "is a directory"})
+		return
+	}
+
+	// pdf=1：pptx 预览（2026-09-07）。客户端没有可用的 pptx 渲染器，服务端用 libreoffice
+	// 转 pdf、前端复用既有 PdfPreview——版式/图保真，代价是首次 1–3s 转换（缓存命中即时）。
+	// 与 download 分支互斥：这里回的是转换产物（inline pdf），不是原文件字节。
+	if r.URL.Query().Get("pdf") == "1" {
+		if !isPptxExt(strings.ToLower(filepath.Ext(target))) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pdf conversion only supports pptx"})
+			return
+		}
+		if info.Size() > pptxConvertMaxBytes {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "file too large to convert"})
+			return
+		}
+		pdfPath, cerr := s.convertToPDF(r.Context(), target, info)
+		if cerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "conversion failed: " + cerr.Error()})
+			return
+		}
+		f, ferr := os.Open(pdfPath)
+		if ferr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "converted file vanished"})
+			return
+		}
+		defer f.Close()
+		fi, _ := f.Stat()
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-cache") // 源文件可变（mtime 进缓存键），别钉住
+		if fi != nil {
+			w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, f)
 		return
 	}
 
