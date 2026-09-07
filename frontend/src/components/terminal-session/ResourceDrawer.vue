@@ -659,6 +659,12 @@ function onResizeEnd(): void {
 function onPanelMousedown(e: MouseEvent): void {
   const t = e.target as HTMLElement | null
   if (t?.closest('input, textarea, select, button, a, [contenteditable], .filepreview')) return
+  // 放行的 SSOT = CSS 自己。面板整体 user-select:none，任何显式开 text 的区域（docx 正文、
+  // pdf 的失败文案、预览标题…）就是"我要能被选中"的声明；blanket preventDefault 会让它们
+  // 光有 CSS 却拖不动 —— 2026-09-07「docx/标题不能复制」的真根因（CSS 改了没用，因为
+  // mousedown 先被吞了）。按计算样式放行，新预览器不必回来改这串类名白名单。
+  const us = t ? (getComputedStyle(t).userSelect || (getComputedStyle(t) as unknown as Record<string, string>).webkitUserSelect) : ''
+  if (us && us !== 'none') return
   e.preventDefault()
 }
 

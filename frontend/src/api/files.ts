@@ -84,6 +84,8 @@ export interface SearchResult {
 export type RawResult =
   | { kind: 'text'; text: string }
   | { kind: 'image'; url: string }
+  | { kind: 'docx'; data: ArrayBuffer; size: number }
+  | { kind: 'pdf'; data: ArrayBuffer; size: number }
   | { kind: 'binary'; size: number }
   | { kind: 'tooLarge'; size: number }
   // error carries WHY: the HTTP status + the backend's `error` string, so the preview can
@@ -271,6 +273,24 @@ export function filesRawRenderUrl(sessionId: string, relPath: string, cwd?: stri
   return cliApi(path)
 }
 
+/**
+ * GET /files/raw?… — a plain URL (not a fetch) for a markdown preview's RELATIVE image
+ * references. Same shape as filesRawRenderUrl (an <img> cannot carry the X-CLI-Auth header,
+ * so the auth code rides the query string; under pro's cookie middleware the param is
+ * ignored) but WITHOUT render=1 — that branch serves html only and pins the isolation CSP.
+ * The default branch streams image/* inline (≤ rawPreviewMaxBytes); an oversized/moved file
+ * answers JSON, the <img> fails to decode, and the reader's error pass swaps in a placeholder.
+ */
+export function filesRawImageUrl(sessionId: string, relPath: string, cwd?: string): string {
+  if (!sessionId) return ''
+  const { getAuthCode } = useCliAuth()
+  let path = withScope('/files/raw', sessionId, cwd)
+  if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+  const code = getAuthCode()
+  if (code) path += `&auth=${encodeURIComponent(code)}`
+  return cliApi(path)
+}
+
 // NOTE: the 目录树 upload + download now go through the CHUNKED protocol (chunkedUpload* below)
 // and the direct-URL streaming download (filesDownloadUrl below) respectively. The former
 // single-shot filesUploadToDir (/paste-upload with a dir field) and blob-buffering filesDownload
@@ -372,6 +392,54 @@ export function filesDownloadUrl(sessionId: string, relPath: string, cwd?: strin
   const code = getAuthCode()
   if (code) path += `&auth=${encodeURIComponent(code)}`
   return cliApi(path)
+}
+
+export type RawBytesResult =
+  | { ok: true; data: ArrayBuffer; size: number }
+  | { ok: false; status: number; reason: string }
+
+/**
+ * GET /files/raw?…&pdf=1 — the SERVER-CONVERTED pdf of a pptx (libreoffice headless, cached by
+ * path+mtime+size server-side). Same auth shapes as the other raw URLs. First open pays the
+ * 1–3s conversion; later opens are cache hits.
+ */
+export function filesConvertedPdfUrl(sessionId: string, relPath: string, cwd?: string): string {
+  if (!sessionId) return ''
+  const { getAuthCode } = useCliAuth()
+  let path = withScope('/files/raw', sessionId, cwd)
+  if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+  path += '&pdf=1'
+  const code = getAuthCode()
+  if (code) path += `&auth=${encodeURIComponent(code)}`
+  return cliApi(path)
+}
+
+/**
+ * GET /files/raw?…&download=1 — the SAME streaming bytes the 下载 button gets, but fetched
+ * so the preview can RENDER them. Needed for formats the preview body shapes can't carry:
+ * a .docx is a zip (NUL bytes) so the plain branch answers the {binary:true} sentinel, never
+ * the bytes. Auth rides cliFetch's header on top of the download URL. Errors mirror filesRaw
+ * ({status, reason}) so the preview's failure explanations stay uniform.
+ */
+export async function filesRawBytes(sessionId: string, relPath: string, cwd?: string, opts?: { convertPdf?: boolean }): Promise<RawBytesResult> {
+  if (!sessionId) return { ok: false, status: 0, reason: '' }
+  const { cliFetch } = useCliAuth()
+  try {
+    // convertPdf: pptx → 服务端 libreoffice 转 pdf 的字节（缓存命中即时），喂给 PdfPreview。
+    const url = opts?.convertPdf
+      ? filesConvertedPdfUrl(sessionId, relPath, cwd)
+      : filesDownloadUrl(sessionId, relPath, cwd)
+    const resp = await cliFetch(url)
+    if (!resp.ok) {
+      let reason = ''
+      try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }
+      return { ok: false, status: resp.status, reason }
+    }
+    const buf = await resp.arrayBuffer()
+    return { ok: true, data: buf, size: buf.byteLength }
+  } catch {
+    return { ok: false, status: 0, reason: '' }
+  }
 }
 
 // ── 目录树 CRUD（POST /files/{mkdir,create,rename,delete}）───────────────────────────────
