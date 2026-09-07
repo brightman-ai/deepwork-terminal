@@ -736,6 +736,12 @@ function onTerminalSearchPrevious(term: string, options: TerminalFindOptions): v
 // 再决定开还是聚焦**。反过来写（先看搜索条开没开就早退）会让第二次 Cmd+F 走不到 preventDefault，
 // 按键漏给浏览器，于是屏幕上同时出现两个查找框（Human 实测截图）。被接管的快捷键必须每一次都吃掉。
 function onFindShortcutKeydown(e: KeyboardEvent): void {
+  // 复制模式开着 = 键盘整个归那个视口。这三个 surface 级监听器都挂在 document 捕获阶段、且在
+  // surface 挂载时就注册（早于复制模式打开），所以不让位就会抢在它前面动作 —— 而这里只
+  // stopPropagation（同节点的其它监听器照收），症状是**两个搜索框同时开**：终端搜索条 + 复制模式
+  // 自己的搜索（2026-09-08 实测；Linux 上 findInTerminal 默认 Ctrl+Shift+F，正是复制模式里的搜索键）。
+  // 让位 = 不碰 event，让它继续走到 CopyModeView。
+  if (copyModeOpen.value) return
   handleFindShortcut(
     e,
     {
@@ -2301,6 +2307,8 @@ function onDesktopComposeSend(text: string) {
  *  binding/action. Desktop-only: mobile has no keyboard to bind, it opens compose from its own
  *  bottom-bar button instead. */
 function onComposeShortcutKeydown(e: KeyboardEvent): void {
+  // 同上：复制模式开着就让位，否则 prefix+I 会在只读回看里把输入条掀起来。
+  if (copyModeOpen.value) return
   if (isMobile.value || !props.active) return
   if (!matchesBinding(e, bindingFor(shortcutsConfig.value, 'toggleComposeDesktop'))) return
   e.preventDefault()
@@ -2590,7 +2598,7 @@ function closeCopyMode(): void {
   void nextTick(() => xtermRef.value?.terminal?.()?.focus())
 }
 
-defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, openCopyMode })
+defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, openCopyMode, copyModeOpen })
 </script>
 
 <style scoped>

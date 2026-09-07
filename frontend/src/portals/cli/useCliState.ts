@@ -199,6 +199,8 @@ export function useCliState(runtime: PortalRuntimeResult) {
     onNew: quickCreateTab,
     onClose: (tabId: string) => { void closeTab(tabId) },
     leaderEnabled: () => !(activeTab.value ? surfaceRefs[activeTab.value.id]?.tmuxAttached : false),
+    // 复制模式开着时整层让位（键盘归那个视口）。和 leaderEnabled 一样，只有壳拿得到表面的状态。
+    copyModeActive: () => !!(activeTab.value ? surfaceRefs[activeTab.value.id]?.copyModeOpen : false),
     onOverview: toggleOverview,
     onRename: startRenameTab,
     // 前缀 + `[` = 进入只读回看，和 tmux 的 copy-mode 同一个键。动作住在终端表面上（只有它拿得到

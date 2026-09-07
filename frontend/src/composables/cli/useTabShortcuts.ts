@@ -60,6 +60,15 @@ export interface TabShortcutsAdapter {
   onRename?: (id: string) => void
   /** 进入只读回看（复制模式）。不提供 = leader + `[` 原样放行给 shell。 */
   onCopyMode?: () => void
+  /**
+   * 只读回看（复制模式）此刻是否开着 —— 开着就**整层让位**。
+   *
+   * 那个视口自己在 document 捕获阶段把键全吞（CopyModeView 的约束①）。但这一层也挂在 document
+   * 捕获阶段、而且注册得更早，于是 leader（默认 Ctrl+B）和 findInTerminal（默认 Ctrl+F）会被截在
+   * 半路 `stopImmediatePropagation` 掉 —— 那正是 tmux copy-mode 里翻页的两个主力键，使用者按下去
+   * 毫无反应（2026-09-08 实报）。不提供 = 维持旧行为（不让位）。
+   */
+  copyModeActive?: () => boolean
 }
 
 interface ParsedBinding {
@@ -288,6 +297,14 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
 
   function handleKeydown(e: KeyboardEvent): void {
     if (!adapter.isActive()) return
+
+    // 复制模式开着 = 键盘整个归那个视口，这一层一个键都不碰。让位的方式是**只 return，不
+    // preventDefault**：事件继续沿捕获链走到 CopyModeView（注册更晚的那个 document 监听器）。
+    // 等待中的 leader 也要一起清掉，否则退出复制模式后还挂着半截前缀。
+    if (adapter.copyModeActive?.()) {
+      clearLeader()
+      return
+    }
     const orderedIds = adapter.orderedTabIds()
     if (orderedIds.length === 0) return
 

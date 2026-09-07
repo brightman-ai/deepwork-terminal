@@ -220,6 +220,21 @@ function onKeydown(e: KeyboardEvent): void {
 
   e.preventDefault()
   e.stopPropagation()
+
+  // ── tmux copy-mode 的翻页键（vi 表）─────────────────────────────────────────────────────────
+  // 进这个视口的人多半带着 tmux 的手感：C-u/C-d 半页、C-b/C-f 整页。下面那张表按的是**裸键**，
+  // Ctrl 组合必须先在这里分流 —— 否则落进 default 被吞掉：既不翻页也不下传，按下去像坏了
+  // （2026-09-08 用户实报「ctrl u / ctrl b 全失效」）。
+  // C-f 归还给"整页下"（tmux 语义），搜索留给 `/`、Cmd+F、C-S-f 三条路。
+  if (e.ctrlKey && !e.altKey && !e.metaKey) {
+    const k = e.key.toLowerCase()
+    if (k === 'f' && e.shiftKey) { openSearch(); return }
+    if (k === 'u') { pageBy(-0.5); return }
+    if (k === 'd') { pageBy(0.5); return }
+    if (k === 'b') { pageBy(-0.9); return }
+    if (k === 'f') { pageBy(0.9); return }
+  }
+
   switch (e.key) {
     case 'Escape':
     case 'q':
@@ -244,7 +259,8 @@ function onKeydown(e: KeyboardEvent): void {
     case 'n': stepMatch(1); break
     case 'N': stepMatch(-1); break
     default:
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') openSearch()
+      // Cmd+F 留着：mac 上"查找"是 Cmd 家族的，tmux 的 Ctrl 键位跟它不冲突。
+      if (e.metaKey && e.key.toLowerCase() === 'f') openSearch()
       // 其余一律吞掉（约束 ①）。Cmd/Ctrl+C 是例外：浏览器的复制走的是 copy 事件，
       // 不依赖这里放行 keydown，所以吞掉它不影响复制。
   }
@@ -301,6 +317,9 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
       <span v-if="title" class="copy-mode__title">{{ title }}</span>
       <span class="copy-mode__status" data-testid="copy-mode-status">{{ statusText }}</span>
       <span class="copy-mode__spacer" />
+      <span class="copy-mode__keys" data-testid="copy-mode-keys">
+        翻页 PgUp/PgDn·C-b/C-f　半页 C-u/C-d　单行 j/k　首尾 g/G　匹配 n/N
+      </span>
       <span v-if="atOldest" class="copy-mode__hint">已到最早</span>
       <button class="copy-mode__btn" data-testid="copy-mode-search" @click="openSearch">搜索 /</button>
       <button class="copy-mode__btn" data-testid="copy-mode-close" @click="emit('close')">退出 Esc</button>
@@ -401,6 +420,18 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
 .copy-mode__status { color: #8b949e; }
 .copy-mode__spacer { flex: 1 1 auto; }
 .copy-mode__hint { color: #8b949e; }
+
+/* 键位图例。这个视口的键是一张**显式白名单**（表外的键一律吞掉），UI 上不写出来就只能靠猜 ——
+   用户按 C-u/C-b 没反应，第一反应是"坏了"而不是"没这个键"。手机没有物理键盘，窄屏收起。 */
+.copy-mode__keys {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #6e7681;
+  font-size: 11px;
+}
+@media (max-width: 860px) { .copy-mode__keys { display: none; } }
 
 .copy-mode__btn {
   padding: 2px 8px;
