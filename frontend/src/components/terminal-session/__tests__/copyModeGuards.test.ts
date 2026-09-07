@@ -37,12 +37,67 @@ describe('约束①：进了复制模式，按键不许漏进 PTY', () => {
     expect(view).toContain("document.removeEventListener('keydown', onKeydown, true)")
   })
 
+  it('【全局快捷键层让位】—— 它注册更早、同在捕获阶段，不让位就把键截在半路', () => {
+    // useTabShortcuts 也挂 document 捕获阶段，且在 app 挂载时就注册（早于复制模式打开），所以它
+    // 先拿到事件：leader（默认 Ctrl+B）和 findInTerminal（默认 Ctrl+F）会被 stopImmediatePropagation
+    // 掉，CopyModeView 永远收不到 —— 而这两个正是 tmux copy-mode 的翻页主力（2026-09-08 实报）。
+    const shortcuts = readFileSync(new URL('../../../composables/cli/useTabShortcuts.ts', import.meta.url), 'utf8')
+    const fn = shortcuts.slice(shortcuts.indexOf('function handleKeydown'))
+    const head = fn.slice(0, fn.indexOf('const armed'))
+    expect(head).toContain('copyModeActive')
+    // 让位必须是【只 return】：一旦 preventDefault，事件就到不了复制模式，等于换一种方式失效。
+    expect(head.slice(head.indexOf('copyModeActive'))).not.toContain('preventDefault')
+  })
+
+  it('【surface 级监听器也让位】—— 它们只 stopPropagation，不让位就是"两个搜索框同时开"', () => {
+    // findInTerminal 在 Linux 上默认 Ctrl+Shift+F，正是复制模式里的搜索键；它的 handler 只
+    // stopPropagation（同节点的 CopyModeView 监听器照样收到），于是两个搜索 UI 一起冒出来。
+    for (const fnName of ['function onFindShortcutKeydown', 'function onComposeShortcutKeydown']) {
+      const fn = surface.slice(surface.indexOf(fnName))
+      expect(fn.slice(0, fn.indexOf('\n}'))).toContain('copyModeOpen.value')
+    }
+  })
+
+  it('壳把表面的 copyModeOpen 接到 adapter 上（不接 = 上面那条守卫永远是 false）', () => {
+    const state = readFileSync(new URL('../../../portals/cli/useCliState.ts', import.meta.url), 'utf8')
+    expect(state).toContain('copyModeActive')
+    expect(state).toContain('copyModeOpen')
+    expect(surface).toContain('copyModeOpen })')   // defineExpose
+  })
+
   it('默认分支也 preventDefault + stopPropagation，而不是只处理认识的键', () => {
     // "只拦我认识的键"= 剩下的全部漏进 PTY。默认必须是吞，例外才是放行。
     const handler = view.slice(view.indexOf('function onKeydown'))
     const head = handler.slice(0, handler.indexOf('switch ('))
     expect(head).toContain('e.preventDefault()')
     expect(head).toContain('e.stopPropagation()')
+  })
+})
+
+describe('tmux 的翻页手感：Ctrl 组合必须在 default 之前分流', () => {
+  // 白名单式的 handler 有个安静的失败模式：没列的键既不执行也不下传，按下去和"功能坏了"
+  // 无法区分。C-u/C-d/C-b/C-f 是 tmux vi copy-mode 的翻页主力，漏掉它们=大多数使用者一进来
+  // 就撞墙（2026-09-08 用户实报）。
+  const handler = view.slice(view.indexOf('function onKeydown'))
+  const beforeSwitch = handler.slice(0, handler.indexOf('switch ('))
+
+  it('四个键都在 switch 之前处理掉（落进 switch 就会被 default 吞）', () => {
+    for (const k of ['u', 'd', 'b', 'f']) {
+      expect(beforeSwitch).toContain(`k === '${k}'`)
+    }
+  })
+
+  it('半页 0.5 / 整页 0.9，方向成对', () => {
+    expect(beforeSwitch).toContain('pageBy(-0.5)')
+    expect(beforeSwitch).toContain('pageBy(0.5)')
+    expect(beforeSwitch).toContain('pageBy(-0.9)')
+    expect(beforeSwitch).toContain('pageBy(0.9)')
+  })
+
+  it('C-f 让位给翻页后，搜索仍有出口（/、Cmd+F、C-S-f）', () => {
+    expect(beforeSwitch).toContain('openSearch()')       // Ctrl+Shift+F
+    expect(handler).toContain("case '/':")
+    expect(handler).toContain('e.metaKey')               // Cmd+F
   })
 })
 
