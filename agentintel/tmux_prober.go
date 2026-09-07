@@ -86,8 +86,13 @@ func NewTmuxProber(inspector *ProcessInspector) *TmuxProber {
 // The single choke point for tmux I/O in this file, so the transport decision is made once
 // rather than at each call site — and so the fallback cannot be forgotten at one of them.
 func (tp *TmuxProber) run(ctx context.Context, args ...string) ([]string, error) {
-	if tp.control != nil {
+	// Whitespace-carrying args canNOT use the control transport (see argsContainWhitespace):
+	// they route straight to spawn, which passes argv verbatim.
+	if tp.control != nil && !argsContainWhitespace(args) {
 		lines, err := tp.control.run(ctx, args...)
+		if os.Getenv("DW_TMUX_DEBUG") == "1" {
+			fmt.Fprintf(os.Stderr, "DW_TMUX_DEBUG control.run args=%v lines=%d err=%v\n", args, len(lines), err)
+		}
 		if err == nil {
 			TmuxControlCommands.Inc()
 			return lines, nil
@@ -97,7 +102,13 @@ func (tp *TmuxProber) run(ctx context.Context, args ...string) ([]string, error)
 		}
 		TmuxSpawnedCommands.Inc()
 	}
+	if os.Getenv("DW_TMUX_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "DW_TMUX_DEBUG spawn %v\n", args)
+	}
 	out, err := tmuxCommandContext(ctx, args...).Output()
+	if os.Getenv("DW_TMUX_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "DW_TMUX_DEBUG spawn rc err=%v outlen=%d first=%q\n", err, len(out), strings.SplitN(string(out), "\n", 2)[0])
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -444,12 +455,36 @@ func tmuxSocketFromEnv(value string) string {
 }
 
 func sanitizedTmuxEnv(env []string) []string {
-	result := make([]string, 0, len(env))
+	result := make([]string, 0, len(env)+1)
+	hasLang := false
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "TMUX=") || strings.HasPrefix(entry, "TMUX_PANE=") {
 			continue
 		}
+		if strings.HasPrefix(entry, "LANG=") || strings.HasPrefix(entry, "LC_ALL=") {
+			hasLang = true
+		}
 		result = append(result, entry)
 	}
+	// tmux ≥3.4 sanitizes format output when NOT in a UTF-8 locale — every control char
+	// (TAB included) becomes '_' — which silently kills the tab-separated list-panes
+	// parsing (measured: LANG=C → "A_B"; LANG=C.UTF-8 → "A\tB"). A server launched from a
+	// stripped env (env -i / bare systemd) would otherwise probe dead with no error anywhere.
+	if !hasLang {
+		result = append(result, "LANG=C.UTF-8")
+	}
 	return result
+}
+
+// argsContainWhitespace reports whether any arg would survive the control-mode join
+// un-quoted. Control input is one line, re-tokenized on ANY whitespace, and tmux offers no
+// quoting there — so a -F format carrying tmuxFieldSep tabs explodes into N tokens and tmux
+// answers "parse error: -F expects an argument" (measured). Those commands must spawn.
+func argsContainWhitespace(args []string) bool {
+	for _, a := range args {
+		if strings.ContainsAny(a, " \t") {
+			return true
+		}
+	}
+	return false
 }
