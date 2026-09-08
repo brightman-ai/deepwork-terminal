@@ -86,6 +86,13 @@ export type RawResult =
   | { kind: 'image'; url: string }
   | { kind: 'docx'; data: ArrayBuffer; size: number }
   | { kind: 'pdf'; data: ArrayBuffer; size: number }
+  // 表格族：sheet = libreoffice 转出的 HTML（xlsx/xls），csv = 原文（客户端解析）。
+  // 两者渲染进同一个 SheetPreview —— 两种来源，一种观感。
+  | { kind: 'sheet'; html: string; size: number }
+  | { kind: 'csv'; text: string }
+  | { kind: 'audio'; url: string; size: number }
+  | { kind: 'zip'; entries: ZipEntry[]; truncated: boolean }
+  | { kind: 'xmind'; contentJson: string; thumbUrl: string }
   | { kind: 'binary'; size: number }
   | { kind: 'tooLarge'; size: number }
   // error carries WHY: the HTTP status + the backend's `error` string, so the preview can
@@ -404,14 +411,89 @@ export type RawBytesResult =
  * 1–3s conversion; later opens are cache hits.
  */
 export function filesConvertedPdfUrl(sessionId: string, relPath: string, cwd?: string): string {
+  return filesConvertUrl(sessionId, relPath, 'pdf', cwd)
+}
+
+/**
+ * GET /files/raw?…&convert=<target> — 服务端 libreoffice 的转换产物。目标格式由**扩展名**决定
+ * （pptx/ppt→pdf、xlsx/xls→html、doc→docx）；前端那张表在 previewFormats.ts，后端那张在
+ * convert_office.go 的 convertTargetFor —— 两边必须一致，否则就是"请求了一个后端拒绝的转换"。
+ * 首次开付 1–3s 转换，之后是缓存命中（键含 mtime+size，源改自动失效）。
+ */
+export function filesConvertUrl(sessionId: string, relPath: string, target: string, cwd?: string): string {
   if (!sessionId) return ''
   const { getAuthCode } = useCliAuth()
   let path = withScope('/files/raw', sessionId, cwd)
   if (relPath) path += `&path=${encodeURIComponent(relPath)}`
-  path += '&pdf=1'
+  path += `&convert=${encodeURIComponent(target)}`
   const code = getAuthCode()
   if (code) path += `&auth=${encodeURIComponent(code)}`
   return cliApi(path)
+}
+
+/**
+ * 转换产物**引用的内嵌图片**（xlsx 里的图表截图等）。它们与产物同在一个缓存目录、由
+ * libreoffice 命名；`<img src="xxx_html_43d2.png">` 里那个名字对浏览器毫无意义，得换成这个地址。
+ * 认证走 query（`<img>` 带不了请求头），与 filesRawImageUrl 同理。
+ */
+export function filesConvertAssetUrl(sessionId: string, relPath: string, target: string, asset: string, cwd?: string): string {
+  const base = filesConvertUrl(sessionId, relPath, target, cwd)
+  return base ? `${base}&asset=${encodeURIComponent(asset)}` : ''
+}
+
+/**
+ * GET /files/raw?…（原字节，认证在 query）—— 给 `<audio>` 用。后端按 audio/* 的 Content-Type
+ * inline 服务并支持 Range，所以进度条能拖；10MiB 的预览上限对它不适用（录音实测 71MB）。
+ */
+export function filesMediaUrl(sessionId: string, relPath: string, cwd?: string): string {
+  return filesRawImageUrl(sessionId, relPath, cwd) // 同一种形状：裸 raw + query 认证
+}
+
+export interface ZipEntry { name: string; size: number; compressed: number; isDir: boolean }
+
+/** GET /files/raw?…&zip=1 — zip/xmind 的条目清单（只读中央目录，不解压）。 */
+export async function filesZipList(sessionId: string, relPath: string, cwd?: string): Promise<{ ok: true; entries: ZipEntry[]; truncated: boolean } | { ok: false; status: number; reason: string }> {
+  if (!sessionId) return { ok: false, status: 0, reason: '' }
+  const { cliFetch } = useCliAuth()
+  let path = withScope('/files/raw', sessionId, cwd)
+  if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+  path += '&zip=1'
+  try {
+    const resp = await cliFetch(cliApi(path))
+    if (!resp.ok) {
+      let reason = ''
+      try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }
+      return { ok: false, status: resp.status, reason }
+    }
+    const body = (await resp.json()) as { entries?: ZipEntry[]; truncated?: boolean }
+    return { ok: true, entries: body.entries ?? [], truncated: !!body.truncated }
+  } catch {
+    return { ok: false, status: 0, reason: '' }
+  }
+}
+
+/** zip 家族里**一个条目**的地址（xmind 的缩略图用它喂 `<img>`）。 */
+export function filesZipEntryUrl(sessionId: string, relPath: string, entry: string, cwd?: string): string {
+  if (!sessionId) return ''
+  const { getAuthCode } = useCliAuth()
+  let path = withScope('/files/raw', sessionId, cwd)
+  if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+  path += `&entry=${encodeURIComponent(entry)}`
+  const code = getAuthCode()
+  if (code) path += `&auth=${encodeURIComponent(code)}`
+  return cliApi(path)
+}
+
+/** zip 家族里一个**文本**条目的内容（xmind 的 content.json 用它）。 */
+export async function filesZipEntryText(sessionId: string, relPath: string, entry: string, cwd?: string): Promise<string> {
+  if (!sessionId) return ''
+  const { cliFetch } = useCliAuth()
+  try {
+    const resp = await cliFetch(filesZipEntryUrl(sessionId, relPath, entry, cwd))
+    return resp.ok ? await resp.text() : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -421,13 +503,14 @@ export function filesConvertedPdfUrl(sessionId: string, relPath: string, cwd?: s
  * the bytes. Auth rides cliFetch's header on top of the download URL. Errors mirror filesRaw
  * ({status, reason}) so the preview's failure explanations stay uniform.
  */
-export async function filesRawBytes(sessionId: string, relPath: string, cwd?: string, opts?: { convertPdf?: boolean }): Promise<RawBytesResult> {
+export async function filesRawBytes(sessionId: string, relPath: string, cwd?: string, opts?: { convertPdf?: boolean; convertTo?: string }): Promise<RawBytesResult> {
   if (!sessionId) return { ok: false, status: 0, reason: '' }
   const { cliFetch } = useCliAuth()
   try {
     // convertPdf: pptx → 服务端 libreoffice 转 pdf 的字节（缓存命中即时），喂给 PdfPreview。
-    const url = opts?.convertPdf
-      ? filesConvertedPdfUrl(sessionId, relPath, cwd)
+    const target = opts?.convertTo || (opts?.convertPdf ? 'pdf' : '')
+    const url = target
+      ? filesConvertUrl(sessionId, relPath, target, cwd)
       : filesDownloadUrl(sessionId, relPath, cwd)
     const resp = await cliFetch(url)
     if (!resp.ok) {

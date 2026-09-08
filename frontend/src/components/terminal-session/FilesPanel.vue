@@ -26,6 +26,11 @@ import {
   filesSearch,
   filesRaw,
   filesRawBytes,
+  filesMediaUrl,
+  filesZipList,
+  filesZipEntryText,
+  filesZipEntryUrl,
+  filesConvertAssetUrl,
   filesRawRenderUrl,
   filesDownloadUrl,
   filesMkdir,
@@ -43,6 +48,11 @@ import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
 import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
+import SheetPreview from '@terminal/components/terminal-session/SheetPreview.vue'
+import AudioPreview from '@terminal/components/terminal-session/AudioPreview.vue'
+import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview.vue'
+import XmindPreview from '@terminal/components/terminal-session/XmindPreview.vue'
+import { CAT_LABEL, CAT_TINT, CAT_ORDER, catOf, extOf, formatFor, isImageName } from '@terminal/components/terminal-session/previewFormats'
 import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
 
 // cwd is the drawer's EFFECTIVE pane working directory, OWNED by ResourceDrawer (CHG:
@@ -72,30 +82,10 @@ async function loadRecent(): Promise<void> {
   }
 }
 
-// ── 格式分类筛选 (recent) ──
-// Group recent files by a small set of human categories so a long mixed list can be
-// filtered to "just the markdown" / "just the code" with one tap (mobile chip row).
-// image:[…] mirrors the backend's imageContentType() (files.go) — the raster types served
-// as image/* and rendered inline. Keep the two lists in step. svg stays under style (it's
-// XML, previewed as text).
-const CAT_EXT: Record<string, string[]> = {
-  doc: ['md', 'markdown', 'mdx', 'txt', 'rst', 'adoc', 'org', 'pdf', 'docx', 'pptx', 'ppt'],
-  code: ['go', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'vue', 'py', 'rs', 'rb', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'cc', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'lua', 'sql', 'proto'],
-  config: ['json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'env', 'xml', 'lock', 'dockerfile'],
-  style: ['css', 'scss', 'less', 'html', 'svg'],
-  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif'],
-}
-const CAT_LABEL: Record<string, string> = { all: '全部', doc: '文档', code: '代码', config: '配置', style: '样式', image: '图片', other: '其他' }
-// Per-category tint for icon + ext badge, keyed off the same catOf SSOT as the chips/filter —
-// one source of category truth, so a row can never claim a type the chips disagree with.
-const CAT_TINT: Record<string, string> = {
-  doc: 'text-sky-500 bg-sky-500/10',
-  code: 'text-emerald-500 bg-emerald-500/10',
-  config: 'text-amber-500 bg-amber-500/10',
-  style: 'text-pink-500 bg-pink-500/10',
-  image: 'text-violet-500 bg-violet-500/10',
-  other: 'text-muted-foreground bg-muted',
-}
+// ── 格式分类筛选 / 预览路由 ──
+// 类别、渲染器、取数方式全部来自 **一张表** previewFormats.ts。这里曾经有第二张表
+// （CAT_EXT）只管角标、而预览分支各判各的，结果是 .ppt 顶着"文档"角标却打不开 ——
+// 角标是承诺，预览是兑现，出自同一处才不会互相打脸。
 function catBadgeClass(name: string): string {
   return CAT_TINT[catOf(name)] || CAT_TINT.other
 }
@@ -104,24 +94,17 @@ function catTextClass(name: string): string {
 }
 function fileExt(name: string): string {
   if (name.toLowerCase() === 'dockerfile') return 'dockerfile'
-  const parts = name.split('.')
-  return parts.length > 1 ? (parts.pop() || '').toLowerCase() : ''
+  return extOf(name)
 }
-function catOf(name: string): string {
-  const e = fileExt(name)
-  for (const [cat, exts] of Object.entries(CAT_EXT)) if (exts.includes(e)) return cat
-  return 'other'
-}
-// isImage reuses the category SSOT (CAT_EXT.image) so the icon/preview never drift from the chips.
 function isImage(name: string): boolean {
-  return catOf(name) === 'image'
+  return isImageName(name)
 }
 const activeCat = ref('all')
 // Only surface categories that actually have files, in a stable order, each with a count.
 const recentCats = computed(() => {
   const counts: Record<string, number> = {}
   for (const f of recent.value) counts[catOf(f.name)] = (counts[catOf(f.name)] || 0) + 1
-  const order = ['doc', 'code', 'config', 'style', 'image', 'other']
+  const order = CAT_ORDER.filter((k) => k !== 'all')
   const cats = [{ key: 'all', label: CAT_LABEL.all, count: recent.value.length }]
   for (const k of order) if (counts[k]) cats.push({ key: k, label: CAT_LABEL[k], count: counts[k] })
   return cats
@@ -734,15 +717,45 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   previewLoading.value = true
   preview.value = { name, absPath, rel, result: { kind: 'text', text: '' } }
   try {
-    // docx/pdf 走独立取数：普通 /files/raw 分支对二进制只回 {binary:true} 哨兵——
-    // 取 download 分支的真字节，交给客户端渲染器（DocxPreview / PdfPreview）。
-    // pptx 走服务端 libreoffice 转 pdf（&pdf=1，缓存命中即时）后复用 PdfPreview。
-    const ext = fileExt(name)
-    if (ext === 'docx' || ext === 'pdf' || ext === 'pptx') {
-      const r = await filesRawBytes(props.sessionId, rel, props.cwd, { convertPdf: ext === 'pptx' })
-      preview.value = r.ok
-        ? { name, absPath, rel, result: { kind: ext === 'docx' ? 'docx' : 'pdf', data: r.data, size: r.size } }
-        : { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
+    // 取数方式由 previewFormats 的 fetch 决定 —— 渲染器要的形状不同（文本 / URL /
+    // ArrayBuffer / JSON），取错了就是"渲染器拿到一坨它不认识的东西"。
+    const spec = formatFor(name)
+    if (spec.fetch === 'bytes' || spec.fetch.startsWith('convert:')) {
+      const target = spec.fetch.startsWith('convert:') ? spec.fetch.slice('convert:'.length) : ''
+      // xlsx/xls → 服务端 html：拿文本而不是字节（要交给 DOMPurify 消毒后进 DOM）
+      if (target === 'html') {
+        const r = await filesRawBytes(props.sessionId, rel, props.cwd, { convertTo: 'html' })
+        preview.value = r.ok
+          ? { name, absPath, rel, result: { kind: 'sheet', html: new TextDecoder('utf-8').decode(r.data), size: r.size } }
+          : { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
+      } else {
+        const r = await filesRawBytes(props.sessionId, rel, props.cwd, target ? { convertTo: target } : undefined)
+        preview.value = r.ok
+          ? { name, absPath, rel, result: { kind: spec.kind === 'docx' ? 'docx' : 'pdf', data: r.data, size: r.size } }
+          : { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
+      }
+    } else if (spec.fetch === 'mediaUrl') {
+      preview.value = { name, absPath, rel, result: { kind: 'audio', url: filesMediaUrl(props.sessionId, rel, props.cwd), size: 0 } }
+    } else if (spec.fetch === 'zipList') {
+      const r = await filesZipList(props.sessionId, rel, props.cwd)
+      if (!r.ok) {
+        preview.value = { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
+      } else if (spec.kind === 'xmind') {
+        // xmind 就是个 zip：大纲取 content.json，导图取 XMind 自己渲染好的缩略图
+        const hasThumb = r.entries.some((e) => e.name === 'Thumbnails/thumbnail.png')
+        const json = await filesZipEntryText(props.sessionId, rel, 'content.json', props.cwd)
+        preview.value = { name, absPath, rel, result: {
+          kind: 'xmind', contentJson: json,
+          thumbUrl: hasThumb ? filesZipEntryUrl(props.sessionId, rel, 'Thumbnails/thumbnail.png', props.cwd) : '',
+        } }
+      } else {
+        preview.value = { name, absPath, rel, result: { kind: 'zip', entries: r.entries, truncated: r.truncated } }
+      }
+    } else if (spec.kind === 'csv') {
+      const result = await filesRaw(props.sessionId, rel, props.cwd)
+      preview.value = result.kind === 'text'
+        ? { name, absPath, rel, result: { kind: 'csv', text: result.text } }
+        : { name, absPath, rel, result }
     } else {
       const result = await filesRaw(props.sessionId, rel, props.cwd)
       preview.value = { name, absPath, rel, result }
@@ -1330,6 +1343,15 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           </div>
           <DocxPreview v-else-if="preview.result.kind === 'docx'" :name="preview.name" :data="preview.result.data" />
           <PdfPreview v-else-if="preview.result.kind === 'pdf'" :name="preview.name" :data="preview.result.data" />
+          <SheetPreview
+            v-else-if="preview.result.kind === 'sheet'"
+            :name="preview.name" :html="preview.result.html"
+            :asset-url="(a: string) => filesConvertAssetUrl(sessionId, preview!.rel, 'html', a, cwd)"
+          />
+          <SheetPreview v-else-if="preview.result.kind === 'csv'" :name="preview.name" :csv-text="preview.result.text" />
+          <AudioPreview v-else-if="preview.result.kind === 'audio'" :name="preview.name" :src="preview.result.url" />
+          <ArchivePreview v-else-if="preview.result.kind === 'zip'" :name="preview.name" :entries="preview.result.entries" :truncated="preview.result.truncated" />
+          <XmindPreview v-else-if="preview.result.kind === 'xmind'" :name="preview.name" :content-json="preview.result.contentJson" :thumb-url="preview.result.thumbUrl" />
           <div v-else-if="preview.result.kind === 'binary'" class="flex flex-col items-center justify-center gap-2 h-full px-4 text-center">
             <Download class="size-7 text-muted-foreground/60" />
             <p class="text-xs text-muted-foreground">二进制文件，无法预览</p>
