@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -472,31 +473,59 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// pdf=1：pptx 预览（2026-09-07）。客户端没有可用的 pptx 渲染器，服务端用 libreoffice
-	// 转 pdf、前端复用既有 PdfPreview——版式/图保真，代价是首次 1–3s 转换（缓存命中即时）。
-	// 与 download 分支互斥：这里回的是转换产物（inline pdf），不是原文件字节。
-	if r.URL.Query().Get("pdf") == "1" {
-		if !isPptxExt(strings.ToLower(filepath.Ext(target))) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pdf conversion only supports pptx"})
+	// convert=<pdf|html|docx>：服务端 libreoffice 转换后的产物（2026-09-07 pptx→pdf 起，
+	// 2026-09-08 扩到 xlsx/xls→html、doc→docx）。目标格式按"族"归一，见 convert_office.go 头部。
+	// `pdf=1` 保留为别名——旧前端还缓存在浏览器里时不该 400。
+	// 与 download 分支互斥：这里回的是转换产物，不是原文件字节。
+	//
+	// asset=<name>：html 产物引用的内嵌图片（xlsx 里的图表截图等），与 main.html 同在一个缓存
+	// 目录、由 libreoffice 命名。只取 Base()，路径穿越无从谈起。
+	if want := r.URL.Query().Get("convert"); want != "" || r.URL.Query().Get("pdf") == "1" {
+		srcExt := strings.ToLower(filepath.Ext(target))
+		target2 := convertTargetFor(srcExt)
+		if target2 == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this format is not converted server-side"})
 			return
 		}
-		if info.Size() > pptxConvertMaxBytes {
+		if want != "" && want != target2 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "requested target does not match this format"})
+			return
+		}
+		if info.Size() > officeConvertMaxBytes {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "file too large to convert"})
 			return
 		}
-		pdfPath, cerr := s.convertToPDF(r.Context(), target, info)
+		dir, cerr := s.convertOffice(r.Context(), target, info, target2)
 		if cerr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "conversion failed: " + cerr.Error()})
+			// 缺 libreoffice 与"这个文件转不动"是两件事，说清楚哪一件——泛泛的"转换失败"
+			// 会让人去查文件，而真因可能是这台机器上根本没装。
+			msg := "conversion failed: " + cerr.Error()
+			if _, lookErr := exec.LookPath(officeConvertBin); lookErr != nil {
+				msg = "libreoffice is not installed on this host, so " + srcExt + " cannot be previewed"
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 			return
 		}
-		f, ferr := os.Open(pdfPath)
+		serveName, ctype := "main."+target2, convertContentType(target2)
+		if asset := r.URL.Query().Get("asset"); asset != "" {
+			serveName = filepath.Base(asset)
+			if serveName == "." || serveName == ".." || strings.HasPrefix(serveName, ".") {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "asset not allowed"})
+				return
+			}
+			if ctype = imageContentType(strings.ToLower(filepath.Ext(serveName))); ctype == "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "only image assets are served"})
+				return
+			}
+		}
+		f, ferr := os.Open(filepath.Join(dir, serveName))
 		if ferr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "converted file vanished"})
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "converted file not found"})
 			return
 		}
 		defer f.Close()
 		fi, _ := f.Stat()
-		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-cache") // 源文件可变（mtime 进缓存键），别钉住
 		if fi != nil {
@@ -529,6 +558,58 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		// pre-set to octet-stream above (ServeContent only sniffs when it's unset), so the
 		// attachment disposition + nosniff still hold for ranged and full responses alike.
 		http.ServeContent(w, r, filepath.Base(target), info.ModTime(), f)
+		return
+	}
+
+	// zip=1 / entry=<name>：zip 家族（.zip / .xmind）的只读预览，见 archive_preview.go。
+	// 列清单只读中央目录（zip 炸弹在这里不花钱）；取条目按名精确匹配 + 双重大小上限。
+	// 放在 tooLarge 之前：一个 200MB 的 zip 的**清单**照样该看得到，那和"预览它的内容"是两回事。
+	if isZipFamilyExt(strings.ToLower(filepath.Ext(target))) {
+		if r.URL.Query().Get("zip") == "1" {
+			entries, truncated, zerr := listZipEntries(target)
+			if zerr != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "not a readable archive: " + zerr.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "truncated": truncated})
+			return
+		}
+		if name := r.URL.Query().Get("entry"); name != "" {
+			ct := zipEntryContentType(name)
+			if ct == "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "that entry type is not served inline"})
+				return
+			}
+			buf, eerr := readZipEntry(target, name)
+			if eerr != nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": eerr.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", ct)
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Content-Length", strconv.Itoa(len(buf)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buf)
+			return
+		}
+	}
+
+	// 音频：按 audio/* INLINE 流式服务，交给原生 <audio>。**必须在 tooLarge 之前**——会议录音
+	// 实测 71MB，10MiB 的预览上限对它毫无意义（那个上限是给"要整个读进内存渲染"的东西定的）。
+	// 走 ServeContent 是为了 Range：没有它进度条拖不动，只能从头听。
+	if audioCT := audioContentType(strings.ToLower(filepath.Ext(target))); audioCT != "" {
+		af, aerr := os.Open(target)
+		if aerr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		defer af.Close()
+		w.Header().Set("Content-Type", audioCT)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-cache")
+		// ServeContent 自己写状态码/Content-Length，并处理 Range（206）——这里都别抢。
+		http.ServeContent(w, r, filepath.Base(target), info.ModTime(), af)
 		return
 	}
 
