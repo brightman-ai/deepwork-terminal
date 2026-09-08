@@ -24,6 +24,8 @@ const scalePct = ref(100)
 const S_MIN = 50, S_MAX = 300
 /** 第一页是横版（宽>高）——幻灯片就是这个形态，文档型 pdf 不是。 */
 const landscape = ref(false)
+/** 这份 pdf 有没有文本层。扫描件没有 —— 那时"选不中"不是坏了，必须说出来。 */
+const hasTextLayer = ref(true)
 /**
  * 页宽上限**按内容形态定**，不是一个拍脑袋的常数。
  *
@@ -42,6 +44,7 @@ let renderSeq = 0
 
 interface PdfPage {
   getViewport(o: { scale: number }): { width: number; height: number }
+  getTextContent(): Promise<{ items: unknown[] }>
   render(o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }): { promise: Promise<void> }
 }
 
@@ -65,7 +68,7 @@ async function load(): Promise<void> {
     pageCount.value = loaded.numPages
     pageNum.value = 1
     // 形态取第一页：同一份 pdf 混排横竖页极少见，而它决定的是整篇的版心宽度。
-    const v1 = (await doc.getPage(1)).getViewport({ scale: 1 })
+    const v1 = (await (doc as NonNullable<typeof doc>).getPage(1)).getViewport({ scale: 1 })
     if (seq !== renderSeq) return
     landscape.value = v1.width > v1.height
     for (let i = 1; i <= loaded.numPages; i++) {
@@ -138,7 +141,39 @@ async function renderPage(idx: number): Promise<void> {
     canvas.style.width = '100%'
     canvas.style.display = 'block'
     await page.render({ canvasContext: canvas.getContext('2d')!, viewport: vp }).promise
-    slot.el.replaceChildren(canvas)
+    // canvas 和文本层必须同处一个定位容器：文本层用绝对定位把每个 span 摆到字上，
+    // 参照系就是这个容器。
+    const wrap = document.createElement('div')
+    wrap.className = 'pdf-canvas-wrap'
+    wrap.appendChild(canvas)
+    slot.el.replaceChildren(wrap)
+
+    // ── 文本层（2026-09-08：「预览要支持内容复制」翻转了"pdf 不做文本选择"这条旧非目标）──
+    // 关键是**用显示尺寸而不是渲染尺寸**建 viewport：canvas 的像素宽按 dpr×缩放放大过，
+    // 而文本层贴的是 CSS 像素。这里量一次真实显示宽，scale 由它反推 —— 与"拖宽面板后重画"
+    // 天然合拍（重画会重新量）。
+    const displayW = canvas.getBoundingClientRect().width || cssW
+    const tvp = page.getViewport({ scale: displayW / vp1.width })
+    const layer = document.createElement('div')
+    layer.className = 'textLayer'
+    // pdfjs v5 的 span 字号是 calc(var(--total-scale-factor) * var(--font-height))，
+    // 不设这个变量整层字号会塌成 0（表现为"能选中但选不到东西"）。
+    // pdfjs 自己按这些变量算 span 字号与整层尺寸（它写的 inline height 长这样：
+    // `round(down, var(--total-scale-factor) * 792px, var(--scale-round-y))`）——
+    // 少给一个变量，那条声明整条无效，症状是"文本层尺寸不对/字号塌掉"。
+    layer.style.setProperty('--total-scale-factor', String(displayW / vp1.width))
+    layer.style.setProperty('--scale-round-x', '1px')
+    layer.style.setProperty('--scale-round-y', '1px')
+    wrap.appendChild(layer)
+    try {
+      const textContent = await page.getTextContent()
+      if (idx === 0) hasTextLayer.value = (textContent.items?.length ?? 0) > 0
+      const pdfjsMod = await import('pdfjs-dist')
+      const TL = (pdfjsMod as unknown as { TextLayer: new (o: object) => { render(): Promise<void> } }).TextLayer
+      await new TL({ textContentSource: textContent, container: layer, viewport: tvp }).render()
+    } catch {
+      layer.remove() // 文本层失败不该连累已经画好的那一页
+    }
     slot.height = slot.el.offsetHeight
   } catch {
     slot.rendered = false
@@ -243,6 +278,12 @@ onBeforeUnmount(() => {
       <span class="pdf-bar-sep"></span>
       <button type="button" title="缩小（ctrl+滚轮 / 双指）" data-testid="fp-pdf-out" @click="nudgeScale(-1)">−</button>
       <button type="button" class="pdf-bar-num" title="重置 100%（适应宽度）" data-testid="fp-pdf-pct" @click="scalePct = 100">{{ pctLabel }}</button>
+      <span
+        v-if="!hasTextLayer"
+        class="pdf-bar-note"
+        data-testid="fp-pdf-no-text"
+        title="这份 pdf 里没有文字层（多半是扫描件或纯图导出），所以选不中文字。需要文字请用上方「下载」后用 OCR 工具处理。"
+      >无文字层</span>
       <button type="button" title="放大（ctrl+滚轮 / 双指）" data-testid="fp-pdf-in" @click="nudgeScale(1)">＋</button>
     </div>
   </div>
@@ -255,14 +296,6 @@ onBeforeUnmount(() => {
 [data-testid='fp-preview-pdf'] {
   user-select: text;
   -webkit-user-select: text;
-}
-.pdf-page {
-  width: 100%;
-  background: #fbfaf8;
-  border-radius: 6px;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
-  overflow: hidden;
-  min-height: 60px; /* 未渲染占位的最小高度，避免滚动条跳动 */
 }
 .pdf-bar {
   position: absolute; /* 悬浮在滚动容器上（外层 relative、不滚动） */
@@ -290,6 +323,77 @@ onBeforeUnmount(() => {
   line-height: 1;
 }
 .pdf-bar button:active { background: rgba(255, 255, 255, 0.2); }
+.pdf-bar-note {
+  padding: 0 6px;
+  font-size: 11px;
+  color: #f0b429;
+  white-space: nowrap;
+}
 .pdf-bar-num { font-size: 12px; color: #ddd; font-variant-numeric: tabular-nums; }
 .pdf-bar-sep { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.18); margin: 0 3px; }
+</style>
+
+<!--
+  ⚠ 非 scoped，故意的：下面这些元素是 **JS 创建**的（renderPage 里 document.createElement），
+  拿不到 Vue 的 data-v 属性，于是 scoped 规则（会被编译成 `.pdf-page[data-v-x] …`）永远匹配不上。
+  这不是理论问题，是 2026-09-08 实测出来的两个哑巴 bug：
+    · 文本层一直是 position:static，被排在页面【下方】而不是叠在页面上（wrap 高 = canvas + 文本层）；
+    · `.pdf-page` 的卡片背景/圆角/阴影从 pdf 功能上线起就没生效（backgroundColor 实测 rgba(0,0,0,0)，
+      看着像有白页卡，其实那是 pdf 内容本身是白的）。
+  作用域由组件根的 data-testid 兜住 —— 等价于 scoped，但能穿到 JS 子树。
+-->
+<style>
+/* canvas + 文本层的定位参照系。 */
+[data-testid='fp-preview-pdf'] .pdf-canvas-wrap { position: relative; line-height: 0; }
+
+/* ── pdfjs v5 文本层 ──────────────────────────────────────────────────────────────────────────
+   照抄官方 pdf_viewer.css 里承重的那几条（整份 259KB 里绝大部分是 viewer UI，用不上）。
+   span 的字号/形变全靠这些自定义属性，缺一条就会"选得中但对不齐"或"整层字号塌成 0"。 */
+[data-testid='fp-preview-pdf'] .textLayer {
+  position: absolute;
+  inset: 0;
+  text-align: initial;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 1;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+[data-testid='fp-preview-pdf'] .textLayer span,
+[data-testid='fp-preview-pdf'] .textLayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+[data-testid='fp-preview-pdf'] .textLayer > :not(.markedContent),
+[data-testid='fp-preview-pdf'] .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+[data-testid='fp-preview-pdf'] .textLayer .markedContent { display: contents; }
+[data-testid='fp-preview-pdf'] .textLayer ::selection { background: rgba(120, 150, 255, 0.45); }
+/* 抽屉面板整体 user-select:none —— 文本层必须显式开，否则文字在那里却拖不动
+   （2026-09-07「docx 不能复制」同一类坑）。 */
+[data-testid='fp-preview-pdf'] .textLayer { user-select: text; -webkit-user-select: text; }
+
+[data-testid='fp-preview-pdf'] .pdf-page {
+  width: 100%;
+  background: #fbfaf8;
+  border-radius: 6px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  min-height: 60px; /* 未渲染占位的最小高度，避免滚动条跳动 */
+}
 </style>
