@@ -688,9 +688,23 @@ const searchCats = computed(() => {
   return cats
 })
 const filteredSearchResults = computed(() => {
-  if (activeSearchCat.value === 'all') return searchResults.value
-  return searchResults.value.filter((e) => e.isDir || catOf(e.name) === activeSearchCat.value)
+  const base = activeSearchCat.value === 'all'
+    ? searchResults.value
+    : searchResults.value.filter((e) => e.isDir || catOf(e.name) === activeSearchCat.value)
+  // 排序（REQ-fp-search-sort，2026-09-12）：rank = 服务端相关度序（默认）；time = 修改时间新→旧；
+  // name = 名字升序。目录恒在前（与搜索目录置顶同一立意）。客户端排——结果已在内存，即时生效。
+  if (searchSortMode.value === 'rank') return base
+  const sorted = [...base]
+  sorted.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+    if (searchSortMode.value === 'time' && a.mtimeMs !== b.mtimeMs) return b.mtimeMs - a.mtimeMs
+    const c = a.name.localeCompare(b.name)
+    return c !== 0 ? c : b.mtimeMs - a.mtimeMs
+  })
+  return sorted
 })
+const searchSortMode = ref<'rank' | 'time' | 'name'>('rank')
+const SEARCH_SORT_LABEL: Record<'rank' | 'time' | 'name', string> = { rank: '相关度', time: '时间', name: '名称' }
 watch(searchCats, (cats) => {
   if (!cats.some((c) => c.key === activeSearchCat.value)) activeSearchCat.value = 'all'
 })
@@ -1276,16 +1290,29 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           结果过多，已截断 — 当前目录很大（可能不是你以为的工程根）。请缩小搜索词，或切到目标目录再搜。
         </div>
         <!-- 类别快筛：只在结果真跨多类时出现（与最近修改 tab 同规则）。目录恒在，不随类别收起。 -->
-        <div v-if="searchResults.length && searchCats.length > 2" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
+        <div v-if="searchResults.length > 1" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
+          <template v-if="searchCats.length > 2">
+            <button
+              v-for="c in searchCats"
+              :key="c.key"
+              type="button"
+              class="shrink-0 rounded-full border px-2.5 py-0.5 text-[0.62rem] font-medium transition-colors"
+              :class="activeSearchCat === c.key ? 'bg-primary/15 border-primary/60 text-foreground' : 'bg-card border-border text-muted-foreground hover:text-foreground'"
+              :data-testid="`fp-scat-${c.key}`"
+              @click="activeSearchCat = c.key"
+            >{{ c.label }}<span class="ml-1 opacity-60 tabular-nums">{{ c.count }}</span></button>
+            <span class="shrink-0 self-center mx-0.5 w-px h-3.5 bg-border/60"></span>
+          </template>
+          <!-- 排序 chips：服务端默认给相关度序；时间/名称在客户端重排（即时）。 -->
           <button
-            v-for="c in searchCats"
-            :key="c.key"
+            v-for="(label, key) in SEARCH_SORT_LABEL"
+            :key="key"
             type="button"
             class="shrink-0 rounded-full border px-2.5 py-0.5 text-[0.62rem] font-medium transition-colors"
-            :class="activeSearchCat === c.key ? 'bg-primary/15 border-primary/60 text-foreground' : 'bg-card border-border text-muted-foreground hover:text-foreground'"
-            :data-testid="`fp-scat-${c.key}`"
-            @click="activeSearchCat = c.key"
-          >{{ c.label }}<span class="ml-1 opacity-60 tabular-nums">{{ c.count }}</span></button>
+            :class="searchSortMode === key ? 'bg-primary/15 border-primary/60 text-foreground' : 'bg-card border-border text-muted-foreground hover:text-foreground'"
+            :data-testid="`fp-ssort-${key}`"
+            @click="searchSortMode = key"
+          >{{ label }}</button>
         </div>
         <div v-if="searching && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">搜索中…</div>
         <div v-else-if="!filteredSearchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
@@ -1400,6 +1427,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
                   <ImageIcon v-else-if="isImage(n.entry.name)" class="size-4 shrink-0 text-violet-500" />
                   <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(n) ? 'text-primary/80' : catTextClass(n.entry.name)" />
                   <span class="min-w-0 flex-1 text-xs" :class="n.entry.isDir ? 'text-foreground font-medium' : 'text-foreground'"><MidTruncatedName :name="n.entry.name" /><span v-if="n.entry.isDir" class="text-muted-foreground/60">/</span></span>
+                  <!-- 文件类型角标：树行此前只有图标+名字，类型要靠图标颜色猜（Human 实报"点进去看不到文件类型"）。与搜索行同款 catOf SSOT。 -->
+                  <span
+                    v-if="!n.entry.isDir"
+                    class="shrink-0 ml-1 rounded px-1 py-px text-[0.54rem] font-medium uppercase leading-none tabular-nums"
+                    :class="catBadgeClass(n.entry.name)"
+                    :data-testid="`fp-tree-type-${n.rel}`"
+                  >{{ fileExt(n.entry.name) || '?' }}</span>
                 </button>
               </div>
               <!-- agent 刚碰过徽标 / 文件大小 -->
