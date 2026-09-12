@@ -52,6 +52,12 @@ func (p *defaultTmuxProvider) TmuxState(ctx context.Context, shellPID int) (json
 	return json.Marshal(st)
 }
 
+// CapturePaneForShell exposes the state service's read-only pane capture (tmux tab 的长程
+// 回看源，2026-09-12)。经 optional 接口断言消费，不扩 TmuxStateProvider。
+func (p *defaultTmuxProvider) CapturePaneForShell(ctx context.Context, shellPID, historyCap int) ([]string, []string, error) {
+	return p.TmuxStateService.CapturePaneForShell(ctx, shellPID, historyCap)
+}
+
 // WithTmuxProvider overrides the default in-process tmux provider.
 // Hosts use this to supply a richer snapshot; standalone needs nothing.
 func WithTmuxProvider(p TmuxStateProvider) Option {

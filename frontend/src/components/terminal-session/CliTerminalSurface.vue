@@ -2572,7 +2572,7 @@ function openInstallGuide() { notifyQuickOpen.value = true }
 const copyModeOpen = ref(false)
 // cliFetch，不是裸 fetch：认证头和 401/429 的处理只有那一处（useCliAuth）。这里再写一份的下场是
 // 复制模式永远是空的，而且页面上一个报错都没有。
-const terminalHistory = useTerminalHistory(() => props.sessionId, (path) => cliFetch(path))
+const terminalHistory = useTerminalHistory(() => props.sessionId, (path) => cliFetch(path), () => (tmuxAttached.value ? { source: 'tmux' } : {} as Record<string, string>))
 
 /**
  * 打开回看历史。返回**空串 = 打开了**，否则是一句给人看的拒绝理由。
@@ -2581,9 +2581,10 @@ const terminalHistory = useTerminalHistory(() => props.sessionId, (path) => cliF
  * 列表的那一层（useCliState 有 showNotice）。一处判断、一处显示，两边都不重复。
  */
 function openCopyMode(): string {
-  // attach 了 tmux 的标签整个让位：那时 `Ctrl+B` 归 tmux，它自己的 copy-mode 就是这件事的原生
-  // 实现，再叠一层只会打架。这条路径上 leader 本来也不会触发（leaderEnabled），这是第二道。
-  if (tmuxAttached.value) return '这个终端在 tmux 里，请用 tmux 自己的复制模式（前缀 + [）'
+  // 2026-09-12：tmux 标签**不再拒绝**。历史数据源是 muxd 的行级保色 scrollback（/sessions/<id>/history），
+  // 对 tmux 会话一样存在（muxd 持有所有 PTY），而且比 tmux 自己的 history 更长；选择/复制是原生
+  // DOM 体验——正是 tmux copy mode 拖选转发在这个应用里失效（tmux 丢弃 motion，见 run
+  // 20260912-094718）时的正确替代。tmux 自己的 copy mode 仍可用 `tmux copy-mode` 命令进入。
   // 远程标签本轮不支持：会话住在别人机器上，历史也在那台机器的常驻进程里，而这里问的是本机 API
   // —— 不拦就会打开一个永远空着的视口，让人以为"这个终端没有历史"。说清楚比装作能用好。
   if (props.isRemote) return '远程终端暂不支持回看历史（历史存在那台机器的常驻进程里）'

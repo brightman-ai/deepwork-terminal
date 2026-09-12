@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -136,6 +137,18 @@ func linesJSON(lines []muxd.Line) []historyLineJSON {
 // that one page is a few tens of kilobytes before compression. The daemon caps it harder anyway.
 const defaultHistoryPage = 500
 
+// tmuxCaptureCap bounds how deep one capture-pane may reach into tmux's history buffer.
+// tmux's own default history-size is 2000; 20000 covers anyone who raised it, at a payload the
+// local link shrugs at (only fetched when the user opens the copy view).
+const tmuxCaptureCap = 20000
+
+// tmuxPaneCapture is the optional capability the tmux provider carries when it can read pane
+// history for a shell. Kept as a narrow interface assertion instead of widening TmuxStateProvider
+// for every implementor.
+type tmuxPaneCapture interface {
+	CapturePaneForShell(ctx context.Context, shellPID, historyCap int) (history []string, screen []string, err error)
+}
+
 // handleSessionHistory serves GET /sessions/{id}/history.
 //
 //	?from=N     absolute line to start at (clamped to the oldest line still held)
@@ -153,6 +166,44 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+
+	// source=tmux —— tmux 标签的长程回看源（2026-09-12）。tmux 原地重绘、把长历史存在自己的
+	// buffer 里，daemon 的行 scrollback 对 tmux 会话几乎是空的；capture-pane（经 tmux socket
+	// 只读，不碰用户 pane）是拿到它的正路。行号 1..N 顺序铺满，screen 接在后面；无样式（v1
+	// 不带 -e，纯文本复制已满足需求）。enable=false 的失败会如实说明，让 UI 有话可说。
+	if q.Get("source") == "tmux" {
+		if cap, ok := s.tmuxProvider.(tmuxPaneCapture); ok {
+			history, screen, cerr := cap.CapturePaneForShell(r.Context(), sess.ShellPID(), tmuxCaptureCap)
+			if cerr != nil {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"enabled": false,
+					"reason":  "tmux-capture: " + cerr.Error(),
+					"lines":   []historyLineJSON{},
+					"base":    0, "total": 0,
+					"styles": []historyStyleJSON{}, "stylesTotal": 0,
+				})
+				return
+			}
+			lines := make([]historyLineJSON, 0, len(history)+len(screen))
+			n := 0
+			for _, l := range history {
+				n++
+				lines = append(lines, historyLineJSON{N: int64(n), Seg: []historySegment{{T: l}}})
+			}
+			total := n
+			for _, l := range screen {
+				n++
+				lines = append(lines, historyLineJSON{N: int64(n), Seg: []historySegment{{T: l}}})
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"enabled": true, "broken": false,
+				"lines": lines, "base": 0, "total": total,
+				"styles":      []historyStyleJSON{{}},
+				"stylesTotal": 1,
+			})
+			return
+		}
+	}
 	req := muxd.HistoryReq{
 		From:       atoi64(q.Get("from"), 0),
 		Count:      int(atoi64(q.Get("count"), defaultHistoryPage)),

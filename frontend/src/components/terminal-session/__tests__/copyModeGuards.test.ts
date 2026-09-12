@@ -113,11 +113,81 @@ describe('约束②：原生文本选择', () => {
   })
 })
 
-describe('约束③：tmux 标签不开', () => {
-  it('openCopyMode 对 tmux 标签和远程标签都拒绝，并给出【理由】', () => {
+describe('约束③（2026-09-12 改版）：tmux 标签 = 混合 leader，copyMode 归应用、其余补发前缀', () => {
+  const shortcuts = readFileSync(new URL('../../../composables/cli/useTabShortcuts.ts', import.meta.url), 'utf8')
+  const state = readFileSync(new URL('../../../portals/cli/useCliState.ts', import.meta.url), 'utf8')
+
+  it('tmux 标签的 leader 不再整体让位，而是进【混合】模式', () => {
+    expect(state).toContain('tmuxLeaderHybrid')
+    expect(state).toContain('leaderEnabled: () => true')
+    expect(shortcuts).toContain('tmuxLeaderHybrid')
+  })
+
+  it('混合模式下只有 copyMode 被认领；其余组合补发前缀字节（tmux 肌肉记忆不丢）', () => {
+    const fn = shortcuts.slice(shortcuts.indexOf('const r = resolveLeaderKey'))
+    const head = fn.slice(0, fn.indexOf("if (r.type === 'action') {"))
+    expect(head).toContain("r.action !== 'copyMode'")
+    expect(head).toContain('onLeaderFallback')
+  })
+
+  it('补发的字节 = leader 代表的控制字符（Ctrl+KeyB → \\x02）', () => {
+    expect(shortcuts).toContain('export function leaderBytesFor')
+  })
+
+  it('应用 copy mode 不再拒绝 tmux 标签（那条拒绝语已随旧语义删除）', () => {
+    expect(surface).not.toContain('这个终端在 tmux 里，请用 tmux 自己的复制模式')
+  })
+})
+
+describe('tmux 的翻页手感：Ctrl 组合必须在 default 之前分流', () => {
+  // 白名单式的 handler 有个安静的失败模式：没列的键既不执行也不下传，按下去和"功能坏了"
+  // 无法区分。C-u/C-d/C-b/C-f 是 tmux vi copy-mode 的翻页主力，漏掉它们=大多数使用者一进来
+  // 就撞墙（2026-09-08 用户实报）。
+  const handler = view.slice(view.indexOf('function onKeydown'))
+  const beforeSwitch = handler.slice(0, handler.indexOf('switch ('))
+
+  it('四个键都在 switch 之前处理掉（落进 switch 就会被 default 吞）', () => {
+    for (const k of ['u', 'd', 'b', 'f']) {
+      expect(beforeSwitch).toContain(`k === '${k}'`)
+    }
+  })
+
+  it('半页 0.5 / 整页 0.9，方向成对', () => {
+    expect(beforeSwitch).toContain('pageBy(-0.5)')
+    expect(beforeSwitch).toContain('pageBy(0.5)')
+    expect(beforeSwitch).toContain('pageBy(-0.9)')
+    expect(beforeSwitch).toContain('pageBy(0.9)')
+  })
+
+  it('C-f 让位给翻页后，搜索仍有出口（/、Cmd+F、C-S-f）', () => {
+    expect(beforeSwitch).toContain('openSearch()')       // Ctrl+Shift+F
+    expect(handler).toContain("case '/':")
+    expect(handler).toContain('e.metaKey')               // Cmd+F
+  })
+})
+
+describe('约束②：原生文本选择', () => {
+  it('滚动容器显式打开 user-select（不是靠继承）', () => {
+    expect(view).toContain('user-select: text')
+  })
+
+  it('没有任何 user-select: none 落在正文上（行号那种装饰除外）', () => {
+    // 行号是导航装饰，复制整段时不该混进去，所以它自己是 none —— 但正文不能是。
+    const textBlock = view.slice(view.indexOf('.copy-mode__text'))
+    expect(textBlock.slice(0, 200)).not.toContain('user-select: none')
+  })
+})
+
+describe('约束③（2026-09-12 改版）：tmux 标签放行、远程仍拒', () => {
+  it('openCopyMode 不再拒绝 tmux 标签（muxd scrollback 对 tmux 会话一样存在）', () => {
     const fn = surface.slice(surface.indexOf('function openCopyMode'))
-    const body = fn.slice(0, fn.indexOf('return \'\''))
-    expect(body).toContain('tmuxAttached.value')
+    const body = fn.slice(0, fn.indexOf("return ''"))
+    expect(body).not.toContain('tmuxAttached.value')
+  })
+
+  it('openCopyMode 对远程标签仍拒绝并给出【理由】', () => {
+    const fn = surface.slice(surface.indexOf('function openCopyMode'))
+    const body = fn.slice(0, fn.indexOf("return ''"))
     // 远程标签的会话住在别人机器上，历史也在那边；不拦就会打开一个永远空着的视口。
     expect(body).toContain('props.isRemote')
     // 返回的是给人看的理由，不是静默的 void —— 一个按下去毫无反应的快捷键，使用者只会以为
