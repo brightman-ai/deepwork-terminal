@@ -449,6 +449,34 @@ func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
 	assert.Empty(t, out2.Entries)
 }
 
+// TC-FS-08 (2026-09-11, REQ-fp-search-dirsfirst): 搜索排序 = 目录组整体置顶。
+// 目录不再是同分 tie-break: 一个得分更高的文件(前缀命中 100)也不得把命中目录(词中命中 60)
+// 压下去。这正是 Human 拍定的"命中的目录排前面"——旧排序下 report.md 会排在 my-report/ 前。
+func TestFilesSearch_DirsGroupBeforeFiles(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	// 目录: "report" 词中命中(word boundary, 60 分)。文件: "report.md" 前缀命中(100 分)。
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "my-report"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "report.md"), []byte("x"), 0o644))
+
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "searchdirs", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "searchdirs")
+
+	resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, "report"), "")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var out searchResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	require.Len(t, out.Entries, 2)
+	assert.True(t, out.Entries[0].IsDir, "matched dir must rank above the higher-scoring file, got %q first", out.Entries[0].Rel)
+	assert.Equal(t, "my-report", out.Entries[0].Rel)
+	assert.False(t, out.Entries[1].IsDir)
+	assert.Equal(t, "report.md", out.Entries[1].Rel)
+}
+
 // TC-FS-07: when more entries match than searchMaxResults, the walk stops early (sentinel
 // abort, NOT filepath.SkipDir which only skips siblings) and flags Truncated so the client
 // can say "narrow your search" instead of silently dropping matches. Regression guard for
