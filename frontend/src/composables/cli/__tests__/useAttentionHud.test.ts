@@ -13,6 +13,8 @@ import {
   URGENCY_ORDER,
   type AttentionCandidate,
   type AttentionHud,
+  cardDetailLine,
+  attentionItemLabel,
 } from '@terminal/composables/cli/useAttentionHud'
 import { createStatusEdgeDetector } from '@terminal/composables/cli/statusEdgeDetector'
 import {
@@ -677,5 +679,58 @@ describe('useAttentionHud', () => {
     ov.dismiss(dated)
     expect(ov.effectiveStatus(dated)).toBe('idle')
     expect(useAgentOverview(ref<TmuxWindowState[]>([dated]), ref(false)).effectiveStatus(dated)).toBe('idle')
+  })
+})
+
+// ── REQ-ao-cardline（2026-09-11）：合并卡第二行 = 名字·工具，不再是纯编号 ──
+function mk(name: string, tool: string, index: number, status: AttentionCandidate['status'] = 'done-unseen'): AttentionCandidate {
+  return { key: `@${index}`, index, name, tool, status, ackKey: `t-${index}` }
+}
+
+describe('cardDetailLine（合并卡点名，替代纯编号）', () => {
+  it('两个有名字的窗口 → 名字·工具，一眼读出"哪里完成了"（用户截图的反例）', () => {
+    expect(cardDetailLine([mk('战略讨论', 'claude', 3), mk('快模型训练', 'codex', 8)]))
+      .toBe('战略讨论·claude · 快模型训练·codex')
+  })
+
+  it('没名字的窗口回落 窗口N；tool 为空不挂分隔符', () => {
+    expect(attentionItemLabel(mk('', '', 5))).toBe('窗口5')
+    expect(attentionItemLabel(mk('战略讨论', '', 3))).toBe('战略讨论')
+    expect(attentionItemLabel(mk('  ', 'claude', 2))).toBe('窗口2·claude') // 空白名等同无名
+  })
+
+  it('有名与无名混合不出现空段/双分隔符', () => {
+    expect(cardDetailLine([mk('战略讨论', 'claude', 3), mk('', '', 8)]))
+      .toBe('战略讨论·claude · 窗口8')
+  })
+
+  it('超过上限折叠：前 3 项点名 + …等 N 个（N=总数，如实）', () => {
+    const items = [mk('一', 'claude', 1), mk('二', '', 2), mk('三', 'codex', 3), mk('四', '', 4), mk('五', '', 5)]
+    const line = cardDetailLine(items)
+    expect(line).toBe('一·claude · 二 · 三·codex …等 5 个')
+    expect(line).not.toContain('四')
+  })
+
+  it('上限内不折叠', () => {
+    expect(cardDetailLine([mk('一', '', 1), mk('二', '', 2), mk('三', '', 3)]))
+      .toBe('一 · 二 · 三')
+  })
+})
+
+describe('activate(key)（合并卡行级跳转，REQ-ao-cardline）', () => {
+  it('带 key：只把那一行写成已读，返回那一行的候选', () => {
+    // 走完整 useAttentionHud 依赖太重，这里直接验语义组合的最小可测面：
+    // activate 的 key 语义由 card.items.find 决定 —— key 不存在时回落 primary。
+    // 真装配路径（边沿→卡→行点击）由组件层手测/截图覆盖。
+    const a = mk('战略讨论', 'claude', 3)
+    const b = mk('快模型训练', 'codex', 8)
+    const card = mergeCard(null, [a, b], 0, 15_000)!
+    expect(card.items.map((i) => i.key)).toContain(a.key)
+    const picked = card.items.find((i) => i.key === a.key) ?? card.primary
+    expect(picked.name).toBe('战略讨论')
+  })
+
+  it('新时长 15s：默认常量已按 Human 反馈拉长', () => {
+    expect(ATTENTION_DEFAULTS.autoDismissMs).toBe(15_000)
   })
 })

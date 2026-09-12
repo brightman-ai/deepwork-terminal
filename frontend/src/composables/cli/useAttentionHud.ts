@@ -87,8 +87,9 @@ export const ATTENTION_DEFAULTS = {
   /** Per-window silence after a card was raised for it. Backend's dual is 120s; the foreground
    *  HUD is cheaper to ignore than an OS notification, so it may speak more often. */
   cooldownMs: 60_000,
-  /** How long a card stays up before collapsing itself. */
-  autoDismissMs: 8_000,
+  /** How long a card stays up before collapsing itself. 2026-09-11 Human 实测 8s "2 秒左右就
+   *  没了"（注意力不在卡上的时刻，主观时长远短于计时）——拉到 15s。收起≠已读（ATT-4 不变）。 */
+  autoDismissMs: 15_000,
 } as const
 
 // ─── pure helpers ────────────────────────────────────────────────────────────────────
@@ -125,6 +126,26 @@ export function mergedHeadline(items: readonly AttentionCandidate[]): string {
   if (!done) return `${waiting} 个窗口等你`
   if (!waiting) return `${done} 个窗口跑完了`
   return `${waiting} 个等你，${done} 个跑完了`
+}
+
+/** 合并卡第二行最多点名几个窗口；其余折叠为 "…等 N 个"（N=总数，如实）。 */
+export const CARD_DETAIL_MAX = 3
+
+/** 一个窗口在合并卡里的身份行：`名字·工具`；没名字（用户没改过且 cwd 也空）才回落 `窗口N`。
+ *  编号只在跳转时有意义，作为身份是噪音——名字与工具本来就在候选上（candidateOf 从
+ *  w.name/w.agentTool 填入），渲染层曾把它们扔掉只报编号（REQ-ao-cardline，2026-09-11）。 */
+export function attentionItemLabel(it: AttentionCandidate): string {
+  const name = (it.name || '').trim() || `窗口${it.index}`
+  return it.tool ? `${name}·${it.tool}` : name
+}
+
+/** 合并卡第二行：逐项点名，好让人一眼知道【哪里】完成了。曾经是 `窗口3 · 窗口8` ——
+ *  纯编号没有信息量（用户原话）。上限 CARD_DETAIL_MAX，超出折叠但报**总数**；总数真正的
+ *  出处在 headline（mergedHeadline），这里只是点名，行宽有限不能枚举到撑爆卡片。 */
+export function cardDetailLine(items: readonly AttentionCandidate[]): string {
+  const labels = items.map(attentionItemLabel)
+  if (labels.length <= CARD_DETAIL_MAX) return labels.join(' · ')
+  return `${labels.slice(0, CARD_DETAIL_MAX).join(' · ')} …等 ${items.length} 个`
 }
 
 /**
@@ -290,7 +311,8 @@ export interface AttentionHud {
   card: Ref<AttentionCard | null>
   /** Tapping the card: marks the target seen, silences it, closes. Returns the window to jump to
    *  (the caller owns `selectWindow` — this layer stays free of tmux commands). */
-  activate(): AttentionCandidate | null
+  /** key = 合并卡里某一行的窗口 key（点行跳行）；省略 = primary（点卡面）。 */
+  activate(key?: string): AttentionCandidate | null
   /** ✕ / swipe: marks the PRIMARY window seen and silences it; every other window on a merged card
    *  is only silenced (muted), never marked seen — waving an alert away is not reading N windows'
    *  output. Closes. */
@@ -414,8 +436,12 @@ export function useAttentionHud(deps: AttentionHudDeps): AttentionHud {
     gate.mute(c.key, c.ackKey)
   }
 
-  function activate(): AttentionCandidate | null {
-    const target = card.value?.primary ?? null
+  function activate(key?: string): AttentionCandidate | null {
+    const c = card.value
+    if (!c) return null
+    // 带 key = 点了合并卡里的某一**行**：跳那个窗口（ Row-level jump）。key 不在卡里（窗口
+    // 已被 refreshCard 摘掉）→ 退回 primary，行为与无参一致。语义不变：跳谁=只把谁写成已读。
+    const target = (key && c.items.find((it) => it.key === key)) || c.primary
     if (target) acknowledge(target)
     close()
     return target

@@ -57,7 +57,26 @@
             <span v-if="card.primary.tool" class="att-hud-tool">{{ card.primary.tool }}</span>
           </template>
         </div>
-        <div class="att-hud-row2">
+        <!-- 合并卡 = 每窗口一行的标题列表（Human 拍定的手机通知范式，2026-09-11）：曾经第二行
+             是一行 join 起来的文本，窗口一多既读不出"哪几个"也点不到具体某个。现在每行一个
+             真按钮：点哪行跳哪窗（activate(key)），状态点用 STATUS_COLOR 同源。 -->
+        <template v-if="isMerged">
+          <button
+            v-for="it in visibleItems"
+            :key="it.key"
+            type="button"
+            class="att-hud-item"
+            :data-testid="`attention-hud-item-${it.index}`"
+            @click.stop="onItemClick(it)"
+          >
+            <span class="att-hud-item-dot" aria-hidden="true" :style="{ background: STATUS_COLOR[it.status] }"></span>
+            <span class="att-hud-item-name">{{ it.name || '窗口' + it.index }}</span>
+            <span class="att-hud-item-idx">{{ it.index }}</span>
+            <span v-if="it.tool" class="att-hud-item-tool">{{ it.tool }}</span>
+          </button>
+          <div v-if="overflowCount > 0" class="att-hud-more">…等 {{ card.items.length }} 个</div>
+        </template>
+        <div v-else class="att-hud-row2">
           <span class="att-hud-line">{{ line2 }}</span>
           <span class="att-hud-arrow" aria-hidden="true">→</span>
         </div>
@@ -85,7 +104,7 @@
  * topbar) instead of tpb-hint's horizontal one, because this HUD drops from a different edge.
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { mergedHeadline, type AttentionCard } from '@terminal/composables/cli/useAttentionHud'
+import { cardDetailLine, mergedHeadline, CARD_DETAIL_MAX, type AttentionCard, type AttentionCandidate } from '@terminal/composables/cli/useAttentionHud'
 import { STATUS_COLOR } from '@terminal/composables/cli/useAgentOverview'
 
 // Teleport gate — see the template comment. Same `ready`-flag idiom HelpCenter.vue uses, rather
@@ -104,8 +123,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** Tapped the card: caller must call its hud.activate() + selectWindow(target.index). */
-  (e: 'activate'): void
+  /** Tapped the card (no key = primary) or one of its rows (key = that window): caller must call
+   *  hud.activate(key) + selectWindow(target.index). */
+  (e: 'activate', key?: string): void
   /** ✕ or a committed right-swipe: caller must call its hud.dismiss(). */
   (e: 'dismiss'): void
 }>()
@@ -133,15 +153,24 @@ const title = computed(() => {
 const line2 = computed(() => {
   const c = props.card
   if (!c) return ''
-  if (c.items.length > 1) return c.items.map((it) => `窗口${it.index}`).join(' · ')
   return c.primary.status === 'waiting' ? '在等你输入' : '跑完了'
 })
 
-// Reads the SAME `title` the sighted card shows — it used to restate the merged headline inline,
-// which is how a screen reader ends up describing a card that no longer exists.
+// 合并卡的行列表：点名上限内逐窗口一行；超出的折叠成 "…等 N 个"（总数如实，真正的总数在
+// headline 里，这里只是列表截断）。
+const visibleItems = computed<AttentionCandidate[]>(() => (props.card?.items ?? []).slice(0, CARD_DETAIL_MAX))
+const overflowCount = computed(() => (props.card?.items.length ?? 0) - visibleItems.value.length)
+
+function onItemClick(it: AttentionCandidate): void {
+  emit('activate', it.key)
+}
+
+// Reads the SAME facts the sighted card shows — merged cards read the row list (cardDetailLine),
+// single cards read the status line, so a screen reader never describes a card that isn't there.
 const ariaLabel = computed(() => {
   if (!props.card) return ''
-  return `${title.value}，${line2.value}。点击跳转，或使用右上角按钮关闭`
+  const detail = isMerged.value ? cardDetailLine(props.card.items) : line2.value
+  return `${title.value}，${detail}。${isMerged.value ? '点击某一行跳转对应窗口' : '点击跳转'}，或使用右上角按钮关闭`
 })
 
 // ── mobile right-swipe-to-dismiss ──────────────────────────────────────────────────────────
@@ -227,7 +256,8 @@ function onTouchEnd(): void {
   right: 8px;
   z-index: 220;
   width: max-content;
-  max-width: 280px;
+  min-width: 200px;
+  max-width: 320px;
   box-sizing: border-box;
   padding: 9px 34px 9px 11px;
   display: flex;
@@ -314,6 +344,70 @@ function onTouchEnd(): void {
   font-size: 0.6rem;
   font-weight: 600;
 }
+/* 合并卡的逐窗口行：整行是真按钮（点哪行跳哪窗），≥28px 命中高，名字亮、工具暗。 */
+.att-hud-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 6px;
+  margin: 0 -2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.att-hud-item:hover, .att-hud-item:focus-visible { background: rgba(255, 255, 255, 0.07); }
+.att-hud-item:active { background: rgba(255, 255, 255, 0.12); }
+.att-hud-item-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+.att-hud-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #e8daff;
+}
+.att-hud-item-idx {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #2a1f3a;
+  border: 1px solid #3a2860;
+  color: #b08fd0;
+  font-family: var(--dw-mono, ui-monospace, monospace);
+  font-size: 0.58rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.att-hud-item-tool {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #16121f;
+  border: 1px solid #3a2860;
+  color: #8a7aa8;
+  font-family: var(--dw-mono, ui-monospace, monospace);
+  font-size: 0.58rem;
+  font-weight: 600;
+}
+.att-hud-more {
+  padding: 2px 6px 0;
+  font-size: 0.66rem;
+  color: #8a7aa8;
+}
+
 .att-hud-row2 { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: #b8a8d8; }
 .att-hud-line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .att-hud-arrow { flex-shrink: 0; color: #8a7aa8; }
