@@ -89,9 +89,15 @@ const evicted = computed(() => h.base.value > 0)
 
 const statusText = computed(() => {
   if (!h.enabled.value) {
-    return h.reason.value === 'daemon-too-old'
-      ? '这个会话还没有历史：常驻进程（muxd）比当前程序旧，需要重启它才会开始记录'
-      : '这个会话没有开启历史'
+    if (h.reason.value === 'daemon-too-old') {
+      return '这个会话还没有历史：常驻进程（muxd）比当前程序旧，需要重启它才会开始记录'
+    }
+    // tmux capture 源的失败要【说出原因】（会话没 attach / 状态时序）——通用文案会把一次
+    // 可重试的失败伪装成"这功能不支持"（2026-09-12 Human 实测撞到的就是这个）。
+    if (h.reason.value.startsWith('tmux-capture:')) {
+      return `这个会话的历史暂时没能从 tmux 读取（${h.reason.value.slice('tmux-capture:'.length).trim()}）——稍后重试；tmux 自己的 copy mode（命令行 tmux copy-mode）不受影响`
+    }
+    return '这个会话没有开启历史'
   }
   if (h.broken.value) return '历史记录中途出错已停止增长（终端本身不受影响）'
   const held = h.total.value - h.base.value

@@ -277,7 +277,9 @@ func (s *TmuxStateService) CapturePaneForShell(ctx context.Context, shellPID, hi
 	if st.AttachedSession == "" {
 		return nil, nil, fmt.Errorf("shell %d is not attached to tmux", shellPID)
 	}
-	target := ""
+	// 目标解析：优先 active window.pane；快照里认不出 active 标记时（多客户端/状态时序），
+	// **裸会话名就是合法 target** —— tmux 自动解析到该会话的当前窗口，永远比报错强。
+	target := st.AttachedSession
 	for _, sess := range st.Sessions {
 		if sess.Name != st.AttachedSession {
 			continue
@@ -295,9 +297,6 @@ func (s *TmuxStateService) CapturePaneForShell(ctx context.Context, shellPID, hi
 			}
 			target = fmt.Sprintf("%s:%d.%d", st.AttachedSession, win.Index, paneIdx)
 		}
-	}
-	if target == "" {
-		return nil, nil, fmt.Errorf("no active window found for session %q", st.AttachedSession)
 	}
 	full, err := s.prober.run(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", historyCap))
 	if err != nil {
