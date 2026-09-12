@@ -656,8 +656,9 @@ const attentionHud = useAttentionHud({
 // Tap: the composable already marks the target seen + silences it + closes (see activate()'s
 // return); this call site's ONLY job is the actual window switch, exactly the split
 // onOverviewSelect already uses for the overview grid's own cards (AOV-9/AOV-14).
-function onHudActivate(): void {
-  const target = attentionHud.activate()
+function onHudActivate(key?: string): void {
+  // key = 点了合并卡的某一**行**：跳那个窗口并把只它写成已读；无 key = 卡面主行 → primary。
+  const target = attentionHud.activate(key)
   if (target) void tmux.selectWindow(target.index)
 }
 function onHudDismiss(): void {
