@@ -1,3 +1,6 @@
+// 必须是第一个 import：vendor chunk（pdfjs/docx-preview）在模块顶层就调用新 API，
+// 兼容层必须先于它们求值（REQ-fp-a2 附带发现，2026-09-11）。
+import './polyfills'
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import router from './router'
