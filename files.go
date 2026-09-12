@@ -406,9 +406,11 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	if walkErr != nil && !errors.Is(walkErr, errSearchBudget) {
 		truncated = true
 	}
-	// Rank the collected hits by relevance, then keep the top searchMaxResults — so the file
-	// you want surfaces even when a common term matched far more than we return. Score desc,
-	// then dirs first, then newest, then rel path for a stable, scannable order.
+	// Rank the collected hits, then keep the top searchMaxResults. 目录组**整体置顶**
+	// (2026-09-11 Human 拍定"命中的目录排前面"): isDir 是第一排序键而非同分 tie-break ——
+	// 一个前缀命中的文件(100 分)不得把命中目录压下去。搜索是"找路": 先给可钻入的结构入口,
+	// 文件退居其后。目录树浏览的目录在前由 handleFilesTree 负责, 互不影响。
+	// 组内顺序: score desc → 新 → rel path, 稳定可扫读。
 	scored := make([]struct {
 		e searchEntry
 		s int
@@ -418,11 +420,11 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		scored[i].s = searchScore(e.Name, terms)
 	}
 	sort.SliceStable(scored, func(i, j int) bool {
-		if scored[i].s != scored[j].s {
-			return scored[i].s > scored[j].s
-		}
 		if scored[i].e.IsDir != scored[j].e.IsDir {
 			return scored[i].e.IsDir
+		}
+		if scored[i].s != scored[j].s {
+			return scored[i].s > scored[j].s
 		}
 		if scored[i].e.MtimeMs != scored[j].e.MtimeMs {
 			return scored[i].e.MtimeMs > scored[j].e.MtimeMs
@@ -758,7 +760,7 @@ func isRecentFile(cwd, abs string) bool {
 //  1. explicit client cwd override (absolute, existing dir): a deliberate anchor — the per-pane
 //     drawer's owning-pane cwd, or a LOCK-mode frozen snapshot. Honoured as-is.
 //  2. tmux authority: the attached session's active-window active-pane CWD. THIS is the fix — a
-//     client that sends no cwd (activeCwd is still '' during detach / the first WS frame) now
+//     client that sends no cwd (activeCwd is still ” during detach / the first WS frame) now
 //     anchors correctly instead of falling through to the tmux launch dir. Read from the same
 //     TmuxState the display consumes, so the front/back views can't drift.
 //  3. non-tmux standalone: the shell's live /proc cwd (correct — the shell IS the pane, and it
