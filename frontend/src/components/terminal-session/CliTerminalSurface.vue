@@ -2570,6 +2570,8 @@ function openInstallGuide() { notifyQuickOpen.value = true }
  * 实现，我们再叠一层只会打架。
  */
 const copyModeOpen = ref(false)
+// 复制模式历史的缓冲键：同键复用已加载行（见 openCopyMode 内的注释）。
+let historyFor = ''
 // cliFetch，不是裸 fetch：认证头和 401/429 的处理只有那一处（useCliAuth）。这里再写一份的下场是
 // 复制模式永远是空的，而且页面上一个报错都没有。
 const terminalHistory = useTerminalHistory(() => props.sessionId, (path) => cliFetch(path), () => (tmuxAttached.value ? { source: 'tmux' } : {} as Record<string, string>))
@@ -2588,7 +2590,14 @@ function openCopyMode(): string {
   // 远程标签本轮不支持：会话住在别人机器上，历史也在那台机器的常驻进程里，而这里问的是本机 API
   // —— 不拦就会打开一个永远空着的视口，让人以为"这个终端没有历史"。说清楚比装作能用好。
   if (props.isRemote) return '远程终端暂不支持回看历史（历史存在那台机器的常驻进程里）'
-  terminalHistory.reset()
+  // 缓冲保留（2026-09-12，Human 报"卡 3 秒才进得去"）：同会话同源（tmux/非 tmux）时**不清空**
+  // 已加载的历史——第二次进入瞬时上屏，新内容由视图的尾部刷新补。会话或源变了（行号体系不同）
+  // 才重置，否则两套行号 merge 出来是乱序。
+  const historyKey = `${props.sessionId}:${tmuxAttached.value ? 'tmux' : 'plain'}`
+  if (historyFor !== historyKey) {
+    terminalHistory.reset()
+    historyFor = historyKey
+  }
   copyModeOpen.value = true
   hud.record('state', '进入回看历史')
   return ''

@@ -182,7 +182,9 @@ describe('约束③（2026-09-12 改版）：tmux 标签放行、远程仍拒', 
   it('openCopyMode 不再拒绝 tmux 标签（muxd scrollback 对 tmux 会话一样存在）', () => {
     const fn = surface.slice(surface.indexOf('function openCopyMode'))
     const body = fn.slice(0, fn.indexOf("return ''"))
-    expect(body).not.toContain('tmuxAttached.value')
+    // 判定的演进：tmuxAttached 仍会出现（缓冲键区分 tmux/非 tmux 源），但它不再构成【拒绝】——
+    // 拒绝语本身删掉才是断言点。
+    expect(body).not.toContain('请用 tmux 自己的复制模式')
   })
 
   it('openCopyMode 对远程标签仍拒绝并给出【理由】', () => {

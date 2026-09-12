@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
@@ -142,6 +144,46 @@ const defaultHistoryPage = 500
 // local link shrugs at (only fetched when the user opens the copy view).
 const tmuxCaptureCap = 20000
 
+// 打开复制模式的头两秒要串行走三个请求（探测/尾页/当前屏），每个都真抓一次 capture 的话，
+// 冷启动就是 6 次 capture + 往返——Human 实测"卡 3 秒才进得去"。缓存 3 秒：同一次进入的
+// 三个请求共享一次 capture；3 秒后的下一次进入再真抓（新输出不会缺席太久）。
+type tmuxCaptureEntry struct {
+	at              time.Time
+	history, screen []string
+}
+
+var tmuxCaptureCache = struct {
+	sync.Mutex
+	m map[int]tmuxCaptureEntry
+}{m: map[int]tmuxCaptureEntry{}}
+
+const tmuxCaptureTTL = 3 * time.Second
+
+func capturePaneForShellCached(ctx context.Context, cap tmuxPaneCapture, shellPID int) ([]string, []string, error) {
+	tmuxCaptureCache.Lock()
+	entry, ok := tmuxCaptureCache.m[shellPID]
+	tmuxCaptureCache.Unlock()
+	if ok && time.Since(entry.at) < tmuxCaptureTTL {
+		return entry.history, entry.screen, nil
+	}
+	history, screen, err := cap.CapturePaneForShell(ctx, shellPID, tmuxCaptureCap)
+	if err != nil {
+		return nil, nil, err
+	}
+	tmuxCaptureCache.Lock()
+	tmuxCaptureCache.m[shellPID] = tmuxCaptureEntry{at: time.Now(), history: history, screen: screen}
+	// 顺手防胀：会话关了缓存条目留着也只是几 MB 的口子，但还是只留最近用过的那些。
+	if len(tmuxCaptureCache.m) > 64 {
+		for pid, e := range tmuxCaptureCache.m {
+			if time.Since(e.at) > time.Minute {
+				delete(tmuxCaptureCache.m, pid)
+			}
+		}
+	}
+	tmuxCaptureCache.Unlock()
+	return history, screen, nil
+}
+
 // tmuxPaneCapture is the optional capability the tmux provider carries when it can read pane
 // history for a shell. Kept as a narrow interface assertion instead of widening TmuxStateProvider
 // for every implementor.
@@ -173,7 +215,7 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 	// 不带 -e，纯文本复制已满足需求）。enable=false 的失败会如实说明，让 UI 有话可说。
 	if q.Get("source") == "tmux" {
 		if cap, ok := s.tmuxProvider.(tmuxPaneCapture); ok {
-			history, screen, cerr := cap.CapturePaneForShell(r.Context(), sess.ShellPID(), tmuxCaptureCap)
+			history, screen, cerr := capturePaneForShellCached(r.Context(), cap, sess.ShellPID())
 			if cerr != nil {
 				writeJSON(w, http.StatusOK, map[string]any{
 					"enabled": false,
