@@ -18,7 +18,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive } from 'lucide-vue-next'
 import { useUploadLimit } from '@terminal/composables/cli/uploadLimits'
 import {
   filesRecent,
@@ -49,6 +49,7 @@ import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
 import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
 import MidTruncatedName from '@terminal/components/terminal-session/MidTruncatedName.vue'
+import { nextTreeSort, sortTreeBy, type TreeSortMode } from '@terminal/components/terminal-session/treeSort'
 import SheetPreview from '@terminal/components/terminal-session/SheetPreview.vue'
 import AudioPreview from '@terminal/components/terminal-session/AudioPreview.vue'
 import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview.vue'
@@ -274,8 +275,18 @@ async function toggleNode(node: TreeNode): Promise<void> {
 }
 
 // 扁平化：走一遍已展开子树 → 单个 <ul> v-for（键盘导航也按这个顺序定位）。
+// ── 目录树排序（REQ-fp-tree-sort，2026-09-12）：名称 / 时间 / 大小 ──
+// 目录恒在前（与搜索目录置顶同一立意）；组内按所选键。排序发生在【渲染层】（flatten 对每层
+// 拷贝排序），不动已加载数据——切排序即 treeVersion 之外多了一个响应式依赖，即时生效。
+const treeSort = ref<TreeSortMode>('name')
+function cycleTreeSort(): void {
+  treeSort.value = nextTreeSort(treeSort.value)
+  bumpTree() // visibleNodes 已读 treeSort（依赖成立），bump 是给键盘导航的顺序一份确定性
+}
+
 function flatten(nodes: TreeNode[], out: TreeNode[]): void {
-  for (const n of nodes) {
+  const ordered = sortTreeBy(nodes, treeSort.value, (n) => n.entry)
+  for (const n of ordered) {
     out.push(n)
     if (n.entry.isDir && n.expanded && n.children) flatten(n.children, out)
   }
@@ -1123,6 +1134,17 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
             data-testid="fp-tree-new-folder"
             @click="startCreate(treeRootRel, 'dir')"
           ><FolderPlus class="size-3.5" /></button>
+          <button
+            class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+            type="button"
+            :title="`排序：${{ name: '名称', time: '时间（新→旧）', size: '大小（大→小）' }[treeSort]}（点击切换，目录恒在前）`"
+            data-testid="fp-tree-sort"
+            @click="cycleTreeSort"
+          >
+            <ArrowDownAZ v-if="treeSort === 'name'" class="size-3.5" />
+            <Clock v-else-if="treeSort === 'time'" class="size-3.5" />
+            <HardDrive v-else class="size-3.5" />
+          </button>
           <button
             class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
             type="button" title="刷新目录（当前层 + 已展开层）"

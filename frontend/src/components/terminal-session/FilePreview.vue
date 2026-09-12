@@ -127,13 +127,15 @@ function bumpFont(d: number): void {
 }
 
 // ── reading theme ────────────────────────────────────────────────────────────────────
-// Dark (Tokyo Night) by default; light for a bright room, where a dark surface glares as
-// badly as a light one does at night. Unlike wrap/font-size, this is a DURABLE preference —
-// losing it on every reopen would be its own small annoyance — so it persists per device.
+// LIGHT by default (2026-09-12 Human：黑夜下的 md 阅读面"非常刺眼"——白天的亮房间里，暗底
+// 和夜间看亮底一样伤眼); dark stays for night owls via the toolbar toggle. Unlike
+// wrap/font-size, this is a DURABLE preference — losing it on every reopen would be its own
+// small annoyance — so it persists per device. Only an EXPLICIT saved 'dark' restores dark:
+// never-touched devices flip to the new default, old preferences survive.
 type ReadTheme = 'dark' | 'light'
 const THEME_KEY = 'dw.filepreview.theme'
 const theme = ref<ReadTheme>(((): ReadTheme => {
-  try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark' } catch { return 'dark' }
+  try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light' } catch { return 'light' }
 })())
 function toggleTheme(): void {
   theme.value = theme.value === 'dark' ? 'light' : 'dark'
