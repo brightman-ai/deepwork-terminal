@@ -8,9 +8,14 @@
  * 失败路径：损坏 zip / 非 docx 内容 → renderAsync 抛错 → 内联原因；预览头部的「下载」按钮
  * 始终是逃生口。库（~160KB）仅在真打开 docx 时动态 import。
  */
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import ImageZoomViewer from '@terminal/components/terminal-session/ImageZoomViewer.vue'
 import { wireImageZoom } from '@terminal/components/terminal-session/imageZoom'
+import { armRenderWatchdog, type RenderWatchdog } from '@terminal/components/terminal-session/previewWatchdog'
+
+// 渲染 watchdog（REQ-fp-a2-0）：renderAsync 抛错有下面的 catch，但永不结算（promise 永远
+// pending）会让人对着黑面板猜。超时把失败讲出来；settle 时机 = 内容真落进 body。
+let watchdog: RenderWatchdog | null = null
 
 const props = defineProps<{
   name: string
@@ -28,6 +33,11 @@ async function render(): Promise<void> {
   rendering.value = true
   errorText.value = ''
   body.innerHTML = ''
+  watchdog?.dispose()
+  watchdog = armRenderWatchdog('docx', (msg) => {
+    errorText.value = msg
+    rendering.value = false
+  })
   try {
     const { renderAsync } = await import('docx-preview')
     await renderAsync(props.data, body, styleEl.value, {
@@ -39,11 +49,14 @@ async function render(): Promise<void> {
     })
     if (!body.childElementCount) {
       // 渲染"成功"却一个节点都没落（空/怪结构）——按失败讲，不给空白页。
+      watchdog?.dispose()
       errorText.value = '文档没有可渲染的内容'
     } else {
+      watchdog?.settle()
       wireImages(body)
     }
   } catch (err) {
+    watchdog?.dispose()
     errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
     rendering.value = false
@@ -56,6 +69,7 @@ function wireImages(root: HTMLElement): void { wireImageZoom(root, (src) => { zo
 
 onMounted(() => void render())
 watch(() => props.data, () => void render())
+onBeforeUnmount(() => { watchdog?.dispose(); watchdog = null })
 </script>
 
 <template>

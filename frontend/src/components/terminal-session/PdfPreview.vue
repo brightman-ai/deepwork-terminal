@@ -8,6 +8,7 @@
  * pdfjs 会【转移/detach】传入的 ArrayBuffer —— 先拷贝，别吃掉 prop。
  */
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { armRenderWatchdog, type RenderWatchdog } from '@terminal/components/terminal-session/previewWatchdog'
 
 const props = defineProps<{
   name: string
@@ -48,6 +49,12 @@ interface PdfPage {
   render(o: { canvasContext: CanvasRenderingContext2D; viewport: unknown }): { promise: Promise<void> }
 }
 
+// 渲染 watchdog（REQ-fp-a2-0）：抛错有下面的 catch，但"永不结算"（worker 挂死、canvas 静默
+// 失败、宿主兼容问题）没有任何出口——promise 永远 pending，用户永远看一块黑。超时把失败
+// 变成人话。settle 的时机是【第一页真像素落进 DOM】，不是 getDocument 成功——后者只说明
+// 解析成了，像素还可能死在路上（移动端黑屏的报告形态就是"切过去但一片空白"）。
+let watchdog: RenderWatchdog | null = null
+
 async function load(): Promise<void> {
   const container = pagesEl.value
   if (!container) return
@@ -56,6 +63,13 @@ async function load(): Promise<void> {
   container.innerHTML = ''
   slots = []
   const seq = ++renderSeq
+  watchdog?.dispose()
+  watchdog = armRenderWatchdog('pdf', (msg) => {
+    if (seq !== renderSeq) return
+    errorText.value = msg
+    rendering.value = false
+    io?.disconnect()
+  })
   try {
     const pdfjs = await import('pdfjs-dist')
     const workerUrl = (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default
@@ -81,6 +95,7 @@ async function load(): Promise<void> {
     setupObserver()
     await nextTick()
   } catch (err) {
+    watchdog?.dispose()
     if (seq === renderSeq) errorText.value = err instanceof Error ? err.message : String(err)
   } finally {
     if (seq === renderSeq) rendering.value = false
@@ -147,6 +162,7 @@ async function renderPage(idx: number): Promise<void> {
     wrap.className = 'pdf-canvas-wrap'
     wrap.appendChild(canvas)
     slot.el.replaceChildren(wrap)
+    if (idx === 0) watchdog?.settle()
 
     // ── 文本层（2026-09-08：「预览要支持内容复制」翻转了"pdf 不做文本选择"这条旧非目标）──
     // 关键是**用显示尺寸而不是渲染尺寸**建 viewport：canvas 的像素宽按 dpr×缩放放大过，
@@ -252,6 +268,7 @@ const pctLabel = computed(() => `${scalePct.value}%`)
 onMounted(() => { void load(); watchWidth() })
 watch(() => props.data, () => void load())
 onBeforeUnmount(() => {
+  watchdog?.dispose(); watchdog = null
   io?.disconnect(); io = null; renderSeq++; doc = null
   ro?.disconnect(); ro = null
   if (scrollTimer) { clearTimeout(scrollTimer); scrollTimer = null }
