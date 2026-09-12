@@ -18,7 +18,7 @@
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw } from 'lucide-vue-next'
 import { useUploadLimit } from '@terminal/composables/cli/uploadLimits'
 import {
   filesRecent,
@@ -48,6 +48,7 @@ import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
 import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
+import MidTruncatedName from '@terminal/components/terminal-session/MidTruncatedName.vue'
 import SheetPreview from '@terminal/components/terminal-session/SheetPreview.vue'
 import AudioPreview from '@terminal/components/terminal-session/AudioPreview.vue'
 import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview.vue'
@@ -137,7 +138,12 @@ const backStack = ref<string[]>([])
 const canGoBack = computed(() => backStack.value.length > 0)
 const crumbs = computed(() => {
   const segs = treeRootRel.value.split('/').filter(Boolean)
-  const out = [{ rel: '', name: treeCwd.value ? baseName(treeCwd.value) : '根' }]
+  const out = [{
+    rel: '',
+    name: treeCwd.value
+      ? baseName(treeCwd.value)
+      : (anchorError.value ? '锚点不可用' : '定位中…'),
+  }]
   let acc = ''
   for (const s of segs) {
     acc = acc ? `${acc}/${s}` : s
@@ -201,17 +207,27 @@ function reconcile(old: TreeNode[] | null, entries: TreeEntry[], parentRel: stri
   })
 }
 
+// 锚点状态（2026-09-11）：treeCwd==='' 有两种完全不同的含义——"正在拿"（首帧竞态，转瞬即逝）
+// 和"拿不到"（会话元数据缺失/请求失败，会一直停在这）。曾经两者都渲染成同一个误导性的「根」，
+// 用户看到的是"目录变成根了，是没拿到吗"——既说不出原因也没有出路。现在显式区分：
+// 定位中… / 锚点不可用（带重试）。
+const anchorError = ref(false)
+
 async function loadView(): Promise<void> {
   treeLoading.value = true
   try {
     const resp = await filesTree(props.sessionId, treeRootRel.value, props.cwd)
     if (resp) {
+      anchorError.value = false
       // cwd 锚只在【真根】查询时更新：子目录查询的 resp.cwd 是那个目录的路径，不是会话锚。
       if (!treeRootRel.value) treeCwd.value = resp.cwd
       roots.value = reconcile(roots.value, resp.entries, treeRootRel.value, 0)
     } else {
+      if (!treeRootRel.value) anchorError.value = true
       roots.value = []
     }
+  } catch {
+    if (!treeRootRel.value) anchorError.value = true
   } finally {
     treeLoading.value = false
     bumpTree()
@@ -642,6 +658,32 @@ const treeQuery = ref('')
 const searchResults = ref<SearchEntry[]>([])
 const searchTruncated = ref(false) // server hit a cap → results incomplete (huge cwd)
 const searching = ref(false)
+// ── 搜索结果的类别快筛（REQ-fp-search-filter，2026-09-11）──
+// 搜索"v7"返回一大堆相近名文件时，纯列表没有第二次收窄的抓手（用户原话："缺乏好的 UI
+// 范式能够快速定位"）。复用最近修改 tab 已有的 chip 范式与 catOf SSOT：类别来自同一张表，
+// 不新造分类。目录不算类别也不被类别过滤——目录是"找路"的结构入口（与搜索目录置顶同一
+// 立意），任何筛选下都保留。
+const activeSearchCat = ref('all')
+const searchCats = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const e of searchResults.value) {
+    if (e.isDir) continue
+    counts[catOf(e.name)] = (counts[catOf(e.name)] || 0) + 1
+  }
+  const cats = [{ key: 'all', label: CAT_LABEL.all, count: searchResults.value.length }]
+  for (const k of CAT_ORDER.filter((k) => k !== 'all')) {
+    if (counts[k]) cats.push({ key: k, label: CAT_LABEL[k], count: counts[k] })
+  }
+  return cats
+})
+const filteredSearchResults = computed(() => {
+  if (activeSearchCat.value === 'all') return searchResults.value
+  return searchResults.value.filter((e) => e.isDir || catOf(e.name) === activeSearchCat.value)
+})
+watch(searchCats, (cats) => {
+  if (!cats.some((c) => c.key === activeSearchCat.value)) activeSearchCat.value = 'all'
+})
+
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0 // guards against out-of-order responses clobbering a newer query
 
@@ -900,12 +942,47 @@ function relTime(ms: number): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
+// 绝对时间（hover title）：relTime 只给「3天前 / 09-08」这种量级，要对比同日多版本得看到分钟。
+function absTime(ms: number): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
 // Re-anchor when the target session OR the ANCHORED cwd prop changes — i.e. ONLY when the
 // user explicitly re-anchors via the drawer's pane pill (or a session switch). A plain tmux
 // pane/window switch no longer touches props.cwd, so the file tree / preview the user is
 // mid-read on stays put. On re-anchor: reset the tree to the new root + reload the sub-tab.
+// 手动刷新（2026-09-11）：根 + 所有已展开子目录逐层重拉。reconcile 保留展开态与选中，
+// 所以刷新不打断正在读的位置。只刷根会让"agent 刚往深层写了文件"看不见——用户会以为刷新没用。
+const treeRefreshing = ref(false)
+async function refreshVisible(): Promise<void> {
+  if (treeRefreshing.value) return
+  treeRefreshing.value = true
+  try {
+    const walk = async (nodes: TreeNode[]): Promise<void> => {
+      for (const n of nodes) {
+        if (n.entry.isDir && n.expanded && n.children) {
+          await refreshDir(n)
+          await walk(n.children)
+        }
+      }
+    }
+    await refreshDir(null)
+    await walk(roots.value)
+  } finally {
+    treeRefreshing.value = false
+  }
+}
+
+function retryAnchor(): void {
+  anchorError.value = false
+  void loadView()
+}
+
 function reanchor(): void {
+  anchorError.value = false
   recent.value = []
   roots.value = []
   recentQuery.value = ''
@@ -968,7 +1045,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           <ImageIcon v-if="isImage(f.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <button class="min-w-0 flex-1 text-left" type="button" :title="f.path" @click="previewRecent(f)">
-            <span class="block text-xs font-medium truncate text-foreground">{{ f.name }}</span>
+            <span class="block text-xs font-medium text-foreground"><MidTruncatedName :name="f.name" /></span>
             <span class="mt-0.5 flex items-center gap-1.5 text-[0.6rem] text-muted-foreground truncate">
               <span v-if="f.tool" class="px-1 rounded bg-muted text-muted-foreground">{{ f.tool }}</span>
               <span class="truncate">{{ f.dir }}</span>
@@ -1022,11 +1099,14 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
             <template v-for="(c, i) in crumbs" :key="c.rel">
               <button
                 class="shrink-0 text-[0.72rem] rounded px-1 py-0.5 hover:bg-muted/50 transition-colors"
-                :class="i === crumbs.length - 1 ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
+                :class="[
+                  i === crumbs.length - 1 ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
+                  anchorError && i === 0 && !treeCwd ? 'text-amber-500 hover:text-amber-400' : '',
+                ]"
                 type="button"
                 :data-testid="`fp-crumb-${c.rel || 'root'}`"
-                :title="c.rel ? (treeCwd.replace(/\/+$/, '') + '/' + c.rel) : treeCwd"
-                @click="i === crumbs.length - 1 ? undefined : reRoot(c.rel, true)"
+                :title="c.rel ? (treeCwd.replace(/\/+$/, '') + '/' + c.rel) : (treeCwd || (anchorError ? '拿不到这个会话的目录锚点——点此重试' : '正在定位会话目录'))"
+                @click="i === crumbs.length - 1 ? (anchorError && !treeCwd ? retryAnchor() : undefined) : reRoot(c.rel, true)"
               >{{ c.name }}</button>
               <ChevronRight v-if="i < crumbs.length - 1" class="size-3 shrink-0 text-muted-foreground/40" />
             </template>
@@ -1043,6 +1123,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
             data-testid="fp-tree-new-folder"
             @click="startCreate(treeRootRel, 'dir')"
           ><FolderPlus class="size-3.5" /></button>
+          <button
+            class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+            type="button" title="刷新目录（当前层 + 已展开层）"
+            data-testid="fp-tree-refresh"
+            :disabled="treeRefreshing"
+            @click="refreshVisible"
+          ><RefreshCw class="size-3.5" :class="{ 'animate-spin': treeRefreshing }" /></button>
           <button
             class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
             type="button" title="全部折叠"
@@ -1123,7 +1210,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           <li v-for="j in uploadJobs" :key="j.id" class="flex items-center gap-2" :data-testid="`fp-upload-job`">
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5">
-                <span class="min-w-0 flex-1 truncate text-[0.62rem] text-foreground" :title="j.name">{{ j.name }}</span>
+                <span class="min-w-0 flex-1 text-[0.62rem] text-foreground" :title="j.name"><MidTruncatedName :name="j.name" tooltip="" /></span>
                 <span
                   class="shrink-0 text-[0.56rem] tabular-nums"
                   :class="j.status === 'error' ? 'text-red-500' : j.status === 'done' ? 'text-green-500' : 'text-muted-foreground/70'"
@@ -1166,11 +1253,23 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
         >
           结果过多，已截断 — 当前目录很大（可能不是你以为的工程根）。请缩小搜索词，或切到目标目录再搜。
         </div>
+        <!-- 类别快筛：只在结果真跨多类时出现（与最近修改 tab 同规则）。目录恒在，不随类别收起。 -->
+        <div v-if="searchResults.length && searchCats.length > 2" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
+          <button
+            v-for="c in searchCats"
+            :key="c.key"
+            type="button"
+            class="shrink-0 rounded-full border px-2.5 py-0.5 text-[0.62rem] font-medium transition-colors"
+            :class="activeSearchCat === c.key ? 'bg-primary/15 border-primary/60 text-foreground' : 'bg-card border-border text-muted-foreground hover:text-foreground'"
+            :data-testid="`fp-scat-${c.key}`"
+            @click="activeSearchCat = c.key"
+          >{{ c.label }}<span class="ml-1 opacity-60 tabular-nums">{{ c.count }}</span></button>
+        </div>
         <div v-if="searching && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">搜索中…</div>
-        <div v-else-if="!searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
+        <div v-else-if="!filteredSearchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
         <ul v-else class="flex flex-col gap-0.5">
           <li
-            v-for="e in searchResults"
+            v-for="e in filteredSearchResults"
             :key="e.rel"
             class="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40 transition-colors"
             :data-testid="`fp-search-${e.rel}`"
@@ -1184,7 +1283,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
               :title="e.rel"
               @click="onSearchHit(e)"
             >
-              <span class="block text-xs truncate" :class="e.isDir ? 'text-foreground font-medium' : 'text-foreground'">{{ e.name }}<span v-if="e.isDir" class="text-muted-foreground/60">/</span></span>
+              <span class="block text-xs" :class="e.isDir ? 'text-foreground font-medium' : 'text-foreground'"><MidTruncatedName :name="e.name" /><span v-if="e.isDir" class="text-muted-foreground/60">/</span></span>
               <span v-if="parentRel(e.rel)" class="block text-[0.58rem] text-muted-foreground/60 truncate">{{ parentRel(e.rel) }}</span>
             </button>
             <!-- 文件类型角标：扩展名 + 类别同色（catOf SSOT），扫一眼可分 md/go/png/… -->
@@ -1195,6 +1294,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
               :data-testid="`fp-search-type-${e.rel}`"
             >{{ fileExt(e.name) || '?' }}</span>
             <span v-if="!e.isDir" class="text-[0.58rem] text-muted-foreground/70 tabular-nums shrink-0">{{ fmtSize(e.size) }}</span>
+            <!-- 修改时间：搜索命中常是同名多版本（v1/v2/v3…），没有时间就分不出哪个是新的 -->
+            <span
+              v-if="e.mtimeMs"
+              class="shrink-0 text-[0.58rem] text-muted-foreground/60 tabular-nums"
+              :title="absTime(e.mtimeMs)"
+              :data-testid="`fp-search-time-${e.rel}`"
+            >{{ relTime(e.mtimeMs) }}</span>
             <button
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
               type="button" title="复制路径"
@@ -1271,7 +1377,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
                   <Folder v-if="n.entry.isDir" class="size-4 shrink-0 text-primary/80" />
                   <ImageIcon v-else-if="isImage(n.entry.name)" class="size-4 shrink-0 text-violet-500" />
                   <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(n) ? 'text-primary/80' : catTextClass(n.entry.name)" />
-                  <span class="min-w-0 flex-1 truncate text-xs" :class="n.entry.isDir ? 'text-foreground font-medium' : 'text-foreground'">{{ n.entry.name }}<span v-if="n.entry.isDir" class="text-muted-foreground/60">/</span></span>
+                  <span class="min-w-0 flex-1 text-xs" :class="n.entry.isDir ? 'text-foreground font-medium' : 'text-foreground'"><MidTruncatedName :name="n.entry.name" /><span v-if="n.entry.isDir" class="text-muted-foreground/60">/</span></span>
                 </button>
               </div>
               <!-- agent 刚碰过徽标 / 文件大小 -->
@@ -1297,7 +1403,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
-          <span class="min-w-0 flex-1 text-xs font-medium truncate text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title">{{ preview.name }}</span>
+          <span class="min-w-0 flex-1 text-xs font-medium text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title"><MidTruncatedName :name="preview.name" tooltip="" /></span>
           <!-- 复制内容 (primary — a content preview's copy means "copy what I'm reading") -->
           <button
             v-if="preview.result.kind === 'text'"
