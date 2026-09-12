@@ -263,6 +263,64 @@ func NewTmuxStateService() *TmuxStateService {
 	}
 }
 
+// CapturePaneForShell reads the tmux pane history of the session this shell's client is attached
+// to, split at the visible-screen boundary. READ-ONLY via the tmux server socket — nothing is
+// typed into the user's pane, and tmux's own copy mode is untouched. This is the long-range source
+// for the web copy mode on tmux tabs: the daemon's line scrollback barely fills for a tmux session
+// (tmux repaints in place and keeps its own history internally), so the only place the deep
+// history lives is tmux's buffer — and capture-pane is the supported way to read it.
+//
+// Returns (historyLines, screenLines): history = everything from the buffer cap down to just above
+// the visible screen; screen = the visible grid. The caller numbers them contiguously.
+func (s *TmuxStateService) CapturePaneForShell(ctx context.Context, shellPID, historyCap int) ([]string, []string, error) {
+	st := s.State(ctx, shellPID)
+	if st.AttachedSession == "" {
+		return nil, nil, fmt.Errorf("shell %d is not attached to tmux", shellPID)
+	}
+	target := ""
+	for _, sess := range st.Sessions {
+		if sess.Name != st.AttachedSession {
+			continue
+		}
+		for _, win := range sess.Windows {
+			if !win.Active {
+				continue
+			}
+			paneIdx := 0
+			for _, pane := range win.Panes {
+				if pane.Active {
+					paneIdx = pane.Index
+					break
+				}
+			}
+			target = fmt.Sprintf("%s:%d.%d", st.AttachedSession, win.Index, paneIdx)
+		}
+	}
+	if target == "" {
+		return nil, nil, fmt.Errorf("no active window found for session %q", st.AttachedSession)
+	}
+	full, err := s.prober.run(ctx, "capture-pane", "-t", target, "-p", "-S", fmt.Sprintf("-%d", historyCap))
+	if err != nil {
+		return nil, nil, fmt.Errorf("capture-pane %s: %w", target, err)
+	}
+	vis, err := s.prober.run(ctx, "capture-pane", "-t", target, "-p")
+	if err != nil {
+		return nil, nil, fmt.Errorf("capture-pane visible %s: %w", target, err)
+	}
+	for len(full) > 0 && full[len(full)-1] == "" {
+		full = full[:len(full)-1]
+	}
+	for len(vis) > 0 && vis[len(vis)-1] == "" {
+		vis = vis[:len(vis)-1]
+	}
+	// 拆分点：visible 是 full 的尾部（同一块屏）。full 比 visible 还短（很小的 pane）→ 全给 history。
+	split := len(full) - len(vis)
+	if split < 0 {
+		split = len(full)
+	}
+	return full[:split], full[split:], nil
+}
+
 // TmuxInstalled reports whether the tmux binary is available, cached for 60s.
 func (s *TmuxStateService) TmuxInstalled() bool {
 	s.mu.Lock()

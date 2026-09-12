@@ -111,6 +111,9 @@ export interface TerminalHistory {
 export function useTerminalHistory(
   sessionId: () => string | undefined,
   doFetch: HistoryFetch,
+  /** 每次取行都会合并的额外查询参数。tmux 标签传 {source:'tmux'} —— 长程源是 tmux 自己的
+   *  buffer 经 capture-pane（2026-09-12），daemon 的行 scrollback 对 tmux 会话几乎是空的。 */
+  sourceParams?: () => Record<string, string>,
 ): TerminalHistory {
   const lines = shallowRef<HistoryLine[]>([])
   const styles = shallowRef<HistoryStyle[]>([])
@@ -142,7 +145,7 @@ export function useTerminalHistory(
   async function fetchPage(params: Record<string, string>): Promise<HistoryPage | null> {
     const id = sessionId()
     if (!id) return null
-    const qs = new URLSearchParams({ ...params, styles: String(styles.value.length) })
+    const qs = new URLSearchParams({ ...params, ...sourceParams?.(), styles: String(styles.value.length) })
     try {
       const res = await doFetch(cliApi(`/sessions/${id}/history?${qs}`))
       if (!res.ok) {

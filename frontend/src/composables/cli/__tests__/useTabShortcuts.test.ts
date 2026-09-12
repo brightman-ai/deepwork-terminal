@@ -1,5 +1,4 @@
 import { describe, it, expect, mock } from 'bun:test'
-
 // useTabShortcuts pulls in useShortcutsConfig -> useServerStore -> @terminal/api/store, whose
 // import chain touches `window.location` at module scope (useCliAuth.ts) — dead in bare `bun
 // test` (no DOM). Mock the store API before importing, same pattern as useServerStore.test.ts.
@@ -8,7 +7,7 @@ mock.module('@terminal/api/store', () => ({
   saveStore: () => Promise.resolve(),
 }))
 
-const { parseBinding, matchesBinding, matchesPrefixDigit, resolveShortcutAction, resolveLeaderKey } = await import('../useTabShortcuts')
+const { parseBinding, matchesBinding, matchesPrefixDigit, resolveShortcutAction, resolveLeaderKey, leaderBytesFor } = await import('../useTabShortcuts')
 const { DEFAULT_SHORTCUTS_CONFIG, DEFAULT_LEADER, bindingFor } = await import('../useShortcutsConfig')
 
 type Cfg = typeof DEFAULT_SHORTCUTS_CONFIG
@@ -255,5 +254,17 @@ describe('leader + [ = 回看历史', () => {
     // 德语布局上 BracketLeft 打出的是 `ü`。匹配 key 而不是 code，就是这条 leader 在半个欧洲失效。
     expect(resolveLeaderKey(key({ code: 'BracketLeft', key: 'ü' }), L, ALL_ACTIONS))
       .toEqual({ type: 'action', action: 'copyMode' })
+  })
+})
+
+describe('leaderBytesFor（tmux 混合 leader 的前缀补发字节）', () => {
+  it('默认 Ctrl+KeyB → \\x02', () => {
+    expect(leaderBytesFor('Ctrl+KeyB')).toBe('\x02')
+  })
+  it('Ctrl+a → \\x01（C-a 也是常见 leader）', () => {
+    expect(leaderBytesFor('Ctrl+KeyA')).toBe('\x01')
+  })
+  it('非 Ctrl+字母尽力而为：单字符原样', () => {
+    expect(leaderBytesFor('KeyZ')).toBe('z')
   })
 })

@@ -69,6 +69,17 @@ export interface TabShortcutsAdapter {
    * 毫无反应（2026-09-08 实报）。不提供 = 维持旧行为（不让位）。
    */
   copyModeActive?: () => boolean
+
+  /**
+   * **tmux 混合 leader**（2026-09-12）：attach 了 tmux 的标签上，leader 仍然武装，但只有
+   * copyMode 一个动作归应用（长程回看复制——muxd 的 scrollback 比 tmux history 更长，且选择/
+   * 复制是原生 DOM 体验）；其余任何 leader 组合（prefix+1 切窗口、prefix+c 新窗口…）都必须把
+   * leader 字节**原样补发给 PTY**、第二键自然流入 —— tmux 的肌肉记忆一个不丢。
+   * 为 true 时，第二段里除 copyMode 外的所有组合走 onLeaderFallback。
+   */
+  tmuxLeaderHybrid?: () => boolean
+  /** hybrid 模式下第二段不归应用时的补发口：把 leader 的字节序列写进 PTY。 */
+  onLeaderFallback?: (binding: string) => void
 }
 
 interface ParsedBinding {
@@ -333,6 +344,19 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
 
       const r = resolveLeaderKey(e, armed.binding, availableActions)
       clearLeader()
+      // ── tmux 混合模式（tmuxLeaderHybrid）：leader 只认领 copyMode（长程回看复制）。
+      // 其余组合（prefix+1 切窗口、prefix+c 新建、乃至不认识的键）把 leader 字节补发进 PTY、
+      // 第二键自然流入 —— 第一段已经把 C-b 吞下（preventDefault），不补发的话 tmux 收到的
+      // 就只剩半个前缀：C-b 1 会变成向 tmux 敲了个 "1"，窗口纹丝不动。
+      const hybrid = adapter.tmuxLeaderHybrid?.() === true
+      if (r.type === 'action' && hybrid && r.action !== 'copyMode') {
+        adapter.onLeaderFallback?.(armed.binding)
+        return
+      }
+      if (r.type === 'cancel' && hybrid) {
+        adapter.onLeaderFallback?.(armed.binding)
+        return
+      }
       if (r.type === 'action') {
         e.preventDefault()
         e.stopImmediatePropagation()
@@ -378,4 +402,19 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
   })
 
   return { leaderPending, leaderLabel: computed(() => bindingLabel(config.value.leader)) }
+}
+
+
+/** 把 leader 键位编码成它代表的**字节序列**（默认 Ctrl+B → \x02），供 hybrid 模式补发进 PTY。
+ *  只认真 Ctrl+字母（控制字符的标准映射）；其它形态尽力而为（单字符原样）——
+ *  现实里 leader 几乎总是 C-b / C-a。 */
+export function leaderBytesFor(binding: string): string {
+  const p = parseBinding(binding)
+  const code = p.code // "KeyB" / "KeyC" —— 键位表的物理码
+  if (p.ctrl && code.startsWith('Key') && code.length === 4) {
+    const letter = code[3].toUpperCase()
+    return String.fromCharCode(letter.charCodeAt(0) - 64)
+  }
+  // 非 Ctrl+字母的 leader 极罕见：尽力而为，至少把可见字符发出去
+  return code.startsWith('Key') ? code[3].toLowerCase() : ''
 }

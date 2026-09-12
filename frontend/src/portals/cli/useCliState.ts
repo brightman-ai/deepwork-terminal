@@ -10,7 +10,7 @@ import { useRemotePeers } from '@terminal/composables/cli/useRemotePeers'
 import type { TabConnection } from '@terminal/composables/cli/useRemotePeers'
 import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
 import type { PortalRuntimeResult } from '@ce/composables/layout/usePortalRuntime'
-import { useTabShortcuts } from '@terminal/composables/cli/useTabShortcuts'
+import { leaderBytesFor, useTabShortcuts } from '@terminal/composables/cli/useTabShortcuts'
 import { computeVisibleTabOrder } from '@terminal/composables/cli/useVisibleTabOrder'
 import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
 import { useSessionsOverview } from '@terminal/composables/cli/useSessionsOverview'
@@ -188,9 +188,11 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // has one always-mounted CLI portal (no sibling portal competes for these Alt combos the way
   // pro's WindowDockOverlay does), so isActive is unconditionally true — the listener's own
   // onMounted/onBeforeUnmount lifecycle (tied to this component tree) is the only gate needed.
-  // leader（默认 Ctrl+B）走的是同一张动作表的第二条路。它在**当前标签 attach 了 tmux 时整个让位**：
-  // 那个前缀就是 tmux 自己的前缀，抢它就是抢。attached 只有终端表面知道，所以经它已注册的实例读
-  // ——和这里读 netStats / 调 onSendKey 是同一条既有通路，不新拉线。
+  // leader（默认 Ctrl+B）走的是同一张动作表的第二条路。2026-09-12 起在 tmux 标签上改为**混合**：
+  // leader 仍然武装，但只有 copyMode（prefix+[ = 长程回看复制）归应用——muxd 的 scrollback 比
+  // tmux 的 history 更长，且选择/复制是原生 DOM 体验（Human 明确要求）；其余 leader 组合
+  // （prefix+1 切窗口、prefix+c 新建…）经 onLeaderFallback 把前缀字节原样补发进 PTY，
+  // tmux 的肌肉记忆一个不丢。attached 与补发都走表面的既有实例通路，不新拉线。
   const { leaderPending, leaderLabel } = useTabShortcuts({
     orderedTabIds: () => visibleTabIds.value,
     activeTabId: () => activeTab.value?.id,
@@ -198,7 +200,13 @@ export function useCliState(runtime: PortalRuntimeResult) {
     onSelect: switchTab,
     onNew: quickCreateTab,
     onClose: (tabId: string) => { void closeTab(tabId) },
-    leaderEnabled: () => !(activeTab.value ? surfaceRefs[activeTab.value.id]?.tmuxAttached : false),
+    leaderEnabled: () => true,
+    tmuxLeaderHybrid: () => !!(activeTab.value ? surfaceRefs[activeTab.value.id]?.tmuxAttached : false),
+    onLeaderFallback: (binding: string) => {
+      const id = activeTab.value?.id
+      if (!id) return
+      surfaceRefs[id]?.onSendKey?.(leaderBytesFor(binding))
+    },
     // 复制模式开着时整层让位（键盘归那个视口）。和 leaderEnabled 一样，只有壳拿得到表面的状态。
     copyModeActive: () => !!(activeTab.value ? surfaceRefs[activeTab.value.id]?.copyModeOpen : false),
     onOverview: toggleOverview,
