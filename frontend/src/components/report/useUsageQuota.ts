@@ -129,6 +129,10 @@ export interface RuntimeQuota {
   display?: string
   present: boolean
   evidence?: string[] // 'credentials' | 'snapshot' | 'sessions'
+  /** 最近一次探活失败的原因（限新鲜期）。解释"数字为什么不动了"——订阅断档/按量 key 都是
+   *  可行动的信息，泛泛的"数据已过期"只会让人猜。 */
+  last_probe_error?: string
+  last_probe_at?: string
   billing?: Billing
   /**
    * The endpoint ids this SUBSCRIPTION is spent through (kit: Credential.RuntimeProviderIDs).

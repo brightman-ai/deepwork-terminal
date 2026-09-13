@@ -441,6 +441,14 @@ function sourceLabel(source?: string): string {
  * 同源）目前只有 codex 有。claude 的读数来自它自己写的快照，没有等价的"就地问一次"，所以那边
  * 只降权、不给一个点了没反应的按钮。
  */
+// ── API 计费但在场的账号（2026-09-13）：曾经被 subscriptions 过滤后【两个 tab 都不显示】，
+// 行"默认消失"（Human 实报）。它们没有订阅窗口可画，但"这是 API 计费会话、无订阅额度"本身
+// 就是该说的话——渲染成一行带说明的暗色收起行，而不是无声消失。切回 OAuth 订阅时 hook 会
+// 写出窗口，完整行自动回来。
+const apiBilledPresent = computed<RuntimeQuota[]>(() =>
+  quotas.value.filter((q) => q.present && q.billing === 'api' && q.note),
+)
+
 function staleOf(q: RuntimeQuota, group: QuotaGroup) {
   return groupPresentation({
     stale: !!group.snapshot?.stale,
@@ -454,6 +462,9 @@ function staleOf(q: RuntimeQuota, group: QuotaGroup) {
     // q.family = 最新那条账号读数的 family = 当前生效的家族。与它不一致的分组是历史。
     groupFamily: group.family || '',
     activeFamily: q.family || '',
+    // 探活失败原因（域侧持久化，限新鲜期）：比"数据已过期"具体得多——"账号未返回可用额度窗口"
+    // 直指订阅断档/按量 key。附加进 hint，徽标文案不变（行宽有限）。
+    probeError: q.last_probe_error || '',
     // 说真正的原因（"你在用 Kimi"）而不是症状（"6 天没有上报"）。
     billedToDisplay: billedElsewhere(q),
   })
@@ -929,7 +940,15 @@ onUnmounted(() => {
             <!-- No reading at all: say so plainly. Never a fabricated 0%/100% bar. -->
             <div v-if="!quotaGroupsFor(q).length" class="uchip-dim uchip-note">{{ q.note || '暂无额度数据' }}</div>
           </div>
-          <div v-if="!subscriptions.length" class="uchip-dim uchip-empty">未检出官方订阅账号</div>
+          <!-- API 计费账号的收起说明行：不画窗口（没有窗口），但把"为什么这行没有数字"说出口。 -->
+          <div
+            v-for="q in apiBilledPresent"
+            :key="'api-' + accountKey(q)"
+            class="uchip-dim uchip-note uchip-apirow"
+            :data-testid="`uchip-apirow-${accountKey(q)}`"
+            :title="q.last_probe_error ? `最近探活：${q.last_probe_error}` : q.note"
+          >{{ q.display || accountLabel(q) }} · {{ q.note }}</div>
+          <div v-if="!subscriptions.length && !apiBilledPresent.length" class="uchip-dim uchip-empty">未检出官方订阅账号</div>
           <div class="uchip-sep" />
         </template>
 
