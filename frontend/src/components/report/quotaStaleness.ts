@@ -66,16 +66,21 @@ export function stalePresentation(opts: {
    * "这几天你在用 Kimi For Coding"。同一件事，一个让人排查，一个让人放心。
    */
   billedToDisplay?: string
+  /** 最近一次探活（probe）失败的原因，域侧持久化、限新鲜期。空 = 无近期失败。 */
+  probeError?: string
 }): StalePresentation {
   if (!opts.stale) {
     return { dim: false, collapse: false, badge: '', hint: '' }
   }
   const age = humanAge(opts.ageSeconds)
+  // 探活失败是比"没有上报"更进一步的诊断：我们【去问了】，账号【给了这个回答】。
+  // "账号未返回可用额度窗口"直指订阅断档/按量 key——先于一切本地推理说出口。
+  const probed = opts.probeError ? `（最近向账号查询失败：${opts.probeError}）` : ''
   const why = opts.billedToDisplay
-    ? `${age ? `近 ${age}` : '当前'}用量记在 ${opts.billedToDisplay}，本账号自然没有新上报`
+    ? `${age ? `近 ${age}` : '当前'}用量记在 ${opts.billedToDisplay}，本账号自然没有新上报${probed}`
     : age
-      ? `本机已 ${age}未收到 ${opts.runtime} 的用量上报`
-      : `本机未收到 ${opts.runtime} 的用量上报`
+      ? `本机已 ${age}未收到 ${opts.runtime} 的用量上报${probed}`
+      : `本机未收到 ${opts.runtime} 的用量上报${probed}`
   // 点不了就别写"点击"——一个点了没反应的提示比没有提示更糟。
   const how = opts.canProbe ? '，点击直接向账号查询' : '（在本机运行一次该工具即可刷新）'
   return {
@@ -144,6 +149,7 @@ export function groupPresentation(opts: {
   groupFamily: string
   activeFamily: string
   billedToDisplay?: string
+  probeError?: string
 }): GroupPresentation {
   if (isSupersededFamily(opts.groupFamily, opts.activeFamily)) {
     // 已被取代：不给"点击刷新"，给"该看哪一行"。
