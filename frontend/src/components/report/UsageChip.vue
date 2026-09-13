@@ -449,6 +449,14 @@ const apiBilledPresent = computed<RuntimeQuota[]>(() =>
   quotas.value.filter((q) => q.present && q.billing === 'api' && q.note),
 )
 
+// 双账号的 API 半边：任何账号上报的活跃 API profile 会话（目前只有 claude 会上报）。
+const claudeAPISessionsNow = computed(() => {
+  for (const q of quotas.value) {
+    if (q.runtime === 'claude' && q.api_sessions?.length) return q.api_sessions
+  }
+  return []
+})
+
 function staleOf(q: RuntimeQuota, group: QuotaGroup) {
   return groupPresentation({
     stale: !!group.snapshot?.stale,
@@ -948,6 +956,14 @@ onUnmounted(() => {
             :data-testid="`uchip-apirow-${accountKey(q)}`"
             :title="q.last_probe_error ? `最近探活：${q.last_probe_error}` : q.note"
           >{{ q.display || accountLabel(q) }} · {{ q.note }}</div>
+          <!-- 双账号（claude-switch）：官方订阅行的窗口照画，同时在跑的 API profile 会话各占一行
+               小字——两个账号同时存在，两个都要被看见（Human 2026-09-13）。 -->
+          <div
+            v-for="s in claudeAPISessionsNow"
+            :key="'apisess-' + s.name"
+            class="uchip-dim uchip-note uchip-apirow"
+            :data-testid="`uchip-apisess-${s.name}`"
+          >API 会话 · {{ s.name }} · 按量付费（{{ Math.max(0, Math.round(s.age_seconds / 60)) }} 分钟前活跃）</div>
           <div v-if="!subscriptions.length && !apiBilledPresent.length" class="uchip-dim uchip-empty">未检出官方订阅账号</div>
           <div class="uchip-sep" />
         </template>

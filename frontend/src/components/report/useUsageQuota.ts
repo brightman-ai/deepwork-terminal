@@ -133,6 +133,9 @@ export interface RuntimeQuota {
    *  可行动的信息，泛泛的"数据已过期"只会让人猜。 */
   last_probe_error?: string
   last_probe_at?: string
+  /** claude-switch 双账号（2026-09-13）：官方订阅行之外，正在跑的 API profile 会话清单
+   *  （statusline 按账号分家后，每个 profile 一份心跳文件）。 */
+  api_sessions?: { name: string; captured_at: string; age_seconds: number }[]
   billing?: Billing
   /**
    * The endpoint ids this SUBSCRIPTION is spent through (kit: Credential.RuntimeProviderIDs).
