@@ -413,6 +413,12 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 	outputLogCtx := obs.WithStage(context.Background(), stgTerminalOutput)
 	var signals ansisignal.Scanner
 	var replayClipboard replayClipboardFilter
+	clipboard := clipboardScanner{offset: stream.ReplayFrom, pasteMode: sess.bracketedPaste.Store}
+	emitClipboard := func(text string, offset int64, historical bool) {
+		if m.OnClipboard != nil {
+			m.OnClipboard(sess, text, offset, historical)
+		}
+	}
 	replayLeft := stream.Offset - stream.ReplayFrom
 	exited := false
 	code := 0
@@ -452,11 +458,17 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 				n := min(int64(len(data)), replayLeft)
 				// Reconstruct scanner framing without re-firing historical BEL/OSC.
 				_ = signals.Feed(data[:n])
+				if m.OnClipboard != nil {
+					clipboard.feed(data[:n], true, emitClipboard)
+				}
 				historyOutput = replayClipboard.feed(data[:n], true)
 				replayLeft -= n
 				live = data[n:]
 			}
 			if len(live) > 0 {
+				if m.OnClipboard != nil {
+					clipboard.feed(live, false, emitClipboard)
+				}
 				sess.mu.Lock()
 				sess.LastActive = time.Now()
 				sess.mu.Unlock()

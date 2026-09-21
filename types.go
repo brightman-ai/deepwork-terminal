@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +28,8 @@ const (
 // Session represents a single terminal session backed by a PTY.
 // [Ref: T5-B3]
 type Session struct {
+	bracketedPaste atomic.Bool
+
 	ID        string      `json:"id"`
 	Name      string      `json:"name"`
 	Title     string      `json:"title"`

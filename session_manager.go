@@ -94,6 +94,9 @@ type SessionManager struct {
 	// the implementation must not block — see onSessionSignal for how that is honoured.
 	OnSignal func(*Session, ansisignal.Signal)
 
+	// Set before Restore/Create; observes bounded clipboard writes without browser ownership.
+	OnClipboard func(*Session, string, int64, bool)
+
 	// origin stamps every session this manager creates with "whose tab list owns me" — see
 	// sessionMeta.Origin. Set once by the server at construction, before any session exists,
 	// for the same reason OnSignal is. Empty in test fixtures, which is correct: a fixture has

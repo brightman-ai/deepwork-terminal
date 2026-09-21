@@ -39,6 +39,7 @@ deepwork-terminal 把终端"解钉"：把 agent 状态、产出文件、那个 `
 - 基于 WebSocket 的完整 PTY 终端，支持断线重连
 - tmux 快捷键盘工具条（copy 模式、分屏 / 缩放 / 切 pane、新建 / 列出 / detach 会话）——无需记忆快捷键，动态显示前缀
 - `Ctrl/Cmd+V` 粘贴截图 → 落到 active pane 的 cwd，路径注入终端；手机上传、一键下载同样支持
+- [远程剪贴板](REMOTE_CLIPBOARD.md)：tmux / SSH 复制默认自动到本机，工作台内查历史、双向收发文本；后台与重连历史不覆盖本机剪贴板
 - 资源抽屉：跨会话上传索引、输入历史复用、文件模糊搜索，以及在浏览器里预览 agent 产出——markdown、代码、文本/日志、HTML 报告（源码 ⇄ 渲染切换）
 
 **随处部署**

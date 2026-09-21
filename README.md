@@ -39,6 +39,7 @@ Copy, upload, download, and browse files in the agent's working tree, all in the
 - Full PTY terminal over WebSocket, with reconnect
 - Quick-keyboard bar for tmux (copy-mode, split / zoom / switch pane, new / list / detach session) — no shortcuts to memorize, dynamic prefix
 - Paste a screenshot with `Ctrl/Cmd+V` → lands in the active pane's cwd, path injected into the terminal; mobile upload and one-tap download too
+- Remote clipboard: automatic foreground tmux / SSH text copying, searchable history, and explicit text transfer to a selected terminal or pane ([guide](REMOTE_CLIPBOARD.md))
 - Resource drawer: cross-session upload index, input-history reuse, fuzzy file search, and in-browser preview of agent output — markdown, code, text/logs, and HTML reports (source ⇄ rendered toggle)
 
 **Deploy anywhere**

@@ -41,6 +41,8 @@ func main() {
 	if len(os.Args) > 1 {
 		var run func([]string) error
 		switch os.Args[1] {
+		case "clipboard":
+			run = runClipboard
 		case "muxd":
 			run = runMuxd
 		case "attach":
