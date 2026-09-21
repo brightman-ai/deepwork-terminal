@@ -376,6 +376,8 @@
       :is-active="active && paneKey === currentPaneKey"
       :cwd="paneCwdFor(paneKey)"
       :tool="paneToolFor(paneKey)"
+      :clipboard="remoteClipboard"
+      :clipboard-pane-id="findPane(paneKey)?.pane.paneId"
       :layout="drawerLayout"
       :layout-mode="drawerLayoutMode"
       :split-disabled="splitDisabled"
@@ -462,6 +464,7 @@ import AgentOverview from '@terminal/components/terminal-session/AgentOverview.v
 // 连接健康 chip = @ce SSOT 组件 (与 workbench/pro 共享同一实现)。终端传英文文案 + cli
 // testid 前缀保持既有 UX/测试契约; WS 是持续流量, 内联吞吐保持默认开 (inlineThroughput=true)。
 import ConnectionChip from '@ce/components/connection/ConnectionChip.vue'
+import { useRemoteClipboard } from '@terminal/composables/cli/useRemoteClipboard'
 import ResourceDrawer from '@terminal/components/terminal-session/ResourceDrawer.vue'
 import NotifyQuickSheet from '@terminal/components/terminal-session/NotifyQuickSheet.vue'
 import TuiModeSheet from '@terminal/components/terminal-session/TuiModeSheet.vue'
@@ -1329,6 +1332,14 @@ function sendBinary(data: Uint8Array, route = 'direct'): void {
   inputTelemetry.recordSend(data, route)
   sendBinaryRaw(data)
 }
+
+const remoteClipboard = useRemoteClipboard({
+  sessionId: () => props.sessionId,
+  active: () => props.active && wsStatus.value === 'connected',
+  isRemote: () => !!props.isRemote,
+  httpBase: () => props.httpBase,
+  authToken: () => props.authToken,
+})
 
 const pasteResolver = useCliPasteResolver({
   sessionId: () => props.sessionId,

@@ -524,6 +524,8 @@ function initTerminal() {
     scrollback: 5000,
     convertEol: true,
   })
+  // Clipboard delivery belongs to the server-backed application store, including hidden tabs.
+  terminal.parser.registerOscHandler(52, () => true)
 
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)

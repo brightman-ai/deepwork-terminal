@@ -69,6 +69,7 @@ func WithTmuxProvider(p TmuxStateProvider) Option {
 // list; a future one added here without a matching promoted/adapted method fails the
 // build immediately instead of 501ing silently at runtime (see the doc comment above).
 var (
+	_ clipboardTmux       = (*defaultTmuxProvider)(nil)
 	_ TmuxStateProvider   = (*defaultTmuxProvider)(nil)
 	_ TmuxCopyMotioner    = (*defaultTmuxProvider)(nil)
 	_ TmuxSessionMaker    = (*defaultTmuxProvider)(nil)

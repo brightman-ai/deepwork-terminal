@@ -33,6 +33,7 @@ const standaloneCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval';
 // Standalone: ListenAndServe() runs API + SPA.
 // Embedded: Handler() returns API routes for a host to mount.
 type Server struct {
+	clipboard         *clipboardStore
 	fileSearchMu      sync.Mutex
 	fileSearchIndexes map[string]*fileSearchIndex
 
@@ -171,6 +172,8 @@ func NewServer(opts ...Option) (*Server, error) {
 	s.signals = newSignalGate()
 	s.hasAgent = s.sessionHasAgent
 	s.mgr.OnSignal = s.onSessionSignal
+	s.clipboard = newClipboardStore()
+	s.mgr.OnClipboard = s.onClipboard
 	// Pick the user's existing sessions back up from the daemon.
 	//
 	// This is the half of "restarting no longer kills your terminals" that the user
@@ -398,6 +401,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /browser/clipboard/files", wrap(s.handleClipboardFilePaths))
 	// Cross-session resource drawer (WS5): global, top-level, not session-scoped.
 	// Uploads come from the persisted index; inputs from claude/codex transcripts.
+	s.mux.HandleFunc("GET /clipboard", wrap(s.handleClipboardHistory))
+	s.mux.HandleFunc("GET /clipboard/targets", wrap(s.handleClipboardTargets))
+	s.mux.HandleFunc("POST /clipboard", wrap(s.handleClipboardSave))
+	s.mux.HandleFunc("POST /clipboard/send", wrap(s.handleClipboardSend))
 	s.mux.HandleFunc("GET /uploads", wrap(s.handleUploadsList))
 	s.mux.HandleFunc("GET /uploads/raw", wrap(s.handleUploadsRaw))
 	s.mux.HandleFunc("GET /inputs", wrap(s.handleInputs))

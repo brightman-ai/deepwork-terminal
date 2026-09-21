@@ -17,12 +17,13 @@
       :class="{ 'is-mobile': isMobile, 'is-peek': handlePeek, 'rd-dock-left': dockLeft }"
       :style="handleStyle"
       type="button"
-      title="工作台 · 点击展开，可上下拖动"
+      :title="clipboard?.unread.value ? `工作台 · 剪贴板有 ${clipboard.unread.value} 条待取内容（Ctrl+Alt+Shift+C）` : '工作台 · 点击展开，可上下拖动；剪贴板 Ctrl+Alt+Shift+C'"
       data-testid="resource-drawer-handle"
       @click="onHandleClick"
       @mouseenter="handleHovering = true"
       @mouseleave="handleHovering = false"
     >
+      <span v-if="clipboard?.unread.value" class="rd-clipboard-dot" aria-label="剪贴板有待取内容"></span>
       <span class="rd-handle-grip" aria-hidden="true"></span>
       <ChevronRight v-if="dockLeft" class="rd-handle-chevron" :size="14" />
       <ChevronLeft v-else class="rd-handle-chevron" :size="14" />
@@ -65,17 +66,6 @@
               工作台
             </span>
             <!-- TOP-LEVEL tabs: 历史输入 / 文件 / 会话总览 (CHG-016). -->
-            <div class="rd-tabs">
-              <button
-                v-for="t in topTabs"
-                :key="t.key"
-                class="rd-tab"
-                :class="{ 'is-active': topTab === t.key }"
-                type="button"
-                :data-testid="`rd-toptab-${t.key}`"
-                @click="topTab = t.key"
-              >{{ t.label }}</button>
-            </div>
             <!-- Layout mode toggle (discoverability fix, design doc §7 signifier notes): 双栏⇄浮层.
                  A signifier (highlights whichever mode is ACTUALLY in effect right now — `layout`,
                  the host's resolved value, not just the stored preference) that doubles as the
@@ -152,6 +142,21 @@
             </button>
           </div>
 
+
+            <div class="rd-tabs">
+              <button
+                v-for="t in topTabs"
+                :key="t.key"
+                class="rd-tab"
+                :class="{ 'is-active': topTab === t.key }"
+                type="button"
+                :data-testid="`rd-toptab-${t.key}`"
+                @click="topTab = t.key"
+              >{{ t.label }}<span v-if="t.key === 'clipboard' && clipboard?.unread.value" class="rd-tab-count">{{ Math.min(99, clipboard.unread.value) }}</span></button>
+            </div>
+          <div v-if="clipboard" v-show="topTab === 'clipboard'" class="rd-toppane">
+            <RemoteClipboardPanel :client="clipboard" :active="open && isActive && topTab === 'clipboard'" :session-id="sessionId" :pane-id="clipboardPaneId" />
+          </div>
 
           <!-- ════ TOP TAB · 目录树 (anchored working tree — the primary workspace entry) ════ -->
           <div v-show="topTab === 'tree'" class="rd-toppane">
@@ -359,9 +364,9 @@
 </template>
 
 <script setup lang="ts">
-import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Lock, LockOpen, PanelLeft, PanelRight } from 'lucide-vue-next'
+import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
@@ -370,6 +375,8 @@ import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
 import type { AgentTool } from '@terminal/types/terminal'
+import RemoteClipboardPanel from './RemoteClipboardPanel.vue'
+import type { RemoteClipboardClient } from '../../composables/cli/useRemoteClipboard'
 import FilesPanel from '@terminal/components/terminal-session/FilesPanel.vue'
 import SessionOverviewTab from '@terminal/components/terminal-session/SessionOverviewTab.vue'
 import ReviewPanel from '@terminal/components/terminal-session/ReviewPanel.vue'
@@ -412,6 +419,8 @@ import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchB
 // standalone usage) is unaffected.
 const props = withDefaults(defineProps<{
   sessionId: string
+  clipboard?: RemoteClipboardClient
+  clipboardPaneId?: string
   open: boolean
   isActive?: boolean
   cwd?: string
@@ -511,10 +520,10 @@ function baseName(path: string): string {
 // The old single 文件 tab (which held recent+tree as internal sub-tabs) is split into two
 // top-level tabs — 目录树 is the primary workspace entry, 最近修改 the agent-edited timeline.
 // The selected top tab and the 历史输入 sub-tab both persist to localStorage.
-type TopKey = 'tree' | 'recent' | 'history' | 'review' | 'overview'
+type TopKey = 'clipboard' | 'tree' | 'recent' | 'history' | 'review' | 'overview'
 const TOP_TAB_KEY = 'dw.rd.tab'
 const SUB_TAB_KEY = 'dw.rd.subtab'
-const TOP_KEYS: TopKey[] = ['tree', 'recent', 'history', 'review', 'overview']
+const TOP_KEYS: TopKey[] = ['tree', 'clipboard', 'recent', 'history', 'review', 'overview']
 function loadTop(): TopKey {
   const v = localStorage.getItem(TOP_TAB_KEY)
   if (v === 'files') return 'tree' // migrate the old unified 文件 tab → 目录树 (file-first default)
@@ -523,12 +532,19 @@ function loadTop(): TopKey {
 const topTab = ref<TopKey>(loadTop())
 const topTabs: { key: TopKey; label: string }[] = [
   { key: 'tree', label: '目录树' },
+  { key: 'clipboard', label: '剪贴板' },
   { key: 'recent', label: '最近修改' },
   { key: 'history', label: '历史输入' },
   { key: 'review', label: '审核' },
   { key: 'overview', label: '会话总览' },
 ]
 watch(topTab, (v) => { localStorage.setItem(TOP_TAB_KEY, v) })
+function onClipboardShortcut(e: KeyboardEvent): void {
+  if (props.isActive && props.clipboard && e.code === 'KeyC' && e.ctrlKey && e.altKey && e.shiftKey) {
+    e.preventDefault(); e.stopImmediatePropagation(); topTab.value = 'clipboard'; emit('update:open', true)
+  }
+}
+usePreviewEscape(() => props.isActive && props.open && topTab.value === 'clipboard', () => emit('update:open', false))
 
 type TabKey = 'images' | 'files' | 'inputs'
 function loadSub(): TabKey {
@@ -549,7 +565,7 @@ watch(activeTab, (v) => { localStorage.setItem(SUB_TAB_KEY, v) })
 const WIDTH_KEY_BASE = 'dw.rd.width'
 const MIN_W = 300
 const TAB_DEFAULT_W: Record<TopKey, number> = {
-  tree: 340, recent: 340, history: 360, review: 560, overview: 620,
+  clipboard: 470, tree: 340, recent: 340, history: 360, review: 560, overview: 620,
 }
 function maxW(): number {
   // Up to 92vw — near-fullscreen on a PC (the old 720px hard cap was too small for desktop);
@@ -864,6 +880,7 @@ watch(() => props.open, (isOpen) => {
 watch(activeTab, () => { sessionFilter.value = ''; expandedInput.value = null })
 
 onMounted(() => {
+  window.addEventListener('keydown', onClipboardShortcut, true)
   window.addEventListener('dw:upload-success', onUploadSuccess)
   window.addEventListener('resize', onWinResize)
   // First-ever mount with the handle never opened: auto-peek the "工作台" label briefly,
@@ -871,6 +888,7 @@ onMounted(() => {
   if (handlePeek.value) handlePeekTimer = setTimeout(dismissHandlePeek, 2600)
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onClipboardShortcut, true)
   window.removeEventListener('dw:upload-success', onUploadSuccess)
   window.removeEventListener('resize', onWinResize)
   if (toastTimer) clearTimeout(toastTimer)
@@ -1208,8 +1226,9 @@ function glyphClass(name: string): string {
    is the only child meant to give. overflow-x:auto (with the tab text pinned nowrap below) turns
    that squeeze into a horizontal scroll instead of vertical CJK text-wrapping — title/toggle/
    lock/full/close (all flex-shrink:0) stay fully visible and clickable regardless of panel width. */
+.rd-clipboard-dot { position: absolute; top: 6px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: #c6a0ee; }
 .rd-tabs {
-  display: flex; gap: 3px; flex: 1 1 auto; min-width: 0; justify-content: center;
+  display: flex; gap: 4px; flex: 0 0 auto; min-width: 0; padding: 7px 10px; border-bottom: 1px solid #302044;
   overflow-x: auto; scrollbar-width: none;
 }
 .rd-tabs::-webkit-scrollbar { display: none; }
