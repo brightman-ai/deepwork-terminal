@@ -207,7 +207,7 @@ func sweepStaleStaging(root string) {
 // resuming client sends only the gap. Idempotent: re-init of the same file returns the same
 // uploadId and the current received set.
 func (s *Server) handleChunkUploadInit(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.FormValue("session"), r.FormValue("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return

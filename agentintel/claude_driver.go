@@ -189,6 +189,12 @@ func (cd *ClaudeDriver) Update() error {
 			} else {
 				cd.state.StopReason = ""
 			}
+			// A non-transient API error is a terminal failure, not a running turn.
+			// Transient errors may still be retrying, so retain Running for those.
+			if terminalClaudeAPIError(row) {
+				cd.state.Status = StatusIdle
+				cd.state.WaitReason = WaitNone
+			}
 			// Free-text-question heuristic: gather this turn's text blocks and record whether it
 			// ended on a question, so State() can escalate an end_turn to waiting (see textEndsQuestion).
 			var text strings.Builder
@@ -400,4 +406,11 @@ func intFromAny(v any) int {
 		return int(n)
 	}
 	return 0
+}
+
+// Explicit non-retrying API failures end work even with stop_reason=stop_sequence.
+func terminalClaudeAPIError(row map[string]any) bool {
+	failed, _ := row["isApiErrorMessage"].(bool)
+	transient, _ := row["apiErrorIsTransient"].(bool)
+	return failed && !transient
 }

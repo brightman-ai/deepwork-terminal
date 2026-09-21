@@ -140,7 +140,11 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 		// including a second, hand-rolled version of the rule/evidence split that DecideSurface
 		// already applies; every one of them was a place a new surface fact could be forgotten on
 		// this side alone.
-		unit := s.sessionAgent.State(ctx, sess.ID, sess.ShellPID(), entry.CWD, screen).SurfaceUnit
+		state := s.sessionAgent.State(ctx, sess.ID, sess.ShellPID(), entry.CWD, screen)
+		unit := state.SurfaceUnit
+		if state.CWD != "" {
+			entry.CWD = state.CWD
+		}
 		if unit.AgentTool == agentintel.ToolNone && s.hooks.AgentDetect != nil && sess.ShellPID() > 0 {
 			// Deprecated host override — only reachable when the built-in detector found
 			// nothing, so an embedder with an exotic runtime can still contribute a status.

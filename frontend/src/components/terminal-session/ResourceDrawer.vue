@@ -157,6 +157,7 @@
           <div v-show="topTab === 'tree'" class="rd-toppane">
             <FilesPanel
               mode="tree"
+              :active="open && isActive && topTab === 'tree'"
               :session-id="sessionId"
               :cwd="effectiveCwd"
               @inject="onChildInject"
@@ -168,6 +169,7 @@
           <div v-show="topTab === 'recent'" class="rd-toppane">
             <FilesPanel
               mode="recent"
+              :active="open && isActive && topTab === 'recent'"
               :session-id="sessionId"
               :cwd="effectiveCwd"
               @inject="onChildInject"
@@ -357,6 +359,7 @@
 </template>
 
 <script setup lang="ts">
+import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Lock, LockOpen, PanelLeft, PanelRight } from 'lucide-vue-next'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
@@ -736,6 +739,7 @@ const tabs = computed(() => [
 
 const expandedInput = ref<number | null>(null)
 const lightbox = ref<UploadItem | null>(null)
+usePreviewEscape(() => props.isActive && !!lightbox.value, () => { lightbox.value = null })
 const toast = ref('')
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 

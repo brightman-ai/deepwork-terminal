@@ -2,8 +2,8 @@
  * Files API client — SESSION-SCOPED browsing of an agent's working tree (CHG-016).
  *
  * Unlike /uploads (cross-session, opaque-id), these endpoints are anchored to ONE
- * session's cwd (server resolves session→cwd; the client only ever sends a relative
- * path, never an absolute one — traversal is rejected server-side). They power the
+ * session or explicitly displayed directory. The client marks selected directories
+ * with anchor=explicit; traversal outside the resolved root is rejected. They power the
  * drawer's 文件 panel: 最近文件 (transcript tool_use signal) + 目录树 (single level).
  *
  *   GET /files/recent?session=<id>          → { items: RecentFileItem[] }
@@ -46,7 +46,7 @@ export interface TreeResponse {
 
 /**
  * One hit of GET /files/search — a TreeEntry plus `rel`, the path RELATIVE to the
- * search root (forward slashes). Files and directories both appear; `isDir` tells
+ * session cwd (forward slashes). Files and directories both appear; `isDir` tells
  * the UI whether to preview (file) or navigate (dir).
  */
 export interface SearchEntry {
@@ -66,6 +66,10 @@ export interface SearchEntry {
 export interface SearchResult {
   entries: SearchEntry[]
   truncated: boolean
+  incomplete?: boolean
+  nextOffset?: number
+  totalMatches?: number
+  error?: string
 }
 
 /**
@@ -100,13 +104,13 @@ export type RawResult =
   // "预览失败". status is absent only for a client-side network/exception failure.
   | { kind: 'error'; status?: number; reason?: string }
 
-// withScope builds the session + (optional) live-cwd query prefix. `cwd` is the active
-// tmux pane's working directory; supplying it makes the server anchor to that pane so the
-// panel follows pane/window switches instead of the session's creation cwd.
+// A supplied cwd is the directory this file panel actually displays (owning/locked pane).
+// Mark it explicit so a different active pane or a cold tmux probe cannot reinterpret it.
+// Without a cwd, retain automatic live-session resolution.
 function withScope(path: string, sessionId: string, cwd?: string): string {
   const sep = path.includes('?') ? '&' : '?'
   let q = `${path}${sep}session=${encodeURIComponent(sessionId)}`
-  if (cwd) q += `&cwd=${encodeURIComponent(cwd)}`
+  if (cwd) q += `&cwd=${encodeURIComponent(cwd)}&anchor=explicit`
   return q
 }
 
@@ -125,13 +129,13 @@ export async function filesRecent(sessionId: string, cwd?: string): Promise<Rece
 }
 
 /** GET /files/tree — one directory level under the session cwd (dirs first). */
-export async function filesTree(sessionId: string, relPath: string, cwd?: string): Promise<TreeResponse | null> {
+export async function filesTree(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal): Promise<TreeResponse | null> {
   if (!sessionId) return null
   const { cliFetch } = useCliAuth()
   try {
     let path = withScope('/files/tree', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
-    const resp = await cliFetch(cliApi(path))
+    const resp = await cliFetch(cliApi(path), { signal })
     if (!resp.ok) return null
     return (await resp.json()) as TreeResponse
   } catch {
@@ -140,22 +144,32 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
 }
 
 /**
- * GET /files/search — recursively find files/dirs under cwd whose NAME contains q
+ * GET /files/search — recursive name search; multiple terms or slashes match cwd-relative paths
  * (case-insensitive), VS-Code quick-open style. Returns an empty result on an empty
  * query or any error so the caller can render an empty list without special-casing.
  */
-export async function filesSearch(sessionId: string, cwd: string | undefined, q: string): Promise<SearchResult> {
+export async function filesSearch(sessionId: string, cwd: string | undefined, q: string,
+  options: { path?: string; offset?: number; signal?: AbortSignal } = {}): Promise<SearchResult> {
   if (!sessionId || !q.trim()) return { entries: [], truncated: false }
   const { cliFetch } = useCliAuth()
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  options.signal?.addEventListener('abort', cancel, { once: true })
+  if (options.signal?.aborted) cancel()
+  let timedOut = false
+  const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 10000)
   try {
     let path = withScope('/files/search', sessionId, cwd)
-    path += `&q=${encodeURIComponent(q)}`
-    const resp = await cliFetch(cliApi(path))
-    if (!resp.ok) return { entries: [], truncated: false }
-    const data = (await resp.json()) as { entries?: SearchEntry[]; truncated?: boolean }
-    return { entries: data.entries ?? [], truncated: data.truncated ?? false }
-  } catch {
-    return { entries: [], truncated: false }
+    path += `&q=${encodeURIComponent(q)}&path=${encodeURIComponent(options.path || '')}&offset=${options.offset || 0}`
+    const resp = await cliFetch(cliApi(path), { signal: controller.signal })
+    if (!resp.ok) return { entries: [], truncated: false, error: `搜索失败（HTTP ${resp.status}），请重试` }
+    return await resp.json() as SearchResult
+  } catch (error) {
+    if (options.signal?.aborted) throw error
+    return { entries: [], truncated: false, error: timedOut ? '搜索超时，点击重试' : '搜索请求失败，请重试' }
+  } finally {
+    clearTimeout(timeout)
+    options.signal?.removeEventListener('abort', cancel)
   }
 }
 
@@ -329,7 +343,7 @@ export async function chunkedUploadInit(
   try {
     const form = new FormData()
     form.append('session', sessionId)
-    if (cwd) form.append('cwd', cwd)
+    if (cwd) { form.append('cwd', cwd); form.append('anchor', 'explicit') }
     form.append('dir', dir || '.')
     form.append('name', file.name)
     form.append('size', String(file.size))
@@ -539,7 +553,7 @@ async function filesPost(op: string, sessionId: string, cwd: string, fields: Rec
   try {
     const form = new FormData()
     form.append('session', sessionId)
-    if (cwd) form.append('cwd', cwd)
+    if (cwd) { form.append('cwd', cwd); form.append('anchor', 'explicit') }
     for (const [k, v] of Object.entries(fields)) form.append(k, v)
     const resp = await cliFetch(cliApi(`/files/${op}`), { method: 'POST', body: form })
     return { ok: resp.ok, status: resp.status }

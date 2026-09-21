@@ -24,7 +24,7 @@ import (
 // to cwd). Creates exactly ONE new directory level (os.Mkdir, not MkdirAll) — a
 // missing parent is a real error (400), not silently created.
 func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.FormValue("session"), r.FormValue("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -54,7 +54,7 @@ func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request) {
 // file, rel to cwd). Uses O_CREATE|O_EXCL so an existing path 409s instead of being
 // silently truncated.
 func (s *Server) handleFilesCreate(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.FormValue("session"), r.FormValue("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -86,7 +86,7 @@ func (s *Server) handleFilesCreate(w http.ResponseWriter, r *http.Request) {
 // (rel). from and to are EACH independently safeResolve'd against cwd — from must
 // exist (404 if not), to must NOT exist (409 if it does), then os.Rename moves it.
 func (s *Server) handleFilesRename(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.FormValue("session"), r.FormValue("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -129,7 +129,7 @@ func (s *Server) handleFilesRename(w http.ResponseWriter, r *http.Request) {
 // the raw string) so it can't be spelled around. An outright `..` escape attempt is
 // already rejected by safeResolve with 403, same as every other /files/* handler.
 func (s *Server) handleFilesDelete(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.FormValue("session"), r.FormValue("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return

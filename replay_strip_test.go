@@ -22,6 +22,11 @@ func TestStripDeviceQueries(t *testing.T) {
 		{"bg color query BEL", "\x1b]11;?\x07Y", "Y"},
 		{"fg color query ST", "\x1b]10;?\x1b\\Y", "Y"},
 		{"palette color query", "\x1b]4;1;?\x07Y", "Y"},
+		{"clipboard write BEL", "before\x1b]52;c;aGk=\x07after", "beforeafter"},
+		{"clipboard write ST", "before\x1b]52;;aGk=\x1b\\after", "beforeafter"},
+		{"clipboard read query", "\x1b]52;c;?\x07X", "X"},
+		{"clipboard empty write", "\x1b]52;c;\x07X", "X"},
+		{"clipboard multiple writes", "\x1b]52;c;b25l\x07text\x1b]52;c;dHdv\x07", "text"},
 
 		// Visual / non-query sequences that must be PRESERVED.
 		{"DECSCUSR cursor style", "\x1b[2 q", "\x1b[2 q"},
@@ -42,5 +47,24 @@ func TestStripDeviceQueries(t *testing.T) {
 				t.Errorf("stripDeviceQueries(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+func TestReplayClipboardChunksAndLiveBoundary(t *testing.T) {
+	old := []byte("before\x1b]52;c;b2xk\x1b\\after")
+	for split := 1; split < len(old); split++ {
+		var f replayClipboardFilter
+		got := append(f.feed(old[:split], true), f.feed(old[split:], true)...)
+		live := []byte("\x1b]52;c;bmV3\a")
+		got = append(got, f.feed(live, false)...)
+		if string(got) != "beforeafter"+string(live) {
+			t.Fatalf("split %d: %q", split, got)
+		}
+	}
+	var f replayClipboardFilter
+	got := f.feed([]byte("text\x1b]52;c;b2"), true)
+	got = append(got, f.feed([]byte("xk\aLIVE\x1b]52;c;bmV3\a"), false)...)
+	if string(got) != "textLIVE\x1b]52;c;bmV3\a" {
+		t.Fatalf("boundary: %q", got)
 	}
 }

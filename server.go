@@ -33,6 +33,9 @@ const standaloneCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval';
 // Standalone: ListenAndServe() runs API + SPA.
 // Embedded: Handler() returns API routes for a host to mount.
 type Server struct {
+	fileSearchMu      sync.Mutex
+	fileSearchIndexes map[string]*fileSearchIndex
+
 	mux          *http.ServeMux
 	mgr          *SessionManager
 	hooks        Hooks

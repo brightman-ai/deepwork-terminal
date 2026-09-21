@@ -65,6 +65,7 @@ func (t *sessionAgentTracker) Tool(ctx context.Context, shellPID int) agentintel
 // was not hypothetical: this struct spelled out six of them and sessions_overview.go then assigned
 // them across one at a time, so every new surface fact had two more places to be forgotten in.
 type sessionAgentState struct {
+	CWD string // live agent directory; may differ from an outer PTY shell
 	agentintel.SurfaceUnit
 	// Decision is the provenance of the status above: which single rule produced it and,
 	// for a screen-derived verdict, the line that matched. It exists so a wrong "needs you"
@@ -96,6 +97,13 @@ func (t *sessionAgentTracker) State(ctx context.Context, key string, shellPID in
 		return sessionAgentState{}
 	}
 
+	// A nested shell can cd without changing the PTY's original shell directory.
+	// The detected runtime's PID and cwd must describe the same process, otherwise
+	// the locator rejects its own session record and guesses an unrelated transcript.
+	if live := processCWD(agent.ProcessPID); live != "" {
+		cwd = live
+	}
+
 	// ONE decision, shared with the tmux pane. This function used to hold its own copy of the
 	// whole verdict — transcript status, the permission-prompt confirmation, needs-you,
 	// awaiting-since, the rule — under a comment asking it not to drift from the pane's copy.
@@ -111,7 +119,7 @@ func (t *sessionAgentTracker) State(ctx context.Context, key string, shellPID in
 		Screen: func() ([]string, bool) { return screen, screen != nil },
 	})
 
-	out := sessionAgentState{SurfaceUnit: unit, Decision: decision}
+	out := sessionAgentState{CWD: cwd, SurfaceUnit: unit, Decision: decision}
 	t.logDecision(ctx, key, out)
 	return out
 }

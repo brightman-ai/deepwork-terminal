@@ -317,7 +317,7 @@ func (m *PaneAgentMonitor) locate(cwd string, tool AgentTool, processPID int, bo
 		// Fallback: claude doesn't hold its transcript fd open (unlike Codex), so without that
 		// record a pane can only be located by cwd, which is AMBIGUOUS when two claude panes share
 		// a repo. Reached by a claude too old to write the record, or before its transcript exists.
-		if files, err := m.locator.ClaudeSessionFiles(cwd); err == nil && len(files) > 0 {
+		if files, err := m.locator.ClaudeSessionFilesForProcess(processPID, cwd); err == nil && len(files) > 0 {
 			free := make([]string, 0, len(files))
 			for _, f := range files {
 				if !boundElsewhere[f] {
