@@ -24,6 +24,7 @@ import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { renderMarkdown } from '@terminal/utils/markdown'
 import { highlightCode, addCopyButtons, renderDiagrams, renderMath, loadHljs } from '@terminal/utils/markdownEnhance'
+import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { filesRawImageUrl } from '@terminal/api/files'
 
 const props = defineProps<{
@@ -276,6 +277,8 @@ function wireImages(root: HTMLElement): void {
 // here at natural size with wheel/pinch zoom + drag pan (Typora-style). Node hover-highlight is
 // pure CSS (:has(), see <style>) — it dims non-hovered nodes so a dense graph stays legible.
 const dvSvg = ref('') // SVG markup of the diagram being viewed; '' = closed
+usePreviewEscape(() => !!lightboxSrc.value, () => { lightboxSrc.value = '' })
+usePreviewEscape(() => !!dvSvg.value, () => { dvSvg.value = '' })
 const dvScale = ref(1)
 const dvTx = ref(0)
 const dvTy = ref(0)

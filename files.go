@@ -92,7 +92,10 @@ type searchResponse struct {
 	// searchMaxScan) and stopped early, so the result set is incomplete. The client
 	// surfaces this so a huge tree (e.g. a monorepo cwd) reads as "narrow your search",
 	// not "no such file" — silent truncation otherwise hides files that exist.
-	Truncated bool `json:"truncated,omitempty"`
+	Truncated    bool `json:"truncated,omitempty"`
+	Incomplete   bool `json:"incomplete"`
+	NextOffset   int  `json:"nextOffset,omitempty"`
+	TotalMatches int  `json:"totalMatches"`
 }
 
 // errSearchBudget aborts the search WalkDir once a cap is hit. Returning filepath.SkipDir
@@ -106,11 +109,6 @@ var errSearchBudget = errors.New("search budget exhausted")
 const (
 	// searchMaxResults is how many ranked hits the client gets (a quick-open list, not an index).
 	searchMaxResults = 200
-	// searchCollectCap is how many raw hits we gather during the walk BEFORE ranking + trimming
-	// to searchMaxResults. Collecting more than we return means a common term ("graph", 200+
-	// matches) no longer gets truncated to the first N in WALK order and buries the file you
-	// actually want — we rank the fuller set, then keep the top searchMaxResults.
-	searchCollectCap = 1200
 	// searchMaxScan caps tree entries walked before giving up (was 20000 — too small for real
 	// project trees, which silently truncated files that exist, e.g. late-sorted tmp/).
 	searchMaxScan = 120000
@@ -218,7 +216,7 @@ func attachmentDisposition(name string) string {
 // been deleted and the历史信号 is still useful. A bad/absent session → 200 with an
 // empty list (the drawer just shows nothing), matching the soft-fail style of /inputs.
 func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusOK, recentFilesResponse{Items: []recentFileItem{}})
 		return
@@ -278,7 +276,7 @@ func (s *Server) handleFilesRecent(w http.ResponseWriter, r *http.Request) {
 // cleaned, joined onto cwd, then symlink-resolved and verified to stay within the
 // cwd subtree — `..` escape / absolute / symlink-out all yield 403.
 func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -295,6 +293,7 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
 		return
 	}
+	s.invalidateFileSearchIndexes(target)
 
 	out := make([]treeEntry, 0, len(entries))
 	for _, e := range entries {
@@ -336,111 +335,133 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 // searchMaxScan entries so a giant tree can't hang the request. An empty/unknown cwd or an
 // empty query → 200 with an empty list (soft-fail, like the other /files/* handlers).
 func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
-		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
+		if r.FormValue("anchor") == "explicit" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "selected directory is unavailable"})
+		} else {
+			writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
+		}
 		return
 	}
 	// Gap-tolerant match: split the query into whitespace-separated terms; an entry name must
-	// contain EVERY term (case-insensitive, order-independent), so "test iso" finds
-	// "tmux-test-isolation". Mirrors the client fuzzyMatch SSOT.
+	// contain EVERY term (case-insensitive, order-independent). Multiple terms may
+	// span the cwd-relative path, so "meeting final-v6" finds final-v6/meeting.md.
 	terms := strings.Fields(strings.ToLower(r.URL.Query().Get("q")))
 	if len(terms) == 0 {
 		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
 		return
 	}
 
+	target, err := safeResolve(cwd, r.URL.Query().Get("path"))
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
+		return
+	}
+	pathQuery := len(terms) > 1 || strings.Contains(terms[0], "/")
+	index, err := s.fileSearchIndex(r.Context(), target)
+	if err != nil {
+		return
+	}
 	out := make([]searchEntry, 0, 64)
-	scanned := 0
-	truncated := false
-	deadline := time.Now().Add(searchTimeBudget)
-	// WalkDir does NOT follow symlinks, so traversal stays within the real subtree.
-	walkErr := filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+	for i, item := range index.entries {
+		if i%256 == 0 && r.Context().Err() != nil {
+			return
+		}
+		path := filepath.Join(target, item.rel)
+		rel, err := filepath.Rel(cwd, path)
 		if err != nil {
-			// Unreadable dir/file: skip it (or its subtree) but keep walking the rest.
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+			continue
 		}
-		if path == cwd {
-			return nil // never match/emit the root itself
+		candidate := item.name
+		if pathQuery {
+			candidate = filepath.ToSlash(rel)
 		}
-		if d.IsDir() && searchSkipDirs[d.Name()] {
-			return filepath.SkipDir
+		if !matchesFuzzy(terms, candidate) {
+			continue
 		}
-		scanned++
-		// Budget hit → abort the ENTIRE walk via sentinel, not filepath.SkipDir. SkipDir on a
-		// file entry only skips its siblings, so the walk would keep grinding a giant tree
-		// after we stopped emitting (slow) AND starve late-sorted dirs (e.g. tmp/) of matches.
-		// Stop on scan count, collected-hit count, OR wall-clock (checked every 1024 entries) —
-		// whichever comes first. Collect up to searchCollectCap (> searchMaxResults) so ranking
-		// has a fuller set to pick the best from.
-		if scanned > searchMaxScan || len(out) >= searchCollectCap || (scanned%1024 == 0 && time.Now().After(deadline)) {
-			truncated = true
-			return errSearchBudget
-		}
-		if !matchesFuzzy(terms, d.Name()) {
-			return nil
-		}
-		rel, rerr := filepath.Rel(cwd, path)
-		if rerr != nil {
-			return nil
-		}
-		entry := searchEntry{
-			Name:  d.Name(),
-			Rel:   filepath.ToSlash(rel),
-			IsDir: d.IsDir(),
-		}
-		if info, ierr := d.Info(); ierr == nil {
+		entry := searchEntry{Name: item.name, Rel: filepath.ToSlash(rel), IsDir: item.isDir}
+		if info, err := os.Lstat(path); err == nil {
 			entry.MtimeMs = info.ModTime().UnixMilli()
-			if !d.IsDir() {
+			if !item.isDir {
 				entry.Size = info.Size()
 			}
+		} else {
+			continue
 		}
 		out = append(out, entry)
-		return nil
-	})
-
-	// A real walk error (not our stop sentinel) means traversal ended early → partial results.
-	if walkErr != nil && !errors.Is(walkErr, errSearchBudget) {
-		truncated = true
 	}
-	// Rank the collected hits, then keep the top searchMaxResults. 目录组**整体置顶**
-	// (2026-09-11 Human 拍定"命中的目录排前面"): isDir 是第一排序键而非同分 tie-break ——
-	// 一个前缀命中的文件(100 分)不得把命中目录压下去。搜索是"找路": 先给可钻入的结构入口,
-	// 文件退居其后。目录树浏览的目录在前由 handleFilesTree 负责, 互不影响。
-	// 组内顺序: score desc → 新 → rel path, 稳定可扫读。
+	// Name queries keep directory hits first, then name relevance, depth and recency.
+	// Path queries additionally match inherited ancestor names, so direct name hits
+	// and nearer locations lead those incidental matches before pagination.
 	scored := make([]struct {
-		e searchEntry
-		s int
+		e         searchEntry
+		s         int
+		nameMatch bool
 	}, len(out))
 	for i, e := range out {
 		scored[i].e = e
 		scored[i].s = searchScore(e.Name, terms)
+		for _, term := range terms {
+			if strings.Contains(strings.ToLower(e.Name), term) {
+				scored[i].nameMatch = true
+				break
+			}
+		}
 	}
 	sort.SliceStable(scored, func(i, j int) bool {
+		// Path queries also match arbitrary descendants. Name hits and nearby results
+		// lead, so copied ancestors cannot bury the requested files behind hundreds of dirs.
+		if pathQuery {
+			if scored[i].nameMatch != scored[j].nameMatch {
+				return scored[i].nameMatch
+			}
+			if di, dj := strings.Count(scored[i].e.Rel, "/"), strings.Count(scored[j].e.Rel, "/"); di != dj {
+				return di < dj
+			}
+			if scored[i].s != scored[j].s {
+				return scored[i].s > scored[j].s
+			}
+		}
 		if scored[i].e.IsDir != scored[j].e.IsDir {
 			return scored[i].e.IsDir
 		}
 		if scored[i].s != scored[j].s {
 			return scored[i].s > scored[j].s
 		}
+		// Equal name matches: show nearby source results before deeply nested copies.
+		if di, dj := strings.Count(scored[i].e.Rel, "/"), strings.Count(scored[j].e.Rel, "/"); di != dj {
+			return di < dj
+		}
 		if scored[i].e.MtimeMs != scored[j].e.MtimeMs {
 			return scored[i].e.MtimeMs > scored[j].e.MtimeMs
 		}
 		return scored[i].e.Rel < scored[j].e.Rel
 	})
-	if len(scored) > searchMaxResults {
-		scored = scored[:searchMaxResults]
-		truncated = true
+	total := len(scored)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
 	}
-	out = make([]searchEntry, len(scored))
-	for i := range scored {
-		out[i] = scored[i].e
+	if offset > total {
+		offset = total
 	}
-
-	writeJSON(w, http.StatusOK, searchResponse{Entries: out, Truncated: truncated})
+	end := offset + searchMaxResults
+	if end > total {
+		end = total
+	}
+	next := 0
+	if end < total {
+		next = end
+	}
+	out = make([]searchEntry, end-offset)
+	for i, hit := range scored[offset:end] {
+		out[i] = hit.e
+	}
+	writeJSON(w, http.StatusOK, searchResponse{
+		Entries: out, Truncated: index.incomplete || next > 0,
+		Incomplete: index.incomplete, NextOffset: next, TotalMatches: total,
+	})
 }
 
 // handleFilesRaw handles GET /files/raw?session=<id>&path=<rel>.
@@ -453,7 +474,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 // text/plain with a no-cache header (the file on disk is mutable — agents may rewrite
 // it between previews).
 func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
-	cwd, ok := s.workbenchCWD(r.Context(), r.URL.Query().Get("session"), r.URL.Query().Get("cwd"))
+	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
@@ -752,26 +773,31 @@ func isRecentFile(cwd, abs string) bool {
 	return false
 }
 
-// workbenchCWD resolves the working directory for a workbench request (files / overview /
-// git-diff / paste). "The active pane's working dir" is a SINGLE fact with ONE authority: the
-// tmux state's pane_current_path — the same snapshot GET /tmux/state + the WS push already
-// serve — so the workbench anchors to exactly the pane the UI shows as active. Resolution:
-//
-//  1. explicit client cwd override (absolute, existing dir): a deliberate anchor — the per-pane
-//     drawer's owning-pane cwd, or a LOCK-mode frozen snapshot. Honoured as-is.
-//  2. tmux authority: the attached session's active-window active-pane CWD. THIS is the fix — a
-//     client that sends no cwd (activeCwd is still ” during detach / the first WS frame) now
-//     anchors correctly instead of falling through to the tmux launch dir. Read from the same
-//     TmuxState the display consumes, so the front/back views can't drift.
-//  3. non-tmux standalone: the shell's live /proc cwd (correct — the shell IS the pane, and it
-//     follows `cd`). For a tmux session step 2 always wins, so this is NEVER reached there —
-//     which is what removes the old "/home/ubuntu" (tmux launch dir) degradation that silently
-//     broke recent-files / overview / git-diff / paste-target alike.
-//  4. the session's creation cwd (last resort).
-//
-// Trust model is local single-user: the caller already holds the auth code + full shell access,
-// so honouring a real existing directory is no escalation; tree/raw still confine traversal
-// within the resolved root.
+// requestWorkbenchCWD distinguishes a user-selected file-panel scope from an
+// automatic cwd hint. A locked/owning pane must not be reinterpreted using another
+// active pane or the shell's launch directory while tmux discovery warms up.
+// Automatic callers (including terminal paste) keep workbenchCWD's live-first policy.
+func (s *Server) requestWorkbenchCWD(r *http.Request) (string, bool) {
+	sessionID, cwd := r.FormValue("session"), r.FormValue("cwd")
+	if r.FormValue("anchor") != "explicit" {
+		return s.workbenchCWD(r.Context(), sessionID, cwd)
+	}
+	if _, err := s.mgr.Get(sessionID); err != nil {
+		return "", false
+	}
+	if !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	info, err := os.Stat(cwd)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return filepath.Clean(cwd), true
+}
+
+// workbenchCWD resolves automatic terminal context from tmux, then the live shell,
+// then the client hint and session creation directory. File panels use
+// requestWorkbenchCWD to preserve a deliberately selected directory.
 func (s *Server) workbenchCWD(ctx context.Context, sessionID, cwdParam string) (string, bool) {
 	cwd, source, ok := s.resolveWorkbenchCWD(ctx, sessionID, cwdParam)
 	// One structured line makes "which dir did the workbench anchor to, and from which source"

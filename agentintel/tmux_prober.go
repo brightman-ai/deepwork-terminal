@@ -255,7 +255,7 @@ func (tp *TmuxProber) ListPanesForSession(ctx context.Context, sessionName strin
 
 // ListPanes returns panes from the tmux server visible to this process.
 func (tp *TmuxProber) ListPanes(ctx context.Context) ([]TmuxPane, error) {
-	lines, err := tp.run(ctx, "list-panes", "-s", "-F", tmuxPaneFormat())
+	lines, err := tp.run(ctx, "list-panes", "-a", "-F", tmuxPaneFormat())
 	if err != nil {
 		return nil, fmt.Errorf("tmux list-panes: %w", err)
 	}

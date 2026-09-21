@@ -16,7 +16,8 @@
  * model here. The pieces it would reuse (PanelPane search, CanvasPane readonly) are
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
+import { useVirtualList } from '@vueuse/core'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { Copy, Check, Folder, FileText, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive } from 'lucide-vue-next'
 import { useUploadLimit } from '@terminal/composables/cli/uploadLimits'
@@ -50,6 +51,8 @@ import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
 import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
 import MidTruncatedName from '@terminal/components/terminal-session/MidTruncatedName.vue'
 import { nextTreeSort, sortTreeBy, type TreeSortMode } from '@terminal/components/terminal-session/treeSort'
+import { searchPathContexts } from '@terminal/components/terminal-session/searchPathContext'
+import { mergeSearchEntries, groupedSearchRows } from '@terminal/components/terminal-session/searchGroups'
 import SheetPreview from '@terminal/components/terminal-session/SheetPreview.vue'
 import AudioPreview from '@terminal/components/terminal-session/AudioPreview.vue'
 import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview.vue'
@@ -64,7 +67,7 @@ import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchB
 // '' → server falls back to the session cwd.
 // mode fixes this instance to ONE view. The drawer's top-level tabs (目录树 / 最近修改) each mount
 // their own FilesPanel, so the panel no longer owns a sub-tab switcher — one mode in, one view out.
-const props = defineProps<{ sessionId: string; cwd: string; mode: 'recent' | 'tree' }>()
+const props = withDefaults(defineProps<{ sessionId: string; cwd: string; mode: 'recent' | 'tree'; active?: boolean }>(), { active: true })
 
 const emit = defineEmits<{
   (e: 'inject', path: string): void
@@ -74,13 +77,16 @@ const emit = defineEmits<{
 // ── 最近文件 ──
 const recent = ref<RecentFileItem[]>([])
 const recentLoading = ref(false)
+let recentSeq = 0
 
 async function loadRecent(): Promise<void> {
+  const seq = ++recentSeq
   recentLoading.value = true
   try {
-    recent.value = await filesRecent(props.sessionId, props.cwd)
+    const result = await filesRecent(props.sessionId, props.cwd)
+    if (seq === recentSeq) recent.value = result
   } finally {
-    recentLoading.value = false
+    if (seq === recentSeq) recentLoading.value = false
   }
 }
 
@@ -126,8 +132,9 @@ watch(recentCats, (cats) => {
 })
 
 // ── 目录树 ──
-const treeCwd = ref('')
+const treeCwd = ref(props.cwd || '')
 const treeLoading = ref(false)
+const viewError = ref('')
 
 // ── 钻入导航（drill-in）──
 // treeRootRel = 当前视图根（'' = 会话 cwd 全树）。钻入一个目录 = 把视图根重定位到它，来路压
@@ -135,7 +142,48 @@ const treeLoading = ref(false)
 // 切片，CRUD/上传/键盘导航按 rel 工作，天然不受影响。全端统一：目录行单击=钻入，chevron=原地
 // 展开（兄弟目录概览），面包屑根段=回全树（手机无双击，两套语义必漂移 —— 只留一套）。
 const treeRootRel = ref('')
-const backStack = ref<string[]>([])
+interface FileLocation {
+  root: string
+  query: string
+  results: SearchEntry[]
+  nextOffset: number
+  total: number
+  searchError: string
+  truncated: boolean
+  searchPending: boolean
+  category: string
+  sort: 'rank' | 'time' | 'name'
+  scroll: number
+  expandedPaths: string[]
+  nodes: TreeNode[]
+  treePending: boolean
+  treeSort: TreeSortMode
+  viewError: string
+  focused: string | null
+}
+const backStack = ref<FileLocation[]>([])
+const backLabel = computed(() => backStack.value.at(-1)?.query.trim() ? '返回搜索结果' : '返回上一目录')
+let restoringNavigation = false
+let navigationRevision = 0
+function rememberLocation(): FileLocation {
+  return {
+    root: treeRootRel.value, query: treeQuery.value, results: searchResults.value,
+    nextOffset: searchNextOffset.value, total: searchTotal.value, searchError: searchError.value,
+    truncated: searchTruncated.value, searchPending: searching.value,
+    category: activeSearchCat.value, sort: searchSortMode.value,
+    scroll: (treeQuery.value.trim() ? searchScrollEl.value : treeScrollEl.value)?.scrollTop || 0,
+    expandedPaths: [...expandedSearchPaths.value], nodes: roots.value, treePending: treeLoading.value,
+    viewError: viewError.value, focused: focusedRel.value, treeSort: treeSort.value,
+  }
+}
+function cancelNavigationRequests(): void {
+  navigationRevision++
+  viewSeq++
+  viewRequest?.abort()
+  treeLoading.value = false
+  cancelSearch()
+  searching.value = false
+}
 const canGoBack = computed(() => backStack.value.length > 0)
 const crumbs = computed(() => {
   const segs = treeRootRel.value.split('/').filter(Boolean)
@@ -153,11 +201,15 @@ const crumbs = computed(() => {
   return out
 })
 async function reRoot(rel: string, push: boolean): Promise<void> {
-  if (rel === treeRootRel.value) return
-  if (push) backStack.value.push(treeRootRel.value)
+  if (rel === treeRootRel.value && !treeQuery.value.trim()) return
+  if (push) backStack.value.push(rememberLocation())
+  cancelNavigationRequests()
+  treeQuery.value = ''
   treeRootRel.value = rel
+  viewError.value = ''
   roots.value = []
   focusedRel.value = null
+  if (treeScrollEl.value) treeScrollEl.value.scrollTop = 0
   await loadView()
 }
 function drillTo(rel: string): void { void reRoot(rel, true) }
@@ -168,11 +220,34 @@ const viewAbsPath = computed(() => {
 })
 async function goBack(): Promise<void> {
   const prev = backStack.value.pop()
-  if (prev === undefined) return
-  treeRootRel.value = prev
-  roots.value = []
-  focusedRel.value = null
-  await loadView()
+  if (!prev) return
+  cancelNavigationRequests()
+  const revision = navigationRevision
+  restoringNavigation = true
+  try {
+    treeRootRel.value = prev.root
+    treeQuery.value = prev.query
+    roots.value = prev.nodes
+    focusedRel.value = prev.focused
+    viewError.value = prev.viewError
+    treeSort.value = prev.treeSort
+    searchResults.value = prev.results
+    searchNextOffset.value = prev.nextOffset
+    searchTotal.value = prev.total
+    searchError.value = prev.searchError
+    searchTruncated.value = prev.truncated
+    activeSearchCat.value = prev.category
+    searchSortMode.value = prev.sort
+    expandedSearchPaths.value = new Set(prev.expandedPaths)
+    bumpTree()
+  } finally { restoringNavigation = false }
+  await nextTick()
+  if (revision !== navigationRevision) return
+  const target = prev.query.trim() ? searchScrollEl.value : treeScrollEl.value
+  if (target) { target.scrollTop = prev.scroll; target.focus({ preventScroll: true }) }
+  treeContainer.onScroll()
+  if (prev.query.trim() && prev.searchPending && !prev.results.length) void runSearch(prev.query.trim())
+  else if (!prev.query.trim() && prev.treePending) void loadView()
 }
 
 // VSCode 式嵌套 lazy 展开树：每个目录节点首次展开时按需拉子目录（GET /files/tree?path=<rel>）。
@@ -214,23 +289,35 @@ function reconcile(old: TreeNode[] | null, entries: TreeEntry[], parentRel: stri
 // 定位中… / 锚点不可用（带重试）。
 const anchorError = ref(false)
 
+let viewSeq = 0
+let viewRequest: AbortController | null = null
 async function loadView(): Promise<void> {
+  viewRequest?.abort()
+  viewRequest = new AbortController()
+  const seq = ++viewSeq
+  const rel = treeRootRel.value
   treeLoading.value = true
+  viewError.value = ''
   try {
-    const resp = await filesTree(props.sessionId, treeRootRel.value, props.cwd)
+    const resp = await filesTree(props.sessionId, rel, props.cwd, viewRequest.signal)
+    if (seq !== viewSeq) return
     if (resp) {
       anchorError.value = false
       // cwd 锚只在【真根】查询时更新：子目录查询的 resp.cwd 是那个目录的路径，不是会话锚。
       if (!treeRootRel.value) treeCwd.value = resp.cwd
       roots.value = reconcile(roots.value, resp.entries, treeRootRel.value, 0)
     } else {
+      viewError.value = '无法读取目录，请重试或返回上一位置'
       if (!treeRootRel.value) anchorError.value = true
       roots.value = []
     }
   } catch {
-    if (!treeRootRel.value) anchorError.value = true
+    if (seq === viewSeq) {
+      viewError.value = '无法读取目录，请重试或返回上一位置'
+      if (!treeRootRel.value) anchorError.value = true
+    }
   } finally {
-    treeLoading.value = false
+    if (seq === viewSeq) treeLoading.value = false
     bumpTree()
   }
 }
@@ -325,6 +412,16 @@ function baseName(path: string): string {
 }
 
 // 节点绝对路径（cwd + rel）——copy / inject / preview / agent-edit 高亮用。
+// Keep project identity visible while reading same-named files or deep directories.
+function locationLabel(absPath: string): string {
+  const root = (treeCwd.value || props.cwd || '').replace(/\/$/, '')
+  if (root && (absPath === root || absPath.startsWith(root + '/'))) {
+    const rel = absPath.slice(root.length).replace(/^\//, '')
+    return [baseName(root), ...rel.split('/').filter(Boolean)].join(' / ')
+  }
+  return absPath
+}
+
 function nodeAbsPath(node: TreeNode): string {
   return `${treeCwd.value.replace(/\/+$/, '')}/${node.rel}`
 }
@@ -518,7 +615,10 @@ function ctxAction(fn: (node: TreeNode) => void): void {
 }
 // ── 键盘导航状态（vim 键 + 方向键；焦点行高亮）──
 const focusedRel = ref<string | null>(null)
-const treeScrollEl = ref<HTMLElement>()
+const TREE_ROW_HEIGHT = 48
+const { list: renderedNodes, containerProps: treeContainer, wrapperProps: treeWrapper } =
+  useVirtualList(visibleNodes, { itemHeight: TREE_ROW_HEIGHT, overscan: 12 })
+const treeScrollEl = treeContainer.ref
 const showCheats = ref(false)
 // focusTree：把键盘焦点落到树容器上，键盘导航从此生效（tabindex+keydown 都在容器）。
 // preventScroll 避免 focus 触发跳动。容器 @click 也调它，保证点树任意处都能接管键盘。
@@ -562,6 +662,14 @@ function focusedNode(): TreeNode | null {
 function focusRow(rel: string | null): void {
   focusedRel.value = rel
   if (!rel) return
+  const index = visibleNodes.value.findIndex(n => n.rel === rel)
+  const el = treeScrollEl.value
+  if (el && index >= 0) {
+    const top = index * TREE_ROW_HEIGHT
+    if (top < el.scrollTop) el.scrollTop = top
+    else if (top + TREE_ROW_HEIGHT > el.scrollTop + el.clientHeight) el.scrollTop = top + TREE_ROW_HEIGHT - el.clientHeight
+    treeContainer.onScroll()
+  }
   void nextTick(() => {
     const rows = treeScrollEl.value?.querySelectorAll('li[data-testid^="fp-tree-"]')
     if (!rows) return
@@ -663,10 +771,20 @@ async function saveSettings(): Promise<void> {
 }
 
 // ── 目录树 recursive search (VS-Code quick-open) ──
-// A non-empty treeQuery replaces the single-level browse with a FLAT, recursive results
-// list from GET /files/search; clearing it returns to breadcrumb browse at the current dir.
+// Search hits share a flat parent-directory heading; clearing returns to normal lazy browse.
 const treeQuery = ref('')
+const searchScrollEl = ref<HTMLElement | null>(null)
+const expandedSearchPaths = ref(new Set<string>())
+function toggleSearchPath(rel: string): void {
+  const next = new Set(expandedSearchPaths.value)
+  if (next.has(rel)) next.delete(rel)
+  else next.add(rel)
+  expandedSearchPaths.value = next
+}
 const searchResults = ref<SearchEntry[]>([])
+const searchNextOffset = ref(0)
+const searchTotal = ref(0)
+const searchError = ref('')
 const searchTruncated = ref(false) // server hit a cap → results incomplete (huge cwd)
 const searching = ref(false)
 // ── 搜索结果的类别快筛（REQ-fp-search-filter，2026-09-11）──
@@ -704,47 +822,64 @@ const filteredSearchResults = computed(() => {
   return sorted
 })
 const searchSortMode = ref<'rank' | 'time' | 'name'>('rank')
+const searchRows = computed(() => groupedSearchRows(filteredSearchResults.value, treeRootRel.value, searchSortMode.value))
+const searchContexts = computed(() => searchPathContexts(searchRows.value.filter(e => e.isDir).map(e => e.label)))
 const SEARCH_SORT_LABEL: Record<'rank' | 'time' | 'name', string> = { rank: '相关度', time: '时间', name: '名称' }
 watch(searchCats, (cats) => {
   if (!cats.some((c) => c.key === activeSearchCat.value)) activeSearchCat.value = 'all'
 })
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
-let searchSeq = 0 // guards against out-of-order responses clobbering a newer query
+let searchSeq = 0
+let searchRequest: AbortController | null = null
 
-async function runSearch(q: string): Promise<void> {
+function cancelSearch(): void {
+  searchSeq++
+  searchRequest?.abort()
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+}
+async function runSearch(q: string, offset = 0): Promise<void> {
+  searchRequest?.abort()
+  const request = new AbortController()
+  searchRequest = request
   const seq = ++searchSeq
   searching.value = true
+  searchError.value = ''
   try {
-    const res = await filesSearch(props.sessionId, props.cwd, q)
+    const res = await filesSearch(props.sessionId, props.cwd, q, {
+      path: treeRootRel.value, offset, signal: request.signal,
+    })
     if (seq === searchSeq) {
-      searchResults.value = res.entries
-      searchTruncated.value = res.truncated
+      searchError.value = res.error || ''
+      if (res.error) return
+      searchResults.value = mergeSearchEntries(offset ? searchResults.value : [], res.entries)
+      searchTruncated.value = res.incomplete ?? res.truncated
+      searchNextOffset.value = res.nextOffset || 0
+      searchTotal.value = res.totalMatches ?? res.entries.length
     }
+  } catch (error) {
+    if (!request.signal.aborted && seq === searchSeq) searchError.value = '搜索失败，请重试'
   } finally {
     if (seq === searchSeq) searching.value = false
   }
 }
 
-// Debounce ~250ms; an empty query instantly drops back to browse mode.
-watch(treeQuery, (q) => {
-  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+watch([treeQuery, treeRootRel], ([q]) => {
+  if (restoringNavigation) return
+  expandedSearchPaths.value = new Set()
+  if (searchScrollEl.value) searchScrollEl.value.scrollTop = 0
+  cancelSearch() // invalidate immediately, including the debounce window
+  searchResults.value = []
+  searchNextOffset.value = 0
+  searchTotal.value = 0
+  searchTruncated.value = false
+  searchError.value = ''
   const trimmed = q.trim()
-  if (!trimmed) {
-    searchSeq++ // cancel any in-flight result
-    searching.value = false
-    searchResults.value = []
-    searchTruncated.value = false
-    return
-  }
-  searchTimer = setTimeout(() => { void runSearch(trimmed) }, 250)
-})
+  searching.value = !!trimmed
+  if (!trimmed) return
+  searchTimer = setTimeout(() => { void runSearch(trimmed) }, 150)
+}, { flush: 'sync' })
 
-// The parent rel dir of a search hit (dimmed in the row, VS-Code style); '' for a top-level hit.
-function parentRel(rel: string): string {
-  const i = rel.lastIndexOf('/')
-  return i >= 0 ? rel.slice(0, i) : ''
-}
 // Absolute path of a search hit (treeCwd may be unset before first browse → fall back to live cwd).
 function searchAbsPath(entry: SearchEntry): string {
   const base = (treeCwd.value || props.cwd || '').replace(/\/+$/, '')
@@ -754,7 +889,6 @@ function searchAbsPath(entry: SearchEntry): string {
 // 清搜索），不再回主树内定位展开 —— 深目录里那一下会把视野扯走，且没有来路。
 function onSearchHit(entry: SearchEntry): void {
   if (entry.isDir) {
-    treeQuery.value = ''
     drillTo(entry.rel)
   } else {
     void previewRel(entry.name, searchAbsPath(entry), entry.rel)
@@ -772,6 +906,7 @@ interface Preview {
 }
 const preview = ref<Preview | null>(null)
 const previewLoading = ref(false)
+let previewSeq = 0
 
 // Free a previous image preview's object URL (created in filesRaw) before it's replaced,
 // so blob bytes don't leak for the session's lifetime.
@@ -780,55 +915,49 @@ function revokePreviewUrl(): void {
 }
 
 async function previewRel(name: string, absPath: string, rel: string): Promise<void> {
+  const seq = ++previewSeq
+  // Every stage of multi-step archive/conversion reads belongs to this same location.
+  const sessionId = props.sessionId
+  const cwd = props.cwd
   revokePreviewUrl()
   previewLoading.value = true
   preview.value = { name, absPath, rel, result: { kind: 'text', text: '' } }
-  try {
-    // 取数方式由 previewFormats 的 fetch 决定 —— 渲染器要的形状不同（文本 / URL /
-    // ArrayBuffer / JSON），取错了就是"渲染器拿到一坨它不认识的东西"。
+  const read = async (): Promise<RawResult> => {
     const spec = formatFor(name)
     if (spec.fetch === 'bytes' || spec.fetch.startsWith('convert:')) {
       const target = spec.fetch.startsWith('convert:') ? spec.fetch.slice('convert:'.length) : ''
-      // xlsx/xls → 服务端 html：拿文本而不是字节（要交给 DOMPurify 消毒后进 DOM）
-      if (target === 'html') {
-        const r = await filesRawBytes(props.sessionId, rel, props.cwd, { convertTo: 'html' })
-        preview.value = r.ok
-          ? { name, absPath, rel, result: { kind: 'sheet', html: new TextDecoder('utf-8').decode(r.data), size: r.size } }
-          : { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
-      } else {
-        const r = await filesRawBytes(props.sessionId, rel, props.cwd, target ? { convertTo: target } : undefined)
-        preview.value = r.ok
-          ? { name, absPath, rel, result: { kind: spec.kind === 'docx' ? 'docx' : 'pdf', data: r.data, size: r.size } }
-          : { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
-      }
-    } else if (spec.fetch === 'mediaUrl') {
-      preview.value = { name, absPath, rel, result: { kind: 'audio', url: filesMediaUrl(props.sessionId, rel, props.cwd), size: 0 } }
-    } else if (spec.fetch === 'zipList') {
-      const r = await filesZipList(props.sessionId, rel, props.cwd)
-      if (!r.ok) {
-        preview.value = { name, absPath, rel, result: { kind: 'error', status: r.status, reason: r.reason } }
-      } else if (spec.kind === 'xmind') {
-        // xmind 就是个 zip：大纲取 content.json，导图取 XMind 自己渲染好的缩略图
-        const hasThumb = r.entries.some((e) => e.name === 'Thumbnails/thumbnail.png')
-        const json = await filesZipEntryText(props.sessionId, rel, 'content.json', props.cwd)
-        preview.value = { name, absPath, rel, result: {
-          kind: 'xmind', contentJson: json,
-          thumbUrl: hasThumb ? filesZipEntryUrl(props.sessionId, rel, 'Thumbnails/thumbnail.png', props.cwd) : '',
-        } }
-      } else {
-        preview.value = { name, absPath, rel, result: { kind: 'zip', entries: r.entries, truncated: r.truncated } }
-      }
-    } else if (spec.kind === 'csv') {
-      const result = await filesRaw(props.sessionId, rel, props.cwd)
-      preview.value = result.kind === 'text'
-        ? { name, absPath, rel, result: { kind: 'csv', text: result.text } }
-        : { name, absPath, rel, result }
-    } else {
-      const result = await filesRaw(props.sessionId, rel, props.cwd)
-      preview.value = { name, absPath, rel, result }
+      const r = await filesRawBytes(sessionId, rel, cwd, target ? { convertTo: target } : undefined)
+      if (!r.ok) return { kind: 'error', status: r.status, reason: r.reason }
+      if (target === 'html') return { kind: 'sheet', html: new TextDecoder('utf-8').decode(r.data), size: r.size }
+      return { kind: spec.kind === 'docx' ? 'docx' : 'pdf', data: r.data, size: r.size }
     }
+    if (spec.fetch === 'mediaUrl') return { kind: 'audio', url: filesMediaUrl(sessionId, rel, cwd), size: 0 }
+    if (spec.fetch === 'zipList') {
+      const r = await filesZipList(sessionId, rel, cwd)
+      if (!r.ok) return { kind: 'error', status: r.status, reason: r.reason }
+      if (seq !== previewSeq) return { kind: 'error' }
+      if (spec.kind === 'xmind') {
+        const hasThumb = r.entries.some(e => e.name === 'Thumbnails/thumbnail.png')
+        const json = await filesZipEntryText(sessionId, rel, 'content.json', cwd)
+        return { kind: 'xmind', contentJson: json,
+          thumbUrl: hasThumb ? filesZipEntryUrl(sessionId, rel, 'Thumbnails/thumbnail.png', cwd) : '' }
+      }
+      return { kind: 'zip', entries: r.entries, truncated: r.truncated }
+    }
+    const result = await filesRaw(sessionId, rel, cwd)
+    return spec.kind === 'csv' && result.kind === 'text' ? { kind: 'csv', text: result.text } : result
+  }
+  try {
+    const result = await read()
+    if (seq !== previewSeq) {
+      if (result.kind === 'image') URL.revokeObjectURL(result.url)
+      return
+    }
+    preview.value = { name, absPath, rel, result }
+  } catch {
+    if (seq === previewSeq) preview.value = { name, absPath, rel, result: { kind: 'error', reason: '文件读取失败，请重试' } }
   } finally {
-    previewLoading.value = false
+    if (seq === previewSeq) previewLoading.value = false
   }
 }
 
@@ -844,10 +973,12 @@ async function previewTreeFile(node: TreeNode): Promise<void> {
   await previewRel(node.entry.name, nodeAbsPath(node), node.rel)
 }
 function closePreview(): void {
+  previewSeq++
+  previewLoading.value = false
   revokePreviewUrl()
   preview.value = null
 }
-onUnmounted(revokePreviewUrl)
+onUnmounted(closePreview)
 
 // An .html/.htm preview also gets a 渲染 URL, so FilePreview can offer the 源码/渲染 toggle.
 // Built from the SAME rel the preview fetched, so both views resolve to one file.
@@ -951,7 +1082,7 @@ function toast(msg: string): void {
 
 // ── formatting ──
 function fmtSize(bytes: number): string {
-  if (!bytes) return ''
+  if (!bytes) return '0 B'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -967,12 +1098,12 @@ function relTime(ms: number): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
-// 绝对时间（hover title）：relTime 只给「3天前 / 09-08」这种量级，要对比同日多版本得看到分钟。
+// Filesystem modification time stays exact in browse/search, including same-minute versions.
 function absTime(ms: number): string {
   if (!ms) return ''
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // Re-anchor when the target session OR the ANCHORED cwd prop changes — i.e. ONLY when the
@@ -1008,6 +1139,15 @@ function retryAnchor(): void {
 
 function reanchor(): void {
   anchorError.value = false
+  viewError.value = ''
+  navigationRevision++
+  viewSeq++
+  recentSeq++
+  viewRequest?.abort()
+  cancelSearch()
+  treeCwd.value = props.cwd || ''
+  treeRootRel.value = ''
+  backStack.value = []
   recent.value = []
   roots.value = []
   recentQuery.value = ''
@@ -1015,18 +1155,25 @@ function reanchor(): void {
   searchResults.value = []
   searching.value = false
   closePreview()
-  if (props.mode === 'recent') void loadRecent()
-  else { void loadView(); void loadRecent() } // tree also loads recent → agent-edit highlight
+  needsLoad = true
+  activate()
 }
-watch(() => props.sessionId, reanchor)
-watch(() => props.cwd, reanchor)
-
-// tree mode loads BOTH the browse level and the recent-edited set: the latter feeds the in-tree
-// "agent just touched this" highlight (see recentEditedAt). recent mode only needs the list.
-onMounted(() => {
+let needsLoad = true
+function activate(): void {
+  if (!props.active || !needsLoad) return
+  needsLoad = false
   if (props.mode === 'recent') { void loadRecent(); return }
-  void loadView(); void loadRecent(); void loadUploadLimit() // tree: 也预取上传限额
+  // The tree is interactive first; transcript-derived badges are secondary work.
+  void loadView().then(() => { if (props.active) void loadRecent() })
+  void loadUploadLimit()
+}
+watch(() => [props.sessionId, props.cwd], reanchor)
+watch(() => props.active, (active) => {
+  if (active) { activate(); if (treeQuery.value.trim() && !searchResults.value.length && !searchError.value) void runSearch(treeQuery.value.trim()) }
+  else { cancelSearch(); searching.value = false }
 })
+onMounted(activate)
+onBeforeUnmount(() => { viewSeq++; viewRequest?.abort(); cancelSearch() })
 
 defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
 </script>
@@ -1103,21 +1250,22 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
       <DrawerSearchBox
         v-model="treeQuery"
-        placeholder="搜索文件 / 目录（递归）…"
+        placeholder="搜索名称或路径，多个词用空格分隔…"
         testid="fp-tree-search"
+        @keydown.enter="($event.target as HTMLInputElement).blur()"
         class="shrink-0 border-b border-border/40 px-2 py-1.5"
       />
 
       <!-- root header：钻入导航（返回 + 面包屑）+ 操作（浏览模式）——工具条作用于当前视图根 -->
-      <div v-show="!treeQuery.trim()" class="shrink-0 flex flex-col border-b border-border">
+      <div class="shrink-0 flex flex-col border-b border-border">
         <div class="flex items-center gap-1 px-2 py-1.5">
           <button
             v-if="canGoBack"
-            class="shrink-0 p-1 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            type="button" title="返回上一目录（Backspace）"
+            class="shrink-0 min-h-9 px-1 rounded text-xs text-primary hover:bg-muted/50 flex items-center gap-1"
+            type="button" :title="backLabel + '（Backspace）'"
             data-testid="fp-tree-back"
             @click="goBack"
-          ><ChevronRight class="size-4 rotate-180" /></button>
+          ><ChevronRight class="size-4 rotate-180" />{{ backLabel }}</button>
           <Folder class="size-3.5 shrink-0 text-primary/80" :class="{ 'opacity-0': treeRootRel }" />
           <!-- 面包屑：根段=回全树；每段可跳（压返回栈） -->
           <nav class="min-w-0 flex-1 flex items-center gap-0.5 overflow-x-auto" data-testid="fp-tree-crumbs" aria-label="目录路径">
@@ -1136,6 +1284,8 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
               <ChevronRight v-if="i < crumbs.length - 1" class="size-3 shrink-0 text-muted-foreground/40" />
             </template>
           </nav>
+        </div>
+        <div v-if="!treeQuery.trim()" class="flex items-center gap-3 px-2 pb-1 flex-wrap">
           <button
             class="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
             type="button" title="在当前目录新建文件"
@@ -1202,12 +1352,10 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           </button>
           <input ref="treeUploadInput" type="file" multiple class="hidden" data-testid="fp-tree-upload-input" @change="onTreeUploadPicked" />
         </div>
-        <div
-          v-if="treeCwd"
-          class="px-2 pb-1 text-[0.56rem] text-muted-foreground/50 truncate select-all"
-          :title="viewAbsPath"
-          data-testid="fp-tree-cwd-abs"
-        >{{ viewAbsPath }}</div>
+        <details v-if="treeCwd" class="px-2 pb-1 text-[0.65rem] text-muted-foreground" :key="treeRootRel" data-testid="fp-location-details">
+          <summary class="cursor-pointer py-1 break-all">当前目录：{{ locationLabel(viewAbsPath) }} · 完整路径</summary>
+          <div class="break-all select-text py-1" data-testid="fp-tree-cwd-abs">{{ viewAbsPath }}</div>
+        </details>
       </div>
 
       <!-- 新建 文件/目录 输入条 -->
@@ -1280,14 +1428,19 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
       <!-- 隐藏：context menu「上传到此」的文件选择 -->
       <input ref="ctxUploadInput" type="file" multiple class="hidden" data-testid="fp-tree-ctx-upload-input" @change="onCtxUploadPicked" />
 
-      <!-- ── search results (recursive, flat) — VS-Code quick-open style ── -->
-      <div v-if="treeQuery.trim()" class="flex-1 overflow-y-auto p-2" data-testid="fp-search-results">
+      <!-- ── search results — flat directory groups ── -->
+      <div v-if="treeQuery.trim()" ref="searchScrollEl" tabindex="-1" class="flex-1 min-h-0 overflow-y-auto p-2 outline-none" data-testid="fp-search-results">
         <div
           v-if="searchTruncated"
           class="mx-2 mb-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400"
           data-testid="fp-search-truncated"
         >
-          结果过多，已截断 — 当前目录很大（可能不是你以为的工程根）。请缩小搜索词，或切到目标目录再搜。
+          当前目录尚未扫描完整；已找到的结果仍可使用。进入目标子目录后搜索可覆盖更深的文件。
+        </div>
+        <div class="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+          <span>搜索当前目录及子目录 · {{ searchResults.length }} / {{ searchTotal }} 项</span>
+          <button v-if="searchNextOffset" class="text-primary" :disabled="searching" data-testid="fp-search-more" @click="runSearch(treeQuery.trim(), searchNextOffset)">{{ searching ? '载入中…' : '加载更多' }}</button>
+          <button v-if="searchError" class="text-destructive" @click="runSearch(treeQuery.trim())">{{ searchError }}</button>
         </div>
         <!-- 类别快筛：只在结果真跨多类时出现（与最近修改 tab 同规则）。目录恒在，不随类别收起。 -->
         <div v-if="searchResults.length > 1" class="flex gap-1.5 overflow-x-auto px-2 py-1.5 shrink-0 border-b border-border/40 no-scrollbar">
@@ -1315,60 +1468,48 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           >{{ label }}</button>
         </div>
         <div v-if="searching && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">搜索中…</div>
+        <div v-else-if="searchError && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground">无法显示搜索结果，请重试或切换目录</div>
         <div v-else-if="!filteredSearchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
-        <ul v-else class="flex flex-col gap-0.5">
-          <li
-            v-for="e in filteredSearchResults"
-            :key="e.rel"
-            class="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40 transition-colors"
-            :data-testid="`fp-search-${e.rel}`"
-          >
-            <Folder v-if="e.isDir" class="size-4 shrink-0 text-primary/80" />
-            <ImageIcon v-else-if="isImage(e.name)" class="size-4 shrink-0 text-violet-500" />
-            <FileText v-else class="size-4 shrink-0" :class="catTextClass(e.name)" />
-            <button
-              class="min-w-0 flex-1 text-left"
-              type="button"
-              :title="e.rel"
-              @click="onSearchHit(e)"
-            >
-              <span class="block text-xs" :class="e.isDir ? 'text-foreground font-medium' : 'text-foreground'"><MidTruncatedName :name="e.name" /><span v-if="e.isDir" class="text-muted-foreground/60">/</span></span>
-              <span v-if="parentRel(e.rel)" class="block text-[0.58rem] text-muted-foreground/60 truncate">{{ parentRel(e.rel) }}</span>
-            </button>
-            <!-- 文件类型角标：扩展名 + 类别同色（catOf SSOT），扫一眼可分 md/go/png/… -->
-            <span
-              v-if="!e.isDir"
-              class="shrink-0 rounded px-1 py-px text-[0.54rem] font-medium uppercase leading-none tabular-nums"
-              :class="catBadgeClass(e.name)"
-              :data-testid="`fp-search-type-${e.rel}`"
-            >{{ fileExt(e.name) || '?' }}</span>
-            <span v-if="!e.isDir" class="text-[0.58rem] text-muted-foreground/70 tabular-nums shrink-0">{{ fmtSize(e.size) }}</span>
-            <!-- 修改时间：搜索命中常是同名多版本（v1/v2/v3…），没有时间就分不出哪个是新的 -->
-            <span
-              v-if="e.mtimeMs"
-              class="shrink-0 text-[0.58rem] text-muted-foreground/60 tabular-nums"
-              :title="absTime(e.mtimeMs)"
-              :data-testid="`fp-search-time-${e.rel}`"
-            >{{ relTime(e.mtimeMs) }}</span>
-            <button
-              class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0 opacity-0 group-hover:opacity-100"
-              type="button" title="复制路径"
-              @click="copyText(searchAbsPath(e), 's:' + e.rel)"
-            >
-              <Check v-if="copiedKey === 's:' + e.rel" class="size-3 text-green-500" />
-              <Copy v-else class="size-3" />
-            </button>
+        <ul v-else class="flex flex-col gap-1">
+          <li v-for="e in searchRows" :key="e.rel"
+            class="group rounded-md px-2 py-1 hover:bg-muted/40 transition-colors"
+            :style="{ paddingLeft: e.grouped ? '24px' : '8px' }"
+            :data-testid="`fp-search-${e.rel}`" :data-search-directory="e.isDir ? e.rel : undefined">
+            <div class="flex items-start gap-2 min-w-0">
+              <Folder v-if="e.isDir" class="size-4 mt-3 shrink-0 text-primary/80" />
+              <ImageIcon v-else-if="isImage(e.name)" class="size-4 mt-3 shrink-0 text-violet-500" />
+              <FileText v-else class="size-4 mt-3 shrink-0" :class="catTextClass(e.name)" />
+              <button class="min-w-0 flex-1 text-left py-2 min-h-11" type="button" :title="e.rel" @click="onSearchHit(e)">
+                <span class="block text-xs text-foreground" :class="{ 'font-medium': e.isDir }"><MidTruncatedName :name="e.name" :tooltip="e.rel" /></span>
+                <span v-if="e.isDir && searchContexts.get(e.label)" class="block mt-1 text-xs text-foreground/80 break-words [overflow-wrap:anywhere]" :data-testid="`fp-search-context-${e.rel}`">{{ searchContexts.get(e.label) }}</span>
+                <span class="block mt-1 text-[0.65rem] text-muted-foreground tabular-nums">
+                  <span v-if="!e.isDir" :data-testid="`fp-search-size-${e.rel}`">{{ fmtSize(e.size) }} · </span>
+                  <span v-if="e.mtimeMs" :title="absTime(e.mtimeMs)" :data-testid="`fp-search-time-${e.rel}`">{{ absTime(e.mtimeMs) }}</span>
+                </span>
+              </button>
+              <span v-if="!e.isDir" class="shrink-0 self-center rounded px-1 py-px text-[0.54rem] font-medium uppercase" :class="catBadgeClass(e.name)" :data-testid="`fp-search-type-${e.rel}`">{{ fileExt(e.name) || '?' }}</span>
+              <button v-if="e.isDir" class="shrink-0 min-h-11 min-w-11 text-xs text-muted-foreground hover:text-foreground" type="button"
+                :title="expandedSearchPaths.has(e.rel) ? '收起完整路径' : '展开完整路径'" :aria-expanded="expandedSearchPaths.has(e.rel)"
+                :data-testid="`fp-search-path-${e.rel}`" @click="toggleSearchPath(e.rel)">路径</button>
+              <button class="min-h-11 min-w-11 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+                type="button" title="复制路径" @click="copyText(searchAbsPath(e), 's:' + e.rel)">
+                <Check v-if="copiedKey === 's:' + e.rel" class="size-3 text-green-500" /><Copy v-else class="size-3" />
+              </button>
+            </div>
+            <div v-if="expandedSearchPaths.has(e.rel)" class="px-1 pb-2 text-xs text-muted-foreground break-all select-text" :data-testid="`fp-search-full-path-${e.rel}`">{{ searchAbsPath(e) }}</div>
           </li>
         </ul>
       </div>
 
       <!-- ── browse（嵌套 lazy 展开树 — VSCode 式）；tabindex+keydown = vim 键盘导航 ── -->
-      <div v-else ref="treeScrollEl" tabindex="0" class="flex-1 overflow-y-auto py-1 outline-none" data-testid="fp-tree" @keydown="onTreeKeydown" @click="focusTree">
+      <div v-else ref="treeScrollEl" tabindex="0" class="flex-1 overflow-y-auto py-1 outline-none" data-testid="fp-tree" @scroll="treeContainer.onScroll" @keydown="onTreeKeydown" @click="focusTree">
         <div v-if="treeLoading && !roots.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">加载中…</div>
+        <div v-else-if="viewError" class="px-2 py-6 text-center text-xs text-destructive" data-testid="fp-tree-error">{{ viewError }} <button class="ml-2 underline" @click="loadView">重试</button></div>
         <div v-else-if="!roots.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">空目录</div>
-        <ul v-else class="flex flex-col">
+        <ul v-else v-bind="treeWrapper" class="flex flex-col">
           <li
-            v-for="n in visibleNodes"
+            v-for="{ data: n } in renderedNodes"
+            :style="{ height: TREE_ROW_HEIGHT + 'px', flexShrink: 0 }"
             :key="n.rel"
             class="group flex items-center rounded-md pr-1 hover:bg-muted/40 transition-colors"
             :class="[recentEditedAt(n) ? 'fp-row-recent' : '', focusedRel === n.rel ? 'fp-row-focused' : '']"
@@ -1426,7 +1567,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
                   <Folder v-if="n.entry.isDir" class="size-4 shrink-0 text-primary/80" />
                   <ImageIcon v-else-if="isImage(n.entry.name)" class="size-4 shrink-0 text-violet-500" />
                   <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(n) ? 'text-primary/80' : catTextClass(n.entry.name)" />
-                  <span class="min-w-0 flex-1 text-xs" :class="n.entry.isDir ? 'text-foreground font-medium' : 'text-foreground'"><MidTruncatedName :name="n.entry.name" /><span v-if="n.entry.isDir" class="text-muted-foreground/60">/</span></span>
+                  <span class="min-w-0 flex-1 text-xs text-foreground">
+                    <span class="block" :class="{ 'font-medium': n.entry.isDir }"><MidTruncatedName :name="n.entry.name" /></span>
+                    <span class="block text-[0.65rem] text-muted-foreground tabular-nums whitespace-nowrap">
+                      <span v-if="!n.entry.isDir" :data-testid="`fp-tree-size-${n.rel}`">{{ fmtSize(n.entry.size) }} · </span>
+                      <span :title="n.entry.mtimeMs ? absTime(n.entry.mtimeMs) : undefined" :data-testid="`fp-tree-time-${n.rel}`">{{ n.entry.mtimeMs ? absTime(n.entry.mtimeMs) : '修改时间未知' }}</span>
+                    </span>
+                  </span>
                   <!-- 文件类型角标：树行此前只有图标+名字，类型要靠图标颜色猜（Human 实报"点进去看不到文件类型"）。与搜索行同款 catOf SSOT。 -->
                   <span
                     v-if="!n.entry.isDir"
@@ -1436,9 +1583,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
                   >{{ fileExt(n.entry.name) || '?' }}</span>
                 </button>
               </div>
-              <!-- agent 刚碰过徽标 / 文件大小 -->
-              <span v-if="recentEditedAt(n)" class="shrink-0 px-1 text-[0.56rem] text-primary/80 tabular-nums" title="agent 最近修改">{{ relTime(recentEditedAt(n)!) }}</span>
-              <span v-else-if="!n.entry.isDir" class="shrink-0 px-1 text-[0.56rem] text-muted-foreground/70 tabular-nums opacity-0 group-hover:opacity-100">{{ fmtSize(n.entry.size) }}</span>
+              <span v-if="recentEditedAt(n)" class="shrink-0 px-1 text-[0.56rem] text-primary/80" title="agent 最近修改">●</span>
               <!-- 更多操作（⋮）——与右键/长按同款菜单，给桌面一个可见入口 -->
               <button
                 type="button"
@@ -1497,6 +1642,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           >插入</button>
           <button class="p-1 rounded text-muted-foreground hover:text-foreground" type="button" title="关闭" data-testid="fp-preview-close" @click="closePreview">&times;</button>
         </div>
+        <div class="shrink-0 max-h-24 overflow-auto border-b border-border/50 px-3 py-2 text-[0.68rem] leading-relaxed text-muted-foreground break-all select-text" data-testid="fp-preview-location" :title="preview.absPath">{{ locationLabel(preview.absPath) }}</div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
           <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @navigate="onDocNavigate" @toast="toast" />

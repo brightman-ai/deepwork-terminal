@@ -9,7 +9,9 @@
  * 交互：PC 滚轮对光标缩放 + 拖拽平移 + 双击 1x↔2.5x + ESC/✕；手机双指 pinch + 单指拖 + 双击。
  * Teleport 到 body：抽屉自己有 overflow 裁剪，不出去就只能在半个面板里"全屏"。
  */
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+
+import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 
 const props = defineProps<{ src: string }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -87,10 +89,7 @@ function onTouchMove(e: TouchEvent): void {
   }
 }
 function onTouchEnd(e: TouchEvent): void { if (e.touches.length < 2) pinch = 0; if (e.touches.length === 0) pan = false }
-function onKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') emit('close') }
-
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+usePreviewEscape(() => !!props.src, () => emit('close'))
 </script>
 
 <template>

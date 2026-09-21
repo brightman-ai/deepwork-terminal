@@ -92,7 +92,11 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	myOrigin := s.dataDir()
 	// Agent state comes from the SAME per-tick snapshot the overview cards render, so the tab dot
 	// and the card can never disagree — they are one computation, not two that happen to match.
-	agents := s.sessionAgentStatuses(r.Context())
+	entries := s.overviewSnapshot(r.Context()).entries
+	byID := make(map[string]SessionOverviewEntry, len(entries))
+	for _, entry := range entries {
+		byID[entry.ID] = entry
+	}
 	result := make([]sessionInfo, 0, len(sessions))
 	for _, sess := range sessions {
 		sess.mu.Lock()
@@ -118,8 +122,11 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		sess.mu.Unlock()
 
-		if a, ok := agents[sess.ID]; ok {
-			info.AgentTool, info.AgentStatus = a[0], a[1]
+		if entry, ok := byID[sess.ID]; ok {
+			info.AgentTool, info.AgentStatus = string(entry.AgentTool), string(entry.AgentStatus)
+			if entry.CWD != "" {
+				info.CWD = entry.CWD
+			}
 		}
 		result = append(result, info)
 	}

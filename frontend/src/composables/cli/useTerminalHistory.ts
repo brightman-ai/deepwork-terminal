@@ -105,6 +105,8 @@ export interface TerminalHistory {
   search: (q: string, from: number, backward: boolean) => Promise<HistoryMatch[]>
   /** 确保某一行在 `lines` 里（搜索跳转用）。 */
   ensureVisible: (n: number) => Promise<void>
+  /** Fill the newer gap left by a distant search before selecting through the end. */
+  loadToEnd: () => Promise<boolean>
   reset: () => void
 }
 
@@ -242,6 +244,34 @@ export function useTerminalHistory(
     }
   }
 
+  async function loadToEnd(): Promise<boolean> {
+    if (loading.value || lines.value.length === 0) return false
+    if (lines.value[lines.value.length - 1].n >= total.value) return true
+    loading.value = true
+    try {
+      // Capture a finite endpoint first; output may continue while pages are fetched.
+      const screen = await fetchPage({ screen: '1' })
+      if (!screen) return false
+      const end = screen.lines[0]?.n ?? screen.total
+      let from = lines.value[lines.value.length - 1].n + 1
+      while (from < end) {
+        const count = Math.min(HISTORY_PAGE, end - from)
+        const page = await fetchPage({ from: String(from), count: String(count) })
+        if (!page) return false
+        if (page.lines.length !== count || page.lines.some((line, i) => line.n !== from + i)) {
+          error.value = '这段历史已变化或被淘汰，请重新打开回看历史后选择'
+          return false
+        }
+        merge(page.lines)
+        from += count
+      }
+      merge(screen.lines)
+      return true
+    } finally {
+      loading.value = false
+    }
+  }
+
   /**
    * 在已经载入的行里就地找一遍（当前可见屏就在这里面）。
    *
@@ -293,7 +323,7 @@ export function useTerminalHistory(
     }
   }
 
-  return { lines, styles, base, total, enabled, broken, reason, loading, error, open, loadOlder, search, ensureVisible, reset }
+  return { lines, styles, base, total, enabled, broken, reason, loading, error, open, loadOlder, search, ensureVisible, loadToEnd, reset }
 }
 
 /**

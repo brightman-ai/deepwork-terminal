@@ -91,7 +91,8 @@ func (pl *ProjectLocator) ClaudeSessionForProcess(processPID int, projectPath st
 	if processPID <= 0 {
 		return "", os.ErrNotExist
 	}
-	raw, err := os.ReadFile(filepath.Join(transcript.ClaudeHome(), "sessions", strconv.Itoa(processPID)+".json"))
+	home, projects := claudeRootsForProcess(processPID)
+	raw, err := os.ReadFile(filepath.Join(home, "sessions", strconv.Itoa(processPID)+".json"))
 	if err != nil {
 		return "", err
 	}
@@ -113,11 +114,53 @@ func (pl *ProjectLocator) ClaudeSessionForProcess(processPID int, projectPath st
 	} else if projectPath != "" && canonicalPath(dir) != canonicalPath(projectPath) {
 		return "", os.ErrNotExist
 	}
-	path := filepath.Join(pl.ClaudeProjectDir(dir), idx.SessionID+transcript.JSONLSuffix)
+	path := filepath.Join(projects, transcript.EncodeProjectDir(canonicalPath(dir)), idx.SessionID+transcript.JSONLSuffix)
 	if _, err := os.Stat(path); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+// An agent can use a different Claude profile from the terminal server. Read only
+// directory settings from its process environment; credentials never leave this function.
+func claudeRootsForProcess(pid int) (home, projects string) {
+	home, projects = transcript.ClaudeHome(), transcript.ClaudeProjectsRoot()
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return
+	}
+	var config, userHome, override string
+	for _, field := range strings.Split(string(raw), "\x00") {
+		key, value, _ := strings.Cut(field, "=")
+		switch key {
+		case "CLAUDE_CONFIG_DIR":
+			config = value
+		case "HOME":
+			userHome = value
+		case "DW_CLAUDE_PROJECTS":
+			override = value
+		}
+	}
+	selected := config
+	if selected == "" && filepath.IsAbs(userHome) {
+		selected = filepath.Join(userHome, ".claude")
+	}
+	if filepath.IsAbs(selected) && filepath.Clean(selected) != filepath.Clean(home) {
+		home, projects = selected, filepath.Join(selected, "projects")
+	}
+	if filepath.IsAbs(override) {
+		projects = override
+	}
+	return
+}
+
+func (pl *ProjectLocator) ClaudeSessionFilesForProcess(pid int, cwd string) ([]string, error) {
+	_, projects := claudeRootsForProcess(pid)
+	dir := filepath.Join(projects, transcript.EncodeProjectDir(canonicalPath(cwd)))
+	if _, err := os.Stat(dir); err != nil {
+		return nil, err
+	}
+	return transcript.NewestFiles(dir, "", transcript.JSONLSuffix, 0), nil
 }
 
 // ClaudeAllSessionFiles returns every .jsonl across ALL Claude projects, newest first.

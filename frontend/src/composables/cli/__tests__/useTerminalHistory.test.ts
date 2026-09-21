@@ -71,6 +71,46 @@ function line(n: number, text = `line ${n}`): { n: number; seg: Array<{ t: strin
   return { n, seg: [{ t: text, s: 0 }] }
 }
 
+describe('select through end after jumping to an older search result', () => {
+  it('fills every intervening page and includes the current screen', async () => {
+    stubFetch(url => {
+      if (url.searchParams.get('screen') === '1') return { lines: [line(1200, 'screen end')], total: 1200 }
+      const from = Number(url.searchParams.get('from'))
+      const count = Number(url.searchParams.get('count'))
+      return { lines: Array.from({ length: count }, (_, i) => line(from + i)), total: 1200 }
+    })
+    const h = useTerminalHistory(() => 's1', doFetch)
+    h.lines.value = [line(10), line(11)]
+    h.total.value = 1200
+    expect(await h.loadToEnd()).toBe(true)
+    expect(h.lines.value).toHaveLength(1191)
+    expect(h.lines.value[0].n).toBe(10)
+    expect(h.lines.value[490].n).toBe(500)
+    expect(lineText(h.lines.value.at(-1)!)).toBe('screen end')
+  })
+  it('keeps existing lines and reports failure when the middle page is unavailable', async () => {
+    stubFetch(url => url.searchParams.has('screen') ? { lines: [line(900)], total: 900 } : null)
+    const h = useTerminalHistory(() => 's1', doFetch)
+    h.lines.value = [line(10)]
+    h.total.value = 900
+    expect(await h.loadToEnd()).toBe(false)
+    expect(h.lines.value).toEqual([line(10)])
+    expect(h.error.value).toBe('HTTP 500')
+    expect(h.loading.value).toBe(false)
+  })
+  it('does not report success after eviction leaves a hole', async () => {
+    stubFetch(url => url.searchParams.has('screen')
+      ? { lines: [line(900)], total: 900 }
+      : { lines: [line(850)], total: 900, base: 850 })
+    const h = useTerminalHistory(() => 's1', doFetch)
+    h.lines.value = [line(10)]
+    h.total.value = 900
+    expect(await h.loadToEnd()).toBe(false)
+    expect(h.error.value).toContain('被淘汰')
+    expect(h.lines.value).toEqual([line(10)])
+  })
+})
+
 describe('useTerminalHistory — 分页', () => {
   it('open 取的是【最近】一页，不是从第 0 行开始', async () => {
     // 使用者是从实时终端切过来的：他要看的是刚刚滚过去的东西，不是这个会话开机时的第一行。

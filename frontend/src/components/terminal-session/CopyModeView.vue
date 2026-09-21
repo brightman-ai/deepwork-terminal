@@ -12,28 +12,66 @@
  * ── 三条硬约束 ──────────────────────────────────────────────────────────────────────────────────
  * ① **一个按键都不许漏进 PTY。** 进了模式就全吞：漏一个字符进 shell，比这个功能不存在更糟。
  *    截获挂在**捕获阶段的 document 上**，先于 xterm 的隐藏 textarea 拿到事件。
- * ② **原生文本选择。** 这是 DOM 文本不是 canvas，所以拖选、双击选词、Cmd+C 全是浏览器原生行为 ——
- *    顺带治了"全屏 TUI 里选不动字"这个老毛病。所以容器**不能**设 user-select:none。
+ * ② **选区按行号和字符位置保存。** 跨屏回收 DOM 不得丢掉起点；复制从历史数据取全文。
+ *    双击选词与触屏保留原生选择入口，所以容器**不能**设 user-select:none。
  * ③ **配色跟着终端走。** 调色板下标解析成 `--dw-ansi-N` 变量，值在这里按 xterm 的主题定义一次；
  *    绝不在数据层硬编码颜色（那会把今天的主题烤进比它活得久的历史里）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { copyTextToClipboard } from '@ce/utils/clipboard'
+import { selectedSegments } from '../../composables/cli/historySelection'
+import { useHistorySelection } from '../../composables/cli/useHistorySelection'
 import {
-  lineText,
   styleToCss,
   type HistoryMatch,
   type TerminalHistory,
 } from '../../composables/cli/useTerminalHistory'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   history: TerminalHistory
+  /** Kept mounted across tab switches; only the visible surface owns global input. */
+  active?: boolean
   /** 标签名，印在标题栏上——多标签时它是唯一能说清"这是谁的历史"的东西。 */
   title?: string
-}>()
+}>(), { active: true })
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const scroller = ref<HTMLElement | null>(null)
 const h = props.history
+const { selection, text: selectedText, onPointerDown, onMouseDown, selectToEnd, stopDrag, clear: clearSelection } =
+  useHistorySelection(h.lines, scroller, () => { void onScroll() })
+watch(() => props.active, (active) => {
+  if (!active) stopDrag()
+  else void nextTick(syncViewport)
+})
+const copyStatus = ref('')
+watch(selection, () => { copyStatus.value = '' })
+async function copySelected(): Promise<void> {
+  if (!selectedText.value) return
+  copyStatus.value = await copyTextToClipboard(selectedText.value) ? '已复制' : '复制失败，请重试'
+}
+function onCopy(e: ClipboardEvent): void {
+  if (!props.active) return
+  if (!selectedText.value || e.target === searchInput.value) return
+  e.preventDefault()
+  e.clipboardData?.setData('text/plain', selectedText.value)
+}
+async function selectThroughEnd(): Promise<void> {
+  const anchor = selection.value?.anchor
+  if (!anchor) return
+  if (!await h.loadToEnd()) {
+    copyStatus.value = h.error.value || '历史正在载入，请稍后重试'
+    return
+  }
+  // The user may have cleared or changed the selection while a page was loading.
+  if (selection.value?.anchor !== anchor) return
+  selectToEnd()
+  await nextTick()
+  if (scroller.value) {
+    scroller.value.scrollTop = totalHeight.value
+    syncViewport()
+  }
+}
 
 /**
  * ── 窗口化渲染 ──────────────────────────────────────────────────────────────────────────────────
@@ -207,6 +245,7 @@ function pageBy(fraction: number): void {
  * 那时字符已经在去 PTY 的路上。这是约束 ①，不是优化。
  */
 function onKeydown(e: KeyboardEvent): void {
+  if (!props.active) return
   // 搜索框里只放行编辑用的键，其余照样吞。
   const inSearchBox = e.target === searchInput.value
   if (inSearchBox) {
@@ -226,6 +265,12 @@ function onKeydown(e: KeyboardEvent): void {
 
   e.preventDefault()
   e.stopPropagation()
+
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+    void copySelected()
+    return
+  }
+  if (e.shiftKey && e.key === 'End') { void selectThroughEnd(); return }
 
   // ── tmux copy-mode 的翻页键（vi 表）─────────────────────────────────────────────────────────
   // 进这个视口的人多半带着 tmux 的手感：C-u/C-d 半页、C-b/C-f 整页。下面那张表按的是**裸键**，
@@ -267,8 +312,7 @@ function onKeydown(e: KeyboardEvent): void {
     default:
       // Cmd+F 留着：mac 上"查找"是 Cmd 家族的，tmux 的 Ctrl 键位跟它不冲突。
       if (e.metaKey && e.key.toLowerCase() === 'f') openSearch()
-      // 其余一律吞掉（约束 ①）。Cmd/Ctrl+C 是例外：浏览器的复制走的是 copy 事件，
-      // 不依赖这里放行 keydown，所以吞掉它不影响复制。
+      // 其余一律吞掉（约束 ①）；复制快捷键在上面显式处理。
   }
 }
 
@@ -281,8 +325,10 @@ function openSearch(): void {
     // 但别的输入路径不产生可被 preventDefault 的 keydown —— 与按键不许漏进 PTY 是同一类问题，
     // 所以这里同样不能只靠 keydown 那一层。
     if (!wasOpen) query.value = ''
-    searchInput.value?.focus()
-    searchInput.value?.select()
+    if (props.active) {
+      searchInput.value?.focus()
+      searchInput.value?.select()
+    }
   })
 }
 
@@ -295,6 +341,7 @@ function closeSearch(): void {
 
 onMounted(async () => {
   document.addEventListener('keydown', onKeydown, true)
+  document.addEventListener('copy', onCopy)
   await h.open()
   await nextTick()
   syncViewport()
@@ -310,6 +357,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown, true)
+  document.removeEventListener('copy', onCopy)
   window.removeEventListener('resize', syncViewport)
 })
 
@@ -329,6 +377,14 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
       <span v-if="atOldest" class="copy-mode__hint">已到最早</span>
       <button class="copy-mode__btn" data-testid="copy-mode-search" @click="openSearch">搜索 /</button>
       <button class="copy-mode__btn" data-testid="copy-mode-close" @click="emit('close')">退出 Esc</button>
+    </div>
+
+    <div class="copy-mode__selection" @mousedown.prevent>
+      <span class="copy-mode__selection-hint">点击起点，滚动后 Shift+点击终点；也可拖选</span>
+      <button class="copy-mode__btn" :disabled="!selection || h.loading.value" data-testid="copy-mode-select-end" title="Shift+End" @click="selectThroughEnd">{{ h.loading.value ? '载入中…' : '选到末尾' }}</button>
+      <button class="copy-mode__btn" :disabled="!selectedText" data-testid="copy-mode-copy" @click="copySelected">复制选中</button>
+      <button v-if="selection" class="copy-mode__btn" @click="clearSelection">清除选择</button>
+      <span role="status" class="copy-mode__hint">{{ copyStatus || (selectedText ? `已选 ${selectedText.length} 字符` : selection ? '已定起点' : '') }}</span>
     </div>
 
     <div v-if="searchOpen" class="copy-mode__search">
@@ -352,6 +408,9 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
       ref="scroller"
       class="copy-mode__scroll"
       data-testid="copy-mode-scroll"
+      tabindex="0"
+      @pointerdown="onPointerDown"
+      @mousedown="onMouseDown"
       @scroll.passive="onScroll"
     >
       <div v-if="h.loading.value && h.lines.value.length === 0" class="copy-mode__empty">载入中…</div>
@@ -372,9 +431,10 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
           >
             <span class="copy-mode__num">{{ line.n }}</span>
             <span class="copy-mode__text"><span
-              v-for="(seg, i) in line.seg"
+              v-for="(seg, i) in selectedSegments(line, selection)"
               :key="i"
               :style="styleToCss(h.styles.value[seg.s])"
+              :class="{ 'copy-mode__selected': seg.selected }"
             >{{ seg.t }}</span><span v-if="line.seg.length === 0">&nbsp;</span></span>
           </div>
         </div>
@@ -403,6 +463,7 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
 }
 
 .copy-mode__bar,
+.copy-mode__selection,
 .copy-mode__search {
   display: flex;
   align-items: center;
@@ -449,6 +510,11 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
   cursor: pointer;
 }
 .copy-mode__btn:hover { background: #3a3a3a; }
+.copy-mode__btn:disabled { opacity: .45; cursor: default; }
+.copy-mode__selection { flex-wrap: wrap; }
+.copy-mode__selection-hint { color: #a0a0a0; }
+.copy-mode__selected { background: #285d96 !important; color: #fff !important; }
+.copy-mode__scroll:focus { outline: none; }
 
 .copy-mode__input {
   flex: 1 1 auto;
@@ -467,7 +533,7 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
   overflow-y: auto;
   overflow-x: auto;
   padding: 4px 0 12px;
-  /* 原生选择——约束 ②。这是 DOM 文本，所以拖选/双击选词/Cmd+C 全都是浏览器自己的行为。 */
+  /* 保留双击选词和触屏的原生入口；跨屏选区由历史行号保存。 */
   user-select: text;
   -webkit-user-select: text;
 }

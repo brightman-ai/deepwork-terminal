@@ -174,6 +174,9 @@ func (t *claudeAgentTree) anyRunning(now time.Time) bool {
 		// we never saw an activation — fall back to the spawn row so an unstarted node cannot
 		// pin the pane forever either.
 		since := n.ActiveSince
+		if a := t.latestAttempt(n.ID); a != nil && a.transitionAt.After(since) {
+			since = a.transitionAt // continuing child work refreshes liveness, not its spawn time
+		}
 		if since.IsZero() {
 			since = n.StartedAt
 		}
@@ -283,8 +286,10 @@ type claudeAgentTree struct {
 	attempts         map[string][]*claudeAgentAttempt // by stable agent ID, causal order
 	attemptByToolUse map[string]*claudeAgentAttempt   // agent ID + tool_use ID → attempt
 
-	readers map[string]*JSONLReader      // by agent ID — that agent's OWN transcript, incremental (offset-cached)
-	usage   map[string]*UsageAccumulator // by agent ID — dedup'd token totals from that transcript
+	aliases          map[string]string // owner + runtime name/handle → child transcript ID
+	pendingTeammates map[string]pendingTeammate
+	readers          map[string]*JSONLReader      // by agent ID — that agent's OWN transcript, incremental (offset-cached)
+	usage            map[string]*UsageAccumulator // by agent ID — dedup'd token totals from that transcript
 }
 
 func newClaudeAgentTree(jsonlPath string) claudeAgentTree {
@@ -292,6 +297,8 @@ func newClaudeAgentTree(jsonlPath string) claudeAgentTree {
 	return claudeAgentTree{
 		sessionDir:       dir,
 		nodes:            make(map[string]*AgentNode),
+		aliases:          make(map[string]string),
+		pendingTeammates: make(map[string]pendingTeammate),
 		pending:          make(map[string]agentSpawnPending),
 		attempts:         make(map[string][]*claudeAgentAttempt),
 		attemptByToolUse: make(map[string]*claudeAgentAttempt),
@@ -486,7 +493,7 @@ func (t *claudeAgentTree) scanRow(row map[string]any, ownerID string, ownerDepth
 	rowType, _ := row["type"].(string)
 	switch rowType {
 	case "assistant":
-		t.scanAssistantRow(row)
+		t.scanAssistantRow(row, ownerID)
 		t.applyAgentTurnEnd(row, ownerAttempt, at)
 	case "user":
 		t.scanUserRow(row, ownerID, ownerDepth)
@@ -505,7 +512,7 @@ func agentRowEndsTurn(row map[string]any) bool {
 	}
 	msg, _ := row["message"].(map[string]any)
 	stopReason, _ := msg["stop_reason"].(string)
-	return stopReason == "end_turn"
+	return stopReason == "end_turn" || terminalClaudeAPIError(row)
 }
 
 // applyAgentTurnEnd consumes the subagent transcript's own terminal fact. Claude
@@ -523,16 +530,20 @@ func (t *claudeAgentTree) applyAgentTurnEnd(row map[string]any, attempt *claudeA
 	}
 	msg, _ := row["message"].(map[string]any)
 	stopReason, _ := msg["stop_reason"].(string)
-	if stopReason != "end_turn" {
+	if stopReason != "end_turn" && !terminalClaudeAPIError(row) {
 		return
 	}
-	t.terminalAttempt(attempt, AgentDone, at)
+	status := AgentDone
+	if terminalClaudeAPIError(row) {
+		status = AgentError
+	}
+	t.terminalAttempt(attempt, status, at)
 }
 
 // scanAssistantRow handles two tool_use kinds: "Agent" (a new spawn, parked
 // in `pending` until the next row resolves its agentId) and "SendMessage"
 // (a resume of an already-known agent — see schema note 6).
-func (t *claudeAgentTree) scanAssistantRow(row map[string]any) {
+func (t *claudeAgentTree) scanAssistantRow(row map[string]any, ownerID string) {
 	msg, _ := row["message"].(map[string]any)
 	content, _ := msg["content"].([]any)
 	for _, it := range content {
@@ -561,6 +572,10 @@ func (t *claudeAgentTree) scanAssistantRow(row map[string]any) {
 			}
 		case "SendMessage":
 			to, _ := input["to"].(string)
+			if to == "" {
+				to, _ = input["recipient"].(string)
+			}
+			to = t.agentRecipient(ownerID, to)
 			if node := t.nodes[to]; node != nil {
 				if id == "" {
 					t.markNodePartial(to)
@@ -634,6 +649,26 @@ func (t *claudeAgentTree) scanUserRow(row map[string]any, ownerID string, ownerD
 				t.markNodePartial(agentID) // terminal fact exists, causal attempt does not
 			}
 			continue // some other tool's result (Bash/Read/…) — not an Agent resolve
+		}
+
+		if turStatus == "teammate_spawned" {
+			name, _ := tur["name"].(string)
+			team, _ := tur["team_name"].(string)
+			handle, _ := tur["agent_id"].(string)
+			agentID = t.teammateTranscriptID(team, name)
+			if agentID == "" {
+				// The sidecar may land after the spawn response. Preserve only identity
+				// metadata and retry on Update; successful spawn is never a failure.
+				compact := map[string]any{"type": "user", "timestamp": row["timestamp"],
+					"message":       map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": toolUseID}}},
+					"toolUseResult": map[string]any{"status": turStatus, "name": name, "team_name": team, "agent_id": handle}}
+				t.pendingTeammates[toolUseID] = pendingTeammate{row: compact, owner: ownerID, depth: ownerDepth}
+				return
+			}
+			t.aliases[agentAttemptKey(ownerID, name)] = agentID
+			if handle != "" {
+				t.aliases[agentAttemptKey(ownerID, handle)] = agentID
+			}
 		}
 
 		// ── Success: the harness assigned a durable agentId (schema note 2). ──
@@ -763,6 +798,7 @@ func (t *claudeAgentTree) applyTaskNotification(text string, at time.Time) {
 // next Update() call.
 func (cd *ClaudeDriver) advanceAgentReaders() {
 	t := &cd.agentTree
+	t.retryTeammates()
 	for i := 0; i < len(t.order); i++ { // index-based: len() re-checked each iteration picks up newly discovered agents within this same call
 		id := t.order[i]
 		node := t.nodes[id]

@@ -412,6 +412,8 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 	outputLogCtx := obs.WithStage(context.Background(), stgTerminalOutput)
 	var signals ansisignal.Scanner
+	var replayClipboard replayClipboardFilter
+	replayLeft := stream.Offset - stream.ReplayFrom
 	exited := false
 	code := 0
 
@@ -444,17 +446,34 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 			observeTerminalOutput(outputLogCtx, sess.ID, data)
 			sess.Buffer.Write(data)
 
-			sess.mu.Lock()
-			sess.LastActive = time.Now()
-			sess.mu.Unlock()
+			live := data
+			var historyOutput []byte
+			if replayLeft > 0 {
+				n := min(int64(len(data)), replayLeft)
+				// Reconstruct scanner framing without re-firing historical BEL/OSC.
+				_ = signals.Feed(data[:n])
+				historyOutput = replayClipboard.feed(data[:n], true)
+				replayLeft -= n
+				live = data[n:]
+			}
+			if len(live) > 0 {
+				sess.mu.Lock()
+				sess.LastActive = time.Now()
+				sess.mu.Unlock()
+			}
 
-			sess.fanOutData(data)
+			if len(historyOutput) > 0 {
+				sess.fanOutData(historyOutput)
+			}
+			if output := replayClipboard.feed(live, false); len(output) > 0 {
+				sess.fanOutData(output)
+			}
 
 			// Signal tap — deliberately AFTER the buffer write and the subscriber fan-out,
 			// so nothing here can delay a single byte reaching the user's terminal. It is a
 			// pure observer: the scanner never consumes or rewrites the stream.
 			if m.OnSignal != nil {
-				for _, sig := range signals.Feed(data) {
+				for _, sig := range signals.Feed(live) {
 					m.OnSignal(sess, sig)
 				}
 			}
@@ -793,12 +812,12 @@ func (m *SessionManager) reconcile() error {
 			status = StatusExited
 		}
 		sess := &Session{
-			ID:         sum.ID,
-			Name:       name,
-			Title:      meta.Title,
-			Engine:     engine,
-			CWD:        meta.CWD,
-			ShellPath:  meta.ShellPath,
+			ID:        sum.ID,
+			Name:      name,
+			Title:     meta.Title,
+			Engine:    engine,
+			CWD:       meta.CWD,
+			ShellPath: meta.ShellPath,
 			// From the BLOB, not from m.origin: this session may well belong to the other
 			// deployment sharing this daemon. Stamping it with ours here is precisely how
 			// one deployment's terminals would start claiming to be the other's.

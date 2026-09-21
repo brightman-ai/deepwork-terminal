@@ -205,6 +205,7 @@
            退出时不需要重连、不需要重放，位置也没动过。 -->
       <CopyModeView
         v-if="copyModeOpen"
+        :active="props.active"
         :history="terminalHistory"
         :title="props.sessionName"
         @close="closeCopyMode"
@@ -1807,6 +1808,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (viewportScrollLockRaf) window.cancelAnimationFrame(viewportScrollLockRaf)
+  surfaceDisposed = true
   if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
   if (drawerReflowTimer) clearTimeout(drawerReflowTimer)
   bottomBarObserver?.disconnect()
@@ -1859,6 +1861,8 @@ let lastBufferType = ''
 // could never have fixed it.
 const GHOST_REFRESH_MIN_INTERVAL = 120
 let ghostRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let ghostRefreshInFlight = false
+let surfaceDisposed = false
 let ghostLastFiredAt: number | null = null
 // End of the echo window opened by the last fire; output arriving before it is OUR redraw.
 let ghostEchoUntil: number | null = null
@@ -1868,7 +1872,7 @@ let ghostEchoUntil: number | null = null
 let ghostLastInputAt: number | null = null
 // force: the caller has a real reason (reflow / reconnect / buffer switch), not an output frame.
 function scheduleGhostRefresh(opts?: { force?: boolean }): void {
-  if (!tmux.attached.value) return
+  if (surfaceDisposed || !viewerNow() || !tmux.attached.value || ghostRefreshInFlight) return
   const term = xtermRef.value?.terminal?.()
   if (!term || term.buffer.active.type !== 'alternate') return
   const nowMs = Date.now()
@@ -1878,13 +1882,21 @@ function scheduleGhostRefresh(opts?: { force?: boolean }): void {
   const wait = ghostRefreshWait(ghostLastFiredAt, Date.now(), GHOST_REFRESH_MIN_INTERVAL)
   ghostRefreshTimer = setTimeout(() => {
     ghostRefreshTimer = null
-    ghostLastFiredAt = Date.now()
+    if (surfaceDisposed || !viewerNow() || !tmux.attached.value || ghostRefreshInFlight) return
     const t = xtermRef.value?.terminal?.()
     if (!t || t.buffer.active.type !== 'alternate') return
+    ghostLastFiredAt = Date.now()
     // Opened BEFORE the request, not after it resolves: the resent cells can reach the socket
     // while the POST is still in flight, and those are exactly the frames that must not re-arm.
     ghostEchoUntil = Date.now() + GHOST_ECHO_WINDOW
-    void tmux.runRefreshClient()
+    // A fixed window measured from SEND expires before the redraw arrives on a slow link.
+    // Suppress throughout the request, then allow the returned PTY burst to settle. Otherwise
+    // a 500ms round trip turns each refresh's own output into another refresh, even while hidden.
+    ghostRefreshInFlight = true
+    void tmux.runRefreshClient().finally(() => {
+      ghostEchoUntil = Date.now() + GHOST_ECHO_WINDOW
+      ghostRefreshInFlight = false
+    })
   }, wait)
 }
 
@@ -2606,7 +2618,7 @@ function openCopyMode(): string {
 function closeCopyMode(): void {
   copyModeOpen.value = false
   // 焦点必须还给终端，否则键盘敲下去没有接收者——和搜索条关闭时同一条规则。
-  void nextTick(() => xtermRef.value?.terminal?.()?.focus())
+  void nextTick(() => { if (props.active) xtermRef.value?.terminal?.()?.focus() })
 }
 
 defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, openCopyMode, copyModeOpen })

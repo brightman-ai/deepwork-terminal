@@ -9,37 +9,38 @@ import (
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
 
-// sessionActivity adapts a live *Session to agentintel.SessionActivity, the
-// host-agnostic view the agent-intel monitor needs of a session. It is the only
-// shim between terminal's session model and the decoupled agentintel engine.
-type sessionActivity struct {
-	sess *Session
-}
-
-func (a sessionActivity) WorkingDir() string       { return a.sess.WorkingDir() }
-func (a sessionActivity) Engine() string           { return a.sess.Engine }
-func (a sessionActivity) LastActivity() time.Time  { return a.sess.GetLastActive() }
-func (a sessionActivity) TailLines(n int) []string { return a.sess.TailOutput(n) }
-
-// sessionActivityGetter exposes the manager's live sessions to agentintel.
-func (m *SessionManager) sessionActivityGetter() agentintel.SessionActivityGetter {
-	return func(_ context.Context, sessionID string) (agentintel.SessionActivity, bool) {
-		sess, err := m.Get(sessionID)
-		if err != nil {
-			return nil, false
-		}
-		return sessionActivity{sess: sess}, true
-	}
-}
-
-// newAgentIntelMonitor builds an agentintel monitor over this server's live
-// sessions (JSONL session mode). It is the native default that powers the
-// standalone agent-state WS push when no host injects Hooks.AgentStatePush.
+// The tab/card and agent-state feed must use the same process-bound transcript.
+// A separate cwd-newest watcher can report idle (and another model's token totals)
+// while the tab's actual runtime is working in a nested shell's different directory.
 func (s *Server) newAgentIntelMonitor() *agentintel.AgentIntelMonitorManager {
-	return agentintel.NewAgentIntelMonitorManager(
-		s.mgr.sessionActivityGetter(),
-		agentintel.NewProjectLocator(),
-	)
+	return agentintel.NewAgentIntelMonitorManagerWithResolver(nil, nil, s.sessionAgentSnapshot)
+}
+
+func (s *Server) sessionAgentSnapshot(ctx context.Context, sessionID string) (agentintel.AgentIntelResponse, error) {
+	resp := agentintel.AgentIntelResponse{Notifications: []agentintel.AgentState{}}
+	if _, err := s.mgr.Get(sessionID); err != nil {
+		return resp, err
+	}
+	for _, entry := range s.overviewSnapshot(ctx).entries {
+		if entry.ID != sessionID || entry.AgentTool == agentintel.ToolNone {
+			continue
+		}
+		state := s.sessionAgent.monitor.Snapshot(sessionID)
+		state.Tool = entry.AgentTool
+		state.Status = entry.AgentStatus
+		state.AwaitingUser = entry.AwaitingUser
+		state.AwaitingSince = entry.AwaitingSince
+		state.EndedOnQuestion = entry.EndedOnQuestion
+		if state.Status == agentintel.StatusRunning {
+			state.WaitReason = agentintel.WaitNone
+		}
+		resp.Current = &state
+		if state.AwaitingUser || state.Status == agentintel.StatusWaiting {
+			resp.Notifications = append(resp.Notifications, state)
+		}
+		break
+	}
+	return resp, nil
 }
 
 // agentStateSnapshotWait bounds how long GET /sessions/{id}/agent-state waits for a first

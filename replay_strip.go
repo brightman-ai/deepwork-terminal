@@ -31,11 +31,61 @@ var deviceQueryRe = regexp.MustCompile(
 		"|\x1b\\][0-9;]*\\?(?:\x07|\x1b\\\\)", // OSC Ps ; ? BEL|ST — color queries
 )
 
+// Clipboard writes are one-shot side effects, not screen contents. Replaying an old cb on
+// reconnect would overwrite whatever the user has copied since. Queries are removed too.
+var replayClipboardRe = regexp.MustCompile("\x1b\\]52;[^\x07\x1b]*(?:\x07|\x1b\\\\)")
+
 // stripDeviceQueries removes terminal report-queries from a replay buffer (see deviceQueryRe).
 // It is a no-op (and allocation-free) when the buffer has no ESC bytes at all.
 func stripDeviceQueries(b []byte) []byte {
 	if bytes.IndexByte(b, 0x1b) < 0 {
 		return b
 	}
-	return deviceQueryRe.ReplaceAll(b, nil)
+	return replayClipboardRe.ReplaceAll(deviceQueryRe.ReplaceAll(b, nil), nil)
+}
+
+// A muxd restore can overlap a browser attach. Its history reaches subscribers in
+// multiple chunks, so the complete-buffer replay regexp is insufficient here.
+// Keep only framing, never the (potentially large) historical clipboard payload.
+type replayClipboardFilter struct {
+	prefix  []byte
+	discard bool
+	escaped bool
+}
+
+func (f *replayClipboardFilter) feed(data []byte, historical bool) []byte {
+	if !historical && len(f.prefix) == 0 && !f.discard {
+		return data
+	}
+	marker := []byte("\x1b]52;")
+	out := make([]byte, 0, len(data))
+	for _, b := range data {
+		if f.discard {
+			if b == '\a' || (f.escaped && b == '\\') {
+				f.discard = false
+				f.escaped = false
+			} else {
+				f.escaped = b == '\x1b'
+			}
+			continue
+		}
+		if len(f.prefix) > 0 {
+			if b == marker[len(f.prefix)] {
+				f.prefix = append(f.prefix, b)
+				if len(f.prefix) == len(marker) {
+					f.prefix = nil
+					f.discard = true
+				}
+				continue
+			}
+			out = append(out, f.prefix...)
+			f.prefix = nil
+		}
+		if historical && b == '\x1b' {
+			f.prefix = append(f.prefix, b)
+		} else {
+			out = append(out, b)
+		}
+	}
+	return out
 }
