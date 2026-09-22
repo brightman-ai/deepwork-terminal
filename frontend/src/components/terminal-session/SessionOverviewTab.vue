@@ -40,6 +40,7 @@ const POLL_MS = 3000
 // landing (the active cwd/tool settles on mobile while several fetches are in flight) can't
 // clobber newer state. Bumped on every refresh + on session switch (invalidates in-flight).
 let seq = 0
+let request: AbortController | null = null
 
 function clearData(): void {
   detail.value = null
@@ -62,16 +63,20 @@ function bagEmpty(bag: Awaited<ReturnType<typeof sessionOverview>>): boolean {
 }
 
 async function refresh(): Promise<void> {
+  if (!props.active || request) return
   if (!props.sessionId) {
     clearData()
     loading.value = false
     return
   }
   const mine = ++seq
+  const current = new AbortController()
+  request = current
+  const timeout = setTimeout(() => current.abort(), 10000)
   try {
     // Pass the ANCHORED pane's cwd AND agentTool so the server routes to the codex-vs-claude
     // metrics extractor for the pane the drawer is anchored to (null-safe: '' → claude).
-    const bag = await sessionOverview(props.sessionId, props.cwd, props.tool)
+    const bag = await sessionOverview(props.sessionId, props.cwd, props.tool, current.signal)
     if (mine !== seq) return // superseded by a newer refresh
     // Don't replace a data-rich overview with a transient empty one: while the tmux state
     // settles on mobile the active pane can momentarily resolve to a barely-used transcript
@@ -86,6 +91,8 @@ async function refresh(): Promise<void> {
     // A failed fetch (404 / network) must NOT leave the pane stuck on its loading affordance
     // forever (the "blank overview" symptom) — fall through so the empty shape renders.
   } finally {
+    clearTimeout(timeout)
+    if (request === current) request = null
     if (mine === seq) loading.value = false
   }
 }
@@ -101,11 +108,12 @@ function startPoll(): void {
 function stopPoll(): void {
   if (timer) { clearInterval(timer); timer = null }
 }
+function cancelRequest(): void { seq++; request?.abort(); request = null }
 
 // Session switch → drop the previous session's data up-front (so the skip-empty guard in
 // refresh() can't preserve it for the new session), reset to loading, re-fetch, restart poll.
 watch(() => props.sessionId, () => {
-  seq++
+  cancelRequest()
   clearData()
   loading.value = true
   if (props.active) void refresh()
@@ -114,14 +122,14 @@ watch(() => props.sessionId, () => {
 
 // Effective cwd OR tool change (followed pane switched, or the user locked/unlocked) →
 // re-fetch immediately so the overview tracks it, without waiting for the 3s poll. Only active.
-watch(() => [props.cwd, props.tool], () => { if (props.active) void refresh() })
+watch(() => [props.cwd, props.tool], () => { cancelRequest(); if (props.active) void refresh() })
 
 // Drawer minimize/restore → pause/resume the poll. On restore do one immediate catch-up so
 // the user doesn't stare at stale numbers for up to 3s; on minimize just stop the timer
 // (data stays). A toggle never clears the data, so re-opening shows the prior overview at once.
 watch(() => props.active, (isActive) => {
   if (isActive) { void refresh(); startPoll() }
-  else stopPoll()
+  else { stopPoll(); cancelRequest() }
 })
 
 onMounted(() => {
@@ -130,6 +138,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   stopPoll()
+  cancelRequest()
 })
 </script>
 

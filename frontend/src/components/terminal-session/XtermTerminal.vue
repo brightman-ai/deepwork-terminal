@@ -61,6 +61,8 @@ import '@xterm/xterm/css/xterm.css'
 const props = defineProps<{
   /** Whether the terminal is active/visible */
   active?: boolean
+  /** Keep parsing on the server's grid until its ordered resize frame arrives. */
+  serverSized?: boolean
   /** Disable proxy textarea (desktop WKWebView — proxy competes with xterm for input) */
   disableProxy?: boolean
   /** Enable mobile helper-keydown fallback for third-party IMEs that skip xterm onData */
@@ -676,8 +678,9 @@ function initTerminal() {
     resizeDebounce = setTimeout(() => {
       if (fitAddon && terminal && canMeasureTerminal(terminalContainer.value)) {
         try {
-          fitAddon.fit()
-          emit('resize', terminal.cols, terminal.rows)
+          if (!props.serverSized) fitAddon.fit()
+          const grid = measure()
+          if (grid) emit('resize', grid.cols, grid.rows)
         } catch {
           // Ignore if terminal is disposed.
         }
@@ -778,6 +781,7 @@ function fit() {
     if (!terminal) return
   }
   if (!canMeasureTerminal(terminalContainer.value)) {
+    if (props.serverSized) return
     // 量不到 ≠ 没有正确答案。所有终端共用同一个布局槽位，所以"别的终端刚量准的尺寸"就是这个
     // 终端可见时会拿到的尺寸——用它，而不是把这个标签的进程晾在 xterm 默认的 80×24 上排版。
     // 见 terminalFit.ts：这是那条不变量一直缺的后半句。
@@ -787,8 +791,27 @@ function fit() {
     }
     return
   }
+  if (props.serverSized) return
   fitAddon?.fit()
   rememberGridSize(terminal.cols, terminal.rows)
+}
+
+function measure(): { cols: number; rows: number } | null {
+  if (!terminal || !canMeasureTerminal(terminalContainer.value)) return null
+  const grid = fitAddon?.proposeDimensions()
+  if (!grid || grid.cols <= 0 || grid.rows <= 0) return null
+  return { cols: Math.min(500, grid.cols), rows: Math.min(500, grid.rows) }
+}
+
+function resizeGrid(cols: number, rows: number): void {
+  const target = terminal
+  // xterm parses writes asynchronously. Put the resize between the old-grid and
+  // new-grid bytes, including during large replay bursts.
+  target?.write('', () => {
+    if (terminal !== target) return
+    if (target.cols !== cols || target.rows !== rows) target.resize(cols, rows)
+    rememberGridSize(cols, rows)
+  })
 }
 
 /** Search forward for `term` from the current position (wraps). Empty term is a no-op clear —
@@ -833,6 +856,8 @@ watch(() => props.active, (active) => {
 })
 
 defineExpose({
+  measure,
+  resizeGrid,
   write,
   fit,
   terminal: () => terminal,

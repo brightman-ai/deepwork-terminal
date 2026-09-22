@@ -181,6 +181,7 @@
         data-testid="keystroke-hud"
       />
       <XtermTerminal
+        server-sized
         ref="xtermRef"
         :active="active"
         :disable-proxy="!isMobile"
@@ -486,12 +487,6 @@ import { canMeasureTerminal } from '@terminal/components/terminal-session/termin
 import { pageKeyOf, pageKeyTarget } from '@terminal/components/terminal-session/pageKeyRouting'
 import { isViewer, viewportIntent } from '@terminal/composables/cli/viewportDeclaration'
 import { useWebSocketClient } from '@terminal/composables/cli/useWebSocketClient'
-import {
-  GHOST_ECHO_WINDOW,
-  ghostRefreshDeferredForTyping,
-  ghostRefreshSuppressed,
-  ghostRefreshWait,
-} from '@terminal/composables/cli/ghostRefresh'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
 import { useTerminalHistory } from '@terminal/composables/cli/useTerminalHistory'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
@@ -1267,8 +1262,8 @@ watch(drawerSqueezePx, () => {
     drawerReflowTimer = null
     nextTick(() => {
       robustFitAndResize()
-      // force: a reflow really does change every cell's position — this is not the guard's echo.
-      scheduleGhostRefresh({ force: true })
+      // One final repair after this real layout change.
+      scheduleGhostRefresh()
     })
   }, 180)
 })
@@ -1312,6 +1307,7 @@ const {
   // on a visibility change — that was the "Reconnecting…" on every tab switch. If you find
   // yourself needing it here, re-read the `props.active` watch below first.
   sendBinary: sendBinaryRaw,
+  sendControl,
   sendResize,
   onMessage,
 } = useWebSocketClient(() => props.sessionId, { wsBase: () => props.wsBase, authToken: () => props.authToken })
@@ -1322,6 +1318,20 @@ const {
 // banner instead and skip every connect path.
 const remoteUnreachable = computed(() => !!props.isRemote && (!!props.connError || !props.wsBase))
 function connectGuarded() { if (!remoteUnreachable.value) connect() }
+
+function declarePresentation(): void {
+  sendControl({ type: 'presentation', payload: {
+    active: viewerNow(), overview: !!props.dwOverviewOpen || overviewOpen.value,
+  } })
+}
+watch([() => props.active, () => props.dwOverviewOpen, overviewOpen, wsStatus], declarePresentation)
+
+// A quiet tmux screen may have no full repaint in the bounded replay tail.
+// Request it once when attachment is established (including late discovery).
+// Keeping a tab mounted means ordinary tab switches do not enter this path.
+watch([wsStatus, tmuxAttached], ([status, attached]) => {
+  if (status === 'connected' && attached) scheduleGhostRefresh()
+})
 
 const inputTelemetry = useCliTerminalInputTelemetry({
   surface: 'workbench',
@@ -1368,6 +1378,7 @@ const clipboardText = useClipboardText({
 // 记住上一次评估的身份，是为了认出"刚成为观看者"这个**边沿**：那一刻必须声明，哪怕本地网格
 // 没变——要纠正的不是我的网格，是服务端那份可能已经被别人写过的共享尺寸。
 let wasViewer = false
+let lastDeclaredGrid: { cols: number; rows: number } | null = null
 
 function viewerNow(): boolean {
   return isViewer({
@@ -1379,18 +1390,21 @@ function viewerNow(): boolean {
 /**
  * fit + 如实告诉服务端我这一票算不算数、算的话多大。
  *
- * fit 无条件做：它只改本地网格，不影响任何人，而且让这个标签在被切回来时已经是量准的。
- * 说什么受规则约束——见 viewportDeclaration.ts。
+ * 只测量容器；按服务端的有序 resized 帧改变解析网格，避免把在途旧数据画在新尺寸上。
+ * 声明资格见 viewportDeclaration.ts。
  */
 function declareViewport(opts: { geometryChanged: boolean }): void {
   const xterm = xtermRef.value
   if (!xterm) return
-  xterm.fit()
+  // Measuring must not reflow xterm before the server's ordered resize arrives:
+  // bytes still in flight were drawn for the previous grid.
   const term = xterm.terminal?.()
-  if (!term || term.cols <= 0 || term.rows <= 0) return
+  const grid = viewerNow() ? xterm.measure() : term && { cols: term.cols, rows: term.rows }
+  if (!term || !grid) return
 
   const now = viewerNow()
-  const intent = viewportIntent(wasViewer, now, opts.geometryChanged)
+  const changed = !lastDeclaredGrid || grid.cols !== lastDeclaredGrid.cols || grid.rows !== lastDeclaredGrid.rows
+  const intent = viewportIntent(wasViewer, now, opts.geometryChanged && changed)
   if (intent === 'silent') {
     wasViewer = now
     return
@@ -1411,15 +1425,15 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
     return
   }
 
-  const sent = sendResize(term.cols, term.rows)
+  const sent = sendResize(grid.cols, grid.rows)
   if (!sent) {
     wasViewer = false // 债留到能说话的那一刻——重连梯队会立刻还上
     return
   }
   wasViewer = now
-  hud.updateSnapshot({ pty: `${term.cols}x${term.rows}` })
-  // Ghosting guard: a resize/reflow (mobile keyboard show/hide, rotation, reattach) can leave
-  // stale cells when a fullscreen TUI repaints differentially. Force a full repaint after the fit.
+  lastDeclaredGrid = grid
+  hud.updateSnapshot({ pty: `${grid.cols}x${grid.rows}` })
+  // Repaint the current grid locally while the ordered server resize is in flight.
   term.refresh(0, term.rows - 1)
 }
 
@@ -1440,9 +1454,9 @@ function applyServerGrid(payload: unknown): void {
   if (!grid) return
   const { cols, rows } = grid
   const term = xtermRef.value?.terminal?.()
-  if (!term || (term.cols === cols && term.rows === rows)) return
-  term.resize(cols, rows)
-  terminalRows.value = term.rows
+  if (!term) return
+  xtermRef.value?.resizeGrid(cols, rows)
+  terminalRows.value = rows
   hud.updateSnapshot({ pty: `${cols}x${rows}` })
   hud.record('resize', `server grid ${cols}x${rows}`)
 }
@@ -1514,7 +1528,8 @@ watch(wsStatus, (val) => {
   hud.updateSnapshot({ ws: val })
   if (val === 'connecting' || val === 'reconnecting') hasSyncedSinceConnect.value = false
   if (val === 'connected') {
-    const wasReconnect = everConnected // true here ⇒ we'd connected before ⇒ this is a RE-connect
+    wasViewer = false
+    lastDeclaredGrid = null
     everConnected = true
     runtimeDiag.value = '' // healthy again → drop any stale reason
     // DOM layout 可能还没稳定 (特别是 Wails 首次渲染)，阶梯式 fit:
@@ -1522,13 +1537,7 @@ watch(wsStatus, (val) => {
     setTimeout(robustFitAndResize, 100)
     setTimeout(robustFitAndResize, 500)
     setTimeout(robustFitAndResize, 1500)
-    // On a RE-connect the server replays up to 256KB of ring buffer onto a screen that was never
-    // cleared; for an alt-screen TUI that overlays stale frame fragments (garble). Once the resize
-    // ladder above has re-asserted the size, force one clean full repaint (refresh-client) to
-    // discard the replay residue. First connect starts from a blank screen, so it needs none.
-    // force: a reconnect replays a bounded tail into a fresh grid, so one authoritative resend is
-    // owed regardless of whatever echo window a pre-reconnect fire may have left open.
-    if (wasReconnect) setTimeout(() => scheduleGhostRefresh({ force: true }), 1600)
+
   } else if ((val === 'disconnected' || val === 'reconnecting') && props.isRemote && !everConnected) {
     void classifyFailure()
   }
@@ -1571,7 +1580,7 @@ watch(() => props.active, (isActive) => {
   if (!isActive) {
     // Explicitly stop being the viewer, so the next activation is recognised as an EDGE. Left
     // stale, a return would look like "nothing changed" and skip the declaration it owes.
-    wasViewer = false
+    declareViewport({ geometryChanged: false })
     return
   }
   // Still connect here: a tab that was never activated has no socket yet (onMounted only connects
@@ -1583,6 +1592,7 @@ watch(() => props.active, (isActive) => {
   // identical — see viewportDeclaration.ts.
   nextTick(() => {
     declareViewport({ geometryChanged: true })
+    if (ghostRefreshOwed) scheduleGhostRefresh()
     const term = xtermRef.value?.terminal?.()
     if (term) terminalRows.value = term.rows
   })
@@ -1601,8 +1611,10 @@ watch(() => props.active, (isActive) => {
 
 function onVisibilityChange() {
   const visible = document.visibilityState === 'visible'
+  declarePresentation()
   declareViewport({ geometryChanged: false })
   if (visible) {
+    if (ghostRefreshOwed) scheduleGhostRefresh()
     const term = xtermRef.value?.terminal?.()
     if (term) term.refresh(0, term.rows - 1)
   }
@@ -1848,67 +1860,29 @@ onUnmounted(() => {
 // Last-seen xterm buffer type ('normal' | 'alternate'); a change drives the ghosting refresh.
 let lastBufferType = ''
 
-// Ghosting guard for the ALTERNATE screen (fullscreen TUI: claude-code "flicker mode", tmux).
-// Symptom (reproduced): tmux's pane model (capture-pane) is CLEAN, but the web terminal shows
-// stale glyphs from a previous frame (e.g. a "0" column left after two-digit content scrolls away)
-// — residue that lives in xterm's BUFFER, diverged from tmux. Proven in-session: a client-side
-// `term.refresh()` does NOT clear it (it re-renders the same diverged buffer); only a server-side
-// `tmux refresh-client` (resend every cell) does.
-//
-// LEADING-EDGE THROTTLE (v3, 2026-07-26): replaces a trailing-debounce-with-maxWait-cap (v2) that
-// only guaranteed a fire "eventually, within maxWait of BURST START" — production caught residue
-// within that window even though the mechanism was confirmed firing correctly live (~once/sec,
-// ~15ms/call, 100% success). The first output frame after idle fires a refresh-client on the next
-// tick; further frames are ignored while one is pending/cooling down; the next frame after
-// GHOST_REFRESH_MIN_INTERVAL fires again immediately. This bounds staleness from the LAST
-// correction instead of from burst start. A real per-call cost of ~15ms means the interval can be
-// small without approaching any request-cost ceiling. See ghostRefresh.ts for the math + test.
-//
-// SELF-FEEDING LOOP (v4, 2026-07-31): v3 was correct about WHEN to correct and wrong about what
-// counts as evidence. `refresh-client` resends every cell, those cells come back as output frames,
-// and this function treated them as "new output → maybe new residue → correct again". Idle pane,
-// nobody typing, measured: 7.7 fires/s and 15 KB/s of pure echo (scripts/diag/wsprobe A/B). The window
-// below closes that edge — see GHOST_ECHO_WINDOW for the numbers and why a longer minInterval
-// could never have fixed it.
-const GHOST_REFRESH_MIN_INTERVAL = 120
+// A reconnect or a drawer reflow can request one final tmux repaint. Never
+// trigger a repaint from output: redraw bytes are ordinary output too, and a
+// delayed echo can outlive any time-based suppression window.
 let ghostRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let ghostRefreshInFlight = false
+let ghostRefreshOwed = false
 let surfaceDisposed = false
-let ghostLastFiredAt: number | null = null
-// End of the echo window opened by the last fire; output arriving before it is OUR redraw.
-let ghostEchoUntil: number | null = null
-// When the user last sent a keystroke — a correction defers while they are still typing. Set in
-// sendTerminalData, the single exit every input path funnels through (keys, paste, toolbar, IME),
-// so no route can bypass the deferral.
-let ghostLastInputAt: number | null = null
-// force: the caller has a real reason (reflow / reconnect / buffer switch), not an output frame.
-function scheduleGhostRefresh(opts?: { force?: boolean }): void {
-  if (surfaceDisposed || !viewerNow() || !tmux.attached.value || ghostRefreshInFlight) return
-  const term = xtermRef.value?.terminal?.()
-  if (!term || term.buffer.active.type !== 'alternate') return
-  const nowMs = Date.now()
-  if (!opts?.force && ghostRefreshSuppressed(ghostEchoUntil, nowMs)) return
-  if (!opts?.force && ghostRefreshDeferredForTyping(ghostLastInputAt, ghostLastFiredAt, nowMs)) return
-  if (ghostRefreshTimer) return // a fire is already pending/cooling down — later frames in the same window are no-ops
-  const wait = ghostRefreshWait(ghostLastFiredAt, Date.now(), GHOST_REFRESH_MIN_INTERVAL)
+function scheduleGhostRefresh(): void {
+  ghostRefreshOwed = true
+  if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
   ghostRefreshTimer = setTimeout(() => {
     ghostRefreshTimer = null
     if (surfaceDisposed || !viewerNow() || !tmux.attached.value || ghostRefreshInFlight) return
-    const t = xtermRef.value?.terminal?.()
-    if (!t || t.buffer.active.type !== 'alternate') return
-    ghostLastFiredAt = Date.now()
-    // Opened BEFORE the request, not after it resolves: the resent cells can reach the socket
-    // while the POST is still in flight, and those are exactly the frames that must not re-arm.
-    ghostEchoUntil = Date.now() + GHOST_ECHO_WINDOW
-    // A fixed window measured from SEND expires before the redraw arrives on a slow link.
-    // Suppress throughout the request, then allow the returned PTY burst to settle. Otherwise
-    // a 500ms round trip turns each refresh's own output into another refresh, even while hidden.
+    // On first attach even the alternate-screen mode may still be in flight.
+    // tmux attachment, not the unfinished replay, establishes the repair need.
+    if (!xtermRef.value?.terminal?.()) return
+    ghostRefreshOwed = false
     ghostRefreshInFlight = true
     void tmux.runRefreshClient().finally(() => {
-      ghostEchoUntil = Date.now() + GHOST_ECHO_WINDOW
       ghostRefreshInFlight = false
+      if (ghostRefreshOwed && viewerNow()) scheduleGhostRefresh()
     })
-  }, wait)
+  }, 180)
 }
 
 function onTerminalReady(terminal: Terminal) {
@@ -1975,7 +1949,8 @@ function onTerminalReady(terminal: Terminal) {
       hasSyncedSinceConnect.value = true
       inputTelemetry.recordOutput(bytes, 'ws-binary')
       xtermRef.value?.write(bytes)
-      scheduleGhostRefresh()
+      // Output is not evidence of corruption: on a slow link our own redraw can
+      // arrive after any echo timer and start an endless full-screen resend loop.
     },
     (msg: WSControlMessage) => {
       // ANY control message closes the resync gap, not just 'session_meta' specifically. A
@@ -2055,9 +2030,6 @@ function sendTerminalData(data: Uint8Array) {
     hud.record('keyboard', '回看历史中，按键未进入终端')
     return
   }
-  // Every input route ends here, so this is where "the user is typing" is known. See
-  // GHOST_TYPING_QUIET: a keystroke buys the terminal quiet from full-screen resends.
-  ghostLastInputAt = Date.now()
   // PgUp/PgDn from a PHYSICAL keyboard land here, and until now they went straight to the PTY —
   // where, in a normal buffer outside tmux, nothing is listening. The key was simply DEAD, while
   // the correct buffer-aware behaviour existed only on the on-screen buttons' path (onSendKey):

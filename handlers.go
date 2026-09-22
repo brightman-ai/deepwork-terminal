@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -29,7 +30,9 @@ const (
 	// tmuxStatePollInterval controls how often the WS writer recomputes tmux
 	// topology and pushes a tmux_state frame on change. Kept light (~1s) so the
 	// frontend stays current without a heavy poll; the provider is time-boxed.
-	tmuxStatePollInterval = 1 * time.Second
+	tmuxStatePollInterval         = 1 * time.Second
+	wsPresentationActive   uint32 = 1
+	wsPresentationOverview uint32 = 2
 )
 
 // writeWS sends one WebSocket message under the standard write timeout.
@@ -456,6 +459,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Upgrade to WebSocket.
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // Allow any origin in dev mode.
+		CompressionMode:    websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
 		logger.Error("ws upgrade failed", "id", id, "error", err)
@@ -613,7 +617,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// producer never accumulates a backlog of screens that have already changed. Diff suppression
 	// lives with the producer for the same reason it lived in the writer before — one owner of
 	// "what did this connection last see".
-	statusCh := make(chan []byte, 1)
+	// Old clients receive the original feed until they declare presentation. New clients
+	// keep their PTY connections alive but only the visible tab requests dashboard data.
+	var presentation atomic.Uint32
+	presentation.Store(wsPresentationActive | wsPresentationOverview)
+	presentationChanged := make(chan struct{}, 1)
+	statusCh := make(chan []byte, 3)
 	go func() {
 		tmuxTicker := time.NewTicker(tmuxStatePollInterval)
 		defer tmuxTicker.Stop()
@@ -621,12 +630,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// Non-tmux Agent Overview feed — same ticker, separate frame. See sessions_overview.go for
 		// why this rides the existing connection instead of polling.
 		//
-		// Tracked by REVISION, not by comparing the payload. The snapshot is global, so "has it
-		// changed" is a fact about the SNAPSHOT, not about this connection — N connections each
-		// re-deriving it by scanning the same bytes was N copies of one comparison per second, and
-		// it grew with the payload as well as with the audience. Zero is never a real revision, so
-		// a fresh connection gets the current state on its first tick with no special case.
-		var lastOverviewRev uint64
+		// Compare the selected view: output can change the full overview every tick while
+		// the small status-only view remains identical.
+		var lastOverview []byte
 		// Explicit-signal feed (session_signal.go). Seeded with the EMPTY payload so a quiet
 		// machine pushes nothing, while a signal that is already pending at attach time is
 		// delivered on the first tick.
@@ -638,17 +644,28 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		offer := func(msg []byte) bool {
 			select {
 			case statusCh <- msg:
+				return true
 			case <-ctx.Done():
 				return false
 			default:
 				terminalStatusFramesDroppedTotal.Inc()
 			}
-			return true
+			return false
 		}
 
 		for {
 			select {
 			case <-tmuxTicker.C:
+			case <-presentationChanged:
+				lastTmuxState, lastOverview = nil, nil
+				lastAgentSignals = emptyAgentSignals
+			case <-ctx.Done():
+				return
+			}
+			if presentation.Load()&wsPresentationActive == 0 {
+				continue
+			}
+			{
 				// TWO independent feeds share this tick. tmux_state is gated on a tmux provider;
 				// sessions_overview must NOT be — a user without tmux is precisely who needs it,
 				// so the old early `continue` on the tmux branch would have starved exactly the
@@ -656,22 +673,25 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if s.tmuxProvider != nil {
 					raw, terr := s.tmuxProvider.TmuxState(ctx, wsShellPID)
 					if terr == nil && raw != nil && !bytes.Equal(raw, lastTmuxState) {
-						lastTmuxState = raw
 						msg, _ := json.Marshal(WSControlMessage{
 							Type:    MsgTypeTmuxState,
 							Payload: raw,
 						})
-						if !offer(msg) {
-							return
+						if offer(msg) {
+							lastTmuxState = raw
 						}
 					}
 				}
 				// The frame is built once per revision inside overviewSnapshot, so a connection
 				// with something to send marshals nothing at all.
-				if snap := s.overviewSnapshot(ctx); snap.revision != lastOverviewRev && snap.frame != nil {
-					lastOverviewRev = snap.revision
-					if !offer(snap.frame) {
-						return
+				snap := s.overviewSnapshot(ctx)
+				frame := snap.statusFrame
+				if presentation.Load()&wsPresentationOverview != 0 {
+					frame = snap.frame
+				}
+				if frame != nil && !bytes.Equal(frame, lastOverview) {
+					if offer(frame) {
+						lastOverview = frame
 					}
 				}
 				// Explicit signals ride the same tick for the same reason as the two above:
@@ -679,17 +699,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				// (a bell in a background tab has no WS of its own), so the frame describes
 				// all of them, exactly like sessions_overview.
 				if raw := s.agentSignalsJSON(); raw != nil && !bytes.Equal(raw, lastAgentSignals) {
-					lastAgentSignals = raw
 					msg, _ := json.Marshal(WSControlMessage{
 						Type:    MsgTypeAgentSignal,
 						Payload: raw,
 					})
-					if !offer(msg) {
-						return
+					if offer(msg) {
+						lastAgentSignals = raw
 					}
 				}
-			case <-ctx.Done():
-				return
 			}
 		}
 	}()
@@ -702,6 +719,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case msg := <-statusCh:
+				if presentation.Load()&wsPresentationActive == 0 {
+					continue
+				}
 				err := writeWS(ctx, conn, websocket.MessageText, msg)
 				if err != nil {
 					logger.Debug("ws status frame write failed", "id", id, "error", err)
@@ -789,6 +809,28 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			var ctrl WSControlMessage
 			if err := json.Unmarshal(data, &ctrl); err != nil {
 				logger.Debug("invalid control message", "id", id, "error", err)
+				continue
+			}
+			if ctrl.Type == MsgTypePresentation {
+				var p struct {
+					Active   *bool `json:"active"`
+					Overview bool  `json:"overview"`
+				}
+				if json.Unmarshal(ctrl.Payload, &p) == nil && p.Active != nil {
+					var flags uint32
+					if *p.Active {
+						flags |= wsPresentationActive
+					}
+					if p.Overview {
+						flags |= wsPresentationOverview
+					}
+					if presentation.Swap(flags) != flags {
+						select {
+						case presentationChanged <- struct{}{}:
+						default:
+						}
+					}
+				}
 				continue
 			}
 			s.handleControlMessage(ctx, conn, sess, subID, ctrl)

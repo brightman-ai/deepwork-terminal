@@ -649,6 +649,7 @@ type HudLogRequest struct {
 // Control message type constants.
 const (
 	MsgTypeResize       = "resize"
+	MsgTypePresentation = "presentation" // client → server: visible tab and overview subscription
 	MsgTypeHeartbeat    = "heartbeat"
 	MsgTypeHeartbeatAck = "heartbeat_ack"
 	MsgTypePing         = "ping"

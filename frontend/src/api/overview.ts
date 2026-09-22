@@ -25,6 +25,7 @@ export async function sessionOverview(
   sessionId: string,
   cwd?: string,
   tool?: string,
+  signal?: AbortSignal,
 ): Promise<SessionMetricsBag> {
   const empty: SessionMetricsBag = { detail: null, summary: null, turns: [], price: null }
   if (!sessionId) return empty
@@ -41,7 +42,7 @@ export async function sessionOverview(
     let url = `/sessions/${encodeURIComponent(sessionId)}/overview`
     const qs = params.toString()
     if (qs) url += `?${qs}`
-    const resp = await cliFetch(cliApi(url))
+    const resp = await cliFetch(cliApi(url), { signal })
     if (!resp.ok) return empty
     const data = (await resp.json()) as Partial<SessionMetricsBag>
     return {

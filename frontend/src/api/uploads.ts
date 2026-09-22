@@ -51,18 +51,18 @@ export interface InputsResponse {
 }
 
 /** GET /uploads — the global, cross-session list of images + files. */
-export async function fetchUploads(): Promise<UploadItem[]> {
+export async function fetchUploads(signal?: AbortSignal): Promise<UploadItem[]> {
   const { cliFetch } = useCliAuth()
-  const resp = await cliFetch(cliApi('/uploads'))
+  const resp = await cliFetch(cliApi('/uploads'), { signal })
   if (!resp.ok) return []
   const data = await resp.json() as Partial<UploadsResponse>
   return data.items ?? []
 }
 
 /** GET /inputs — human prompts parsed from claude/codex transcripts, newest first. */
-export async function fetchInputs(): Promise<InputItem[]> {
+export async function fetchInputs(signal?: AbortSignal): Promise<InputItem[]> {
   const { cliFetch } = useCliAuth()
-  const resp = await cliFetch(cliApi('/inputs'))
+  const resp = await cliFetch(cliApi('/inputs'), { signal })
   if (!resp.ok) return []
   const data = await resp.json() as Partial<InputsResponse>
   return data.items ?? []

@@ -303,12 +303,12 @@
 
           <!-- ════ TOP TAB · 审核 (git diff of the anchored cwd's repo — read-only) ════ -->
           <div v-show="topTab === 'review'" class="rd-toppane">
-            <ReviewPanel :session-id="sessionId" :cwd="effectiveCwd" />
+            <ReviewPanel :session-id="sessionId" :cwd="effectiveCwd" :active="open && isActive && topTab === 'review'" />
           </div>
 
           <!-- ════ TOP TAB 4 · 会话总览 (@ce shared SSOT pane, terminal fetch wrapper) ════ -->
           <div v-show="topTab === 'overview'" class="rd-toppane">
-            <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open" />
+            <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open && isActive && topTab === 'overview'" />
           </div>
 
           <div v-if="toast" class="rd-toast">{{ toast }}</div>
@@ -844,27 +844,43 @@ function onLightboxBackdrop(): void {
   if (zoom.value.scale <= MIN_SCALE && !gestureMoved) lightbox.value = null
 }
 
-async function refresh(): Promise<void> {
+const historySource = computed(() => props.open && props.isActive && topTab.value === 'history'
+  ? activeTab.value === 'inputs' ? 'inputs' : 'uploads' : '')
+let historyRequest: AbortController | null = null
+const historyLoadedAt = { inputs: 0, uploads: 0 }
+async function refresh(force = false): Promise<void> {
+  historyRequest?.abort()
+  historyRequest = null
+  loading.value = false
+  const source = historySource.value
+  if (!source || (!force && Date.now() - historyLoadedAt[source] < 30_000)) return
+  const request = new AbortController()
+  historyRequest = request
+  const timeout = setTimeout(() => request.abort(), 10_000)
   loading.value = true
   try {
-    const [up, ins] = await Promise.all([fetchUploads(), fetchInputs()])
-    uploads.value = up
-    allInputs.value = ins
+    if (source === 'inputs') allInputs.value = await fetchInputs(request.signal)
+    else uploads.value = await fetchUploads(request.signal)
+    historyLoadedAt[source] = Date.now()
+  } catch {
+    // Keep the last loaded history when interrupted or offline.
   } finally {
-    loading.value = false
+    clearTimeout(timeout)
+    if (historyRequest === request) { historyRequest = null; loading.value = false }
   }
 }
+watch(historySource, () => { void refresh() }, { immediate: true })
 
 function onUploadSuccess(): void {
   // A new upload landed; if the drawer is open, pull the fresh cross-session list.
-  if (props.open) void refresh()
+  historyLoadedAt.uploads = 0
+  if (historySource.value === 'uploads') void refresh(true)
 }
 
 // Refetch whenever the drawer opens. Reset the per-open expansion state.
 watch(() => props.open, (isOpen) => {
   if (isOpen) {
     expandedInput.value = null
-    void refresh()
   } else {
     // Minimize (v-show): the panel + FilesPanel (preview/tab/scroll) + the lock state stay
     // MOUNTED so re-opening restores exactly. We only dismiss the modal full-screen overlays
@@ -888,6 +904,7 @@ onMounted(() => {
   if (handlePeek.value) handlePeekTimer = setTimeout(dismissHandlePeek, 2600)
 })
 onBeforeUnmount(() => {
+  historyRequest?.abort()
   window.removeEventListener('keydown', onClipboardShortcut, true)
   window.removeEventListener('dw:upload-success', onUploadSuccess)
   window.removeEventListener('resize', onWinResize)
