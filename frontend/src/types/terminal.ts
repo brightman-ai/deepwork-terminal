@@ -50,7 +50,7 @@ export function parseServerGrid(payload: unknown): ServerGrid | null {
 }
 
 export interface WSControlMessage {
-  type: 'resize' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal' | 'resized' | 'replay_reset'
+  type: 'resize' | 'presentation' | 'heartbeat' | 'heartbeat_ack' | 'auth_refresh' | 'shell_exit' | 'error' | 'preempted' | 'agent_state' | 'session_meta' | 'input' | 'tmux_nav' | 'tmux_state' | 'sessions_overview' | 'agent_signal' | 'resized' | 'replay_reset'
   payload?: Record<string, unknown>
 }
 

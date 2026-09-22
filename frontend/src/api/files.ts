@@ -132,14 +132,22 @@ export async function filesRecent(sessionId: string, cwd?: string): Promise<Rece
 export async function filesTree(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal): Promise<TreeResponse | null> {
   if (!sessionId) return null
   const { cliFetch } = useCliAuth()
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  signal?.addEventListener('abort', cancel, { once: true })
+  if (signal?.aborted) cancel()
+  const timeout = setTimeout(cancel, 10000)
   try {
     let path = withScope('/files/tree', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
-    const resp = await cliFetch(cliApi(path), { signal })
+    const resp = await cliFetch(cliApi(path), { signal: controller.signal })
     if (!resp.ok) return null
-    return (await resp.json()) as TreeResponse
+    return await resp.json() as TreeResponse
   } catch {
     return null
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', cancel)
   }
 }
 
@@ -213,12 +221,12 @@ export interface GitDiffResult {
  * working tree: staged + unstaged + untracked). Read-only. Soft-fails to a graceful empty
  * result on any error so the caller never has to special-case a failure status.
  */
-export async function gitDiff(sessionId: string, cwd?: string): Promise<GitDiffResult> {
+export async function gitDiff(sessionId: string, cwd?: string, signal?: AbortSignal): Promise<GitDiffResult> {
   const empty: GitDiffResult = { root: '', files: [], notGit: false, noCwd: false, truncated: false, error: false }
   if (!sessionId) return { ...empty, noCwd: true }
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(cliApi(withScope('/git/diff', sessionId, cwd)))
+    const resp = await cliFetch(cliApi(withScope('/git/diff', sessionId, cwd)), { signal })
     if (!resp.ok) return { ...empty, error: true }
     const data = (await resp.json()) as Partial<GitDiffResult>
     return {

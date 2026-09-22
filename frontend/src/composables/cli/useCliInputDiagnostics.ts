@@ -15,6 +15,7 @@ const MAX_CODE_POINTS = 8
 interface DiagEvent { ts: number; msg: string; [k: string]: unknown }
 const _buf: DiagEvent[] = []
 let _flushTimer: ReturnType<typeof setInterval> | null = null
+let _flushing = false
 
 function _startFlush(): void {
   if (_flushTimer !== null) return
@@ -22,11 +23,15 @@ function _startFlush(): void {
 }
 
 async function _flush(): Promise<void> {
-  if (_buf.length === 0) return
+  if (_flushing || _buf.length === 0) return
+  _flushing = true
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
   const events = _buf.splice(0)
   const auth = typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_STORAGE_KEY) ?? '' : ''
   try {
     await fetch(cliApi('/debug/logs'), {
+      signal: controller.signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -37,6 +42,9 @@ async function _flush(): Promise<void> {
     })
   } catch {
     // Best-effort — drop on network error.
+  } finally {
+    clearTimeout(timeout)
+    _flushing = false
   }
 }
 

@@ -13,38 +13,51 @@
  * follow/lock model FilesPanel consumes): in FOLLOW mode it tracks the live active pane;
  * once LOCKED it freezes. We re-fetch only when sessionId/cwd actually change.
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { RefreshCw, ChevronRight } from 'lucide-vue-next'
 import { gitDiff, type GitDiffFile, type GitDiffResult } from '@terminal/api/files'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
 
-const props = defineProps<{ sessionId: string; cwd: string }>()
+const props = withDefaults(defineProps<{ sessionId: string; cwd: string; active?: boolean }>(), { active: true })
 
 const loading = ref(false)
 const result = ref<GitDiffResult | null>(null)
 const expanded = ref<string>('') // path of the currently-open file (accordion, one at a time)
 const query = ref('') // client-side filename/path filter over the changed-file list (S-3)
+let request: AbortController | null = null
+let needsLoad = true
 
 async function load(): Promise<void> {
+  if (!props.active) return
+  request?.abort()
+  const current = new AbortController()
+  request = current
   loading.value = true
   try {
-    result.value = await gitDiff(props.sessionId, props.cwd)
+    const data = await gitDiff(props.sessionId, props.cwd, current.signal)
+    if (request === current && !current.signal.aborted) { result.value = data; needsLoad = false }
   } finally {
-    loading.value = false
+    if (request === current) { request = null; loading.value = false }
   }
 }
 
 // Re-anchor whenever the target session OR the anchored cwd changes (a follow-mode pane
 // switch or a lock/unlock) — R-5: 审核 follows the new cwd's repo. A plain expand stays put.
 function reload(): void {
+  needsLoad = true
+  result.value = null
   expanded.value = ''
   query.value = ''
   void load()
 }
 watch(() => props.sessionId, reload)
 watch(() => props.cwd, reload)
-onMounted(load)
+watch(() => props.active, active => {
+  if (active && needsLoad) void load()
+  else if (!active) { request?.abort(); request = null; loading.value = false }
+}, { immediate: true })
+onBeforeUnmount(() => request?.abort())
 
 function toggle(path: string): void {
   expanded.value = expanded.value === path ? '' : path

@@ -299,6 +299,9 @@ type overviewSnapshot struct {
 	// connection per tick. The payload is global, so the frame around it is global too; every
 	// connection re-encoding the same envelope was N copies of one answer.
 	frame []byte
+	// Tab badges need agent facts, not the terminal tails from every session. This
+	// compact view is cached with the full overview and changes only when facts do.
+	statusFrame []byte
 	// revision changes if and only if `json` changes. It is what lets a subscriber ask "is this
 	// new?" by comparing a uint64 instead of the whole payload — the difference between a cost
 	// that scales with CHANGE and one that scales with the number of people watching. Starts at 1,
@@ -481,6 +484,12 @@ func (s *Server) buildOverview(parent context.Context, b *overviewBuild) {
 	} else {
 		snap.frame = s.overviewCache.frame
 	}
+	compact := append([]SessionOverviewEntry(nil), entries...)
+	for i := range compact {
+		compact[i].Tail = nil
+	}
+	compactJSON, _ := json.Marshal(compact)
+	snap.statusFrame, _ = json.Marshal(WSControlMessage{Type: MsgTypeSessionsOverview, Payload: compactJSON})
 	s.overviewCache = snap
 	s.overviewCacheAt = time.Now()
 	s.overviewCacheMu.Unlock()
