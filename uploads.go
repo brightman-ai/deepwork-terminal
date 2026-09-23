@@ -1,10 +1,14 @@
 package terminal
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -38,31 +42,108 @@ type uploadItem struct {
 
 // uploadsResponse is the payload of GET /uploads.
 type uploadsResponse struct {
-	Items []uploadItem `json:"items"`
+	Items      []uploadItem `json:"items"`
+	Total      int          `json:"total"`
+	Counts     uploadCounts `json:"counts"`
+	Sessions   []string     `json:"sessions"`
+	NextCursor string       `json:"nextCursor,omitempty"`
+}
+
+type uploadCounts struct {
+	Images int `json:"images"`
+	Files  int `json:"files"`
+}
+
+type uploadCursor struct {
+	MtimeMs int64  `json:"mtimeMs"`
+	ID      string `json:"id"`
 }
 
 // handleUploadsList handles GET /uploads — the global, cross-session listing.
 //
 // It first backfills any on-disk uploads from ALIVE sessions that predate the
-// index, then returns every indexed entry (newest first), re-stat'd and pruned of
-// vanished files. Optional filters: ?kind=image|file and ?session=<name>.
+// index, then returns indexed entries, re-stat'd and pruned of vanished files.
+// Filters/search/order apply to the full inventory before the optional cursor page.
 func (s *Server) handleUploadsList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	// Old clients may still request the complete list. New clients use bounded
+	// pages; filtering/sorting MUST precede pagination so search covers history.
+	limit := 0
+	if q.Has("limit") {
+		var err error
+		limit, err = strconv.Atoi(q.Get("limit"))
+		if err != nil || limit < 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid limit"})
+			return
+		}
+		limit = min(limit, 100)
+	}
+	var cursor uploadCursor
+	if token := q.Get("cursor"); token != "" {
+		data, err := base64.RawURLEncoding.DecodeString(token)
+		if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.ID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
+			return
+		}
+	}
 	s.backfillUploads()
 
-	kindFilter := r.URL.Query().Get("kind")
-	sessionFilter := r.URL.Query().Get("session")
+	kindFilter := q.Get("kind")
+	sessionFilter := q.Get("session")
+	terms := strings.Fields(strings.ToLower(q.Get("q")))
+	oldest := q.Get("order") == "oldest"
 	rawBase := strings.TrimSuffix(r.URL.Path, "/uploads") + "/uploads/raw"
 
 	entries := s.uploads.list()
-	items := make([]uploadItem, 0, len(entries))
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].MtimeMs == entries[j].MtimeMs {
+			if oldest {
+				return entries[i].ID < entries[j].ID
+			}
+			return entries[i].ID > entries[j].ID
+		}
+		if oldest {
+			return entries[i].MtimeMs < entries[j].MtimeMs
+		}
+		return entries[i].MtimeMs > entries[j].MtimeMs
+	})
+	out := uploadsResponse{Items: make([]uploadItem, 0), Sessions: make([]string, 0)}
+	sessions := make(map[string]bool)
 	for _, e := range entries {
+		if e.Kind == "image" {
+			out.Counts.Images++
+		} else if e.Kind == "file" {
+			out.Counts.Files++
+		}
+		if e.SessionName != "" {
+			sessions[e.SessionName] = true
+		}
 		if kindFilter != "" && e.Kind != kindFilter {
 			continue
 		}
 		if sessionFilter != "" && e.SessionName != sessionFilter {
 			continue
 		}
-		items = append(items, uploadItem{
+		if !matchesFuzzy(terms, e.Name+" "+e.SessionName+" "+e.CWD) {
+			continue
+		}
+		out.Total++
+		if cursor.ID != "" {
+			before := e.MtimeMs < cursor.MtimeMs || (e.MtimeMs == cursor.MtimeMs && e.ID < cursor.ID)
+			after := e.MtimeMs > cursor.MtimeMs || (e.MtimeMs == cursor.MtimeMs && e.ID > cursor.ID)
+			if (!oldest && !before) || (oldest && !after) {
+				continue
+			}
+		}
+		if limit > 0 && len(out.Items) == limit {
+			if out.NextCursor == "" {
+				last := out.Items[len(out.Items)-1]
+				data, _ := json.Marshal(uploadCursor{MtimeMs: last.MtimeMs, ID: last.ID})
+				out.NextCursor = base64.RawURLEncoding.EncodeToString(data)
+			}
+			continue
+		}
+		out.Items = append(out.Items, uploadItem{
 			ID:          e.ID,
 			Kind:        e.Kind,
 			Name:        e.Name,
@@ -75,7 +156,12 @@ func (s *Server) handleUploadsList(w http.ResponseWriter, r *http.Request) {
 			Path:        e.AbsPath,
 		})
 	}
-	writeJSON(w, http.StatusOK, uploadsResponse{Items: items})
+	for session := range sessions {
+		out.Sessions = append(out.Sessions, session)
+	}
+	sort.Strings(out.Sessions)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleUploadsRaw handles GET /uploads/raw?id=<id>.

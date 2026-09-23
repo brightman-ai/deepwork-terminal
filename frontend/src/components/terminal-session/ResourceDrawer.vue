@@ -218,13 +218,17 @@
               testid="rd-filter-search"
               class="rd-search-box"
             />
+            <button class="rd-act" type="button" title="刷新历史记录" :disabled="loading" @click="refreshHistory">刷新</button>
           </div>
 
           <div class="rd-body">
+            <div v-if="historyError" class="rd-history-status rd-history-error" role="alert" data-testid="rd-history-error">
+              {{ historyError }} <button class="rd-act" type="button" @click="retryHistory">重试</button>
+            </div>
             <!-- 图片 -->
-            <div v-show="activeTab === 'images'" class="rd-pane">
+            <div v-if="activeTab === 'images'" class="rd-pane">
               <div v-if="loading && !images.length" class="rd-empty">加载中…</div>
-              <div v-else-if="!images.length" class="rd-empty">{{ uploads.length ? '无匹配图片' : '暂无图片' }}</div>
+              <div v-else-if="!images.length && !historyError" class="rd-empty">{{ uploadHistory.inventory.value.counts.images ? '无匹配图片' : '暂无图片' }}</div>
               <div v-else class="rd-grid">
                 <button
                   v-for="img in images"
@@ -247,9 +251,9 @@
             </div>
 
             <!-- 文件 -->
-            <div v-show="activeTab === 'files'" class="rd-pane">
+            <div v-if="activeTab === 'files'" class="rd-pane">
               <div v-if="loading && !files.length" class="rd-empty">加载中…</div>
-              <div v-else-if="!files.length" class="rd-empty">{{ uploads.length ? '无匹配文件' : '暂无文件' }}</div>
+              <div v-else-if="!files.length && !historyError" class="rd-empty">{{ uploadHistory.inventory.value.counts.files ? '无匹配文件' : '暂无文件' }}</div>
               <ul v-else class="rd-list">
                 <li v-for="f in files" :key="f.id" class="rd-file">
                   <span class="rd-file-glyph" :class="glyphClass(f.name)">{{ glyphChar(f.name) }}</span>
@@ -271,9 +275,9 @@
             </div>
 
             <!-- 输入 (human prompts from claude/codex transcripts — cross-session) -->
-            <div v-show="activeTab === 'inputs'" class="rd-pane">
+            <div v-if="activeTab === 'inputs'" class="rd-pane">
               <div v-if="loading && !inputs.length" class="rd-empty">加载中…</div>
-              <div v-else-if="!inputs.length" class="rd-empty">{{ allInputs.length ? '无匹配输入' : '暂无输入历史' }}</div>
+              <div v-else-if="!inputs.length && !historyError" class="rd-empty">{{ allInputs.length ? '无匹配输入' : '暂无输入历史' }}</div>
               <ul v-else class="rd-list">
                 <li
                   v-for="(item, i) in inputs"
@@ -297,6 +301,12 @@
                   </div>
                 </li>
               </ul>
+            </div>
+            <div v-if="activeTab !== 'inputs' && uploads.length" class="rd-history-status" data-testid="rd-history-pagination">
+              <span>已显示 {{ uploads.length }} / {{ uploadHistory.page.value.total }}</span>
+              <button v-if="uploadHistory.page.value.nextCursor" class="rd-act" type="button" :disabled="loading" @click="uploadHistory.loadMore">
+                {{ loading ? '加载中…' : '加载更多' }}
+              </button>
             </div>
           </div>
           </template>
@@ -373,7 +383,8 @@ import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { useEdgeDrag } from '@ce/composables/useEdgeDrag'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
-import { fetchUploads, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
+import { fetchUploadsPage, fetchInputs, fetchRawText, rawUrl, type UploadItem, type InputItem } from '@terminal/api/uploads'
+import { useUploadHistory } from '../../composables/cli/useUploadHistory'
 import type { AgentTool } from '@terminal/types/terminal'
 import RemoteClipboardPanel from './RemoteClipboardPanel.vue'
 import type { RemoteClipboardClient } from '../../composables/cli/useRemoteClipboard'
@@ -697,14 +708,24 @@ function onChildComposeDraft(text: string): void {
   emit('update:open', false)
 }
 
-const uploads = ref<UploadItem[]>([])
 const allInputs = ref<InputItem[]>([])
-const loading = ref(false)
+const inputLoading = ref(false)
+const inputError = ref('')
 
 // --- filter state (shared across tabs) ---
 const sessionFilter = ref('') // '' = 全部; else a sessionName (uploads) or source (inputs)
 const sortNewest = ref(true)
 const search = ref('')
+// Reset the filter axis before loading the next category.
+watch(activeTab, () => { sessionFilter.value = ''; expandedInput.value = null })
+const uploadHistory = useUploadHistory({
+  active: computed(() => props.open && props.isActive && topTab.value === 'history' && activeTab.value !== 'inputs'),
+  kind: computed(() => activeTab.value === 'images' ? 'image' : 'file'),
+  search, session: sessionFilter, newest: sortNewest,
+}, fetchUploadsPage)
+const uploads = computed(() => uploadHistory.page.value.items)
+const loading = computed(() => activeTab.value === 'inputs' ? inputLoading.value : uploadHistory.loading.value)
+const historyError = computed(() => activeTab.value === 'inputs' ? inputError.value : uploadHistory.error.value)
 
 // On the 输入 tab the scope dropdown filters by SOURCE (claude/codex); elsewhere by
 // the originating session name. The "全部" label adapts so the control reads naturally.
@@ -714,7 +735,7 @@ const scopeOptions = computed<string[]>(() => {
   if (activeTab.value === 'inputs') {
     for (const it of allInputs.value) set.add(it.source)
   } else {
-    for (const u of uploads.value) if (u.sessionName) set.add(u.sessionName)
+    for (const name of uploadHistory.inventory.value.sessions) set.add(name)
   }
   return [...set].sort()
 })
@@ -727,16 +748,8 @@ function sortByTime<T extends { t: number }>(arr: T[]): T[] {
   return [...arr].sort((a, b) => (sortNewest.value ? b.t - a.t : a.t - b.t))
 }
 
-const filteredUploads = computed(() => {
-  const rows = uploads.value.filter((u) => {
-    if (sessionFilter.value && u.sessionName !== sessionFilter.value) return false
-    return matchesSearch(u.name) || matchesSearch(u.sessionName)
-  })
-  return sortByTime(rows.map((u) => ({ ...u, t: u.mtimeMs }))) as (UploadItem & { t: number })[]
-})
-
-const images = computed(() => filteredUploads.value.filter((u) => u.kind === 'image'))
-const files = computed(() => filteredUploads.value.filter((u) => u.kind === 'file'))
+const images = computed(() => uploads.value.filter((u) => u.kind === 'image'))
+const files = computed(() => uploads.value.filter((u) => u.kind === 'file'))
 
 const inputs = computed(() => {
   const rows = allInputs.value.filter((it) => {
@@ -748,8 +761,8 @@ const inputs = computed(() => {
 
 // Tab counts reflect the UNFILTERED totals so the badge is a stable inventory.
 const tabs = computed(() => [
-  { key: 'images' as TabKey, label: '图片', count: uploads.value.filter((u) => u.kind === 'image').length },
-  { key: 'files' as TabKey, label: '文件', count: uploads.value.filter((u) => u.kind === 'file').length },
+  { key: 'images' as TabKey, label: '图片', count: uploadHistory.inventory.value.counts.images },
+  { key: 'files' as TabKey, label: '文件', count: uploadHistory.inventory.value.counts.files },
   { key: 'inputs' as TabKey, label: '输入', count: allInputs.value.length },
 ])
 
@@ -844,38 +857,39 @@ function onLightboxBackdrop(): void {
   if (zoom.value.scale <= MIN_SCALE && !gestureMoved) lightbox.value = null
 }
 
-const historySource = computed(() => props.open && props.isActive && topTab.value === 'history'
-  ? activeTab.value === 'inputs' ? 'inputs' : 'uploads' : '')
+const historySource = computed(() => props.open && props.isActive && topTab.value === 'history' && activeTab.value === 'inputs')
 let historyRequest: AbortController | null = null
-const historyLoadedAt = { inputs: 0, uploads: 0 }
+let historyLoadedAt = 0
 async function refresh(force = false): Promise<void> {
   historyRequest?.abort()
   historyRequest = null
-  loading.value = false
+  inputLoading.value = false
   const source = historySource.value
-  if (!source || (!force && Date.now() - historyLoadedAt[source] < 30_000)) return
+  if (!source || (!force && Date.now() - historyLoadedAt < 30_000)) return
   const request = new AbortController()
   historyRequest = request
   const timeout = setTimeout(() => request.abort(), 10_000)
-  loading.value = true
+  inputLoading.value = true
+  inputError.value = ''
   try {
-    if (source === 'inputs') allInputs.value = await fetchInputs(request.signal)
-    else uploads.value = await fetchUploads(request.signal)
-    historyLoadedAt[source] = Date.now()
+    const result = await fetchInputs(request.signal)
+    if (historyRequest !== request) return
+    allInputs.value = result
+    historyLoadedAt = Date.now()
   } catch {
-    // Keep the last loaded history when interrupted or offline.
+    if (historyRequest === request) inputError.value = '加载失败或超时，请重试'
   } finally {
     clearTimeout(timeout)
-    if (historyRequest === request) { historyRequest = null; loading.value = false }
+    if (historyRequest === request) { historyRequest = null; inputLoading.value = false }
   }
 }
 watch(historySource, () => { void refresh() }, { immediate: true })
 
 function onUploadSuccess(): void {
-  // A new upload landed; if the drawer is open, pull the fresh cross-session list.
-  historyLoadedAt.uploads = 0
-  if (historySource.value === 'uploads') void refresh(true)
+  uploadHistory.invalidate()
 }
+function refreshHistory(): void { if (activeTab.value === 'inputs') void refresh(true); else void uploadHistory.refresh() }
+function retryHistory(): void { if (activeTab.value === 'inputs') void refresh(true); else void uploadHistory.retry() }
 
 // Refetch whenever the drawer opens. Reset the per-open expansion state.
 watch(() => props.open, (isOpen) => {
@@ -891,9 +905,6 @@ watch(() => props.open, (isOpen) => {
     resetZoom()
   }
 })
-
-// Switching tabs clears a scope filter that no longer applies to the new axis.
-watch(activeTab, () => { sessionFilter.value = ''; expandedInput.value = null })
 
 onMounted(() => {
   window.addEventListener('keydown', onClipboardShortcut, true)
@@ -919,6 +930,7 @@ function openLightbox(img: UploadItem): void { lightbox.value = img; resetZoom()
 // bytes and show them in a scrollable monospaced panel; images go to the lightbox;
 // anything else (binary) falls back to a download (handled in the row template).
 const textPreview = ref<{ item: UploadItem; content: string } | null>(null)
+usePreviewEscape(() => props.isActive && !!textPreview.value, () => { textPreview.value = null })
 
 async function previewFile(f: UploadItem): Promise<void> {
   if (isImageName(f.name)) { openLightbox(f); return }
@@ -1336,7 +1348,9 @@ function glyphClass(name: string): string {
   scrollbar-width: thin;
   scrollbar-color: #3a2860 transparent;
 }
-.rd-pane { min-height: 100%; }
+.rd-pane { min-height: 0; }
+.rd-history-error { position: sticky; top: 0; z-index: 1; background: #1b1329; }
+.rd-history-status { display: flex; justify-content: center; align-items: center; gap: 12px; padding: 12px 4px; color: var(--text-secondary, #b0a1c4); font-size: 0.75rem; }
 .rd-empty { color: #5a4a78; font-style: italic; font-size: 0.72rem; padding: 14px 4px; text-align: center; }
 
 /* session chip (uploads) + source badge (inputs) */
