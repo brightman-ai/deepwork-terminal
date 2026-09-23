@@ -35,6 +35,10 @@ export interface UploadItem {
 
 export interface UploadsResponse {
   items: UploadItem[]
+  total: number
+  counts: { images: number; files: number }
+  sessions: string[]
+  nextCursor?: string
 }
 
 export interface InputItem {
@@ -50,20 +54,23 @@ export interface InputsResponse {
   items: InputItem[]
 }
 
-/** GET /uploads — the global, cross-session list of images + files. */
-export async function fetchUploads(signal?: AbortSignal): Promise<UploadItem[]> {
+/** Filter the entire inventory on the server before returning one bounded page. */
+export async function fetchUploadsPage(query: {
+  kind: 'image' | 'file'; q: string; session: string; order: 'newest' | 'oldest'; cursor?: string
+}, signal?: AbortSignal): Promise<UploadsResponse> {
   const { cliFetch } = useCliAuth()
-  const resp = await cliFetch(cliApi('/uploads'), { signal })
-  if (!resp.ok) return []
-  const data = await resp.json() as Partial<UploadsResponse>
-  return data.items ?? []
+  const params = new URLSearchParams({ ...query, limit: '24' })
+  if (!query.cursor) params.delete('cursor')
+  const resp = await cliFetch(cliApi(`/uploads?${params}`), { signal })
+  if (!resp.ok) throw new Error(`加载失败 (${resp.status})`)
+  return await resp.json() as UploadsResponse
 }
 
 /** GET /inputs — human prompts parsed from claude/codex transcripts, newest first. */
 export async function fetchInputs(signal?: AbortSignal): Promise<InputItem[]> {
   const { cliFetch } = useCliAuth()
   const resp = await cliFetch(cliApi('/inputs'), { signal })
-  if (!resp.ok) return []
+  if (!resp.ok) throw new Error(`加载失败 (${resp.status})`)
   const data = await resp.json() as Partial<InputsResponse>
   return data.items ?? []
 }
