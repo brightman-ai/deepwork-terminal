@@ -4,7 +4,7 @@
  * Supports reconnection, heartbeat with RTT measurement, and bandwidth tracking.
  * [Ref: CAP-terminal-io S3, DDC-02]
  */
-import { ref, reactive, onUnmounted } from 'vue'
+import { ref, reactive, onScopeDispose } from 'vue'
 import type { WSConnectionStatus, WSControlMessage } from '@terminal/types/terminal'
 import { wsUrl } from '@ce/utils/runtimeBase'
 import { cliApi, peerApi } from '@terminal/composables/cli/useCliApiPrefix'
@@ -69,7 +69,8 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   let reconnectAttempts = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let telemetryTimer: ReturnType<typeof setInterval> | null = null
-  let wasPreempted = false
+  let stopped = false
+  const stableConnectionMs = 10_000
   let queuedBinaryBytes = 0
   const maxQueuedBinaryBytes = 64 * 1024
   const queuedBinary: Uint8Array[] = []
@@ -103,15 +104,30 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   }
 
   function connect() {
+    if (stopped) return
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+    clearReconnectTimer()
     status.value = reconnectAttempts > 0 ? 'reconnecting' : 'connecting'
 
-    ws = new WebSocket(getWsUrl())
-    ws.binaryType = 'arraybuffer'
+    let socket: WebSocket
+    try { socket = new WebSocket(getWsUrl()) } catch {
+      status.value = 'disconnected'
+      scheduleReconnect()
+      return
+    }
+    ws = socket
+    socket.binaryType = 'arraybuffer'
+    let wasPreempted = false
+    let openedAt = 0
+    let receivedMessage = false
 
-    ws.onopen = () => {
+    socket.onopen = () => {
+      if (ws !== socket) return
       status.value = 'connected'
-      reconnectAttempts = 0
+      openedAt = Date.now()
+      // A successful handshake is not a working terminal. An incompatible replay
+      // can fail immediately after open and otherwise retry every second forever.
+      // Reset the failure budget only after this connection has actually worked.
       // Fresh connection → reset cumulative traffic + uptime baseline.
       netStats.txTotal = 0
       netStats.rxTotal = 0
@@ -122,7 +138,10 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
       flushQueuedBinary()
     }
 
-    ws.onmessage = (event: MessageEvent) => {
+    socket.onmessage = (event: MessageEvent) => {
+      if (ws !== socket) return
+      receivedMessage = true
+      if (openedAt && Date.now() - openedAt >= stableConnectionMs) reconnectAttempts = 0
       if (event.data instanceof ArrayBuffer) {
         bytesReceivedInWindow += event.data.byteLength
         onBinaryMessage?.(event.data)
@@ -146,11 +165,16 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
       }
     }
 
-    ws.onclose = () => {
+    socket.onclose = (event: CloseEvent) => {
+      if (ws !== socket) return
+      ws = null
       stopTelemetry()
-      if (wasPreempted) {
+      if (receivedMessage && openedAt && Date.now() - openedAt >= stableConnectionMs) reconnectAttempts = 0
+      // The close reason also identifies a takeover if its control frame was
+      // lost. Do not interpret an arbitrary policy rejection as a takeover.
+      if (wasPreempted || (event.code === 1008 && event.reason === 'preempted by new connection')) {
         status.value = 'preempted'
-        wasPreempted = false
+        clearQueuedBinary()
         return
       }
       status.value = 'disconnected'
@@ -160,23 +184,37 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
       scheduleReconnect()
     }
 
-    ws.onerror = () => { /* followed by onclose */ }
+    socket.onerror = () => { /* followed by onclose */ }
   }
 
   function reconnect() {
-    wasPreempted = false
+    stopped = false
     reconnectAttempts = 0
-    if (ws) { ws.close(1000, 'manual reconnect'); ws = null }
+    clearReconnectTimer()
+    stopTelemetry()
+    retireSocket('manual reconnect')
     connect()
   }
 
   function disconnect() {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-    reconnectAttempts = maxAttempts
+    stopped = true
+    clearReconnectTimer()
     stopTelemetry()
-    if (ws) { ws.close(1000, 'client disconnect'); ws = null }
+    retireSocket('client disconnect')
     clearQueuedBinary()
     status.value = 'disconnected'
+  }
+
+  function retireSocket(reason: string): void {
+    const old = ws
+    ws = null // retire before close: its delayed callbacks must not touch the replacement
+    if (!old) return
+    old.onopen = old.onmessage = old.onclose = old.onerror = null
+    old.close(1000, reason)
+  }
+
+  function clearReconnectTimer(): void {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   }
 
   // [TH-0501-m9j] Direct synchronous binary WS send. No intermediate layers.
@@ -244,10 +282,10 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   }
 
   function scheduleReconnect() {
-    if (reconnectAttempts >= maxAttempts) return
+    if (stopped || reconnectAttempts >= maxAttempts || reconnectTimer) return
     const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
     reconnectAttempts++
-    reconnectTimer = setTimeout(connect, delay)
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; connect() }, delay)
   }
 
   // A tab backgrounded (phone locked / switched away) long enough to exhaust maxAttempts
@@ -257,12 +295,12 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
   // timer. Skips 'preempted' on purpose — that status means another device holds the session,
   // and reconnect() would just fight it for the same slot.
   function onVisible(): void {
-    if (document.hidden || status.value !== 'disconnected') return
+    if (stopped || document.hidden || status.value !== 'disconnected') return
     reconnect()
   }
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', onVisible)
-    onUnmounted(() => document.removeEventListener('visibilitychange', onVisible))
+    onScopeDispose(() => document.removeEventListener('visibilitychange', onVisible))
   }
 
   // Unified telemetry tick (~2s): samples bandwidth/traffic/uptime from byte counters that
@@ -315,7 +353,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     if (notice) binaryHandler(new TextEncoder().encode(notice).buffer as ArrayBuffer)
   }
 
-  onUnmounted(disconnect)
+  onScopeDispose(disconnect)
 
   return {
     status,

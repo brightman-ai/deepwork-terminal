@@ -457,9 +457,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upgrade to WebSocket.
+	compression := terminalWSCompression(r.UserAgent())
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true, // Allow any origin in dev mode.
-		CompressionMode:    websocket.CompressionNoContextTakeover,
+		CompressionMode:    compression,
 	})
 	if err != nil {
 		logger.Error("ws upgrade failed", "id", id, "error", err)
@@ -475,6 +476,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	inputLogCtx := obs.WithStage(ctx, stgTerminalInput)
 	attachLogCtx := obs.WithStage(ctx, stgTerminalAttach)
 	connectedAt := time.Now()
+	closeCode := -1
+	receivedMessages := 0
 
 	// BUG-3: Register as active connection — preempts any existing WS for this session.
 	connEpoch := s.mgr.SetActiveConn(id, conn, cancel)
@@ -512,6 +515,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"session_id", id,
 		"sub_id", subID,
 		"remote_addr", r.RemoteAddr,
+		"compression_policy", int(compression),
 		"buffer_bytes", bufferBytes,
 		"replay_bytes", len(replay),
 		"replay_limit_bytes", wsReplayMaxBytes,
@@ -522,7 +526,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		terminalLogger.Info(attachLogCtx, "cli ws disconnected",
 			"session_id", id,
 			"sub_id", subID,
-			"duration_ms", time.Since(connectedAt).Milliseconds())
+			"duration_ms", time.Since(connectedAt).Milliseconds(),
+			"close_code", closeCode,
+			"received_messages", receivedMessages,
+			"compression_policy", int(compression))
 	}()
 	// Tell this browser the grid BEFORE the replay, not after.
 	//
@@ -782,10 +789,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		msgType, data, err := conn.Read(ctx)
 		if err != nil {
+			closeCode = int(websocket.CloseStatus(err))
 			// Client disconnected — PTY stays alive (IR-07).
 			logger.Debug("ws read closed", "id", id, "error", err)
 			break
 		}
+		receivedMessages++
 
 		switch msgType {
 		case websocket.MessageBinary:
