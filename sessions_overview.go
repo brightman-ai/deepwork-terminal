@@ -157,6 +157,19 @@ func (s *Server) sessionsOverview(ctx context.Context) []SessionOverviewEntry {
 			}
 		}
 
+		// tmux attach 桥（REQ-cli-tabs-009）：两条检测都一无所获时，若这个 tab 的 shell 正 attach
+		// 在某个 tmux session 上，agent 事实取那个 session 的全窗口 roll-up（语义与出处见
+		// sessions_overview_tmux.go）。填的还是这同一个 unit —— 后面的显式信号覆盖与 N=1 RollUp
+		// 原样适用，桥只是在「什么都不知道」时把 tmux_state 早已算好的事实接进来。
+		if unit.AgentTool == agentintel.ToolNone {
+			if bridged, cwd, ok := tmuxTabRollup(ctx, s.tmuxProvider, sess.ShellPID()); ok {
+				unit = bridged
+				if cwd != "" {
+					entry.CWD = cwd
+				}
+			}
+		}
+
 		// An EXPLICIT signal (session_signal.go) outranks everything above: the detectors
 		// INFER whether you are needed, a BEL/OSC notification is the program SAYING SO. So
 		// it can only ever raise the card to needs-you, never lower it.
