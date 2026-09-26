@@ -7,7 +7,7 @@ mock.module('@terminal/api/store', () => ({
   saveStore: () => Promise.resolve(),
 }))
 
-const { parseBinding, matchesBinding, matchesPrefixDigit, resolveShortcutAction, resolveLeaderKey, leaderBytesFor } = await import('../useTabShortcuts')
+const { parseBinding, matchesBinding, matchesPrefixDigit, resolveShortcutAction, resolveLeaderKey, leaderBytesFor, hybridResendsLeader } = await import('../useTabShortcuts')
 const { DEFAULT_SHORTCUTS_CONFIG, DEFAULT_LEADER, bindingFor } = await import('../useShortcutsConfig')
 
 type Cfg = typeof DEFAULT_SHORTCUTS_CONFIG
@@ -266,5 +266,35 @@ describe('leaderBytesFor（tmux 混合 leader 的前缀补发字节）', () => {
   })
   it('非 Ctrl+字母尽力而为：单字符原样', () => {
     expect(leaderBytesFor('KeyZ')).toBe('z')
+  })
+})
+
+/**
+ * hybridResendsLeader —— 2026-09-26 实报「attach tmux 的标签里 C-b s 失效」的根因钉。
+ *
+ * 第一段已把 leader 吞下，第二段凡是「真实 tmux 里也是前缀+键」的结局都必须补发前缀字节；
+ * 最初的实现只覆盖了 action / cancel，漏了 passthrough —— 而 tmux 的默认绑定（s 会话树、
+ * d detach、z zoom…）恰恰几乎都不在 dw 的映射表里，全是 passthrough。
+ */
+describe('tmux 混合 leader：前缀补发（C-b s 失效的根因）', () => {
+  const HYBRID = true
+  it('不认识的键补发 —— 设计注释明示「乃至不认识的键」，C-b s 就死在这', () => {
+    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), HYBRID)).toBe(true)
+    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyD', key: 'd' }), HYBRID)).toBe(true)
+  })
+  it('已映射动作（非 copyMode）与 cancel 照旧补发（既有行为回归钉）', () => {
+    expect(hybridResendsLeader({ type: 'action', action: 'newTab' }, key({ code: 'KeyC', key: 'c' }), HYBRID)).toBe(true)
+    expect(hybridResendsLeader({ type: 'cancel' }, key({ code: 'Escape', key: 'Escape' }), HYBRID)).toBe(true)
+  })
+  it('copyMode 不补发 —— prefix+[ 归应用（长程回看复制），不进 PTY', () => {
+    expect(hybridResendsLeader({ type: 'action', action: 'copyMode' }, key({ code: 'BracketLeft', key: '[' }), HYBRID)).toBe(false)
+  })
+  it('带修饰键的第二段不补发 —— 「取消 + 一个真正的 ^C」语义保留', () => {
+    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyC', key: 'c', ctrlKey: true }), HYBRID)).toBe(false)
+    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyN', key: 'n', altKey: true }), HYBRID)).toBe(false)
+  })
+  it('非混合模式一律不补发（没 attach tmux 的标签，前缀归 dw 自己）', () => {
+    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), false)).toBe(false)
+    expect(hybridResendsLeader({ type: 'action', action: 'newTab' }, key({ code: 'KeyC', key: 'c' }), false)).toBe(false)
   })
 })
