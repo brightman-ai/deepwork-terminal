@@ -205,6 +205,24 @@ export function resolveLeaderKey(
 }
 
 /**
+ * tmux 混合模式下，第二段的这一个结局要不要把 leader 的字节补发进 PTY。
+ *
+ * 第一段已经把 leader 吞下（preventDefault）了 —— 凡是在真实 tmux 里也是「前缀 + 键」的组合
+ * 都必须补发，否则 tmux 只剩半个前缀：C-b s 变成向 shell 敲了个 "s"，会话树纹丝不动
+ * （2026-09-26 实报：attach tmux 的标签里 C-b s 失效，根因就是 passthrough 这条没补发，
+ * 当初只覆盖了 action / cancel 两种结局）。
+ *
+ * 唯一不补发的是**带修饰键的第二段**（C-b 然后 Ctrl+C）：那是 resolveLeaderKey 明示的
+ * 「取消 + 一个真正的 ^C」语义，hybrid 下照旧保留。
+ */
+export function hybridResendsLeader(r: LeaderResolution, e: KeyboardEvent, hybrid: boolean): boolean {
+  if (!hybrid) return false
+  if (r.type === 'cancel') return true
+  if (r.type === 'action') return r.action !== 'copyMode'
+  return !(e.ctrlKey || e.altKey || e.metaKey || e.shiftKey)
+}
+
+/**
  * 这个键落在一个**正在输入文字**的地方吗。
  *
  * leader 的监听挂在 document 的捕获阶段 —— 它先于任何组件自己的 `@keydown.stop` 拿到事件。
@@ -349,11 +367,7 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
       // 第二键自然流入 —— 第一段已经把 C-b 吞下（preventDefault），不补发的话 tmux 收到的
       // 就只剩半个前缀：C-b 1 会变成向 tmux 敲了个 "1"，窗口纹丝不动。
       const hybrid = adapter.tmuxLeaderHybrid?.() === true
-      if (r.type === 'action' && hybrid && r.action !== 'copyMode') {
-        adapter.onLeaderFallback?.(armed.binding)
-        return
-      }
-      if (r.type === 'cancel' && hybrid) {
+      if (hybridResendsLeader(r, e, hybrid)) {
         adapter.onLeaderFallback?.(armed.binding)
         return
       }

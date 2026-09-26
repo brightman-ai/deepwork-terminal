@@ -126,8 +126,18 @@ describe('约束③（2026-09-12 改版）：tmux 标签 = 混合 leader，copyM
   it('混合模式下只有 copyMode 被认领；其余组合补发前缀字节（tmux 肌肉记忆不丢）', () => {
     const fn = shortcuts.slice(shortcuts.indexOf('const r = resolveLeaderKey'))
     const head = fn.slice(0, fn.indexOf("if (r.type === 'action') {"))
-    expect(head).toContain("r.action !== 'copyMode'")
+    // 2026-09-26：补发判定收敛到 hybridResendsLeader 谓词。此前这里手写两个 if 分支、只覆盖
+    // action/cancel —— 漏了 passthrough，正是「C-b s 丢前缀」事故的根因。
+    expect(head).toContain('hybridResendsLeader')
     expect(head).toContain('onLeaderFallback')
+  })
+
+  it('补发谓词覆盖「不认识的键」（passthrough）—— C-b s 事故钉', () => {
+    const pred = shortcuts.slice(shortcuts.indexOf('export function hybridResendsLeader'))
+    expect(pred).toContain("r.action !== 'copyMode'")   // copyMode 归应用，不补发
+    expect(pred).toContain("r.type === 'cancel'")        // C-b C-b = tmux send-prefix
+    // 无修饰的 passthrough 补发（返回 true）；带修饰的第二段保持「取消 + 一个真正的 ^C」
+    expect(pred).toContain('!(e.ctrlKey || e.altKey || e.metaKey || e.shiftKey)')
   })
 
   it('补发的字节 = leader 代表的控制字符（Ctrl+KeyB → \\x02）', () => {
