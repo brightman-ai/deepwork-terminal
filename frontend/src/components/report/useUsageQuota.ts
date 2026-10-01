@@ -19,7 +19,7 @@ import { ref, computed } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { findTightestQuota } from './usageQuotaGroups'
-export { quotaGroupsFor, findTightestQuota, accountKey } from './usageQuotaGroups'
+export { quotaGroupsFor, findTightestQuota, accountKey, accountTightestRemaining } from './usageQuotaGroups'
 
 export type Billing = 'subscription' | 'api' | 'unknown'
 
@@ -47,6 +47,15 @@ export interface SnapshotMeta {
 }
 export interface QuotaGroup {
   family?: string
+  /** What to render; `family` stays the merge key. */
+  family_label?: string
+  /**
+   * This family IS the account's own quota — not a per-model feature or an additional metered
+   * pool riding beside it. Supersession ("账号已切换家族") is an ACCOUNT-family statement, so
+   * only account-wide groups may be folded away as history; an additional pool is a parallel
+   * budget that shows when used and never claims to be superseded.
+   */
+  account_wide?: boolean
   windows?: QuotaWindow[]
   snapshot?: SnapshotMeta
 }
@@ -156,6 +165,10 @@ export interface RuntimeQuota {
   quota_groups?: QuotaGroup[]
   credits?: QuotaCredits
   health: RuntimeHealth
+  /** Served by the domain: whether this account can be asked for a live reading. Decides
+   *  whether「数据已过期」offers the click-to-probe action — a button that cannot ask is a
+   *  button that lies. */
+  can_probe?: boolean
   attribution?: QuotaAttribution
   note?: string
 }

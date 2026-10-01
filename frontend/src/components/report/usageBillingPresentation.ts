@@ -43,23 +43,27 @@ export interface SubscriptionAccount {
 /**
  * Whether this row's spend is covered by a subscription you actually hold.
  *
- * Two things had to go into this, in order:
+ * Three things had to go into this, in order:
  *
  * 1. VENDOR, not (runtime, vendor). A subscription is bought from a vendor; the runtime is merely
  *    which CLI you spent it from, and the same Kimi plan is reachable from more than one. This
  *    replaced a hardcoded table of first-party pairings, which structurally barred any
  *    third-party plan from the subscription tab no matter what you had bought.
  *
- * 2. ENDPOINT, when the account declares one. Holding a Kimi PLAN and a Moonshot API KEY at the
- *    same time is ordinary, and vendor-matching alone files both under the subscription — because
- *    codex records a billing mode only for Fast turns and claude records none at all, so nearly
- *    every row arrives as「unknown」. The plan is reached through a declared endpoint
- *    ("mimo2codex-kimi-coding"); metered traffic is not. Matching the endpoint is evidence for
- *    which of the two this row was, where matching the vendor is a coin flip that always lands on
- *    "subscription".
+ * 2. ENDPOINT, when the account declares one AND the row records one. Holding a Kimi PLAN and a
+ *    Moonshot API KEY at the same time is ordinary, and vendor-matching alone files both under
+ *    the subscription — because codex records a billing mode only for Fast turns and claude
+ *    records none at all, so nearly every row arrives as「unknown」. The plan is reached through
+ *    a declared endpoint ("mimo2codex-kimi-coding"); metered traffic through some other one.
+ *    Matching the endpoint is evidence for which of the two this row was.
  *
- * An account with no declared endpoints covers the vendor wholesale — that is the first-party
- * case, where the plan IS the CLI's login and there is no separate endpoint to name.
+ * 3. NO endpoint ON THE ROW is the absence of evidence, not evidence of metering. Claude
+ *    transcripts never record which endpoint a session ran against (attribution falls back to
+ *    the model id), so requiring a match there filed EVERY claude-side Kimi/GLM row out of the
+ *    subscription tab and into the API tab as an estimate — the user holding four official
+ *    subscriptions saw only two of them billed under「官方订阅」(Human 2026-09-30). Per UB-08,
+ *    billing unknown + a live subscription for that vendor ⟹ subscription-window fallback:
+ *    the row lands in the sub tab as「≈等价」, which claims no bill either way.
  */
 export function subscriptionCovers(
   row: Pick<UsageProviderRow, 'vendor' | 'runtime_provider'>,
@@ -69,7 +73,8 @@ export function subscriptionCovers(
   return accounts.some((account) => {
     if (account.vendor !== row.vendor) return false
     if (!account.endpoints?.length) return true
-    return account.endpoints.includes(row.runtime_provider ?? '')
+    if (!row.runtime_provider) return true
+    return account.endpoints.includes(row.runtime_provider)
   })
 }
 

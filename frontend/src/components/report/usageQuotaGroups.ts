@@ -40,3 +40,20 @@ export function findTightestQuota(
   }
   return best
 }
+
+/** One account's most-constraining CREDIBLE window — the sort key for card order (最紧优先).
+ *
+ *  Stale groups do not vote (an old number does not get to look urgent), and an account with no
+ *  credible window sinks (it is comparable with nothing). This exists because the registry order
+ *  once puts an EXHAUSTED subscription last, under the popover's fold, where the user reads it as
+ *  「没有显示」— the tightest card is exactly the one that must be first (Human 2026-09-30). */
+export function accountTightestRemaining(q: RuntimeQuota): number {
+  let best: number | null = null
+  for (const group of quotaGroupsFor(q)) {
+    if (group.snapshot?.stale) continue
+    for (const w of group.windows ?? []) {
+      if (best === null || w.remaining_percent < best) best = w.remaining_percent
+    }
+  }
+  return best === null ? Number.POSITIVE_INFINITY : best
+}

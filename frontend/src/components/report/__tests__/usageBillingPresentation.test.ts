@@ -140,6 +140,23 @@ describe('usage Money placement', () => {
     expect(subscriptionCovers({ vendor: 'anthropic' }, subscribed)).toBe(true)
     expect(subscriptionCovers({ vendor: 'moonshot' }, subscribed)).toBe(false)
   })
+
+  // 2026-09-30：claude 侧的 Kimi/GLM 流量从不记 runtime_provider（transcript 只有 model id），
+  // 把"对不上声明端点"读成"不是订阅"会把每一条 claude 侧订阅流量都挤进 API tab——持有
+  // 四个官方订阅的用户只看到两家在「官方订阅」里计费。无端点证据 = 证据缺失，按 UB-08
+  // 走订阅窗口 fallback（≈等价，两种情况都不冒充实付）。
+  test('a row with no endpoint evidence falls back to the vendor subscription (claude-side Kimi/GLM)', () => {
+    const kimiPlan = [{ vendor: 'moonshot', endpoints: ['mimo2codex-kimi-coding'] }]
+    // 有端点记录且是声明的那个 → 订阅（原行为不变）
+    expect(subscriptionCovers({ vendor: 'moonshot', runtime_provider: 'mimo2codex-kimi-coding' }, kimiPlan)).toBe(true)
+    // 有端点记录但不是声明的 → 按量（原行为不变：端点是反证）
+    expect(subscriptionCovers({ vendor: 'moonshot', runtime_provider: 'some-relay' }, kimiPlan)).toBe(false)
+    // 没有端点记录（claude 侧）→ 厂商 fallback
+    expect(subscriptionCovers({ vendor: 'moonshot' }, kimiPlan)).toBe(true)
+    const claudeSpent: UsageProviderRow = { ...row('moonshot', 'claude') }
+    expect(usageMoneyPresentation(claudeSpent, kimiPlan))
+      .toMatchObject({ tab: 'sub', semantics: 'api_equivalent', evidence: 'current_subscription_fallback' })
+  })
 })
 
 describe('why a row carries no money', () => {

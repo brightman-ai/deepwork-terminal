@@ -99,27 +99,31 @@ export function stalePresentation(opts: {
  *
  * ## 判据从哪来
  *
- * `QuotaInfo.family`（响应顶层那个）是**最新一条账号读数的 family**——kit 侧 `applyReadings`
- * 把 readings 按新旧排序后取 `groups[0].Family`。而两个来源（probe 读 `x-codex-active-limit`
- * 响应头、rollout 读 `limit_id` 且已滤掉 per-model 子限额）**都是对"账号当时在哪个家族"的陈述**，
- * 所以"最新的那条陈述"就是当前家族。
+ * `QuotaInfo.family`（响应顶层那个）是 `quota_groups[0]` 的 family——kit 侧 `applyReadings`
+ * 保证 groups[0] 是**账号级族**里最新的一条（`account_wide` 优先于新旧排序）。而两个来源
+ * （probe 读 `x-codex-active-limit` 响应头、rollout 读 `limit_id` 且已滤掉 per-model 子限额）
+ * **都是对"账号当时在哪个家族"的陈述**，所以"账号级族里最新的那条陈述"就是当前家族。
  *
- * ## 为什么不给 kit 加一个显式的 active_family 字段
+ * ## 只对账号级族下此结论
  *
- * 那要三仓联动发版（kit 打版 → 公开仓 go.mod 升版 → 私有仓 go.mod 升版），而这个信息**已经在
- * 响应里且已经正确**。为一个已存在的事实做一轮跨仓发布，不划算。
- *
- * 代价是我们依赖了一个**语义上没被契约写死**的字段（它文档上写的是"兼容投影的 family"，
- * 只是恰好等于最新家族）。所以这里把这份依赖**显式写出来并用测试钉住**；哪天 kit 真要改
- * `QuotaInfo.family` 的含义，改的人至少能从这段注释看到下游有人在这么用。
+ * "被取代"是**账号家族**之间的事（codex→premium 换套餐）。附加计量池
+ * （`base_model_inference`/gpt-reserve 这类与账号池并行的预算）与账号家族**不共用这条
+ * 语义**——它们不是"换过去的旧家族"，是并行的小预算，按子限额规则（有消耗才占行）呈现。
+ * 2026-09-30 的生产事故正是把附加池当成了当前家族：真账号池（剩 12%）被折叠成
+ * "此为历史读数"，没动过的附加池（剩 100%）顶上当主数字。
  *
  * ## 不确定时不下结论
  *
- * 顶层 family 为空（老快照、或该运行时压根没有家族概念）⟹ 一律返回 false。**不知道 ≠ 已作废**，
- * 与"查不到 ≠ 已是最新"是同一条纪律。
+ * 顶层 family 为空（老快照、或该运行时压根没有家族概念），或该组不是账号级族 ⟹
+ * 一律返回 false。**不知道 ≠ 已作废**，与"查不到 ≠ 已是最新"是同一条纪律。
  */
-export function isSupersededFamily(groupFamily: string, activeFamily: string): boolean {
+export function isSupersededFamily(
+  groupFamily: string,
+  activeFamily: string,
+  groupIsAccountWide: boolean,
+): boolean {
   if (!groupFamily || !activeFamily) return false
+  if (!groupIsAccountWide) return false
   return groupFamily !== activeFamily
 }
 
@@ -148,10 +152,11 @@ export function groupPresentation(opts: {
   canProbe: boolean
   groupFamily: string
   activeFamily: string
+  groupAccountWide: boolean
   billedToDisplay?: string
   probeError?: string
 }): GroupPresentation {
-  if (isSupersededFamily(opts.groupFamily, opts.activeFamily)) {
+  if (isSupersededFamily(opts.groupFamily, opts.activeFamily, opts.groupAccountWide)) {
     // 已被取代：不给"点击刷新"，给"该看哪一行"。
     return {
       dim: true,
