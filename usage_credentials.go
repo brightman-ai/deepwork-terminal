@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,9 +62,17 @@ type subscriptionCredential struct {
 // credentialStore implements usage.CredentialSource over the sealed file. It is read-through
 // with a short cache so a warm-up pass does not decrypt once per vendor, and so an operator who
 // edits the file does not have to restart the server to be believed.
+//
+// The file lives at the deepwork home (~/.deepwork, DEEPWORK_HOME-overridable) — the SAME
+// home that hosts kit/usage's quota snapshots — because a vendor subscription belongs to the
+// machine's user, not to whichever server instance happens to run. The per-DataDir location
+// this store used first is how one shell (standalone, DataDir ~/.dw-terminal) came to show
+// Kimi/GLM subscriptions that the other (pro-embedded, DataDir ~/.deepwork) had never heard
+// of: same machine, same user, two different answers to "what am I subscribed to".
 type credentialStore struct {
-	path string
-	key  []byte
+	path      string // canonical, shared
+	key       []byte
+	legacyDir string // pre-share location, consulted once for migration
 
 	mu       sync.Mutex
 	loadedAt time.Time
@@ -72,10 +81,15 @@ type credentialStore struct {
 
 const credentialCacheTTL = 30 * time.Second
 
+// credentialFileName is the sealed store's name in whichever directory holds it.
+const credentialFileName = "usage-credentials.json.enc"
+
 func newCredentialStore(dataDir string) *credentialStore {
+	shared := usage.DeepworkFile(credentialFileName)
 	return &credentialStore{
-		path: filepath.Join(dataDir, "usage-credentials.json.enc"),
-		key:  loadOrCreateIlinkKey(dataDir), // one machine key for every secret in this process
+		path:      shared,
+		key:       loadOrCreateIlinkKey(filepath.Dir(shared)), // one machine key for every secret in this process
+		legacyDir: dataDir,
 	}
 }
 
@@ -98,7 +112,11 @@ func (s *credentialStore) load() map[string]usage.Credential {
 	out := map[string]usage.Credential{}
 	sealed, err := os.ReadFile(s.path) //nolint:gosec — our own sealed store
 	if err != nil {
-		return out
+		s.migrateLegacy()
+		// Whatever migration produced is worth reading; nothing means "no subscriptions".
+		if sealed, err = os.ReadFile(s.path); err != nil {
+			return out
+		}
 	}
 	plain, err := aesgcmOpen(s.key, sealed)
 	if err != nil {
@@ -121,6 +139,49 @@ func (s *credentialStore) load() map[string]usage.Credential {
 		}
 	}
 	return out
+}
+
+// migrateLegacy carries a pre-share store into the shared location, exactly once: it only acts
+// when the shared file is absent and the legacy pair (store + the key that sealed it) is not.
+// The legacy file is left in place — nothing here is destructive, and a host rolling back to an
+// older binary keeps working off its old copy. A legacy file that cannot be decrypted under its
+// own key is logged and skipped: guessing at it would be worse than ignoring it.
+//
+// Test binaries never migrate (same discipline as muxd's socket guard): a NewServer test
+// resolves the REAL ~/.dw-terminal as DataDir, and without this guard one `go test ./...` run
+// migrated the developer's actual store — observed 2026-09-30. Tests that want migration set
+// DEEPWORK_HOME explicitly.
+func (s *credentialStore) migrateLegacy() {
+	if strings.HasSuffix(os.Args[0], ".test") && os.Getenv("DEEPWORK_HOME") == "" {
+		return
+	}
+	legacyPath := filepath.Join(s.legacyDir, credentialFileName)
+	if s.legacyDir == "" || s.path == legacyPath {
+		return
+	}
+	sealed, err := os.ReadFile(legacyPath) //nolint:gosec — read-only migration source
+	if err != nil {
+		return // nothing to migrate
+	}
+	legacyKey, err := os.ReadFile(filepath.Join(s.legacyDir, "ilink.key"))
+	if err != nil || len(legacyKey) != 32 {
+		return
+	}
+	plain, err := aesgcmOpen(legacyKey, sealed)
+	if err != nil {
+		logger.Warn("usage credentials legacy migration skipped: decrypt failed", "error", err)
+		return
+	}
+	resealed, err := aesgcmSeal(s.key, plain)
+	if err != nil {
+		logger.Warn("usage credentials migration skipped: seal failed", "error", err)
+		return
+	}
+	if err := ilinkAtomicWrite(s.path, resealed, 0o600); err != nil {
+		logger.Warn("usage credentials migration write failed", "error", err)
+		return
+	}
+	logger.Info("usage credentials migrated to shared deepwork home", "from", legacyPath, "to", s.path)
 }
 
 // startQuotaWarmer installs the credential store and keeps every free-to-ask account's reading
