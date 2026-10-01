@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,6 +29,10 @@ type Session struct {
 
 	mu   sync.Mutex
 	pty  *os.File
+	// lastOutputNano is when the PTY last produced output (Unix nanos, 0 = never).
+	// Atomic so the read loop can stamp it without the session lock — the patrol reads
+	// it to tell an idle prompt from a TUI mid-draw. See patrolSignalKeys.
+	lastOutputNano atomic.Int64
 	cmd  *exec.Cmd
 	ring *RingBuffer
 	meta []byte // opaque; the daemon never looks inside
@@ -398,6 +403,115 @@ func (s *Session) KillForeground(sig syscall.Signal) error {
 		return fmt.Errorf("muxd: session %s kill foreground pgid %d: %w", s.ID, pgid, err)
 	}
 	return nil
+}
+
+// ensureSignalKeys repairs a terminal that lost ISIG before a keystroke needs it.
+//
+// Why this exists (observed twice on 2026-09-30): a TUI (bat and friends) sets the tty to
+// raw — ISIG off — and when it dies without restoring, the residue is permanent, because
+// zsh's line editor re-applies its SAVED termios at every prompt and never re-enables ISIG
+// itself (it assumes the default). Symptoms: characters type fine, Ctrl-C/Z/\ do nothing
+// and produce no echo — the bytes reach the PTY and die there. Sessions are long-lived by
+// design, so one crashed pager freezes ^C for days.
+//
+// Two layers share one core (healIsigIfShellForeground):
+//
+//   - this, the INPUT path: fires when the payload carries a byte the tty's own cc table
+//     maps to VINTR/VQUIT/VSUSP. Every press that needs ISIG gets it, so the user-visible
+//     invariant holds even though zsh's archive keeps re-breaking the kernel state between
+//     prompts (a durable cure would mean injecting `stty` into the shell, which stomps
+//     half-typed lines — worse than the disease).
+//   - patrolSignalKeys, a periodic sweep: heals the residue BEFORE anyone presses
+//     anything, gated on quiescence — a session that has been silent for a while is an
+//     idle prompt, while a TUI that just set raw mode is mid-handshake and still drawing.
+//     The gate, plus the foreground-group check in the core, keeps the patrol off every
+//     terminal it does not own.
+func (s *Session) ensureSignalKeys(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.signalKeysHealPreconditions() {
+		return
+	}
+	term, ok := s.termiosLocked()
+	if !ok || !carriesSignalByte(term, payload) {
+		return
+	}
+	s.healIsigLocked(term)
+}
+
+// patrolSignalKeys is the proactive layer: an idle, quiet session whose shell owns the
+// foreground must have ISIG on. Returns true if a heal happened (for tests/telemetry).
+func (s *Session) patrolSignalKeys(quietFor time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.signalKeysHealPreconditions() {
+		return false
+	}
+	if last := s.lastOutputNano.Load(); last != 0 && time.Since(time.Unix(0, last)) < quietFor {
+		return false
+	}
+	term, ok := s.termiosLocked()
+	if !ok {
+		return false
+	}
+	return s.healIsigLocked(term)
+}
+
+// signalKeysHealPreconditions holds the cheap aliveness checks shared by both layers.
+// Caller holds s.mu.
+func (s *Session) signalKeysHealPreconditions() bool {
+	f, cmd, alive := s.pty, s.cmd, s.alive
+	return alive && f != nil && !s.ptyClosed && cmd != nil && cmd.Process != nil
+}
+
+// termiosLocked reads the tty's termios. Caller holds s.mu.
+func (s *Session) termiosLocked() (*unix.Termios, bool) {
+	term, err := unix.IoctlGetTermios(int(s.pty.Fd()), unix.TCGETS)
+	if err != nil {
+		return nil, false
+	}
+	if term.Lflag&unix.ISIG != 0 {
+		return nil, false // healthy — nothing to heal
+	}
+	return term, true
+}
+
+// healIsigLocked restores ISIG when — and only when — the shell's own process group is
+// the tty's foreground group, i.e. the shell-at-prompt state where ISIG is non-negotiable.
+// A foreground TUI (its own pgid in front) is left alone on purpose: its raw mode is its
+// own business, and stomping ISIG onto it would turn the user's Ctrl-C into a SIGINT the
+// TUI never agreed to receive. Caller holds s.mu.
+func (s *Session) healIsigLocked(term *unix.Termios) bool {
+	fg, err := unix.IoctlGetInt(int(s.pty.Fd()), unix.TIOCGPGRP)
+	if err != nil || fg != s.cmd.Process.Pid {
+		return false
+	}
+	fixed := *term
+	fixed.Lflag |= unix.ISIG
+	if err := unix.IoctlSetTermios(int(s.pty.Fd()), unix.TCSETS, &fixed); err != nil {
+		return false
+	}
+	// The daemon's stderr is its log file (spawnDaemon wires it) — one line per heal,
+	// because "why did my ^C start working again" deserves a paper trail.
+	fmt.Fprintf(os.Stderr, "muxd: restored ISIG on session %s (lost to a crashed TUI; shell %d owns the tty)\n", s.ID, s.cmd.Process.Pid)
+	return true
+}
+
+// carriesSignalByte reports whether payload holds a byte the terminal currently maps to
+// INTR, QUIT or SUSP. Read from the live cc table, not hardcoded 0x03 — the user may have
+// rebound VINTR, and then ^C is just a letter.
+func carriesSignalByte(term *unix.Termios, payload []byte) bool {
+	for _, b := range payload {
+		for _, idx := range []int{unix.VINTR, unix.VQUIT, unix.VSUSP} {
+			if term.Cc[idx] == b {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Destroy terminates the session's process and closes its PTY. This is the EXPLICIT

@@ -95,6 +95,7 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 	if d.idleTimeout > 0 {
 		go d.watchIdle()
 	}
+	go d.patrolSignalKeys(ctx)
 
 	for {
 		c, err := ln.Accept()
@@ -112,6 +113,40 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 			return err
 		}
 		go d.handleConn(c)
+	}
+}
+
+
+// patrolSignalKeys periodically enforces the one terminal invariant the kernel will not:
+// a session whose shell owns the foreground must have ISIG on. A TUI that crashed without
+// restoring its raw mode leaves it off forever (zsh never re-enables it — see
+// Session.patrolSignalKeys), and the patrol heals that residue before anyone presses ^C.
+//
+// The quiescence gate keeps it off anything that is merely STARTING: a TUI mid-handshake
+// is still drawing (recent output), and one that has taken the foreground is skipped by
+// the group check inside the heal itself.
+func (d *Daemon) patrolSignalKeys(ctx context.Context) {
+	const interval = 10 * time.Second
+	const quietFor = 8 * time.Second
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.stop:
+			return
+		case <-t.C:
+		}
+		d.mu.Lock()
+		all := make([]*Session, 0, len(d.sessions))
+		for _, s := range d.sessions {
+			all = append(all, s)
+		}
+		d.mu.Unlock()
+		for _, s := range all {
+			s.patrolSignalKeys(quietFor)
+		}
 	}
 }
 
@@ -471,6 +506,7 @@ func (d *Daemon) handleConn(c net.Conn) {
 				fail(ErrCodeNotFound, "input before attach")
 				continue
 			}
+			attached.ensureSignalKeys(payload)
 			if err := attached.Write(payload); err != nil {
 				fail(ErrCodeInternal, err.Error())
 			}
@@ -663,5 +699,6 @@ func (d *Daemon) controlInput(req InputReq) error {
 	if !ok {
 		return fmt.Errorf("muxd: no such session: %s", req.ID)
 	}
+	s.ensureSignalKeys(req.Data)
 	return s.Write(req.Data)
 }
