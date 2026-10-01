@@ -23,11 +23,11 @@
  */
 import { nextTick, onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { Gauge } from 'lucide-vue-next'
-import { useUsageQuota, quotaGroupsFor, findTightestQuota, accountKey, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
+import { useUsageQuota, quotaGroupsFor, findTightestQuota, accountKey, accountTightestRemaining, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
 import { useUsageReport, type UsageProviderRow } from './useUsageReport'
 import { useAgentReport } from './useAgentReport'
 import AgentReportDetail from './AgentReportDetail.vue'
-import { fmtTokens, fmtCost, fmtCredits } from './cost'
+import { fmtTokens, fmtCost } from './cost'
 import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
 import { usageMoneyPresentation, subscriptionCovers, facadeNote, type UsageMoneySemantics, type SubscriptionAccount } from './usageBillingPresentation'
@@ -467,9 +467,11 @@ function staleOf(q: RuntimeQuota, group: QuotaGroup) {
     // vendor appeared behind that same CLI, and it is the kind of wrong that shows a button
     // which does nothing.
     canProbe: !!q.can_probe,
-    // q.family = 最新那条账号读数的 family = 当前生效的家族。与它不一致的分组是历史。
+    // q.family = quota_groups[0]（账号级族最新一条）= 当前生效的家族。与它不一致的**账号级**
+    // 分组是历史；附加计量池（account_wide=false）是并行小预算，走子限额规则，不当历史折叠。
     groupFamily: group.family || '',
     activeFamily: q.family || '',
+    groupAccountWide: !!group.account_wide,
     // 探活失败原因（域侧持久化，限新鲜期）：比"数据已过期"具体得多——"账号未返回可用额度窗口"
     // 直指订阅断档/按量 key。附加进 hint，徽标文案不变（行宽有限）。
     probeError: q.last_probe_error || '',
@@ -504,8 +506,10 @@ function accountChip(q: RuntimeQuota): AccountChip | null {
     return { text: '当前计费', cls: 'live', title: '最近 30 分钟内有会话的用量记在这个账号上（并发时多个账号可同时成立）' }
   }
   const who = billedElsewhere(q)
+  // 卡面不点名另一个账号（Human 2026-09-30：「GLM 卡面不出现 Claude 字样」）：每张卡只讲
+  // 自己的订阅。归属细节留在 title 里——它回答"为什么这行读数是旧的"，是信息，不占卡面。
   return who
-    ? { text: `记在 ${who}`, cls: 'idle', title: `最近 30 分钟的会话经 ${who} 计费，不消耗本账号额度` }
+    ? { text: '非当前计费', cls: 'idle', title: `最近 30 分钟的会话经 ${who} 计费，不消耗本账号额度` }
     : null
 }
 
@@ -612,6 +616,15 @@ const healthOwner = computed(() => {
   return owner
 })
 const showsHealth = (q: RuntimeQuota) => healthOwner.value.get(q.runtime) === accountKey(q)
+
+// ── 卡序：最紧的订阅排最前（Human 2026-09-30 拍板「最紧优先 + 一屏全见」）─────────────────
+// 「还剩多少」是这个面板的主问题，剩得最少的那张卡就是最该被看见的那张——尤其是一张已经
+// 0% 的卡。实测事故：Kimi 5h 耗尽（剩 0%），却因注册表顺序排在第 4 位、被弹层限高裁在
+// 折叠线下面，用户以为「Kimi 没有显示」。排序只动卡序不动数据；排序键在 usageQuotaGroups
+// （纯函数、有测试）。平局保持注册表序（sort 稳定）。
+const sortedSubscriptions = computed(() =>
+  [...subscriptions.value].sort((a, b) => accountTightestRemaining(a) - accountTightestRemaining(b)),
+)
 
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
@@ -847,7 +860,7 @@ onUnmounted(() => {
         <!-- ── 官方订阅 tab 独有：额度条 / 重置 / 新鲜度（API 计费没有额度窗口，不伪造）── -->
         <template v-if="tab === 'sub'">
           <div
-            v-for="q in subscriptions"
+            v-for="q in sortedSubscriptions"
             :key="accountKey(q)"
             class="uchip-rt"
             :class="{ 'is-billing': q.attribution?.active, 'is-idle': !!billedElsewhere(q) }"
@@ -1236,7 +1249,7 @@ onUnmounted(() => {
 .uchip-backdrop { position: fixed; inset: 0; z-index: 3000; }
 .uchip-pop {
   position: fixed; z-index: 3001;
-  width: min(340px, calc(100vw - 16px)); max-height: min(72vh, 560px); overflow-y: auto;
+  width: min(340px, calc(100vw - 16px)); max-height: min(80vh, 640px); overflow-y: auto;
   overflow-anchor: none;
   box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
   background: #16181d; border: 1px solid #2a2d35; box-shadow: 0 10px 30px rgba(0,0,0,0.5); color: #e6e8ec;
@@ -1255,11 +1268,13 @@ onUnmounted(() => {
 }
 .uchip-tabs button.on { background: #2a2d35; color: #e6e8ec; font-weight: 600; }
 
-.uchip-rt { margin-bottom: 10px; }
+/* 四订阅一屏全见（Human 2026-09-30）：卡距/组距全面收紧半档，配合最紧优先排序，
+   四张卡不再依赖滚动。 */
+.uchip-rt { margin-bottom: 7px; }
 /* 未在计费的账号整行降一档。它不是坏了——只是现在不是它在花钱。降权而不是隐藏：正因为你在
    别处花钱，这条「还剩多少、何时重置」才是你决定什么时候切回来的依据。 */
 .uchip-rt.is-idle { opacity: 0.82; }
-.uchip-rt-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.uchip-rt-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; margin-bottom: 3px; }
 .uchip-rt-name { color: #e6e8ec; }
 /* 归属 chip 紧跟账号名，不靠右——它是名字的一部分（"哪个账号，以及它现在算不算数"），
    不是行尾的状态角标。绿=正在发生；中性灰=陈述，不是警告（那一行没有任何东西需要你处理）。 */
@@ -1269,7 +1284,7 @@ onUnmounted(() => {
 
 /* credits：厂商自己的消耗单位。百分比答「还剩多少」，这一行答「花了多少」——把它排在额度条
    下面、用同一套右对齐数字，两个问题一次读完，不必切页。 */
-.uchip-credits { display: flex; align-items: baseline; gap: 6px; font-size: 11px; margin-top: 4px; cursor: help; }
+.uchip-credits { display: flex; align-items: baseline; gap: 6px; font-size: 11px; margin-top: 2px; cursor: help; }
 .uchip-credits-k { color: #8b909a; font-size: 10.5px; flex-shrink: 0; }
 .uchip-credits-v { color: #e6e8ec; font-weight: 600; font-variant-numeric: tabular-nums; }
 .uchip-credits-u { color: #8b909a; font-weight: 400; font-size: 10px; }
@@ -1284,12 +1299,12 @@ onUnmounted(() => {
    一个已结清，甚至可能不属于同一个计费周期。这里靠层级而不是靠 tooltip 来阻止那个读法。 */
 .uchip-credits-prior {
   display: flex; align-items: baseline; gap: 6px;
-  font-size: 10.5px; margin-top: 2px; padding-left: 10px; cursor: help;
+  font-size: 10.5px; margin-top: 1px; padding-left: 10px; cursor: help;
 }
 .uchip-credits-prior-k { color: #6f757f; flex-shrink: 0; }
 .uchip-credits-prior-v { color: #9aa0aa; font-variant-numeric: tabular-nums; }
 .uchip-credits-prior-note { color: #6f757f; margin-left: auto; }
-.uchip-group { padding: 4px 0 5px; }
+.uchip-group { padding: 3px 0 4px; }
 .uchip-group + .uchip-group { border-top: 1px dashed #2a2d35; }
 /* 过期读数必须**看起来就是旧的**。此前只降了一点整体不透明度（0.72），主体仍是满格实心绿条 +
    大号百分比 —— 视觉权重和新鲜读数几乎没差别，于是角落那句"已过期"没人看见（Human 实测：
@@ -1326,7 +1341,7 @@ onUnmounted(() => {
 .uchip-badge.eq { color: #a5b4fc; background: rgba(165,180,252,0.12); }
 .uchip-badge.unknown { color: #9aa0aa; background: rgba(154,160,170,0.12); }
 
-.uchip-win { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #c9cdd5; margin: 2px 0; }
+.uchip-win { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #c9cdd5; margin: 1px 0; }
 .uchip-win-k { width: 40px; flex-shrink: 0; color: #8b909a; }
 .uchip-src { color: #6f757f; }
 .uchip-bar { flex: 1; height: 5px; border-radius: 3px; background: #262a32; overflow: hidden; }

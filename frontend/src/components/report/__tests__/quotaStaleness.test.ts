@@ -68,18 +68,22 @@ describe('humanAge', () => {
 import { isSupersededFamily, supersededNote } from '../quotaStaleness'
 
 describe('isSupersededFamily', () => {
-  it('家族与当前生效的不一致 → 已被取代（Human 实测那条 43% 的 codex 行）', () => {
-    expect(isSupersededFamily('codex', 'premium')).toBe(true)
+  it('账号级族与当前生效的不一致 → 已被取代（Human 实测那条 43% 的 codex 行）', () => {
+    expect(isSupersededFamily('codex', 'premium', true)).toBe(true)
   })
 
   it('就是当前家族 → 不是历史', () => {
-    expect(isSupersededFamily('premium', 'premium')).toBe(false)
+    expect(isSupersededFamily('premium', 'premium', true)).toBe(false)
+  })
+
+  it('附加计量池不是"被取代的旧家族"——它是并行小预算（2026-09-30 事故的另一半：reserve 池被当成当前家族，真账号池反被折叠）', () => {
+    expect(isSupersededFamily('base_model_inference', 'codex', false)).toBe(false)
   })
 
   it('不知道当前是哪个家族 → 一律 false（不知道 ≠ 已作废）', () => {
-    expect(isSupersededFamily('codex', '')).toBe(false)
-    expect(isSupersededFamily('', 'premium')).toBe(false)
-    expect(isSupersededFamily('', '')).toBe(false)
+    expect(isSupersededFamily('codex', '', true)).toBe(false)
+    expect(isSupersededFamily('', 'premium', true)).toBe(false)
+    expect(isSupersededFamily('', '', true)).toBe(false)
   })
 })
 
