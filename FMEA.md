@@ -17,7 +17,8 @@
 | F2 | 建立 Claude 会话；内外层 shell、不同 cwd/profile 来回切换 | Agent 被绑定到错误 transcript，状态/运行目录/通知错误 | 8/4/8 → **256** | Linux 读取进程 environ；Darwin 尝试 KERN_PROCARGS2；环境不可见时禁止 PID 绑定并回退 cwd；嵌套 shell 用例 | **MITIGATED / LIMITATION**：防止 host profile 旧 PID 记录冒认；macOS 不暴露子进程 env 时无法验证私有 profile，保持 unknown |
 | F3 | WebSocket 输入、输出、断线重连、窗口 resize、server restart | 会话被误销毁、重放缺口拼成假屏幕、或重连后输入不再生效 | 10/3/6 → **180** | muxd detach/restore、非连续 replay 清空、restart E2E、真实 PTY TUI 与 peer PID 用例 | **MITIGATED**：restart E2E、muxd 与真实 TUI 相关用例通过 |
 | F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：策略单测与全仓 Go 测试通过；真实权限故障注入仍待做 |
-| F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume 用例 | **MITIGATED / P2 residual**：分块上传套件与全仓 Go 测试通过；重复 complete/abort 顺序仍待补 |
+| F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume/retry 用例 | **MITIGATED / P2 residual**：定向分块套件覆盖续传与重复 complete；跨进程持续并发压测仍待补 |
+| F11 | 分块上传 complete 成功但响应丢失，客户端按“合并失败”重试 | 相同文件落成原文件 + hash 副本；并发完成可能覆盖同名不同内容 | 7/5/6 → **210** | content hash + requested-name dedupe；same-dir atomic no-replace hard link；重复完成回归 | **MITIGATED**：响应丢失重试返回同一 relPath，且不同内容用独立名 |
 | F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 与混合 endpoint 回归用例 | **MITIGATED**：旧 rollout + custom default 会清除 OpenAI claim；已知/未知并发不声称唯一付款方；配置热切换压力测试仍待做 |
 | F7 | 看 Agent 报表；筛选、翻页、提交“有用/需返工”、刷新 | 完成被当验收，反馈未持久化或缓存仍显示旧汇总 | 7/5/6 → **210** | OutcomeEvidence 有来源/oracle/time/ref/confidence；幂等 JSONL；报告只失效依赖 outcome 的缓存 | **MITIGATED / UI E2E OPEN**：reporter 与 detail API 已验证 completed guard、权限、幂等、多页 cursor 回读、汇总/证据一致；真实浏览器点击路径仍待验 |
 | F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 与跨 Origin 多轮 API 测试；本机没有可控浏览器 surface | **PARTIAL / P1 by severity gate**：preflight→旧 token→rotate→旧 token 拒绝→新 token 成功已通过；真实远端 browser reconnect 保持 OPEN |
@@ -42,6 +43,7 @@
 | Baseline | 主旅程与 S/O/D 风险排序 | 代码/README/现有测试审阅；评分均标为工程估计 | `65488e3` |
 | Phase A | F1–F7、F9 高风险处理与平台稳定性 | `go test ./... -count=1`、Go builds、`go vet ./...`、前端 type-check/build、search poll 单测、共享前端契约 | `e12ecb6` |
 | Phase B | F4 扫描错误 last-good/恢复故障注入 | `go test . -run '^TestFilesSearch_FailedRefreshPreservesLastGoodAndRecovers$' -count=1` | `c1b7f2d` |
+| Phase B2 | F11 complete 响应丢失后的幂等重试 | `go test . -run '^TestChunkUploadCompleteRetryAfterLostResponseReusesSameFile$' -count=1` | `569c53a` |
 | Phase C | F7 人工 outcome 持久化闭环 | `go test . -run '^TestHumanOutcomeRoundTripRequiresCompletedWorkAndIsIdempotent$' -count=1` | `8a9ad32` |
 | Phase C2 | F6 Codex custom default、旧 rollout 与混合 endpoint | `go test . -run '^TestReconcileCodexAttribution' -count=1` | `68929de` |
 | Phase C3 | F7 outcome API 跨页反馈与汇总回读 | `go test . -run '^TestAgentOutcomeHTTPRoundTripKeepsPagedDetailAndSummaryConsistent$' -count=1` | `46ea018` |
