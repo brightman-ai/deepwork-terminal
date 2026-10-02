@@ -22,7 +22,7 @@
 | F7 | 看 Agent 报表；筛选、翻页、提交“有用/需返工”、刷新 | 完成被当验收，反馈未持久化或缓存仍显示旧汇总 | 7/5/6 → **210** | OutcomeEvidence 有来源/oracle/time/ref/confidence；幂等 JSONL；报告只失效依赖 outcome 的缓存 | **PARTIAL**：reporter round-trip 已验证 completed guard、权限、幂等、详情回读和 memo 不变；多页筛选后的 UI 汇总仍待端到端证据 |
 | F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 测试；E2E 只测本机入口 | **OPEN / P1 by severity gate**：远端 browser journey 验 rotate 后重连及多 Origin 失败文案 |
 | F9 | daemon socket 初始化、升级后旧 daemon 占用、短时文件路径 | AF_UNIX 路径过长返回含糊错误；普通文件被误当活 socket 拒绝恢复 | 7/4/6 → **168** | 测试 fixture 使用短私有 socket；ENOTSOCK 归为无 listener；Darwin peer PID 回归 | **MITIGATED**：Darwin socket/PID 与 CLI 测试通过；生产用户自定义超长 socket 路径诊断仍待补 |
-| F10 | 通知等待→通知→用户回复→下一轮完成；多个 pane 并行 | 重复通知、必要权限与返工混为一类，或用户回复后 cooldown 吞掉下一轮 | 8/4/7 → **224** | transition/cooldown/显式 signal 共用测试；phase 和 evidence 分层 | **PARTIAL**：单 pane transition/cooldown 用例通过；多 pane 并行完成/关闭通知循环仍待做 |
+| F10 | 通知等待→通知→用户回复→下一轮完成；多个 pane 并行 | 重复通知、必要权限与返工混为一类，或用户回复后 cooldown 吞掉下一轮 | 8/4/7 → **224** | transition/cooldown/显式 signal 共用测试；phase 和 evidence 分层 | **MITIGATED / PARTIAL**：双 tab 同批完成与只回复一 tab 的 cooldown 隔离已验证；关闭通知和真实多 channel fanout 仍待做 |
 
 ## 分阶段验收与提交
 
@@ -44,3 +44,4 @@
 | Phase B | F4 扫描错误 last-good/恢复故障注入 | `go test . -run '^TestFilesSearch_FailedRefreshPreservesLastGoodAndRecovers$' -count=1` | `c1b7f2d` |
 | Phase C | F7 人工 outcome 持久化闭环 | `go test . -run '^TestHumanOutcomeRoundTripRequiresCompletedWorkAndIsIdempotent$' -count=1` | `8a9ad32` |
 | Phase C2 | F6 Codex custom default、旧 rollout 与混合 endpoint | `go test . -run '^TestReconcileCodexAttribution' -count=1` | `68929de` |
+| Phase E | F10 双 tab 并行完成与独立 cooldown | `go test . -run '^TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent$' -count=1` | `e422749` |
