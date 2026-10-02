@@ -19,7 +19,7 @@
 | F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：策略单测与全仓 Go 测试通过；真实权限故障注入仍待做 |
 | F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume/retry 用例 | **MITIGATED / P2 residual**：定向分块套件覆盖续传与重复 complete；跨进程持续并发压测仍待补 |
 | F11 | 分块上传 complete 成功但响应丢失，客户端按“合并失败”重试 | 相同文件落成原文件 + hash 副本；并发完成可能覆盖同名不同内容 | 7/5/6 → **210** | content hash + requested-name dedupe；same-dir atomic no-replace hard link；重复完成回归 | **MITIGATED**：响应丢失重试返回同一 relPath，且不同内容用独立名 |
-| F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 与混合 endpoint 回归用例 | **MITIGATED**：旧 rollout + custom default 会清除 OpenAI claim；已知/未知并发不声称唯一付款方；配置热切换压力测试仍待做 |
+| F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 与混合 endpoint 回归用例 | **MITIGATED**：旧 rollout + custom default 会清除 OpenAI claim；已知/未知并发不声称唯一付款方；原子替换配置后 100 次交替切换均重新判定，race 回归通过 |
 | F7 | 看 Agent 报表；筛选、翻页、提交“有用/需返工”、刷新 | 完成被当验收，反馈未持久化或缓存仍显示旧汇总 | 7/5/6 → **210** | OutcomeEvidence 有来源/oracle/time/ref/confidence；幂等 JSONL；报告只失效依赖 outcome 的缓存；前端模板/保存/分页刷新契约回归 | **MITIGATED / UI E2E OPEN**：reporter 与 detail API 已验证 completed guard、权限、幂等、多页 cursor 回读、汇总/证据一致；源码契约验证入口门槛、重复提交禁用、保存证据与刷新/错误提示；真实浏览器点击路径仍待验 |
 | F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 与跨 Origin 多轮 API 测试；本机没有可控浏览器 surface | **PARTIAL / P1 by severity gate**：preflight→旧 token→rotate→旧 token 拒绝→新 token 成功已通过；真实远端 browser reconnect 保持 OPEN |
 | F9 | daemon socket 初始化、升级后旧 daemon 占用、短时文件路径 | AF_UNIX 路径过长返回含糊错误；普通文件被误当活 socket 拒绝恢复 | 7/4/6 → **168** | 测试 fixture 使用短私有 socket；ENOTSOCK 归为无 listener；Darwin peer PID 回归；按 OS sun_path 限制 bind 前校验 | **MITIGATED**：Darwin/Linux 长路径诊断、ENOTSOCK 回收和 peer PID 测试通过 |
@@ -55,6 +55,7 @@
 | Phase E2 | F10 最后渠道关闭后立即重开，确认旧 poller 落盘并退出后才可启动新 poller | `go test . -run '^(TestNotifierRestartWaitsForPreviousPollerToPersist|TestEnsureNotifierWithoutTmux|TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent)$' -count=1 -timeout=2m`；新生命周期回归另经 `-race` 单测 | `1765237` |
 | Phase C4 | F7 前端 outcome 反馈入口、持久化调用、证据显示及分页刷新接线 | `cd frontend && bun test src/components/report/__tests__/agentOutcomeFeedback.test.ts src/components/report/__tests__/templateBindings.test.ts && bun run type-check` | `582b9d8` |
 | Phase E3 | F10 多个启用渠道并发 fan-out；单渠道 panic 不阻断其它渠道 | `go test ./notify -run '^(TestCoordinatorFanoutSkipsDisabled|TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic)$' -count=5 -race -timeout=2m` | `dc14ef6` |
+| Phase C5 | F6 Codex provider default 热切换，旧 rollout 每次按最新配置归属 | `go test . -run '^TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches$' -count=10 -race -timeout=2m` | pending |
 
 ### 本轮最终验收快照
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -82,6 +83,37 @@ func TestReconcileCodexAttributionClearsStaleOpenAIClaimForCustomDefault(t *test
 	got := reconcileCodexAttribution(quotas, nil)
 	require.Nil(t, got[0].Attribution, "an old provider-less rollout cannot inherit OpenAI attribution after the default changed")
 	require.True(t, got[1].Attribution.Active, "Codex reconciliation must not rewrite other runtimes")
+}
+
+func TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches(t *testing.T) {
+	home := t.TempDir()
+	configureCodexAttributionTest(t, home, "custom-relay")
+	writeCodexProviderRollout(t, home, "legacy", "") // no provider in this older rollout
+
+	for i := 0; i < 100; i++ {
+		provider, wantAttribution := "custom-relay", false
+		if i%2 == 0 {
+			provider, wantAttribution = "openai", true
+		}
+		configPath := filepath.Join(home, "config.toml")
+		tmpPath := filepath.Join(home, "config-next-"+strconv.Itoa(i)+".toml")
+		config := "model_provider = \"" + provider + "\"\n"
+		require.NoError(t, os.WriteFile(tmpPath, []byte(config), 0o600))
+		// Codex writes its active config atomically. The reader must pick up the new default
+		// every time rather than cache a previous attribution decision for the old rollout.
+		require.NoError(t, os.Rename(tmpPath, configPath))
+
+		quotas := []usage.QuotaInfo{{
+			Runtime: "codex", Vendor: usage.VendorOpenAI,
+			Attribution: &usage.Attribution{Active: true, Vendor: usage.VendorOpenAI, Display: "OpenAI"},
+		}}
+		got := reconcileCodexAttribution(quotas, nil)
+		if wantAttribution {
+			require.NotNil(t, got[0].Attribution, "iteration %d: built-in OpenAI default should retain its declaration", i)
+		} else {
+			require.Nil(t, got[0].Attribution, "iteration %d: custom default must clear the stale OpenAI claim", i)
+		}
+	}
 }
 
 func TestReconcileCodexAttributionMarksConcurrentKnownAndUnknownProviders(t *testing.T) {
