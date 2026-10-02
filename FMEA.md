@@ -52,9 +52,19 @@
 | Phase A3 | F1 最后 source 注销后 quota query 不 panic | `go test . -run '^(TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose|TestHandleUsageQuota)$' -count=1` | `a67b56c` |
 | Phase A4 | F9 超长 AF_UNIX 路径 bind 前诊断 | `go test ./muxd -run '^(TestListenRejectsOverlongSocketPathWithActionableError|TestProtoListenReclaimsStaleSocket)$' -count=1` | `c1b3afb` |
 | Phase F | F8 跨 Origin 鉴权旋转序列 | `go test . -run '^TestRemoteAuthJourney_RotateRevokesTheOldCode$' -count=1` | `2847cd9` |
-| Phase E2 | F10 最后渠道关闭后立即重开，确认旧 poller 落盘并退出后才可启动新 poller | `go test . -run '^(TestNotifierRestartWaitsForPreviousPollerToPersist|TestEnsureNotifierWithoutTmux|TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent)$' -count=1 -timeout=2m`；新生命周期回归另经 `-race` 单测 | pending |
-| Phase C4 | F7 前端 outcome 反馈入口、持久化调用、证据显示及分页刷新接线 | `cd frontend && bun test src/components/report/__tests__/agentOutcomeFeedback.test.ts src/components/report/__tests__/templateBindings.test.ts && bun run type-check` | pending |
-| Phase E3 | F10 多个启用渠道并发 fan-out；单渠道 panic 不阻断其它渠道 | `go test ./notify -run '^(TestCoordinatorFanoutSkipsDisabled|TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic)$' -count=5 -race -timeout=2m` | pending |
+| Phase E2 | F10 最后渠道关闭后立即重开，确认旧 poller 落盘并退出后才可启动新 poller | `go test . -run '^(TestNotifierRestartWaitsForPreviousPollerToPersist|TestEnsureNotifierWithoutTmux|TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent)$' -count=1 -timeout=2m`；新生命周期回归另经 `-race` 单测 | `1765237` |
+| Phase C4 | F7 前端 outcome 反馈入口、持久化调用、证据显示及分页刷新接线 | `cd frontend && bun test src/components/report/__tests__/agentOutcomeFeedback.test.ts src/components/report/__tests__/templateBindings.test.ts && bun run type-check` | `582b9d8` |
+| Phase E3 | F10 多个启用渠道并发 fan-out；单渠道 panic 不阻断其它渠道 | `go test ./notify -run '^(TestCoordinatorFanoutSkipsDisabled|TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic)$' -count=5 -race -timeout=2m` | `dc14ef6` |
+
+### 本轮最终验收快照
+
+- 代码基线：`dc14ef6`（最终验收前代码工作区干净）。
+- `go test ./... -count=1 -timeout=3m`：PASS（63.5s）。
+- `cd frontend && bun test`：PASS（741 tests / 80 files）；`bun run type-check`：PASS。
+- `cd frontend && VITE_PORTALS=cli,settings bun run build`：PASS；Vite 提示若干既有 chunk 超过 500 kB。
+- `go build ./...`、`GOWORK=off go build ./...`、`go vet ./...`、`GOOS=linux GOARCH=amd64 go build ./...`、`git diff --check`：PASS。
+- F2 在本机执行了 profile 回归；Darwin 不暴露子进程 profile 环境时按代码安全回退，真实 Claude 私有 profile 所有权仍为平台限制。
+- F7 前端按钮真实点击路径、F8 真实远端浏览器重连、F10 外部渠道实际送达仍 OPEN：当前 CUA 没有浏览器 tab，browser MCP transport closed，也没有外部 provider 凭证/接收端。对应 API、模板契约、coordinator fan-out 的自动化测试不能替代这些体验验收。
 
 ### 全量验收快照
 
