@@ -22,7 +22,7 @@
 | F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 与混合 endpoint 回归用例 | **MITIGATED**：旧 rollout + custom default 会清除 OpenAI claim；已知/未知并发不声称唯一付款方；配置热切换压力测试仍待做 |
 | F7 | 看 Agent 报表；筛选、翻页、提交“有用/需返工”、刷新 | 完成被当验收，反馈未持久化或缓存仍显示旧汇总 | 7/5/6 → **210** | OutcomeEvidence 有来源/oracle/time/ref/confidence；幂等 JSONL；报告只失效依赖 outcome 的缓存 | **MITIGATED / UI E2E OPEN**：reporter 与 detail API 已验证 completed guard、权限、幂等、多页 cursor 回读、汇总/证据一致；真实浏览器点击路径仍待验 |
 | F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 与跨 Origin 多轮 API 测试；本机没有可控浏览器 surface | **PARTIAL / P1 by severity gate**：preflight→旧 token→rotate→旧 token 拒绝→新 token 成功已通过；真实远端 browser reconnect 保持 OPEN |
-| F9 | daemon socket 初始化、升级后旧 daemon 占用、短时文件路径 | AF_UNIX 路径过长返回含糊错误；普通文件被误当活 socket 拒绝恢复 | 7/4/6 → **168** | 测试 fixture 使用短私有 socket；ENOTSOCK 归为无 listener；Darwin peer PID 回归 | **MITIGATED**：Darwin socket/PID 与 CLI 测试通过；生产用户自定义超长 socket 路径诊断仍待补 |
+| F9 | daemon socket 初始化、升级后旧 daemon 占用、短时文件路径 | AF_UNIX 路径过长返回含糊错误；普通文件被误当活 socket 拒绝恢复 | 7/4/6 → **168** | 测试 fixture 使用短私有 socket；ENOTSOCK 归为无 listener；Darwin peer PID 回归；按 OS sun_path 限制 bind 前校验 | **MITIGATED**：Darwin/Linux 长路径诊断、ENOTSOCK 回收和 peer PID 测试通过 |
 | F10 | 通知等待→通知→用户回复→下一轮完成；多个 pane 并行 | 重复通知、必要权限与返工混为一类，或用户回复后 cooldown 吞掉下一轮 | 8/4/7 → **224** | transition/cooldown/显式 signal 共用测试；phase 和 evidence 分层 | **MITIGATED / PARTIAL**：双 tab 同批完成与只回复一 tab 的 cooldown 隔离已验证；关闭通知和真实多 channel fanout 仍待做 |
 
 ## 分阶段验收与提交
@@ -50,4 +50,5 @@
 | Phase E | F10 双 tab 并行完成与独立 cooldown | `go test . -run '^TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent$' -count=1` | `e422749` |
 | Phase A2 | F1 多 Server credential source 反序关闭 | `go test . -run '^TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose$' -count=1` | `cd3b741` |
 | Phase A3 | F1 最后 source 注销后 quota query 不 panic | `go test . -run '^(TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose|TestHandleUsageQuota)$' -count=1` | `a67b56c` |
+| Phase A4 | F9 超长 AF_UNIX 路径 bind 前诊断 | `go test ./muxd -run '^(TestListenRejectsOverlongSocketPathWithActionableError|TestProtoListenReclaimsStaleSocket)$' -count=1` | `c1b3afb` |
 | Phase F | F8 跨 Origin 鉴权旋转序列 | `go test . -run '^TestRemoteAuthJourney_RotateRevokesTheOldCode$' -count=1` | `2847cd9` |
