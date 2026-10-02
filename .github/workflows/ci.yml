@@ -10,6 +10,44 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout terminal source
+        uses: actions/checkout@v4
+        with:
+          path: deepwork-terminal
+
+      # The terminal's @ce aliases resolve to a sibling checkout. Pin the source
+      # revision used by the current frontend contract so CI is reproducible.
+      - name: Checkout shared CE frontend source
+        uses: actions/checkout@v4
+        with:
+          repository: brightman-ai/deepwork
+          ref: 038833a55593ad80f8e9ad738fe6da0260aafd1b
+          path: deepwork
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+
+      - name: Install frontend dependencies
+        working-directory: deepwork-terminal/frontend
+        run: bun install --frozen-lockfile
+
+      - name: Test frontend
+        working-directory: deepwork-terminal/frontend
+        run: bun run test
+
+      - name: Type-check frontend
+        working-directory: deepwork-terminal/frontend
+        run: bun run type-check
+
+      - name: Build frontend
+        working-directory: deepwork-terminal/frontend
+        run: bun run build
+
   build:
     runs-on: ubuntu-latest
     steps:
