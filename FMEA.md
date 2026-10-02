@@ -17,10 +17,10 @@
 | F2 | 建立 Claude 会话；内外层 shell、不同 cwd/profile 来回切换 | Agent 被绑定到错误 transcript，状态/运行目录/通知错误 | 8/4/8 → **256** | Linux 读取进程 environ；Darwin 尝试 KERN_PROCARGS2；环境不可见时禁止 PID 绑定并回退 cwd；嵌套 shell 用例 | **MITIGATED / LIMITATION**：防止 host profile 旧 PID 记录冒认；macOS 不暴露子进程 env 时无法验证私有 profile，保持 unknown |
 | F3 | WebSocket 输入、输出、断线重连、窗口 resize、server restart | 会话被误销毁、重放缺口拼成假屏幕、或重连后输入不再生效 | 10/3/6 → **180** | muxd detach/restore、非连续 replay 清空、restart E2E、真实 PTY TUI 与 peer PID 用例 | **MITIGATED**：restart E2E、muxd 与真实 TUI 相关用例通过 |
 | F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：策略单测与全仓 Go 测试通过；真实权限故障注入仍待做 |
-| F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume 用例 | **MITIGATED**：分块上传套件与全仓 Go 测试通过；重复 complete/abort 顺序仍待补 |
+| F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume 用例 | **MITIGATED / P2 residual**：分块上传套件与全仓 Go 测试通过；重复 complete/abort 顺序仍待补 |
 | F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 回归用例 | **MITIGATED**：配置边界测试、构建与全仓 Go 测试通过；热切换并发仍待压力验证 |
 | F7 | 看 Agent 报表；筛选、翻页、提交“有用/需返工”、刷新 | 完成被当验收，反馈未持久化或缓存仍显示旧汇总 | 7/5/6 → **210** | OutcomeEvidence 有来源/oracle/time/ref/confidence；幂等 JSONL；报告只失效依赖 outcome 的缓存 | **PARTIAL**：缓存/文案有回归；API 多页反馈到 UI 汇总的端到端证据仍待补 |
-| F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 测试；E2E 只测本机入口 | **OPEN**：远端 browser journey 验 rotate 后重连及多 Origin 失败文案 |
+| F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 测试；E2E 只测本机入口 | **OPEN / P1 by severity gate**：远端 browser journey 验 rotate 后重连及多 Origin 失败文案 |
 | F9 | daemon socket 初始化、升级后旧 daemon 占用、短时文件路径 | AF_UNIX 路径过长返回含糊错误；普通文件被误当活 socket 拒绝恢复 | 7/4/6 → **168** | 测试 fixture 使用短私有 socket；ENOTSOCK 归为无 listener；Darwin peer PID 回归 | **MITIGATED**：Darwin socket/PID 与 CLI 测试通过；生产用户自定义超长 socket 路径诊断仍待补 |
 | F10 | 通知等待→通知→用户回复→下一轮完成；多个 pane 并行 | 重复通知、必要权限与返工混为一类，或用户回复后 cooldown 吞掉下一轮 | 8/4/7 → **224** | transition/cooldown/显式 signal 共用测试；phase 和 evidence 分层 | **PARTIAL**：单 pane transition/cooldown 用例通过；多 pane 并行完成/关闭通知循环仍待做 |
 
@@ -41,3 +41,4 @@
 |---|---|---|---|
 | Baseline | 主旅程与 S/O/D 风险排序 | 代码/README/现有测试审阅；评分均标为工程估计 | `65488e3` |
 | Phase A | F1–F7、F9 高风险处理与平台稳定性 | `go test ./... -count=1`、Go builds、`go vet ./...`、前端 type-check/build、search poll 单测、共享前端契约 | `e12ecb6` |
+| Phase B | F4 扫描错误 last-good/恢复故障注入 | `go test . -run '^TestFilesSearch_FailedRefreshPreservesLastGoodAndRecovers$' -count=1` | `c1b7f2d` |
