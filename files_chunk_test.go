@@ -187,6 +187,81 @@ func TestChunkUploadCompleteRetryAfterLostResponseReusesSameFile(t *testing.T) {
 	require.Equal(t, payload, got)
 }
 
+func TestChunkUploadConcurrentServersKeepSameNameDifferentContents(t *testing.T) {
+	serverA, smA, _ := newDrawerTestServer(t)
+	serverB, smB, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	_, err := smA.CreateWithOptions(CreateOptions{Name: "chunk-collision-a", CWD: cwd})
+	require.NoError(t, err)
+	_, err = smB.CreateWithOptions(CreateOptions{Name: "chunk-collision-b", CWD: cwd})
+	require.NoError(t, err)
+	sessionA := sessionByName(t, smA, "chunk-collision-a").ID
+	sessionB := sessionByName(t, smB, "chunk-collision-b").ID
+
+	payloadA := makeChunkPayload(4096)
+	payloadB := append([]byte(nil), payloadA...)
+	for i := range payloadB {
+		payloadB[i] ^= 0xff
+	}
+	initA := chunkInit(t, serverA, sessionA, cwd, "", "shared.bin", len(payloadA))
+	initB := chunkInit(t, serverB, sessionB, cwd, "", "shared.bin", len(payloadB))
+	require.Equal(t, initA.UploadID, initB.UploadID, "server-local staging should allow independent same-shaped uploads")
+	sendAllChunks(t, serverA, initA, payloadA)
+	sendAllChunks(t, serverB, initB, payloadB)
+
+	type completed struct {
+		filename string
+		path     string
+		status   int
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan completed, 2)
+	complete := func(server *httptest.Server, session string, upload chunkInitResp) {
+		<-start
+		resp, err := httpPostForm(formatURL(server, "/files/upload/complete"), url.Values{
+			"uploadId": {upload.UploadID}, "session": {session},
+		}, "")
+		if err != nil {
+			results <- completed{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		result := completed{status: resp.StatusCode}
+		if resp.StatusCode == http.StatusOK {
+			var body struct {
+				Filename string `json:"filename"`
+				Path     string `json:"path"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				result.err = err
+			} else {
+				result.filename, result.path = body.Filename, body.Path
+			}
+		}
+		results <- result
+	}
+	go complete(serverA, sessionA, initA)
+	go complete(serverB, sessionB, initB)
+	close(start)
+	a, b := <-results, <-results
+	require.NoError(t, a.err)
+	require.NoError(t, b.err)
+	require.Equal(t, http.StatusOK, a.status)
+	require.Equal(t, http.StatusOK, b.status)
+	require.NotEqual(t, a.path, b.path, "different contents must never share or overwrite a target")
+
+	gotA, err := os.ReadFile(a.path)
+	require.NoError(t, err)
+	gotB, err := os.ReadFile(b.path)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(payloadA, gotA) && bytes.Equal(payloadB, gotB) ||
+		bytes.Equal(payloadA, gotB) && bytes.Equal(payloadB, gotA), "both files must retain one complete source payload")
+	entries, err := os.ReadDir(cwd)
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "same-name collision must produce exactly two stable files")
+}
+
 // TC-CHK-02: a partial upload resumes — re-init reports the chunks already on disk, status
 // agrees, completing early 409s with the missing set, and finishing the gap succeeds.
 func TestChunkUploadResume(t *testing.T) {
