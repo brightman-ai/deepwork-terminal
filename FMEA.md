@@ -17,7 +17,7 @@
 | F2 | 建立 Claude 会话；内外层 shell、不同 cwd/profile 来回切换 | Agent 被绑定到错误 transcript，状态/运行目录/通知错误 | 8/4/8 → **256** | Linux 读取进程 environ；Darwin 尝试 KERN_PROCARGS2；环境不可见时禁止 PID 绑定并回退 cwd；嵌套 shell 用例 | **MITIGATED / LIMITATION**：防止 host profile 旧 PID 记录冒认；macOS 不暴露子进程 env 时无法验证私有 profile，保持 unknown |
 | F3 | WebSocket 输入、输出、断线重连、窗口 resize、server restart | 会话被误销毁、重放缺口拼成假屏幕、或重连后输入不再生效 | 10/3/6 → **180** | muxd detach/restore、非连续 replay 清空、restart E2E、真实 PTY TUI 与 peer PID 用例 | **MITIGATED**：restart E2E、muxd 与真实 TUI 相关用例通过 |
 | F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：chmod 000 注入拒绝读取，last-good 保留、错误可见、恢复后新结果出现；该回归在 race 下连续 3 次通过 |
-| F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume/retry 用例；双 Server 同目录并发完成回归 | **MITIGATED / P2 residual**：两个独立 Server 实例并行上传同名不同内容后两份文件均完整；跨进程持续并发压力仍待补（本回归共享进程锁） |
+| F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume/retry 用例；跨进程无共享锁的同名并发完成回归 | **MITIGATED / P2 residual**：两个 Server 实例和两个独立进程同时上传同名不同内容后两份文件均完整；跨进程高并发长时间压力仍待补 |
 | F11 | 分块上传 complete 成功但响应丢失，客户端按“合并失败”重试 | 相同文件落成原文件 + hash 副本；并发完成可能覆盖同名不同内容 | 7/5/6 → **210** | content hash + requested-name dedupe；same-dir atomic no-replace hard link；重复完成回归 | **MITIGATED**：响应丢失重试返回同一 relPath，且不同内容用独立名 |
 | F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 与混合 endpoint 回归用例 | **MITIGATED**：旧 rollout + custom default 会清除 OpenAI claim；已知/未知并发不声称唯一付款方；原子替换配置后 100 次交替切换均重新判定，race 回归通过 |
 | F7 | 看 Agent 报表；筛选、翻页、提交“有用/需返工”、刷新 | 完成被当验收，反馈未持久化或缓存仍显示旧汇总 | 7/5/6 → **210** | OutcomeEvidence 有来源/oracle/time/ref/confidence；幂等 JSONL；报告只失效依赖 outcome 的缓存；前端模板/保存/分页刷新契约回归 | **MITIGATED / UI E2E OPEN**：reporter 与 detail API 已验证 completed guard、权限、幂等、多页 cursor 回读、汇总/证据一致；源码契约验证入口门槛、重复提交禁用、保存证据与刷新/错误提示；真实浏览器点击路径仍待验 |
@@ -57,6 +57,7 @@
 | Phase E3 | F10 多个启用渠道并发 fan-out；单渠道 panic 不阻断其它渠道 | `go test ./notify -run '^(TestCoordinatorFanoutSkipsDisabled|TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic)$' -count=5 -race -timeout=2m` | `dc14ef6` |
 | Phase C5 | F6 Codex provider default 热切换，旧 rollout 每次按最新配置归属 | `go test . -run '^TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches$' -count=10 -race -timeout=2m` | `e4b2ac4` |
 | Phase B3 | F5 两个 Server 实例并发完成同目录同名、不同内容的分块上传 | `go test . -run '^TestChunkUploadConcurrentServersKeepSameNameDifferentContents$' -count=5 -race -timeout=2m` | `3425e55` |
+| Phase B4 | F5 独立进程并发完成同目录同名、不同内容上传，验证无共享锁时不覆盖 | `go test . -run '^TestChunkUploadCompleteConcurrentAcrossProcessesDoesNotOverwrite$' -count=3 -race -timeout=2m` | pending |
 
 ### 本轮最终验收快照
 
