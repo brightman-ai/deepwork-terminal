@@ -13,7 +13,7 @@
 
 | ID | 主旅程 / 多轮交互 | 失效模式及影响 | S/O/D → RPN | 当前控制 / 证据 | 优先动作 |
 |---|---|---|---:|---|---|
-| F1 | 发现并连接终端；多 Server 启停、监听失败后重试 | 多实例切换时 quota credential source 残留，或测试启动触达真实用户凭证并发起请求 | 9/3/8 → **216** | source 有 owner 栈并在 Close/listen 失败注销；默认 go test 且未设隔离 home 时 warmer 不注册；反序注销回归用例 | **MITIGATED**：旧实例先关闭、新实例仍持有 source；最后实例关闭恢复前一 source；全仓测试通过 |
+| F1 | 发现并连接终端；多 Server 启停、监听失败后重试 | 多实例切换时 quota credential source 残留，测试触达真实凭证，或 last-close 留下 typed-nil source 导致查询 panic | 9/3/8 → **216** | source owner 栈、Close/listen 失败注销、测试 home guard、nil-safe kit interface、反序注销后立即查额度回归 | **MITIGATED**：旧实例先关闭、新实例仍持有 source；最后实例关闭清空无 typed-nil；隔离测试与真实 quota query 契约通过 |
 | F2 | 建立 Claude 会话；内外层 shell、不同 cwd/profile 来回切换 | Agent 被绑定到错误 transcript，状态/运行目录/通知错误 | 8/4/8 → **256** | Linux 读取进程 environ；Darwin 尝试 KERN_PROCARGS2；环境不可见时禁止 PID 绑定并回退 cwd；嵌套 shell 用例 | **MITIGATED / LIMITATION**：防止 host profile 旧 PID 记录冒认；macOS 不暴露子进程 env 时无法验证私有 profile，保持 unknown |
 | F3 | WebSocket 输入、输出、断线重连、窗口 resize、server restart | 会话被误销毁、重放缺口拼成假屏幕、或重连后输入不再生效 | 10/3/6 → **180** | muxd detach/restore、非连续 replay 清空、restart E2E、真实 PTY TUI 与 peer PID 用例 | **MITIGATED**：restart E2E、muxd 与真实 TUI 相关用例通过 |
 | F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：策略单测与全仓 Go 测试通过；真实权限故障注入仍待做 |
@@ -49,4 +49,5 @@
 | Phase C3 | F7 outcome API 跨页反馈与汇总回读 | `go test . -run '^TestAgentOutcomeHTTPRoundTripKeepsPagedDetailAndSummaryConsistent$' -count=1` | `46ea018` |
 | Phase E | F10 双 tab 并行完成与独立 cooldown | `go test . -run '^TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent$' -count=1` | `e422749` |
 | Phase A2 | F1 多 Server credential source 反序关闭 | `go test . -run '^TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose$' -count=1` | `cd3b741` |
+| Phase A3 | F1 最后 source 注销后 quota query 不 panic | `go test . -run '^(TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose|TestHandleUsageQuota)$' -count=1` | `a67b56c` |
 | Phase F | F8 跨 Origin 鉴权旋转序列 | `go test . -run '^TestRemoteAuthJourney_RotateRevokesTheOldCode$' -count=1` | `2847cd9` |
