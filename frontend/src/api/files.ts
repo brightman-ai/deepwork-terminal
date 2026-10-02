@@ -69,6 +69,11 @@ export interface SearchResult {
   incomplete?: boolean
   nextOffset?: number
   totalMatches?: number
+  indexState?: 'building' | 'ready' | 'error'
+  scanned?: number
+  generation?: number
+  reset?: boolean
+  scanError?: string
   error?: string
 }
 
@@ -129,7 +134,7 @@ export async function filesRecent(sessionId: string, cwd?: string): Promise<Rece
 }
 
 /** GET /files/tree — one directory level under the session cwd (dirs first). */
-export async function filesTree(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal): Promise<TreeResponse | null> {
+export async function filesTree(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal, refresh = false): Promise<TreeResponse | null> {
   if (!sessionId) return null
   const { cliFetch } = useCliAuth()
   const controller = new AbortController()
@@ -140,6 +145,7 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
   try {
     let path = withScope('/files/tree', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
+    if (refresh) path += '&refresh=1'
     const resp = await cliFetch(cliApi(path), { signal: controller.signal })
     if (!resp.ok) return null
     return await resp.json() as TreeResponse
@@ -157,7 +163,7 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
  * query or any error so the caller can render an empty list without special-casing.
  */
 export async function filesSearch(sessionId: string, cwd: string | undefined, q: string,
-  options: { path?: string; offset?: number; signal?: AbortSignal } = {}): Promise<SearchResult> {
+  options: { path?: string; offset?: number; generation?: number; signal?: AbortSignal } = {}): Promise<SearchResult> {
   if (!sessionId || !q.trim()) return { entries: [], truncated: false }
   const { cliFetch } = useCliAuth()
   const controller = new AbortController()
@@ -168,7 +174,7 @@ export async function filesSearch(sessionId: string, cwd: string | undefined, q:
   const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 10000)
   try {
     let path = withScope('/files/search', sessionId, cwd)
-    path += `&q=${encodeURIComponent(q)}&path=${encodeURIComponent(options.path || '')}&offset=${options.offset || 0}`
+    path += `&q=${encodeURIComponent(q)}&path=${encodeURIComponent(options.path || '')}&offset=${options.offset || 0}&generation=${options.generation || 0}`
     const resp = await cliFetch(cliApi(path), { signal: controller.signal })
     if (!resp.ok) return { entries: [], truncated: false, error: `搜索失败（HTTP ${resp.status}），请重试` }
     return await resp.json() as SearchResult

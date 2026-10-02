@@ -107,6 +107,8 @@ let renderSyncOn = true
 let searchResultsSub: { dispose(): void } | null = null
 let resizeObserver: ResizeObserver | null = null
 let resizeDebounce: ReturnType<typeof setTimeout> | null = null
+let revealTimer: ReturnType<typeof setTimeout> | null = null
+let revealRevision = 0
 let renderSyncRaf = 0
 let renderSyncTrailing: ReturnType<typeof setTimeout> | null = null
 let renderSyncBurstReset: ReturnType<typeof setTimeout> | null = null
@@ -699,6 +701,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  revealRevision++
+  if (revealTimer) clearTimeout(revealTimer)
   xtermKeydownFallback.dispose()
   for (const cleanup of diagnosticCleanups.splice(0)) cleanup()
   searchResultsSub?.dispose()
@@ -845,14 +849,24 @@ function clearSearch(): void {
 }
 
 watch(() => props.active, (active) => {
-  if (active) {
-    // 先接回 GPU 上下文（新 context = 新图集，隐藏期间被系统回收的纹理不可能残留到你眼前），
-    // 再 fit。顺序有意义：fit 会触发重绘，要重绘在新渲染器上发生。
-    reacquireWebglRenderer()
-    void nextTick(() => setTimeout(() => fit(), 50))
-  } else {
-    releaseWebglWhileHidden()
-  }
+  const revision = ++revealRevision
+  if (revealTimer) { clearTimeout(revealTimer); revealTimer = null }
+  if (!active) { releaseWebglWhileHidden(); return }
+  // Let v-show restore layout before acquiring a renderer or measuring. Crucially,
+  // repaint even in serverSized mode, where fit intentionally does not resize.
+  void nextTick(() => {
+    revealTimer = setTimeout(() => {
+      revealTimer = null
+      if (revision !== revealRevision || !props.active) return
+      fit()
+      reacquireWebglRenderer()
+      const target = terminal
+      if (!target || !canMeasureTerminal(terminalContainer.value)) return
+      target.write('', () => {
+        if (terminal === target && revision === revealRevision && props.active) refreshVisibleRows()
+      })
+    }, 50)
+  })
 })
 
 defineExpose({

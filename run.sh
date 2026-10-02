@@ -88,4 +88,7 @@ echo "Addr: $ADDR"
 if [ -n "$AUTH_CODE" ]; then
     echo "Auth Code: $AUTH_CODE"
 fi
+# The service launches interactive terminals: do not inherit an automation runner's
+# no-colour setting. An explicit terminal env overlay can still opt into NO_COLOR.
+unset NO_COLOR
 exec "${CMD[@]}"

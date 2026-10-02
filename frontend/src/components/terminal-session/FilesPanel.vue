@@ -151,6 +151,10 @@ interface FileLocation {
   searchError: string
   truncated: boolean
   searchPending: boolean
+  indexState: 'building' | 'ready' | 'error' | ''
+  scanned: number
+  generation: number
+  scanError: string
   category: string
   sort: 'rank' | 'time' | 'name'
   scroll: number
@@ -170,6 +174,7 @@ function rememberLocation(): FileLocation {
     root: treeRootRel.value, query: treeQuery.value, results: searchResults.value,
     nextOffset: searchNextOffset.value, total: searchTotal.value, searchError: searchError.value,
     truncated: searchTruncated.value, searchPending: searching.value,
+    indexState: searchIndexState.value, scanned: searchScanned.value, generation: searchGeneration.value, scanError: searchScanError.value,
     category: activeSearchCat.value, sort: searchSortMode.value,
     scroll: (treeQuery.value.trim() ? searchScrollEl.value : treeScrollEl.value)?.scrollTop || 0,
     expandedPaths: [...expandedSearchPaths.value], nodes: roots.value, treePending: treeLoading.value,
@@ -236,6 +241,10 @@ async function goBack(): Promise<void> {
     searchTotal.value = prev.total
     searchError.value = prev.searchError
     searchTruncated.value = prev.truncated
+    searchIndexState.value = prev.indexState
+    searchScanned.value = prev.scanned
+    searchGeneration.value = prev.generation
+    searchScanError.value = prev.scanError
     activeSearchCat.value = prev.category
     searchSortMode.value = prev.sort
     expandedSearchPaths.value = new Set(prev.expandedPaths)
@@ -246,7 +255,7 @@ async function goBack(): Promise<void> {
   const target = prev.query.trim() ? searchScrollEl.value : treeScrollEl.value
   if (target) { target.scrollTop = prev.scroll; target.focus({ preventScroll: true }) }
   treeContainer.onScroll()
-  if (prev.query.trim() && prev.searchPending && !prev.results.length) void runSearch(prev.query.trim())
+  if (prev.query.trim()) void runSearch(prev.query.trim(), 0, true)
   else if (!prev.query.trim() && prev.treePending) void loadView()
 }
 
@@ -299,7 +308,7 @@ async function loadView(): Promise<void> {
   treeLoading.value = true
   viewError.value = ''
   try {
-    const resp = await filesTree(props.sessionId, rel, props.cwd, viewRequest.signal)
+    const resp = await filesTree(props.sessionId, rel, treeCwd.value || props.cwd, viewRequest.signal)
     if (seq !== viewSeq) return
     if (resp) {
       anchorError.value = false
@@ -325,7 +334,7 @@ async function loadView(): Promise<void> {
 // refreshDir：重拉某目录一层（null=当前视图根），reconcile 保留展开态。上传/建/删/改名后调用。
 async function refreshDir(node: TreeNode | null): Promise<void> {
   const rel = node ? node.rel : treeRootRel.value
-  const resp = await filesTree(props.sessionId, rel, props.cwd)
+  const resp = await filesTree(props.sessionId, rel, treeCwd.value || props.cwd, undefined, true)
   if (!resp) return
   if (!node) {
     if (!treeRootRel.value) treeCwd.value = resp.cwd
@@ -341,7 +350,7 @@ async function ensureChildren(node: TreeNode): Promise<void> {
   node.loading = true
   bumpTree() // spinner 出现
   try {
-    const resp = await filesTree(props.sessionId, node.rel, props.cwd)
+    const resp = await filesTree(props.sessionId, node.rel, treeCwd.value || props.cwd)
     node.children = resp ? reconcile(null, resp.entries, node.rel, node.depth + 1) : []
   } finally {
     node.loading = false
@@ -785,7 +794,11 @@ const searchResults = ref<SearchEntry[]>([])
 const searchNextOffset = ref(0)
 const searchTotal = ref(0)
 const searchError = ref('')
-const searchTruncated = ref(false) // server hit a cap → results incomplete (huge cwd)
+const searchTruncated = ref(false)
+const searchIndexState = ref<'building' | 'ready' | 'error' | ''>('')
+const searchScanned = ref(0)
+const searchGeneration = ref(0)
+const searchScanError = ref('')
 const searching = ref(false)
 // ── 搜索结果的类别快筛（REQ-fp-search-filter，2026-09-11）──
 // 搜索"v7"返回一大堆相近名文件时，纯列表没有第二次收窄的抓手（用户原话："缺乏好的 UI
@@ -830,32 +843,48 @@ watch(searchCats, (cats) => {
 })
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
+let searchPoll: ReturnType<typeof setTimeout> | null = null
 let searchSeq = 0
 let searchRequest: AbortController | null = null
 
 function cancelSearch(): void {
+  if (searchPoll) { clearTimeout(searchPoll); searchPoll = null }
   searchSeq++
   searchRequest?.abort()
   if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
 }
-async function runSearch(q: string, offset = 0): Promise<void> {
+async function runSearch(q: string, offset = 0, polling = false): Promise<void> {
+  if (searchPoll) { clearTimeout(searchPoll); searchPoll = null }
   searchRequest?.abort()
   const request = new AbortController()
   searchRequest = request
   const seq = ++searchSeq
-  searching.value = true
+  if (!polling) searching.value = true
   searchError.value = ''
   try {
-    const res = await filesSearch(props.sessionId, props.cwd, q, {
-      path: treeRootRel.value, offset, signal: request.signal,
+    const res = await filesSearch(props.sessionId, treeCwd.value || props.cwd, q, {
+      path: treeRootRel.value, offset, generation: searchGeneration.value, signal: request.signal,
     })
     if (seq === searchSeq) {
       searchError.value = res.error || ''
       if (res.error) return
-      searchResults.value = mergeSearchEntries(offset ? searchResults.value : [], res.entries)
+      const sameGeneration = res.generation === searchGeneration.value
+      if (!polling || !sameGeneration) {
+        searchResults.value = mergeSearchEntries(offset && !res.reset ? searchResults.value : [], res.entries)
+        searchNextOffset.value = res.nextOffset || 0
+      }
+      searchGeneration.value = res.generation || 0
+      searchIndexState.value = res.indexState || ''
+      searchScanned.value = res.scanned || 0
+      searchScanError.value = res.scanError || ''
       searchTruncated.value = res.incomplete ?? res.truncated
-      searchNextOffset.value = res.nextOffset || 0
       searchTotal.value = res.totalMatches ?? res.entries.length
+      if (props.active && treeQuery.value.trim() === q && res.indexState !== 'error') {
+        searchPoll = setTimeout(() => {
+          searchPoll = null
+          if (props.active && treeQuery.value.trim() === q) void runSearch(q, 0, true)
+        }, res.indexState === 'building' ? 500 : 30000)
+      }
     }
   } catch (error) {
     if (!request.signal.aborted && seq === searchSeq) searchError.value = '搜索失败，请重试'
@@ -873,6 +902,10 @@ watch([treeQuery, treeRootRel], ([q]) => {
   searchNextOffset.value = 0
   searchTotal.value = 0
   searchTruncated.value = false
+  searchIndexState.value = ''
+  searchGeneration.value = 0
+  searchScanError.value = ''
+  searchScanned.value = 0
   searchError.value = ''
   const trimmed = q.trim()
   searching.value = !!trimmed
@@ -1167,9 +1200,14 @@ function activate(): void {
   void loadView().then(() => { if (props.active) void loadRecent() })
   void loadUploadLimit()
 }
-watch(() => [props.sessionId, props.cwd], reanchor)
+watch(() => [props.sessionId, props.cwd], ([session, cwd], [previousSession]) => {
+  // Learning the same directory we already resolved is not a navigation action.
+  // A missing telemetry frame must not erase an in-progress search either.
+  if (session === previousSession && (!cwd || cwd === treeCwd.value)) return
+  reanchor()
+})
 watch(() => props.active, (active) => {
-  if (active) { activate(); if (treeQuery.value.trim() && !searchResults.value.length && !searchError.value) void runSearch(treeQuery.value.trim()) }
+  if (active) { activate(); if (treeQuery.value.trim()) void runSearch(treeQuery.value.trim(), 0, true) }
   else { cancelSearch(); searching.value = false }
 })
 onMounted(activate)
@@ -1431,14 +1469,16 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
       <!-- ── search results — flat directory groups ── -->
       <div v-if="treeQuery.trim()" ref="searchScrollEl" tabindex="-1" class="flex-1 min-h-0 overflow-y-auto p-2 outline-none" data-testid="fp-search-results">
         <div
-          v-if="searchTruncated"
+          v-if="searchTruncated || searchIndexState === 'building' || searchScanError"
           class="mx-2 mb-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400"
           data-testid="fp-search-truncated"
         >
-          当前目录尚未扫描完整；已找到的结果仍可使用。进入目标子目录后搜索可覆盖更深的文件。
+          <template v-if="searchIndexState === 'building'">{{ searchTruncated ? '正在索引' : '正在更新索引' }} · 已发现 {{ searchScanned.toLocaleString() }} 项。结果会自动补齐，可继续输入。</template>
+          <template v-else-if="searchScanError">{{ searchScanError }}；当前结果不完整。</template>
+          <template v-else>当前索引不完整，请刷新重试。</template>
         </div>
         <div class="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
-          <span>搜索当前目录及子目录 · {{ searchResults.length }} / {{ searchTotal }} 项</span>
+          <span>搜索当前目录及子目录 · {{ searchResults.length }} / {{ searchTotal }} 项{{ searchTruncated ? '（已发现）' : '' }}</span>
           <button v-if="searchNextOffset" class="text-primary" :disabled="searching" data-testid="fp-search-more" @click="runSearch(treeQuery.trim(), searchNextOffset)">{{ searching ? '载入中…' : '加载更多' }}</button>
           <button v-if="searchError" class="text-destructive" @click="runSearch(treeQuery.trim())">{{ searchError }}</button>
         </div>
@@ -1467,7 +1507,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
             @click="searchSortMode = key"
           >{{ label }}</button>
         </div>
-        <div v-if="searching && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">搜索中…</div>
+        <div v-if="(searching || searchIndexState === 'building') && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">正在搜索，结果会自动显示…</div>
         <div v-else-if="searchError && !searchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground">无法显示搜索结果，请重试或切换目录</div>
         <div v-else-if="!filteredSearchResults.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">无匹配文件</div>
         <ul v-else class="flex flex-col gap-1">

@@ -451,6 +451,7 @@ import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, type 
 import { ArrowDownToLine, Copy, Search, Square } from 'lucide-vue-next'
 import { Terminal } from '@xterm/xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
+import { createTerminalConnectionGate } from '@terminal/composables/cli/terminalConnectionGate'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.vue'
@@ -1004,9 +1005,13 @@ function findPane(key: string): { win: TmuxWindowState; pane: TmuxPaneState } | 
   }
   return undefined
 }
+const paneCwdMemory = new Map<string, string>()
 function paneCwdFor(key: string): string {
-  if (key === noTmuxPaneKey) return tmux.activeCwd.value
-  return findPane(key)?.pane.cwd ?? ''
+  const live = key === noTmuxPaneKey
+    ? (tmux.activeCwd.value || surfaceEntry.value?.cwd || '')
+    : (findPane(key)?.pane.cwd || '')
+  if (live) paneCwdMemory.set(key, live)
+  return live || paneCwdMemory.get(key) || ''
 }
 function paneToolFor(key: string): AgentTool {
   if (key === noTmuxPaneKey) return tmux.activeTool.value
@@ -1038,6 +1043,7 @@ watch(validPaneKeys, (valid) => {
   paneKnown.value = paneKnown.value.filter(k => valid.has(k))
   for (const k of stale) {
     delete paneOpenMap[k]
+    paneCwdMemory.delete(k)
     delete drawerInstanceRefs[k]
     selectionRangeMap.delete(k)
   }
@@ -1317,7 +1323,10 @@ const {
 // back to the same-origin (local) WS and silently attach this tab to localhost. We show an error
 // banner instead and skip every connect path.
 const remoteUnreachable = computed(() => !!props.isRemote && (!!props.connError || !props.wsBase))
-function connectGuarded() { if (!remoteUnreachable.value) connect() }
+const terminalConnection = createTerminalConnectionGate(() => {
+  if (!remoteUnreachable.value) connect()
+})
+function connectGuarded() { terminalConnection.request() }
 
 function declarePresentation(): void {
   sendControl({ type: 'presentation', payload: {
@@ -1830,6 +1839,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  terminalConnection.dispose()
   if (viewportScrollLockRaf) window.cancelAnimationFrame(viewportScrollLockRaf)
   surfaceDisposed = true
   if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)
@@ -2009,7 +2019,7 @@ function onTerminalReady(terminal: Terminal) {
       }
     }
   )
-  connectGuarded()
+  terminalConnection.receiverAttached()
 }
 
 function onTerminalData(data: Uint8Array) {

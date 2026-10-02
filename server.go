@@ -33,9 +33,11 @@ const standaloneCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval';
 // Standalone: ListenAndServe() runs API + SPA.
 // Embedded: Handler() returns API routes for a host to mount.
 type Server struct {
-	clipboard         *clipboardStore
-	fileSearchMu      sync.Mutex
-	fileSearchIndexes map[string]*fileSearchIndex
+	clipboard          *clipboardStore
+	fileSearchMu       sync.Mutex
+	fileSearchIndexes  map[string]*fileSearchIndex
+	workbenchCWDMu     sync.Mutex
+	workbenchCWDProbes map[int]*workbenchCWDProbe
 
 	mux          *http.ServeMux
 	mgr          *SessionManager
@@ -373,6 +375,7 @@ func (s *Server) Port() int {
 
 // Close shuts down all sessions and stops the background agent notifier.
 func (s *Server) Close() error {
+	s.closeFileSearchIndexes()
 	if s.watchCancel != nil {
 		s.watchCancel()
 	}

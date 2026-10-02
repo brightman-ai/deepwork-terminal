@@ -23,7 +23,8 @@
  */
 import { nextTick, onMounted, onUnmounted, ref, computed, watch } from 'vue'
 import { Gauge } from 'lucide-vue-next'
-import { useUsageQuota, quotaGroupsFor, findTightestQuota, accountKey, accountTightestRemaining, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
+import { findHeadlineQuota } from './usageQuotaGroups'
+import { useUsageQuota, quotaGroupsFor, accountKey, accountTightestRemaining, type QuotaGroup, type RuntimeQuota } from './useUsageQuota'
 import { useUsageReport, type UsageProviderRow } from './useUsageReport'
 import { useAgentReport } from './useAgentReport'
 import AgentReportDetail from './AgentReportDetail.vue'
@@ -306,12 +307,8 @@ const spendingSubscriptions = computed<ReadonlySet<string>>(() => new Set(
 // 归属是更强的信号，且是第一手的：后端能说出「最近一次会话记在谁头上」时，一个**明确没在计费**的
 // 账号就不该替这颗药丸说话——那正是截图里的处境（官方额度早已耗尽，人已改用 Kimi，而 chrome 还在
 // 用官方那条读数当头条）。但「不知道」绝不当「没在用」：claude 压根没有归属这一说，必须留下。
-const headline = computed(() => {
-  const relevant = quotas.value.filter((q) => q.attribution?.active !== false)
-  const pool = relevant.length ? relevant : quotas.value
-  const spending = pool.filter((q) => !!q.vendor && spendingSubscriptions.value.has(q.vendor))
-  return findTightestQuota(spending.length ? spending : pool)
-})
+const headline = computed(() => findHeadlineQuota(quotas.value, spendingSubscriptions.value))
+
 // The tightest overall, kept only to warn about a subscription the headline is not speaking for.
 const overshadowed = computed(() => {
   const h = headline.value
@@ -517,7 +514,12 @@ function accountChip(q: RuntimeQuota): AccountChip | null {
 // 判据是「这一组有话要说吗」——全 0% 的子限额没有。账号池即使 0% 也必须在，因为它是这一行的主语。
 function visibleGroups(q: RuntimeQuota): QuotaGroup[] {
   const groups = quotaGroupsFor(q)
+  if (q.runtime === 'codex' && q.vendor === 'openai' && groups[0]?.family === 'codex') return groups.slice(0, 1)
   return groups.filter((group, i) => i === 0 || (group.windows ?? []).some((w) => w.used_percent > 0))
+}
+function additionalGroups(q: RuntimeQuota): QuotaGroup[] {
+  const groups = quotaGroupsFor(q)
+  return q.runtime === 'codex' && q.vendor === 'openai' && groups[0]?.family === 'codex' ? groups.slice(1) : []
 }
 const familyLabelOf = (group: QuotaGroup) => group.family_label || group.family || ''
 
@@ -929,6 +931,16 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <div v-if="additionalGroups(q).length" class="uchip-extra-limits" :data-testid="`uchip-additional-${accountKey(q)}`">
+              <span class="uchip-dim">附加限额</span>
+              <span v-for="group in additionalGroups(q)" :key="group.family" class="uchip-extra-limit"
+                :title="`官方返回的独立计量限额：${familyLabelOf(group)}。未公开说明时，不推断为可接替主额度的备用余额。${(group.windows || []).map(w => `${kindLabel(w.kind)}重置于 ${fmtReset(w.reset_at)}`).join('；')}`">
+                {{ familyLabelOf(group) }}
+                <span v-for="(w, i) in group.windows" :key="i" :class="{ 'uchip-extra-low': w.remaining_percent < 15 }">{{ kindLabel(w.kind) }} {{ Math.round(w.remaining_percent) }}%</span>
+                <span v-if="group.snapshot?.stale" class="uchip-dim">读数过期</span>
+              </span>
+            </div>
+
             <!-- 厂商自己的消耗单位。百分比回答「还剩多少」，credits 回答「花了多少」——两个不同的
                  问题，所以两行。只有厂商真有这个单位时才出现（Kimi 按窗口百分比计，就没有这一行，
                  硬造一个才是把订阅和 API 计费搅在一起）。 -->
@@ -1304,6 +1316,9 @@ onUnmounted(() => {
 .uchip-credits-prior-k { color: #6f757f; flex-shrink: 0; }
 .uchip-credits-prior-v { color: #9aa0aa; font-variant-numeric: tabular-nums; }
 .uchip-credits-prior-note { color: #6f757f; margin-left: auto; }
+.uchip-extra-limits { display:flex; flex-wrap:wrap; align-items:center; gap:5px; margin:5px 0; font-size:10px; }
+.uchip-extra-limit { display:inline-flex; align-items:center; gap:5px; padding:2px 6px; border-radius:4px; background:#1b1e26; color:#a4abba; cursor:help; }
+.uchip-extra-low { color:#f87171; }
 .uchip-group { padding: 3px 0 4px; }
 .uchip-group + .uchip-group { border-top: 1px dashed #2a2d35; }
 /* 过期读数必须**看起来就是旧的**。此前只降了一点整体不透明度（0.72），主体仍是满格实心绿条 +

@@ -27,15 +27,15 @@ type Session struct {
 	// history must not be able to hold the lock the PTY's read loop takes. See History.
 	history *History
 
-	mu   sync.Mutex
-	pty  *os.File
+	mu  sync.Mutex
+	pty *os.File
 	// lastOutputNano is when the PTY last produced output (Unix nanos, 0 = never).
 	// Atomic so the read loop can stamp it without the session lock — the patrol reads
 	// it to tell an idle prompt from a TUI mid-draw. See patrolSignalKeys.
 	lastOutputNano atomic.Int64
-	cmd  *exec.Cmd
-	ring *RingBuffer
-	meta []byte // opaque; the daemon never looks inside
+	cmd            *exec.Cmd
+	ring           *RingBuffer
+	meta           []byte // opaque; the daemon never looks inside
 	// size is what the PTY is currently running at — the grid its scrollback was written
 	// in, and therefore the grid a replay must be rendered onto.
 	size     Grid
@@ -469,7 +469,7 @@ func (s *Session) signalKeysHealPreconditions() bool {
 
 // termiosLocked reads the tty's termios. Caller holds s.mu.
 func (s *Session) termiosLocked() (*unix.Termios, bool) {
-	term, err := unix.IoctlGetTermios(int(s.pty.Fd()), unix.TCGETS)
+	term, err := unix.IoctlGetTermios(int(s.pty.Fd()), ioctlReadTermios)
 	if err != nil {
 		return nil, false
 	}
@@ -491,7 +491,7 @@ func (s *Session) healIsigLocked(term *unix.Termios) bool {
 	}
 	fixed := *term
 	fixed.Lflag |= unix.ISIG
-	if err := unix.IoctlSetTermios(int(s.pty.Fd()), unix.TCSETS, &fixed); err != nil {
+	if err := unix.IoctlSetTermios(int(s.pty.Fd()), ioctlWriteTermios, &fixed); err != nil {
 		return false
 	}
 	// The daemon's stderr is its log file (spawnDaemon wires it) — one line per heal,
