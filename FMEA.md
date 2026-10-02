@@ -57,17 +57,17 @@
 | Phase E3 | F10 多个启用渠道并发 fan-out；单渠道 panic 不阻断其它渠道 | `go test ./notify -run '^(TestCoordinatorFanoutSkipsDisabled|TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic)$' -count=5 -race -timeout=2m` | `dc14ef6` |
 | Phase C5 | F6 Codex provider default 热切换，旧 rollout 每次按最新配置归属 | `go test . -run '^TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches$' -count=10 -race -timeout=2m` | `e4b2ac4` |
 | Phase B3 | F5 两个 Server 实例并发完成同目录同名、不同内容的分块上传 | `go test . -run '^TestChunkUploadConcurrentServersKeepSameNameDifferentContents$' -count=5 -race -timeout=2m` | `3425e55` |
-| Phase B4 | F5 独立进程并发完成同目录同名、不同内容上传，验证无共享锁时不覆盖 | `go test . -run '^TestChunkUploadCompleteConcurrentAcrossProcessesDoesNotOverwrite$' -count=3 -race -timeout=2m` | pending |
+| Phase B4 | F5 独立进程并发完成同目录同名、不同内容上传，验证无共享锁时不覆盖 | `go test . -run '^TestChunkUploadCompleteConcurrentAcrossProcessesDoesNotOverwrite$' -count=3 -race -timeout=2m` | `9881a12` |
 
 ### 本轮最终验收快照
 
-- 代码基线：`3425e55`（最终验收前代码工作区干净）。
-- `go test ./... -count=1 -timeout=3m`：PASS（64.8s）。
+- 代码基线：`9881a12`（最终验收前代码工作区干净）。
+- `go test ./... -count=1 -timeout=3m`：PASS（60.4s）。
 - `cd frontend && bun test`：PASS（741 tests / 80 files）；`bun run type-check`：PASS。
 - `cd frontend && VITE_PORTALS=cli,settings bun run build`：PASS；Vite 提示若干既有 chunk 超过 500 kB。
 - `go build ./...`、`GOWORK=off go build ./...`、`go vet ./...`、`GOOS=linux GOARCH=amd64 go build ./...`、`git diff --check`：PASS。
 - F2 在本机执行了 profile 回归；Darwin 若不暴露子进程 profile 环境，代码会安全回退；真实 Claude 私有 profile 所有权场景仍未做系统级验收。
-- F5 两个 Server 实例回归共享 Go 进程锁，跨进程持续并发仍 OPEN。
+- F5 跨进程无共享锁的同时完成回归已通过；长时间高并发压力仍是 P2 余项。
 - F7 前端按钮真实点击路径、F8 真实远端浏览器重连、F10 外部渠道实际送达仍 OPEN：当前 CUA 没有浏览器 tab，browser MCP transport closed，也没有外部 provider 凭证/接收端。对应 API、模板契约、coordinator fan-out 的自动化测试不能替代这些体验验收。
 
 ### 全量验收快照
