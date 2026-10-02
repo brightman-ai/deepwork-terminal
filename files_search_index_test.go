@@ -281,6 +281,66 @@ func TestFileSearchIndex_UnavailableRootReportsError(t *testing.T) {
 	require.NotEmpty(t, view.scanError)
 }
 
+func TestFilesSearch_FailedRefreshPreservesLastGoodAndRecovers(t *testing.T) {
+	server, sm, fileServer := newDrawerTestServer(t)
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	require.NoError(t, os.Mkdir(blocked, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "stable.md"), nil, 0o600))
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "last-good", CWD: root})
+	require.NoError(t, err)
+	sessionID := sessionByName(t, sm, "last-good").ID
+
+	awaitFileSearchIndex(t, fileServer, root)
+	query := func(q string) searchResponse {
+		t.Helper()
+		resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sessionID, q), "")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		var result searchResponse
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		return result
+	}
+	initial := query("stable")
+	require.False(t, initial.Incomplete)
+	require.Len(t, initial.Entries, 1)
+
+	// Make a changed subtree unreadable after the last-good snapshot exists. chmod is
+	// restored on every exit so TempDir cleanup remains reliable.
+	require.NoError(t, os.WriteFile(filepath.Join(blocked, "recovered.md"), nil, 0o600))
+	require.NoError(t, os.Chmod(blocked, 0))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+	fileServer.invalidateFileSearchIndexes(root)
+	index, err := fileServer.fileSearchIndex(context.Background(), root)
+	require.NoError(t, err)
+	select {
+	case <-index.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed refresh did not finish")
+	}
+
+	failed, building := index.snapshot()
+	require.False(t, building)
+	require.False(t, failed.complete)
+	require.NotEmpty(t, failed.scanError)
+	require.Greater(t, failed.generation, initial.Generation)
+	staleHit := query("stable")
+	require.True(t, staleHit.Incomplete)
+	require.NotEmpty(t, staleHit.ScanError)
+	require.Len(t, staleHit.Entries, 1)
+	require.Equal(t, "stable.md", staleHit.Entries[0].Name)
+
+	require.NoError(t, os.Chmod(blocked, 0o700))
+	fileServer.invalidateFileSearchIndexes(root)
+	awaitFileSearchIndex(t, fileServer, root)
+	recovered := query("recovered")
+	require.False(t, recovered.Incomplete)
+	require.Empty(t, recovered.ScanError)
+	require.Len(t, recovered.Entries, 1)
+	require.Equal(t, "blocked/recovered.md", recovered.Entries[0].Rel)
+}
+
 func awaitFileSearchIndex(t *testing.T, s *Server, root string) {
 	t.Helper()
 	index, err := s.fileSearchIndex(context.Background(), root)
