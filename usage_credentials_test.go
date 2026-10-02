@@ -101,6 +101,9 @@ func TestTestRunWithoutIsolatedHomeDoesNotStartQuotaWarmer(t *testing.T) {
 }
 
 func TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	t.Setenv("DW_CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(t.TempDir(), "claude", "projects"))
 	usageCredentialSourceMu.Lock()
 	previousSources := append([]usageCredentialRegistration(nil), usageCredentialSources...)
 	previousSource := usageCredentialSource
@@ -109,7 +112,7 @@ func TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose(t *testing
 		usageCredentialSourceMu.Lock()
 		usageCredentialSources = previousSources
 		usageCredentialSource = previousSource
-		usage.UseCredentials(previousSource)
+		useUsageCredentialSource(previousSource)
 		usageCredentialSourceMu.Unlock()
 	})
 
@@ -132,6 +135,11 @@ func TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose(t *testing
 	usageCredentialSourceMu.RUnlock()
 	if active != previousSource {
 		t.Fatalf("closing the last server did not restore the previous source: got %p want %p", active, previousSource)
+	}
+	if active == nil {
+		// Reproduces the real call chain that used to panic: typed nil had made it
+		// through kit's CredentialSource interface until this first quota query.
+		_ = usage.QueryAllQuotas()
 	}
 }
 
