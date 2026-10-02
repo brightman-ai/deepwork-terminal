@@ -85,6 +85,18 @@ go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
 > GOPROXY=https://goproxy.cn,direct go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
 > ```
 
+### 前端检查
+
+前端测试使用 Bun。在仓库根目录运行以下命令安装锁定依赖、执行测试和类型检查。类型检查/构建还需要把 `brightman-ai/deepwork` 仓库放在本仓库旁边，前端会复用其中的 CE 组件：
+
+```bash
+cd frontend
+bun install --frozen-lockfile
+bun run test
+bun run type-check
+bun run build
+```
+
 没装 Go 但想从源码构建？安装脚本可以帮你装最新稳定版 Go：
 
 ```bash

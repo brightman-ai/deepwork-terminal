@@ -85,6 +85,18 @@ go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
 > GOPROXY=https://goproxy.cn,direct go install github.com/brightman-ai/deepwork-terminal/cmd/dw-terminal@latest
 > ```
 
+### Frontend checks
+
+The frontend tests use Bun. From the repository root, install the locked dependencies and run the suite and type-check. Type-check/build also need the `brightman-ai/deepwork` checkout beside this repository because the frontend shares its CE components:
+
+```bash
+cd frontend
+bun install --frozen-lockfile
+bun run test
+bun run type-check
+bun run build
+```
+
 No Go installed but want a source build? The installer can bootstrap the latest stable Go:
 
 ```bash
