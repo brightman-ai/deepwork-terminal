@@ -137,12 +137,16 @@ func (s *Server) stopNotifier() {
 	s.notifierMu.Lock()
 	n := s.notifier
 	s.notifier = nil
-	s.notifierMu.Unlock()
 	if n == nil {
+		s.notifierMu.Unlock()
 		return
 	}
 	n.cancel()
 	<-n.done
+	// Keep the lifecycle lock until the old goroutine has saved its final state. Otherwise
+	// a concurrent ensureNotifier can start a second poller and load notify-state.json
+	// before this one writes it, briefly duplicating notifications and racing persistence.
+	s.notifierMu.Unlock()
 	logger.Info("agent notifier stopped")
 }
 

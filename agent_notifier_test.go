@@ -207,6 +207,51 @@ func TestEnsureNotifierWithoutTmux(t *testing.T) {
 	}
 }
 
+func TestNotifierRestartWaitsForPreviousPollerToPersist(t *testing.T) {
+	srv := &Server{config: Config{DataDir: t.TempDir()}}
+	canceled := make(chan struct{})
+	old := &agentNotifier{
+		server: srv,
+		cancel: func() { close(canceled) },
+		done:   make(chan struct{}),
+	}
+	srv.notifier = old
+
+	stopped := make(chan struct{})
+	go func() {
+		srv.stopNotifier()
+		close(stopped)
+	}()
+	<-canceled
+
+	started := make(chan struct{})
+	go func() {
+		srv.ensureNotifier()
+		close(started)
+	}()
+	select {
+	case <-started:
+		close(old.done)
+		<-stopped
+		srv.stopNotifier()
+		t.Fatal("a new poller started before the previous poller finished its final state save")
+	case <-time.After(25 * time.Millisecond):
+		// The enable path must wait until stopNotifier has observed the previous done signal.
+	}
+
+	close(old.done) // release the simulated poller's final save / shutdown barrier
+	<-stopped
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("notifier did not restart after the prior poller stopped")
+	}
+	if !srv.notifierRunning() {
+		t.Fatal("notifier is not running after the enable path completed")
+	}
+	srv.stopNotifier()
+}
+
 // TestSessionRefLocation pins how a PTY session addresses itself in a message: a tab has no
 // tmux coordinates, and rendering "窗口0 · 面板0" for it would invent a topology.
 func TestSessionRefLocation(t *testing.T) {
