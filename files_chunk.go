@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +56,53 @@ const (
 	// meta is rewritten on each re-init) is never swept out from under an active client.
 	chunkStagingTTL = 24 * time.Hour
 )
+
+// chunkTargetName confines retry deduplication to the requested filename and its
+// content-addressed collision name. A successful complete whose response was lost can be
+// repeated without creating another file, while same-named different content is preserved.
+func chunkTargetName(dir, requestedName, hashHex string, size int64) (name string, reuse bool, err error) {
+	original := filepath.Join(dir, requestedName)
+	if chunkFileMatches(original, size, hashHex) {
+		return requestedName, true, nil
+	}
+	if _, err := os.Lstat(original); errors.Is(err, os.ErrNotExist) {
+		return requestedName, false, nil
+	} else if err != nil {
+		return "", false, err
+	}
+
+	ext := filepath.Ext(requestedName)
+	stem := strings.TrimSuffix(requestedName, ext)
+	if stem == "" {
+		stem = "upload"
+	}
+	base := filepath.Base(uniqueClipboardFilename(dir, requestedName, hashHex))
+	for suffix := 0; suffix < 1000; suffix++ {
+		candidateName := base
+		if suffix > 0 {
+			candidateName = fmt.Sprintf("%s-%s-%d%s", stem, hashHex, suffix, ext)
+		}
+		candidate := filepath.Join(dir, candidateName)
+		if chunkFileMatches(candidate, size, hashHex) {
+			return candidateName, true, nil
+		}
+		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidateName, false, nil
+		} else if err != nil {
+			return "", false, err
+		}
+	}
+	return "", false, errors.New("too many content-addressed filename collisions")
+}
+
+func chunkFileMatches(path string, size int64, hashHex string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != size {
+		return false
+	}
+	hash, err := fileShortHash(path)
+	return err == nil && hash == hashHex
+}
 
 // chunkStoreMu guards the whole-directory read-modify sections (stale sweep, reassemble)
 // so a concurrent complete/sweep on the same staging root can't race. Per-chunk writes
@@ -456,23 +504,45 @@ func (s *Server) handleChunkUploadComplete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Clobber-safe final name (never overwrite an existing DIFFERENT file in the target dir), the
-	// suffix content-addressed so a re-upload of identical bytes collapses to one name. Then
-	// re-confine the full rel path under cwd before the rename — belt to safeResolve's brace.
 	hashHex := hex.EncodeToString(hasher.Sum(nil)[:8])
-	finalName := uniqueClipboardFilename(targetDir, meta.Name, hashHex)
-	if finalName == "" {
-		finalName = meta.Name
+	var finalName, target string
+	finalized := false
+	for attempt := 0; attempt < 16; attempt++ {
+		var reuse bool
+		finalName, reuse, err = chunkTargetName(targetDir, meta.Name, hashHex, written)
+		if err != nil {
+			os.Remove(tmpPath)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot choose final file name"})
+			return
+		}
+		target, err = safeResolve(canonicalCWD, filepath.Join(meta.Dir, finalName))
+		if err != nil {
+			os.Remove(tmpPath)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
+			return
+		}
+		if reuse {
+			_ = os.Remove(tmpPath)
+			finalized = true
+			break
+		}
+		// A same-directory hard link publishes the already-flushed temp file atomically
+		// without rename replacing a file created by another server in the meantime.
+		if err := os.Link(tmpPath, target); err == nil {
+			_ = os.Remove(tmpPath)
+			finalized = true
+			break
+		} else if !errors.Is(err, os.ErrExist) {
+			os.Remove(tmpPath)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot finalize file"})
+			return
+		}
+		// Another writer won the name between Lstat and Link. Re-check content and
+		// choose a numbered suffix if its bytes differ; never clobber a concurrent file.
 	}
-	target, err := safeResolve(canonicalCWD, filepath.Join(meta.Dir, finalName))
-	if err != nil {
+	if !finalized {
 		os.Remove(tmpPath)
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
-		return
-	}
-	if err := os.Rename(tmpPath, target); err != nil {
-		os.Remove(tmpPath)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot finalize file"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "too many concurrent filename collisions"})
 		return
 	}
 
