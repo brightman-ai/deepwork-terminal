@@ -52,3 +52,11 @@
 | Phase A3 | F1 最后 source 注销后 quota query 不 panic | `go test . -run '^(TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose|TestHandleUsageQuota)$' -count=1` | `a67b56c` |
 | Phase A4 | F9 超长 AF_UNIX 路径 bind 前诊断 | `go test ./muxd -run '^(TestListenRejectsOverlongSocketPathWithActionableError|TestProtoListenReclaimsStaleSocket)$' -count=1` | `c1b3afb` |
 | Phase F | F8 跨 Origin 鉴权旋转序列 | `go test . -run '^TestRemoteAuthJourney_RotateRevokesTheOldCode$' -count=1` | `2847cd9` |
+
+### 全量验收快照
+
+- 代码基线：`bafe213`（工作区无未提交改动）。
+- `go test ./... -count=1 -timeout=2m`：PASS。
+- `go build ./...`、`GOWORK=off go build ./...`、`go vet ./...`、`git diff --check`：PASS。
+- 前端类型检查/正式构建、搜索轮询单测、共享前端契约：PASS。
+- 没有可控浏览器 surface，F8 的真实远端 browser reconnect 仍记为 L4-SKIP/OPEN；API 序列测试没有冒充真实浏览器验收。
