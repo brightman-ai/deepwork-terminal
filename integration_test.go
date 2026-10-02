@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -400,6 +401,74 @@ func TestIntegration_CORSPreflightAcksPrivateNetwork(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	corsMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(w2, req2)
 	assert.Empty(t, w2.Header().Get("Access-Control-Allow-Private-Network"))
+}
+
+// TestRemoteAuthJourney_RotateRevokesTheOldCode covers the browser-facing sequence across the
+// CORS and auth boundaries: preflight, authenticated read, rotate, stale-token rejection, and
+// successful retry with the returned code. A real remote browser session is recorded separately
+// in FMEA.md as unverified when no browser surface is available.
+func TestRemoteAuthJourney_RotateRevokesTheOldCode(t *testing.T) {
+	srv, err := NewServer(WithConfig(Config{
+		Addr: ":0", DefaultShell: "/bin/sh", BufferSize: 4096, MaxSessions: 10,
+		AuthCode: "OLD1-OLD2", DataDir: t.TempDir(),
+	}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+	peerMux := http.NewServeMux()
+	peerMux.Handle("/api/", corsMiddleware(http.StripPrefix("/api", srv.mux)))
+	peer := httptest.NewServer(peerMux)
+	defer peer.Close()
+	origin := "https://remote.example"
+	request := func(method, path, code string, body io.Reader) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, peer.URL+path, body)
+		require.NoError(t, err)
+		req.Header.Set("Origin", origin)
+		if code != "" {
+			req.Header.Set("X-CLI-Auth", code)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := peer.Client().Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	preflight, err := http.NewRequest(http.MethodOptions, peer.URL+"/api/sessions", nil)
+	require.NoError(t, err)
+	preflight.Header.Set("Origin", origin)
+	preflight.Header.Set("Access-Control-Request-Method", "POST")
+	preflight.Header.Set("Access-Control-Request-Headers", "X-CLI-Auth, Content-Type")
+	resp, err := peer.Client().Do(preflight)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, origin, resp.Header.Get("Access-Control-Allow-Origin"))
+	require.Empty(t, resp.Header.Get("Access-Control-Allow-Credentials"))
+	resp.Body.Close()
+
+	resp = request(http.MethodGet, "/api/sessions", "OLD1-OLD2", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, origin, resp.Header.Get("Access-Control-Allow-Origin"))
+	resp.Body.Close()
+
+	resp = request(http.MethodPost, "/api/auth/rotate", "OLD1-OLD2", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var rotated struct {
+		AuthCode string `json:"authCode"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&rotated))
+	resp.Body.Close()
+	require.NotEmpty(t, rotated.AuthCode)
+
+	resp = request(http.MethodGet, "/api/sessions", "OLD1-OLD2", nil)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.Equal(t, origin, resp.Header.Get("Access-Control-Allow-Origin"))
+	resp.Body.Close()
+
+	resp = request(http.MethodGet, "/api/sessions", rotated.AuthCode, nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp.Body.Close()
 }
 
 // TC-08-I-12: HUD log upload.
