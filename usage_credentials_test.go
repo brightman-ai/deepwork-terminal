@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/brightman-ai/kit/usage"
 )
 
 func TestCredentialStore_SharedAcrossDataDirs(t *testing.T) {
@@ -95,6 +97,41 @@ func TestTestRunWithoutIsolatedHomeDoesNotStartQuotaWarmer(t *testing.T) {
 		if registration.owner == owner {
 			t.Fatal("go test without DEEPWORK_HOME started a quota warmer")
 		}
+	}
+}
+
+func TestUsageCredentialSourcesRestoreNewestOwnerAfterOutOfOrderClose(t *testing.T) {
+	usageCredentialSourceMu.Lock()
+	previousSources := append([]usageCredentialRegistration(nil), usageCredentialSources...)
+	previousSource := usageCredentialSource
+	usageCredentialSourceMu.Unlock()
+	t.Cleanup(func() {
+		usageCredentialSourceMu.Lock()
+		usageCredentialSources = previousSources
+		usageCredentialSource = previousSource
+		usage.UseCredentials(previousSource)
+		usageCredentialSourceMu.Unlock()
+	})
+
+	older, newer := &Server{}, &Server{}
+	first, second := &credentialStore{}, &credentialStore{}
+	registerUsageCredentialSource(older, first)
+	registerUsageCredentialSource(newer, second)
+	unregisterUsageCredentialSource(older) // the older instance closes first
+
+	usageCredentialSourceMu.RLock()
+	active, registrations := usageCredentialSource, append([]usageCredentialRegistration(nil), usageCredentialSources...)
+	usageCredentialSourceMu.RUnlock()
+	if active != second || len(registrations) != len(previousSources)+1 || registrations[len(registrations)-1].owner != newer {
+		t.Fatalf("closing an older server replaced the active source: source=%p registrations=%+v", active, registrations)
+	}
+
+	unregisterUsageCredentialSource(newer)
+	usageCredentialSourceMu.RLock()
+	active = usageCredentialSource
+	usageCredentialSourceMu.RUnlock()
+	if active != previousSource {
+		t.Fatalf("closing the last server did not restore the previous source: got %p want %p", active, previousSource)
 	}
 }
 
