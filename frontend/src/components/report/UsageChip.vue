@@ -1135,7 +1135,7 @@ onUnmounted(() => {
               <span v-if="agentReport.summary.open">· {{ agentReport.summary.open }} 未闭合</span>
             </div>
             <div class="uchip-agent-proof">
-              <span v-if="agentReport.summary.verified_pass">{{ agentReport.summary.verified_pass }} 项已验证</span>
+              <span v-if="agentReport.summary.verified_pass" title="包括自动验证通过和人工验收；两者不代表同一种证据">{{ agentReport.summary.verified_pass }} 项验证通过或人工验收</span>
               <span v-else>完成 ≠ 验收 · {{ coverageText('outcome') }}</span>
             </div>
 

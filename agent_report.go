@@ -93,6 +93,7 @@ type agentReporter struct {
 	now          func() time.Time
 	index        *agentIndexStore
 	deepworkRoot string
+	outcomePath  string
 	drivers      map[string]reportAgentTreeDriver
 }
 
@@ -112,8 +113,9 @@ type reportAgentTreeDriver interface {
 }
 
 type agentReportCacheEntry struct {
-	report  agentanalytics.ActivityReport
-	builtAt time.Time
+	report       agentanalytics.ActivityReport
+	builtAt      time.Time
+	outcomeStamp string
 }
 
 func newAgentReporter(dataDir ...string) *agentReporter {
@@ -121,6 +123,7 @@ func newAgentReporter(dataDir ...string) *agentReporter {
 	if len(dataDir) > 0 && strings.TrimSpace(dataDir[0]) != "" {
 		a.index = newAgentIndexStore(dataDir[0], agentReportIndexVersion)
 		a.deepworkRoot = filepath.Join(dataDir[0], "transcripts", "sessions")
+		a.outcomePath = agentOutcomeStorePath(dataDir[0])
 		a.files = a.index.load()
 	}
 	return a
@@ -130,27 +133,29 @@ func (a *agentReporter) Report(ctx context.Context, window, timezone string, for
 	key := window + "|" + timezone
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	outcomeStamp := a.outcomeEvidenceStamp()
 	forced := len(force) > 0 && force[0]
-	if cached, ok := a.reports[key]; !forced && ok && a.now().Sub(cached.builtAt) < agentReportCacheTTL {
+	if cached, ok := a.reports[key]; !forced && ok && cached.outcomeStamp == outcomeStamp && a.now().Sub(cached.builtAt) < agentReportCacheTTL {
 		return cached.report
 	}
-	dataset := a.refreshLocked(ctx, window)
+	dataset := a.withHumanOutcomesLocked(a.refreshLocked(ctx, window))
 	report := agentanalytics.BuildActivityReport(dataset, window, timezone, a.now())
-	a.reports[key] = agentReportCacheEntry{report: report, builtAt: a.now()}
+	// Keep the stamp observed BEFORE the outcome snapshot was applied. If another process
+	// appends while this report is being built, the next request sees the newer file stamp
+	// and rebuilds instead of caching a report under evidence it never consumed.
+	a.reports[key] = agentReportCacheEntry{report: report, builtAt: a.now(), outcomeStamp: outcomeStamp}
 	return report
 }
 
 func (a *agentReporter) Dataset(ctx context.Context, window string) agentanalytics.ActivityDataset {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.refreshLocked(ctx, window)
+	return a.withHumanOutcomesLocked(a.refreshLocked(ctx, window))
 }
 
 func (a *agentReporter) Detail(ctx context.Context, window, timezone string, filter agentanalytics.DetailFilter) agentanalytics.ActivityDetailReport {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	dataset := a.refreshLocked(ctx, window)
-	return agentanalytics.BuildActivityDetail(dataset, window, timezone, a.now(), filter)
+	detail, _ := a.DetailWithOutcomeEvidence(ctx, window, timezone, filter)
+	return detail
 }
 
 // refreshScan is what one pass over the source files established: which files are live, how
@@ -1423,6 +1428,8 @@ func pathWithinRoot(path, root string) bool {
 }
 
 func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
 	if s.agentUsage == nil {
 		s.mu.Lock()
 		if s.agentUsage == nil {
@@ -1446,6 +1453,8 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentReportDetail(w http.ResponseWriter, r *http.Request) {
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
 	if s.agentUsage == nil {
 		s.mu.Lock()
 		if s.agentUsage == nil {
@@ -1471,5 +1480,9 @@ func (s *Server) handleAgentReportDetail(w http.ResponseWriter, r *http.Request)
 		Risk: r.URL.Query().Get("risk"), Outcome: r.URL.Query().Get("outcome"),
 		Runtime: r.URL.Query().Get("runtime"), Cursor: r.URL.Query().Get("cursor"), Limit: limit,
 	}
-	writeJSON(w, http.StatusOK, s.agentUsage.Detail(r.Context(), window, timezone, filter))
+	detail, evidence := s.agentUsage.DetailWithOutcomeEvidence(r.Context(), window, timezone, filter)
+	writeJSON(w, http.StatusOK, agentDetailWithOutcomeEvidence{
+		ActivityDetailReport: detail,
+		OutcomeEvidence:      evidence,
+	})
 }

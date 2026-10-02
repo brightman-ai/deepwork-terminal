@@ -26,11 +26,22 @@ export interface AgentDetailTask {
   diagnostics?: string[]
 }
 
+export interface AgentOutcomeEvidence {
+  work_item_id: string
+  source: string
+  oracle_kind: string
+  status: string
+  at: string
+  ref?: string
+  confidence: number
+}
+
 export interface AgentDetailReport {
   schema_version: string
   report: AgentActivityReport
   filters: { projects: string[]; task_classes: string[]; risks: string[]; outcomes: string[]; runtimes: string[] }
   tasks: AgentDetailTask[]
+  outcome_evidence?: Record<string, AgentOutcomeEvidence[]>
   next_cursor?: string
   metrics: Array<{ id: string; grain: string; formula: string; unit: string; provenance: string; coverage: string; comparison_policy: string }>
 }
@@ -51,6 +62,10 @@ export function normalizeAgentDetailReport(value: unknown): AgentDetailReport {
     task.requests = Array.isArray(task.requests) ? task.requests : []
     task.artifacts = Array.isArray(task.artifacts) ? task.artifacts : []
   })
+  if (!next.outcome_evidence || typeof next.outcome_evidence !== 'object') next.outcome_evidence = {}
+  for (const [workItemId, evidence] of Object.entries(next.outcome_evidence)) {
+    next.outcome_evidence[workItemId] = Array.isArray(evidence) ? evidence : []
+  }
   next.metrics = Array.isArray(next.metrics) ? next.metrics : []
   return next
 }

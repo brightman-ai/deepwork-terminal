@@ -22,10 +22,12 @@ import (
 // transcripts are enumerated newest-first are all answered by kit/transcript — the single
 // resolver every layer shares. Resolving them independently here is how a CLAUDE_CONFIG_DIR
 // user ends up with agent detection reading one ~/.claude while usage reads another.
-type ProjectLocator struct{}
+type ProjectLocator struct {
+	processEnv func(int) ([]string, error)
+}
 
 func NewProjectLocator() *ProjectLocator {
-	return &ProjectLocator{}
+	return &ProjectLocator{processEnv: processEnvironment}
 }
 
 // ClaudeProjectDir returns the Claude JSONL directory for a project path.
@@ -91,7 +93,13 @@ func (pl *ProjectLocator) ClaudeSessionForProcess(processPID int, projectPath st
 	if processPID <= 0 {
 		return "", os.ErrNotExist
 	}
-	home, projects := claudeRootsForProcess(processPID)
+	home, projects, processEnvKnown := pl.claudeRootsForProcess(processPID)
+	if !processEnvKnown {
+		// A PID-index record in the host profile is not proof that this process uses
+		// that profile. Fall back to cwd-based transcript discovery instead of
+		// binding an unrelated session when the OS hides the child's environment.
+		return "", os.ErrNotExist
+	}
 	raw, err := os.ReadFile(filepath.Join(home, "sessions", strconv.Itoa(processPID)+".json"))
 	if err != nil {
 		return "", err
@@ -123,14 +131,18 @@ func (pl *ProjectLocator) ClaudeSessionForProcess(processPID int, projectPath st
 
 // An agent can use a different Claude profile from the terminal server. Read only
 // directory settings from its process environment; credentials never leave this function.
-func claudeRootsForProcess(pid int) (home, projects string) {
+func (pl *ProjectLocator) claudeRootsForProcess(pid int) (home, projects string, processEnvKnown bool) {
 	home, projects = transcript.ClaudeHome(), transcript.ClaudeProjectsRoot()
-	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	readEnvironment := pl.processEnv
+	if readEnvironment == nil {
+		readEnvironment = processEnvironment
+	}
+	environment, err := readEnvironment(pid)
 	if err != nil {
-		return
+		return home, projects, false
 	}
 	var config, userHome, override string
-	for _, field := range strings.Split(string(raw), "\x00") {
+	for _, field := range environment {
 		key, value, _ := strings.Cut(field, "=")
 		switch key {
 		case "CLAUDE_CONFIG_DIR":
@@ -151,11 +163,11 @@ func claudeRootsForProcess(pid int) (home, projects string) {
 	if filepath.IsAbs(override) {
 		projects = override
 	}
-	return
+	return home, projects, true
 }
 
 func (pl *ProjectLocator) ClaudeSessionFilesForProcess(pid int, cwd string) ([]string, error) {
-	_, projects := claudeRootsForProcess(pid)
+	_, projects, _ := pl.claudeRootsForProcess(pid)
 	dir := filepath.Join(projects, transcript.EncodeProjectDir(canonicalPath(cwd)))
 	if _, err := os.Stat(dir); err != nil {
 		return nil, err

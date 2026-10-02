@@ -376,10 +376,19 @@ func (s *Server) handleChunkUploadComplete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Canonicalize the saved cwd before resolving descendants. macOS commonly presents temp
+	// paths as /var/... while EvalSymlinks returns /private/var/...; mixing those spellings
+	// makes filepath.Rel report an absolute-looking walk outside the cwd.
+	canonicalCWD, err := safeResolve(meta.CWD, "")
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target root not allowed"})
+		return
+	}
+
 	// Resolve the target dir the reassembled file lands in (safeResolve confines it to the
 	// tree, re-checked here — the dir could have changed since init). MkdirAll is a no-op when
 	// it already exists (the common case: a browsed 目录树 dir), harmless otherwise.
-	targetDir, err := safeResolve(meta.CWD, meta.Dir)
+	targetDir, err := safeResolve(canonicalCWD, meta.Dir)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "target dir not allowed"})
 		return
@@ -455,7 +464,7 @@ func (s *Server) handleChunkUploadComplete(w http.ResponseWriter, r *http.Reques
 	if finalName == "" {
 		finalName = meta.Name
 	}
-	target, err := safeResolve(meta.CWD, filepath.Join(meta.Dir, finalName))
+	target, err := safeResolve(canonicalCWD, filepath.Join(meta.Dir, finalName))
 	if err != nil {
 		os.Remove(tmpPath)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
@@ -477,7 +486,7 @@ func (s *Server) handleChunkUploadComplete(w http.ResponseWriter, r *http.Reques
 	// The staging dir has done its job — reclaim it now rather than waiting for the TTL sweep.
 	os.RemoveAll(stagingDir)
 
-	relPath, _ := filepath.Rel(meta.CWD, target)
+	relPath, _ := filepath.Rel(canonicalCWD, target)
 	if relPath == "" {
 		relPath = target
 	}

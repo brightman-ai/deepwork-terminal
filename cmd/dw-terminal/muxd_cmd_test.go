@@ -18,7 +18,12 @@ import (
 // set of running tmux sessions, one layer down.
 func isolatedSocket(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	dir, err := os.MkdirTemp(os.TempDir(), "dw-")
+	if err != nil {
+		t.Fatalf("make short muxd socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "muxd.sock")
 	t.Setenv(muxd.EnvSocketOverride, path)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(path))
 	return path

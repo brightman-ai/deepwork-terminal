@@ -345,6 +345,9 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
 		return
 	}
+	if r.URL.Query().Get("refresh") == "1" {
+		s.invalidateFileSearchIndexes(target)
+	}
 	pathQuery := len(terms) > 1 || strings.Contains(terms[0], "/")
 	index, err := s.fileSearchIndex(r.Context(), target)
 	if err != nil {

@@ -14,6 +14,16 @@ import (
 	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
+func shortTestMuxdSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "dw-")
+	if err != nil {
+		t.Fatalf("make short muxd socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "muxd.sock")
+}
+
 // newRealPTYManager builds a SessionManager backed by REAL PTYs, on a daemon that
 // belongs to this test alone.
 //
@@ -27,7 +37,7 @@ import (
 // behind; the sessions still travel the real socket and the real protocol.
 func newRealPTYManager(t *testing.T, bufferSize int, shell string) *SessionManager {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	sock := shortTestMuxdSocket(t)
 	t.Setenv(muxd.EnvSocketOverride, sock)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(sock))
 
@@ -46,7 +56,7 @@ func newRealPTYManager(t *testing.T, bufferSize int, shell string) *SessionManag
 // sessions. An in-process daemon can never reproduce it.
 func newSpawnedDaemonManager(t *testing.T) (*SessionManager, string) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	sock := shortTestMuxdSocket(t)
 	t.Setenv(muxd.EnvSocketOverride, sock)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(sock))
 	t.Setenv(muxd.EnvDaemonBin, buildTestBinary(t))

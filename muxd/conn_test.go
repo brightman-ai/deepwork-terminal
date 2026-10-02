@@ -10,13 +10,18 @@ import (
 	"testing"
 )
 
-// isolatedSocket returns a socket path inside t.TempDir and points the override env at
-// it. Every test in this package MUST route through here: a test that resolved the real
-// SocketPath() would talk to the user's live daemon.
+// isolatedSocket returns a short private socket path and points the override env at it.
+// macOS limits AF_UNIX path lengths; t.TempDir embeds the long test name and can exceed
+// that limit before the behavior under test is reached. Every test in this package MUST
+// route through here so none can talk to the user's live daemon.
 func isolatedSocket(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "run", "test.sock")
+	dir, err := os.MkdirTemp(os.TempDir(), "dw-")
+	if err != nil {
+		t.Fatalf("make short muxd socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "test.sock")
 	t.Setenv(EnvSocketOverride, path)
 	return path
 }
@@ -207,6 +212,8 @@ func TestDialLearnsDaemonPIDFromKernelWhenProtocolCannotSay(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	defer ln.Close()
+	peerChecked := make(chan struct{})
+	defer close(peerChecked)
 
 	go func() {
 		c, err := ln.Accept()
@@ -221,6 +228,10 @@ func TestDialLearnsDaemonPIDFromKernelWhenProtocolCannotSay(t *testing.T) {
 			Code: ErrCodeVersion,
 			Msg:  "daemon speaks protocol v0, client speaks v1",
 		})
+		// Darwin's LOCAL_PEERPID is only reliable while the peer is connected. Keep
+		// the stand-in alive until DialInfo has queried the kernel; Linux's SO_PEERCRED
+		// remains readable after close, which used to hide this fixture race.
+		<-peerChecked
 	}()
 
 	_, _, err = DialInfo(path)

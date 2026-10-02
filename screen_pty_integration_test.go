@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,13 @@ func TestRenderScreen_RealPTY_FullScreenTUI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := sess.WriteInput([]byte("top -d 1\n")); err != nil {
+	command := "top -d 1"
+	if runtime.GOOS == "darwin" {
+		// macOS top uses -s for the refresh interval; Linux's -d flag is rejected by
+		// BSD top. Leave sampling unbounded so it exercises the interactive repaint path.
+		command = "top -s 1"
+	}
+	if err := sess.WriteInput([]byte(command + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// Let it paint a couple of frames.

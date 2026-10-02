@@ -163,7 +163,7 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
  * query or any error so the caller can render an empty list without special-casing.
  */
 export async function filesSearch(sessionId: string, cwd: string | undefined, q: string,
-  options: { path?: string; offset?: number; generation?: number; signal?: AbortSignal } = {}): Promise<SearchResult> {
+  options: { path?: string; offset?: number; generation?: number; refresh?: boolean; signal?: AbortSignal } = {}): Promise<SearchResult> {
   if (!sessionId || !q.trim()) return { entries: [], truncated: false }
   const { cliFetch } = useCliAuth()
   const controller = new AbortController()
@@ -175,6 +175,7 @@ export async function filesSearch(sessionId: string, cwd: string | undefined, q:
   try {
     let path = withScope('/files/search', sessionId, cwd)
     path += `&q=${encodeURIComponent(q)}&path=${encodeURIComponent(options.path || '')}&offset=${options.offset || 0}&generation=${options.generation || 0}`
+    if (options.refresh) path += '&refresh=1'
     const resp = await cliFetch(cliApi(path), { signal: controller.signal })
     if (!resp.ok) return { entries: [], truncated: false, error: `搜索失败（HTTP ${resp.status}），请重试` }
     return await resp.json() as SearchResult

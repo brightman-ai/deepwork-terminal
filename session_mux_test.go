@@ -12,6 +12,19 @@ import (
 	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
+// shortMuxdSocket keeps the AF_UNIX path below macOS's sockaddr_un limit. t.TempDir()
+// embeds the long test name and can make an otherwise valid isolated daemon fail bind with
+// EINVAL before the behavior under test is reached.
+func shortMuxdSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(os.TempDir(), "dw-")
+	if err != nil {
+		t.Fatalf("make short muxd socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "muxd.sock")
+}
+
 // TestCloseAllDetachesRatherThanDestroys pins the single most important behavioural
 // difference this whole change introduces, at the unit level.
 //
@@ -330,7 +343,7 @@ func TestCrossHostSessionBecomesVisible(t *testing.T) {
 //
 // The stand-in listens on the socket and refuses like a daemon of a different vintage.
 func TestDaemonHealthExplainsAnIncompatibleDaemon(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	sock := shortMuxdSocket(t)
 	t.Setenv(muxd.EnvSocketOverride, sock)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(sock))
 
@@ -339,6 +352,8 @@ func TestDaemonHealthExplainsAnIncompatibleDaemon(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	defer ln.Close()
+	peerChecked := make(chan struct{})
+	defer close(peerChecked)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -354,6 +369,7 @@ func TestDaemonHealthExplainsAnIncompatibleDaemon(t *testing.T) {
 					Code: muxd.ErrCodeVersion,
 					Msg:  "daemon speaks protocol v0",
 				})
+				<-peerChecked
 			}()
 		}
 	}()
@@ -383,7 +399,7 @@ func TestDaemonHealthExplainsAnIncompatibleDaemon(t *testing.T) {
 // TestDaemonHealthDoesNotStartADaemon: a probe that spawns the thing it measures always
 // reports health, which makes it worthless. "Nothing is running" must stay reportable.
 func TestDaemonHealthDoesNotStartADaemon(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	sock := shortMuxdSocket(t)
 	t.Setenv(muxd.EnvSocketOverride, sock)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(sock))
 	t.Setenv(muxd.EnvDaemonBin, "/bin/false") // any spawn attempt would be visible as a failure
@@ -524,7 +540,7 @@ func TestShutdownDoesNotReattachItself(t *testing.T) {
 // enforcing it — the moment anything creates a session a daemon exists, and the next retry
 // finds it.
 func TestWatchDaemonDoesNotStartADaemon(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	sock := shortMuxdSocket(t)
 	t.Setenv(muxd.EnvSocketOverride, sock)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(sock))
 
@@ -692,7 +708,7 @@ func TestNonContiguousReplayResetsTheLocalBuffer(t *testing.T) {
 	const daemonRing = 8 << 10
 	const serverRing = 1 << 20
 
-	sock := filepath.Join(t.TempDir(), "run", "muxd.sock")
+	sock := shortMuxdSocket(t)
 	t.Setenv(muxd.EnvSocketOverride, sock)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Dir(sock))
 

@@ -9,6 +9,7 @@ package terminal
 // legacy store migrates itself forward exactly once.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +68,40 @@ func TestCredentialStore_NoLegacy_NoShared_EmptyIsLegitimate(t *testing.T) {
 	store := newCredentialStore(t.TempDir())
 	if _, ok := store.Credential("zhipu"); ok {
 		t.Fatal("no store anywhere means no subscriptions — a legitimate state, not an error")
+	}
+}
+
+func TestTestRunWithoutIsolatedHomeDoesNotStartQuotaWarmer(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", "")
+	if !testRunWithoutIsolatedDeepworkHome() {
+		t.Fatal("the test binary without an explicit home should be recognized as unisolated")
+	}
+
+	owner := &Server{config: Config{DataDir: t.TempDir()}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	usageCredentialSourceMu.RLock()
+	registrationsBefore := len(usageCredentialSources)
+	usageCredentialSourceMu.RUnlock()
+
+	owner.startQuotaWarmer(ctx)
+
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
+	if len(usageCredentialSources) != registrationsBefore {
+		t.Fatal("go test without DEEPWORK_HOME registered credentials from the developer's real home")
+	}
+	for _, registration := range usageCredentialSources {
+		if registration.owner == owner {
+			t.Fatal("go test without DEEPWORK_HOME started a quota warmer")
+		}
+	}
+}
+
+func TestExplicitDeepworkHomeIsNotTreatedAsUnisolatedTestRun(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	if testRunWithoutIsolatedDeepworkHome() {
+		t.Fatal("an explicit temporary DEEPWORK_HOME should permit isolated quota tests")
 	}
 }
 

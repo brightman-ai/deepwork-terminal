@@ -164,10 +164,17 @@ func (i *fileSearchIndex) build(ctx context.Context, root string, ready chan str
 		// Appends never modify the published prefix; capping the view prevents a
 		// consumer from appending into the builder's tail, without quadratic copies.
 		view := entries[:len(entries):len(entries)]
+		viewComplete := complete && scanError == ""
+		if complete && scanError != "" && initial.generation != 0 {
+			// A failed refresh must not turn a previously complete index into a
+			// partial prefix. Keep the last usable names and report the failed scan
+			// alongside them so callers can show both results and the warning.
+			view = initial.entries
+		}
 		i.mu.Lock()
 		i.matchesByQuery = nil
-		i.view = fileSearchSnapshot{entries: view, generation: fileSearchGeneration.Add(1), complete: complete && scanError == "", scanError: scanError}
-		if complete {
+		i.view = fileSearchSnapshot{entries: view, generation: fileSearchGeneration.Add(1), complete: viewComplete, scanError: scanError}
+		if viewComplete {
 			i.directories = directories
 			if full {
 				i.reconciledAt = time.Now()

@@ -40,13 +40,14 @@ const (
 )
 
 type e2eEnv struct {
-	t       *testing.T
-	bin     string
-	dir     string
-	sock    string
-	port    int
-	baseURL string
-	srv     *exec.Cmd
+	t          *testing.T
+	bin        string
+	dir        string
+	sock       string
+	port       int
+	baseURL    string
+	srv        *exec.Cmd
+	sessionIDs []string
 }
 
 func newE2EEnv(t *testing.T) *e2eEnv {
@@ -68,12 +69,17 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 			t.Fatal(err)
 		}
 	}
+	socketDir, err := os.MkdirTemp(os.TempDir(), "dw-")
+	if err != nil {
+		t.Fatalf("make short muxd socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 	port := freePort(t)
 	env := &e2eEnv{
 		t:       t,
 		bin:     bin,
 		dir:     dir,
-		sock:    filepath.Join(dir, "run", "muxd.sock"),
+		sock:    filepath.Join(socketDir, "muxd.sock"),
 		port:    port,
 		baseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
 	}
@@ -175,6 +181,15 @@ func (e *e2eEnv) killServer() {
 }
 
 func (e *e2eEnv) teardown() {
+	// Sessions intentionally survive ordinary server/daemon shutdown in production.
+	// This fixture owns them, so delete them while the server is still serving; otherwise
+	// the shells can write ~/.bash_history after testing.T starts removing HOME.
+	for _, id := range e.sessionIDs {
+		_, code, err := e.do(http.MethodDelete, "/api/sessions/"+id, nil)
+		if err != nil || code >= 300 {
+			e.t.Logf("cleanup session %s: err=%v status=%d", id, err, code)
+		}
+	}
 	e.killServer()
 	// Scoped to this test's socket — never a broad pkill, which would hit the developer's
 	// own daemon and terminals.
@@ -242,6 +257,7 @@ func (e *e2eEnv) createSession(name string) e2eSession {
 	if err := json.Unmarshal(b, &s); err != nil {
 		e.t.Fatalf("decode created session: %v (%s)", err, b)
 	}
+	e.sessionIDs = append(e.sessionIDs, s.ID)
 	return s
 }
 
