@@ -1,10 +1,14 @@
 package terminal
 
 import (
-	"github.com/stretchr/testify/require"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/brightman-ai/kit/usage"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOfficialCodexProviderDeclaration_RequiresCompleteEvidence(t *testing.T) {
@@ -64,4 +68,64 @@ func TestDirectOpenAIProviderIsDefault_RespectsConfiguredDefaultProvider(t *test
 		}
 		require.False(t, snapshot.directOpenAIProviderIsDefault())
 	})
+}
+
+func TestReconcileCodexAttributionClearsStaleOpenAIClaimForCustomDefault(t *testing.T) {
+	home := t.TempDir()
+	configureCodexAttributionTest(t, home, "custom-relay")
+	writeCodexProviderRollout(t, home, "old-default", "") // legacy session_meta omits provider
+
+	quotas := []usage.QuotaInfo{
+		{Runtime: "codex", Vendor: usage.VendorOpenAI, Attribution: &usage.Attribution{Active: true, Vendor: usage.VendorOpenAI, Display: "OpenAI"}},
+		{Runtime: "claude", Vendor: "anthropic", Attribution: &usage.Attribution{Active: true, Vendor: "anthropic"}},
+	}
+	got := reconcileCodexAttribution(quotas, nil)
+	require.Nil(t, got[0].Attribution, "an old provider-less rollout cannot inherit OpenAI attribution after the default changed")
+	require.True(t, got[1].Attribution.Active, "Codex reconciliation must not rewrite other runtimes")
+}
+
+func TestReconcileCodexAttributionMarksConcurrentKnownAndUnknownProviders(t *testing.T) {
+	home := t.TempDir()
+	configureCodexAttributionTest(t, home, "custom-default")
+	writeCodexProviderRollout(t, home, "known", "kimi-codex")
+	writeCodexProviderRollout(t, home, "unknown", "another-relay")
+
+	deepworkHome := t.TempDir()
+	t.Setenv("DEEPWORK_HOME", deepworkHome)
+	credentials := newCredentialStore(t.TempDir())
+	seed(t, credentials, `{"version":1,"subscriptions":[{"vendor":"moonshot","api_key":"fixture-key","runtime_provider_ids":["kimi-codex"]}]}`)
+	quotas := []usage.QuotaInfo{
+		{Runtime: "codex", Vendor: usage.VendorOpenAI, Attribution: &usage.Attribution{Active: true, Vendor: usage.VendorOpenAI, Display: "OpenAI", ProviderID: "old"}},
+		{Runtime: "codex", Vendor: usage.VendorMoonshot, Attribution: &usage.Attribution{Active: false, Vendor: usage.VendorMoonshot, Display: "Moonshot", ProviderID: "kimi-codex"}},
+	}
+	got := reconcileCodexAttribution(quotas, credentials)
+	require.False(t, got[0].Attribution.Active, "an undeclared concurrent endpoint must not inherit another vendor's active claim")
+	require.True(t, got[1].Attribution.Active, "the explicitly mapped endpoint remains known to be active")
+	require.Empty(t, got[1].Attribution.Vendor, "mixed known/unknown traffic must not claim an exclusive biller")
+	require.Empty(t, got[1].Attribution.Display)
+}
+
+func configureCodexAttributionTest(t *testing.T, home, provider string) {
+	t.Helper()
+	t.Setenv("DW_CODEX_HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	for _, key := range []string{"OPENAI_BASE_URL", "OPENAI_API_BASE", "CHATGPT_BASE_URL", "CODEX_CHATGPT_BASE_URL", "OPENAI_API_KEY"} {
+		t.Setenv(key, "")
+	}
+	config := "model_provider = \"" + provider + "\"\n"
+	config += "[model_providers." + provider + "]\nname = \"fixture\"\nbase_url = \"https://relay.invalid\"\nwire_api = \"responses\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600))
+}
+
+func writeCodexProviderRollout(t *testing.T, home, name, provider string) {
+	t.Helper()
+	now := time.Now().UTC()
+	dir := filepath.Join(home, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"))
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	meta, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"model_provider": provider}})
+	require.NoError(t, err)
+	path := filepath.Join(dir, "rollout-"+name+".jsonl")
+	require.NoError(t, os.WriteFile(path, append(meta, '\n'), 0o600))
+	require.NoError(t, os.Chtimes(path, now, now))
 }
