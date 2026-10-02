@@ -100,6 +100,21 @@ func TestProtoListenPermissions(t *testing.T) {
 	}
 }
 
+func TestListenRejectsOverlongSocketPathWithActionableError(t *testing.T) {
+	if maxUnixSocketPathBytes == 0 {
+		t.Skip("no local sun_path limit declared for this OS")
+	}
+	path := "/" + strings.Repeat("x", maxUnixSocketPathBytes)
+	ln, err := Listen(path)
+	if ln != nil {
+		_ = ln.Close()
+		t.Fatal("Listen unexpectedly accepted a path longer than sun_path")
+	}
+	if err == nil || !strings.Contains(err.Error(), "shorten "+EnvSocketOverride) {
+		t.Fatalf("error=%v, want an actionable socket path length diagnostic", err)
+	}
+}
+
 // TestProtoListenReclaimsStaleSocket covers the daemon-crashed-without-cleanup case:
 // the file is there, nothing is behind it, and a new daemon must be able to take over.
 func TestProtoListenReclaimsStaleSocket(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -103,6 +104,10 @@ func uidTag() string {
 // would let a second daemon evict a healthy first one and split the session set in two
 // — half the sessions unreachable, with no error anywhere.
 func Listen(path string) (net.Listener, error) {
+	if maxUnixSocketPathBytes > 0 && len(path) > maxUnixSocketPathBytes {
+		return nil, fmt.Errorf("muxd: unix socket path is too long (%d bytes; max %d on %s); shorten %s or XDG_RUNTIME_DIR",
+			len(path), maxUnixSocketPathBytes, runtime.GOOS, EnvSocketOverride)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return nil, fmt.Errorf("muxd: create socket dir: %w", err)
 	}
