@@ -16,7 +16,7 @@
 | F1 | 发现并连接终端；多 Server 启停、监听失败后重试 | 多实例切换时 quota credential source 残留，测试触达真实凭证，或 last-close 留下 typed-nil source 导致查询 panic | 9/3/8 → **216** | source owner 栈、Close/listen 失败注销、测试 home guard、nil-safe kit interface、反序注销后立即查额度回归 | **MITIGATED**：旧实例先关闭、新实例仍持有 source；最后实例关闭清空无 typed-nil；隔离测试与真实 quota query 契约通过 |
 | F2 | 建立 Claude 会话；内外层 shell、不同 cwd/profile 来回切换 | Agent 被绑定到错误 transcript，状态/运行目录/通知错误 | 8/4/8 → **256** | Linux 读取进程 environ；Darwin 尝试 KERN_PROCARGS2；环境不可见时禁止 PID 绑定并回退 cwd；嵌套 shell 用例 | **MITIGATED / LIMITATION**：防止 host profile 旧 PID 记录冒认；macOS 不暴露子进程 env 时无法验证私有 profile，保持 unknown |
 | F3 | WebSocket 输入、输出、断线重连、窗口 resize、server restart | 会话被误销毁、重放缺口拼成假屏幕、或重连后输入不再生效 | 10/3/6 → **180** | muxd detach/restore、非连续 replay 清空、restart E2E、真实 PTY TUI 与 peer PID 用例 | **MITIGATED**：restart E2E、muxd 与真实 TUI 相关用例通过 |
-| F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：策略单测与全仓 Go 测试通过；真实权限故障注入仍待做 |
+| F4 | 文件抽屉搜索；失败后立即重试、等待恢复、换 query/目录 | 索引失败吞掉 last-good 结果，或持久故障每 30 秒触发昂贵重扫 | 7/5/7 → **245** | 失败保留旧快照、立即重试；构建态 500ms、错误态 5min、正常态 30s 的轮询策略及单测 | **MITIGATED**：chmod 000 注入拒绝读取，last-good 保留、错误可见、恢复后新结果出现；该回归在 race 下连续 3 次通过 |
 | F5 | 上传大文件；中断续传、重复 chunk、完成、同名冲突 | 文件损坏/覆盖，或返回错误 relPath 让客户端在错误位置继续操作 | 8/3/6 → **144** | 分块长度与 hash 校验、原子落盘、cwd symlink 规范化；RoundTrip/Resume/retry 用例；双 Server 同目录并发完成回归 | **MITIGATED / P2 residual**：两个独立 Server 实例并行上传同名不同内容后两份文件均完整；跨进程持续并发压力仍待补（本回归共享进程锁） |
 | F11 | 分块上传 complete 成功但响应丢失，客户端按“合并失败”重试 | 相同文件落成原文件 + hash 副本；并发完成可能覆盖同名不同内容 | 7/5/6 → **210** | content hash + requested-name dedupe；same-dir atomic no-replace hard link；重复完成回归 | **MITIGATED**：响应丢失重试返回同一 relPath，且不同内容用独立名 |
 | F6 | 查额度、切换 provider、连续刷新或多进程并行使用 Codex | 自定义 endpoint 被误报为 OpenAI/订阅付款方，导致错误消费决策 | 8/4/7 → **224** | config/auth/provider 与近期 rollout 合并判断；无法归属时 unknown；Codex default-provider 与混合 endpoint 回归用例 | **MITIGATED**：旧 rollout + custom default 会清除 OpenAI claim；已知/未知并发不声称唯一付款方；原子替换配置后 100 次交替切换均重新判定，race 回归通过 |
@@ -55,17 +55,18 @@
 | Phase E2 | F10 最后渠道关闭后立即重开，确认旧 poller 落盘并退出后才可启动新 poller | `go test . -run '^(TestNotifierRestartWaitsForPreviousPollerToPersist|TestEnsureNotifierWithoutTmux|TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent)$' -count=1 -timeout=2m`；新生命周期回归另经 `-race` 单测 | `1765237` |
 | Phase C4 | F7 前端 outcome 反馈入口、持久化调用、证据显示及分页刷新接线 | `cd frontend && bun test src/components/report/__tests__/agentOutcomeFeedback.test.ts src/components/report/__tests__/templateBindings.test.ts && bun run type-check` | `582b9d8` |
 | Phase E3 | F10 多个启用渠道并发 fan-out；单渠道 panic 不阻断其它渠道 | `go test ./notify -run '^(TestCoordinatorFanoutSkipsDisabled|TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic)$' -count=5 -race -timeout=2m` | `dc14ef6` |
-| Phase C5 | F6 Codex provider default 热切换，旧 rollout 每次按最新配置归属 | `go test . -run '^TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches$' -count=10 -race -timeout=2m` | pending |
-| Phase B3 | F5 两个 Server 实例并发完成同目录同名、不同内容的分块上传 | `go test . -run '^TestChunkUploadConcurrentServersKeepSameNameDifferentContents$' -count=5 -race -timeout=2m` | pending |
+| Phase C5 | F6 Codex provider default 热切换，旧 rollout 每次按最新配置归属 | `go test . -run '^TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches$' -count=10 -race -timeout=2m` | `e4b2ac4` |
+| Phase B3 | F5 两个 Server 实例并发完成同目录同名、不同内容的分块上传 | `go test . -run '^TestChunkUploadConcurrentServersKeepSameNameDifferentContents$' -count=5 -race -timeout=2m` | `3425e55` |
 
 ### 本轮最终验收快照
 
-- 代码基线：`dc14ef6`（最终验收前代码工作区干净）。
-- `go test ./... -count=1 -timeout=3m`：PASS（63.5s）。
+- 代码基线：`3425e55`（最终验收前代码工作区干净）。
+- `go test ./... -count=1 -timeout=3m`：PASS（64.8s）。
 - `cd frontend && bun test`：PASS（741 tests / 80 files）；`bun run type-check`：PASS。
 - `cd frontend && VITE_PORTALS=cli,settings bun run build`：PASS；Vite 提示若干既有 chunk 超过 500 kB。
 - `go build ./...`、`GOWORK=off go build ./...`、`go vet ./...`、`GOOS=linux GOARCH=amd64 go build ./...`、`git diff --check`：PASS。
-- F2 在本机执行了 profile 回归；Darwin 不暴露子进程 profile 环境时按代码安全回退，真实 Claude 私有 profile 所有权仍为平台限制。
+- F2 在本机执行了 profile 回归；Darwin 若不暴露子进程 profile 环境，代码会安全回退；真实 Claude 私有 profile 所有权场景仍未做系统级验收。
+- F5 两个 Server 实例回归共享 Go 进程锁，跨进程持续并发仍 OPEN。
 - F7 前端按钮真实点击路径、F8 真实远端浏览器重连、F10 外部渠道实际送达仍 OPEN：当前 CUA 没有浏览器 tab，browser MCP transport closed，也没有外部 provider 凭证/接收端。对应 API、模板契约、coordinator fan-out 的自动化测试不能替代这些体验验收。
 
 ### 全量验收快照
