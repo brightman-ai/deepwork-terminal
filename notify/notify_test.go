@@ -12,15 +12,19 @@ import (
 )
 
 type fakeProvider struct {
-	kind string
-	out  Outcome
-	sent int
+	kind        string
+	out         Outcome
+	sent        int
+	panicOnSend bool
 }
 
 func (f *fakeProvider) Kind() string { return f.kind }
 func (f *fakeProvider) Name() string { return f.kind }
 func (f *fakeProvider) Send(ctx context.Context, e Event, cfg ProviderConfig) (Outcome, string) {
 	f.sent++
+	if f.panicOnSend {
+		panic("provider failure")
+	}
 	return f.out, ""
 }
 func (f *fakeProvider) Status(ctx context.Context, cfg ProviderConfig) Status {
@@ -51,6 +55,31 @@ func TestCoordinatorFanoutSkipsDisabled(t *testing.T) {
 	}
 	if len(rec.Results) != 1 || rec.Results[0].Provider != "a" {
 		t.Fatalf("record should contain only a: %+v", rec.Results)
+	}
+}
+
+func TestCoordinatorFanoutDeliversToEveryEnabledProviderDespitePanic(t *testing.T) {
+	a := &fakeProvider{kind: "a", out: OutcomeSent}
+	b := &fakeProvider{kind: "b", panicOnSend: true}
+	cProvider := &fakeProvider{kind: "c", out: OutcomeSent}
+	store := &memStore{c: Config{Providers: []ProviderConfig{
+		{Kind: "a", Enabled: true}, {Kind: "b", Enabled: true}, {Kind: "c", Enabled: true},
+	}}}
+	c := NewCoordinator(store, fixedNow, a, b, cProvider)
+
+	rec := c.Send(context.Background(), Event{Kind: KindDone})
+	if a.sent != 1 || b.sent != 1 || cProvider.sent != 1 {
+		t.Fatalf("every enabled provider should be attempted once, got a=%d b=%d c=%d", a.sent, b.sent, cProvider.sent)
+	}
+	if len(rec.Results) != 3 {
+		t.Fatalf("one provider panic must not abort fan-out: %+v", rec.Results)
+	}
+	got := make(map[string]Outcome, len(rec.Results))
+	for _, result := range rec.Results {
+		got[result.Provider] = result.Outcome
+	}
+	if got["a"] != OutcomeSent || got["b"] != OutcomeFailed || got["c"] != OutcomeSent {
+		t.Fatalf("provider outcomes = %v, want success/failure/success", got)
 	}
 }
 
