@@ -140,6 +140,53 @@ func TestChunkUploadRoundTrip(t *testing.T) {
 	assert.True(t, bytes.Equal(payload, got), "reassembled bytes must equal source")
 }
 
+func TestChunkUploadCompleteRetryAfterLostResponseReusesSameFile(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "chunk-retry", CWD: cwd})
+	require.NoError(t, err)
+	sessionID := sessionByName(t, sm, "chunk-retry").ID
+	payload := makeChunkPayload(1024)
+	complete := func(uploadID string) struct {
+		RelPath  string `json:"relPath"`
+		Filename string `json:"filename"`
+	} {
+		t.Helper()
+		resp, err := httpPostForm(formatURL(server, "/files/upload/complete"),
+			url.Values{"uploadId": {uploadID}, "session": {sessionID}}, "")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var result struct {
+			RelPath  string `json:"relPath"`
+			Filename string `json:"filename"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+		return result
+	}
+
+	firstInit := chunkInit(t, server, sessionID, cwd, "", "retry.bin", len(payload))
+	sendAllChunks(t, server, firstInit, payload)
+	first := complete(firstInit.UploadID) // the file lands; imagine its response was lost
+
+	retryInit := chunkInit(t, server, sessionID, cwd, "", "retry.bin", len(payload))
+	require.Equal(t, firstInit.UploadID, retryInit.UploadID)
+	require.Empty(t, retryInit.Received)
+	sendAllChunks(t, server, retryInit, payload)
+	second := complete(retryInit.UploadID)
+	require.Equal(t, first.RelPath, second.RelPath, "retry must resolve to the original landed file")
+	require.Equal(t, first.Filename, second.Filename)
+
+	entries, err := os.ReadDir(cwd)
+	require.NoError(t, err)
+	if len(entries) != 1 {
+		t.Fatalf("retry left duplicate files: %v", entries)
+	}
+	got, err := os.ReadFile(filepath.Join(cwd, second.Filename))
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
 // TC-CHK-02: a partial upload resumes — re-init reports the chunks already on disk, status
 // agrees, completing early 409s with the missing set, and finishing the gap succeeds.
 func TestChunkUploadResume(t *testing.T) {
