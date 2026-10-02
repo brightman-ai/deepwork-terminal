@@ -129,6 +129,29 @@ func TestNotifierSessionSource_CooldownClearsWhenUserAnswers(t *testing.T) {
 	}
 }
 
+func TestNotifierSessionSource_MultipleSessionsKeepCooldownIndependent(t *testing.T) {
+	n := newNotifierRig()
+	base := time.Date(2026, 7, 29, 11, 0, 0, 0, time.UTC)
+	first, second := sessionEntry("tab-a", "claude", "running"), sessionEntry("tab-b", "codex", "running")
+	// Distinct sessions may share the same display title; identity is the session id.
+	first.Title, second.Title = "终端", "终端"
+	n.feed(t, base, first, second)
+	first.AgentStatus, second.AgentStatus = agentintel.StatusIdle, agentintel.StatusIdle
+	n.feed(t, base.Add(time.Second), first, second)
+	if len(n.pending) != 2 || !n.pending[ptyKey("tab-a")] || !n.pending[ptyKey("tab-b")] {
+		t.Fatalf("simultaneous completions must queue independently: %v", n.pending)
+	}
+
+	n.pending = map[string]bool{}                // pretend both notifications flushed
+	first.AgentStatus = agentintel.StatusRunning // user answered only tab A
+	n.feed(t, base.Add(2*time.Second), first, second)
+	first.AgentStatus = agentintel.StatusIdle
+	n.feed(t, base.Add(3*time.Second), first, second)
+	if len(n.pending) != 1 || !n.pending[ptyKey("tab-a")] || n.pending[ptyKey("tab-b")] {
+		t.Fatalf("replying to tab A must clear only A's cooldown: %v", n.pending)
+	}
+}
+
 // TestNotifierSweep pins what a vanished target means per source: a tab the manager no
 // longer lists is genuinely gone, while a tmux read that FAILED says nothing about its panes
 // — filing those as closed would inflate the next notification's archive count.
