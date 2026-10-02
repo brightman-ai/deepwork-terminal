@@ -395,7 +395,7 @@ func TestFilesRecent_Shape(t *testing.T) {
 // TC-FS-06: GET /files/search recursively finds matching files/dirs by name, returns the
 // cwd-relative path, and SKIPS noise dirs (node_modules) entirely.
 func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
-	server, sm, _ := newDrawerTestServer(t)
+	server, sm, fileServer := newDrawerTestServer(t)
 	cwd := t.TempDir()
 	// A nested matching file under real source.
 	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "src", "deep"), 0o755))
@@ -410,6 +410,7 @@ func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
 	require.NoError(t, err)
 	sess := sessionByName(t, sm, "search")
 
+	awaitFileSearchIndex(t, fileServer, cwd)
 	resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, "widget"), "")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -453,7 +454,7 @@ func TestFilesSearch_RecursiveAndSkipsNoise(t *testing.T) {
 // 目录不再是同分 tie-break: 一个得分更高的文件(前缀命中 100)也不得把命中目录(词中命中 60)
 // 压下去。这正是 Human 拍定的"命中的目录排前面"——旧排序下 report.md 会排在 my-report/ 前。
 func TestFilesSearch_DirsGroupBeforeFiles(t *testing.T) {
-	server, sm, _ := newDrawerTestServer(t)
+	server, sm, fileServer := newDrawerTestServer(t)
 	cwd := t.TempDir()
 	// 目录: "report" 词中命中(word boundary, 60 分)。文件: "report.md" 前缀命中(100 分)。
 	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "my-report"), 0o755))
@@ -463,6 +464,7 @@ func TestFilesSearch_DirsGroupBeforeFiles(t *testing.T) {
 	require.NoError(t, err)
 	sess := sessionByName(t, sm, "searchdirs")
 
+	awaitFileSearchIndex(t, fileServer, cwd)
 	resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, "report"), "")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -482,7 +484,7 @@ func TestFilesSearch_DirsGroupBeforeFiles(t *testing.T) {
 // can say "narrow your search" instead of silently dropping matches. Regression guard for
 // the bug where a giant cwd was both slow (walk never terminated) AND hid late-sorted files.
 func TestFilesSearch_TruncatesWhenResultsExceedCap(t *testing.T) {
-	server, sm, _ := newDrawerTestServer(t)
+	server, sm, fileServer := newDrawerTestServer(t)
 	cwd := t.TempDir()
 	// More matching files than the result cap, all in one dir → forces the cap path.
 	for i := 0; i < searchMaxResults+25; i++ {
@@ -493,6 +495,7 @@ func TestFilesSearch_TruncatesWhenResultsExceedCap(t *testing.T) {
 	require.NoError(t, err)
 	sess := sessionByName(t, sm, "trunc")
 
+	awaitFileSearchIndex(t, fileServer, cwd)
 	resp, err := httpGet(formatURL(server, "/files/search?session=%s&q=%s", sess.ID, "widget"), "")
 	require.NoError(t, err)
 	defer resp.Body.Close()

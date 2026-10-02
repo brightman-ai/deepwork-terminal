@@ -60,22 +60,22 @@ func TestEnsureSignalKeys_restoresIsigAtIdlePrompt(t *testing.T) {
 	}, 2_000_000_000, 20_000_000, "shell never became the tty's foreground group")
 
 	stripIsig := func() {
-		term, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+		term, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
 		require.NoError(t, err)
 		term.Lflag &^= unix.ISIG
-		require.NoError(t, unix.IoctlSetTermios(fd, unix.TCSETS, term))
+		require.NoError(t, unix.IoctlSetTermios(fd, ioctlWriteTermios, term))
 	}
 
 	// Incident shape: ISIG lost, ^C arrives → repaired before the write.
 	stripIsig()
 	s.ensureSignalKeys([]byte{0x03})
-	term, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	term, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
 	require.NoError(t, err)
 	assert.NotZero(t, term.Lflag&unix.ISIG, "ISIG must be restored before the ^C is written")
 
 	// Healthy terminal: nothing to do, and nothing changes.
 	s.ensureSignalKeys([]byte{0x03})
-	term, err = unix.IoctlGetTermios(fd, unix.TCGETS)
+	term, err = unix.IoctlGetTermios(fd, ioctlReadTermios)
 	require.NoError(t, err)
 	assert.NotZero(t, term.Lflag&unix.ISIG)
 
@@ -83,7 +83,7 @@ func TestEnsureSignalKeys_restoresIsigAtIdlePrompt(t *testing.T) {
 	// its business, and a cure tied to plain keys would stomp TUIs mid-keystroke.
 	stripIsig()
 	s.ensureSignalKeys([]byte("hello"))
-	term, err = unix.IoctlGetTermios(fd, unix.TCGETS)
+	term, err = unix.IoctlGetTermios(fd, ioctlReadTermios)
 	require.NoError(t, err)
 	assert.Zero(t, term.Lflag&unix.ISIG, "plain text must not trigger the repair")
 }
@@ -110,24 +110,24 @@ func TestPatrolSignalKeys_quiescenceGate(t *testing.T) {
 	}, 2_000_000_000, 20_000_000, "shell never became the tty's foreground group")
 
 	stripIsig := func() {
-		term, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+		term, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
 		require.NoError(t, err)
 		term.Lflag &^= unix.ISIG
-		require.NoError(t, unix.IoctlSetTermios(fd, unix.TCSETS, term))
+		require.NoError(t, unix.IoctlSetTermios(fd, ioctlWriteTermios, term))
 	}
 
 	// Recent output (a TUI mid-draw): the patrol must hold off, even with ISIG missing.
 	stripIsig()
 	s.lastOutputNano.Store(time.Now().UnixNano())
 	assert.False(t, s.patrolSignalKeys(8*time.Second), "busy session must not be healed")
-	term, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	term, err := unix.IoctlGetTermios(fd, ioctlReadTermios)
 	require.NoError(t, err)
 	assert.Zero(t, term.Lflag&unix.ISIG, "patrol must not stomp a possibly-live TUI")
 
 	// Quiet for long enough (an idle prompt with residue): heal.
 	s.lastOutputNano.Store(time.Now().Add(-30 * time.Second).UnixNano())
 	assert.True(t, s.patrolSignalKeys(8*time.Second), "quiet residue must be healed")
-	term, err = unix.IoctlGetTermios(fd, unix.TCGETS)
+	term, err = unix.IoctlGetTermios(fd, ioctlReadTermios)
 	require.NoError(t, err)
 	assert.NotZero(t, term.Lflag&unix.ISIG)
 

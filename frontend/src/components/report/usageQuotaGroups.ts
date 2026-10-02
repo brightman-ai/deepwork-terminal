@@ -12,7 +12,13 @@ export function accountKey(q: { runtime: string; vendor?: string }): string {
   return `${q.runtime}:${q.vendor ?? ''}`
 }
 export function quotaGroupsFor(q: RuntimeQuota): QuotaGroup[] {
-  if (q.quota_groups?.length) return q.quota_groups
+  if (q.quota_groups?.length) {
+    const groups = [...q.quota_groups]
+    if (q.runtime === 'codex' && (!q.vendor || q.vendor === 'openai')) {
+      groups.sort((a, b) => Number(b.family === 'codex') - Number(a.family === 'codex'))
+    }
+    return groups
+  }
   if (q.windows?.length || q.snapshot) {
     return [{ family: q.family, windows: q.windows, snapshot: q.snapshot }]
   }
@@ -56,4 +62,15 @@ export function accountTightestRemaining(q: RuntimeQuota): number {
     }
   }
   return best === null ? Number.POSITIVE_INFINITY : best
+}
+
+/** Prefer the active/spending account, but never let an unreadable preferred
+ * account mask an available current reading from another logged-in account. */
+export function findHeadlineQuota(quotas: RuntimeQuota[], spending: ReadonlySet<string>) {
+  const relevant = quotas.filter(q => q.attribution?.active !== false)
+  const pool = relevant.length ? relevant : quotas
+  const spent = pool.filter(q => !!q.vendor && spending.has(q.vendor))
+  return findTightestQuota(spent.length ? spent : pool)
+    ?? findTightestQuota(pool)
+    ?? findTightestQuota(quotas)
 }

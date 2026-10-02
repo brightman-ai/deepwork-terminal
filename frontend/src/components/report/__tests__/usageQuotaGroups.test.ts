@@ -83,3 +83,41 @@ describe('accountTightestRemaining', () => {
     expect(accountTightestRemaining(waiting)).toBe(Number.POSITIVE_INFINITY)
   })
 })
+
+import { findHeadlineQuota } from '../usageQuotaGroups'
+describe('topbar reading fallback', () => {
+  test('stale Claude cannot mask fresh Codex whose alias has not been attributed', () => {
+    const quotas: RuntimeQuota[] = [
+      { runtime:'claude', vendor:'anthropic', present:true, billing:'subscription', health,
+        snapshot:{age_seconds:19000,source:'hook',stale:true},
+        windows:[{kind:'7d',window_minutes:10080,used_percent:0,remaining_percent:100}] },
+      { runtime:'codex', vendor:'openai', display:'Codex 官方', present:true, billing:'subscription',health,
+        attribution:{active:false,provider_id:'local_codex'},
+        snapshot:{age_seconds:60,source:'probe',stale:false},
+        windows:[{kind:'7d',window_minutes:10080,used_percent:12,remaining_percent:88}] },
+    ]
+    expect(findHeadlineQuota(quotas,new Set(['openai']))?.window.remaining_percent).toBe(88)
+  })
+  test('a valid active account still wins over an inactive tighter quota', () => {
+    const make = (vendor:string, active:boolean,remaining:number):RuntimeQuota => ({
+      runtime:'codex',vendor,present:true,billing:'subscription',health,attribution:{active},
+      snapshot:{age_seconds:1,source:'probe',stale:false},
+      windows:[{kind:'7d',window_minutes:10080,used_percent:100-remaining,remaining_percent:remaining}],
+    })
+    expect(findHeadlineQuota([make('openai',false,0),make('moonshot',true,60)],new Set(['moonshot']))?.window.remaining_percent).toBe(60)
+  })
+})
+
+describe('one account, main limit plus additional limits', () => {
+  test('reserve sorted before codex in raw input must not become the account main row', () => {
+    const q:RuntimeQuota={runtime:'codex',vendor:'openai',present:true,health,quota_groups:[
+      {family:'base_model_inference',family_label:'gpt-reserve',windows:[{kind:'7d',window_minutes:10080,used_percent:0,remaining_percent:100}]},
+      {family:'codex',windows:[{kind:'7d',window_minutes:10080,used_percent:20,remaining_percent:80}]},
+    ]}
+    const groups=quotaGroupsFor(q)
+    expect(groups.map(g=>g.family)).toEqual(['codex','base_model_inference'])
+    expect(groups[0].windows?.[0].remaining_percent).toBe(80)
+    expect(groups[1].windows?.[0].remaining_percent).toBe(100)
+    expect(q.quota_groups?.[0].family).toBe('base_model_inference')
+  })
+})

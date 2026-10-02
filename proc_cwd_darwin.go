@@ -12,9 +12,9 @@ import (
 )
 
 // macOS 没有 /proc。取别的进程的 cwd 只有两条路：libproc 的 proc_pidinfo（要 cgo）或者 lsof。
-// 这里用 lsof —— 系统自带、不引入 cgo，代价是它要 fork 一个进程（实测 ~33ms）。
+// cgo 构建直接读 libproc；不含 cgo 的构建使用系统 lsof，代价是 fork。
 //
-// **正因为它贵，才必须有缓存**：sessions_overview 的推送循环每秒会问一次每个会话的 cwd，几个标签
+// lsof 回退路径使用缓存：sessions_overview 的推送循环每秒会问一次每个会话的 cwd，几个标签
 // 就是每秒几次 fork。TTL 取 1s：既压住了推送循环的重复提问，又不会让「刚 cd 完就粘贴」这种操作
 // 读到超过一秒的旧值。
 const procCWDCacheTTL = time.Second
@@ -33,6 +33,9 @@ var procCWDCache = struct {
 }{m: make(map[int]procCWDEntry)}
 
 func readProcessCWD(pid int) string {
+	if dir := nativeProcessCWD(pid); dir != "" {
+		return dir
+	}
 	now := time.Now()
 	procCWDCache.Lock()
 	if e, ok := procCWDCache.m[pid]; ok && now.Sub(e.at) < procCWDCacheTTL {

@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brightman-ai/kit/transcript"
 	"github.com/brightman-ai/kit/usage"
 )
 
@@ -85,7 +86,12 @@ const credentialCacheTTL = 30 * time.Second
 const credentialFileName = "usage-credentials.json.enc"
 
 func newCredentialStore(dataDir string) *credentialStore {
-	shared := usage.DeepworkFile(credentialFileName)
+	home := os.Getenv("DEEPWORK_HOME")
+	if home == "" {
+		userHome, _ := os.UserHomeDir()
+		home = filepath.Join(userHome, ".deepwork")
+	}
+	shared := filepath.Join(home, credentialFileName)
 	return &credentialStore{
 		path:      shared,
 		key:       loadOrCreateIlinkKey(filepath.Dir(shared)), // one machine key for every secret in this process
@@ -110,6 +116,23 @@ func (s *credentialStore) Credential(vendor string) (usage.Credential, bool) {
 // state (most hosts have none), so it is not an error and never blocks startup.
 func (s *credentialStore) load() map[string]usage.Credential {
 	out := map[string]usage.Credential{}
+	defer func() {
+		id := officialCodexProviderDeclaration(transcript.CodexHome())
+		if id == "" {
+			return
+		}
+		// An explicit host declaration is stronger than the default-profile adapter.
+		for _, cred := range out {
+			for _, declared := range cred.RuntimeProviderIDs {
+				if declared == id {
+					return
+				}
+			}
+		}
+		cred := out["openai"]
+		cred.RuntimeProviderIDs = append(cred.RuntimeProviderIDs, id)
+		out["openai"] = cred
+	}()
 	sealed, err := os.ReadFile(s.path) //nolint:gosec — our own sealed store
 	if err != nil {
 		s.migrateLegacy()
@@ -129,7 +152,7 @@ func (s *credentialStore) load() map[string]usage.Credential {
 		return out
 	}
 	for _, entry := range file.Subscriptions {
-		if entry.Vendor == "" || entry.APIKey == "" {
+		if entry.Vendor == "" || (entry.APIKey == "" && len(entry.RuntimeProviderIDs) == 0) {
 			continue
 		}
 		out[entry.Vendor] = usage.Credential{

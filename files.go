@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
 )
@@ -88,35 +87,20 @@ type searchEntry struct {
 
 type searchResponse struct {
 	Entries []searchEntry `json:"entries"`
-	// Truncated is true when the walk hit a cap (too many hits or a tree larger than
-	// searchMaxScan) and stopped early, so the result set is incomplete. The client
-	// surfaces this so a huge tree (e.g. a monorepo cwd) reads as "narrow your search",
-	// not "no such file" — silent truncation otherwise hides files that exist.
-	Truncated    bool `json:"truncated,omitempty"`
-	Incomplete   bool `json:"incomplete"`
-	NextOffset   int  `json:"nextOffset,omitempty"`
-	TotalMatches int  `json:"totalMatches"`
+	// Truncated distinguishes a partial index or a paginated result from a complete list.
+	Truncated    bool   `json:"truncated,omitempty"`
+	Incomplete   bool   `json:"incomplete"`
+	NextOffset   int    `json:"nextOffset,omitempty"`
+	TotalMatches int    `json:"totalMatches"`
+	IndexState   string `json:"indexState"`
+	Scanned      int    `json:"scanned"`
+	Generation   uint64 `json:"generation"`
+	Reset        bool   `json:"reset,omitempty"`
+	ScanError    string `json:"scanError,omitempty"`
 }
 
-// errSearchBudget aborts the search WalkDir once a cap is hit. Returning filepath.SkipDir
-// from a FILE entry only skips its siblings — the walk keeps grinding the rest of a giant
-// tree (slow). A sentinel error returned from the walk fn stops WalkDir immediately.
-var errSearchBudget = errors.New("search budget exhausted")
-
-// searchMaxResults caps how many hits /files/search returns — a quick-open list, not a
-// full index dump. searchMaxScan caps how many tree entries we walk before stopping, so
-// a giant subtree can't hang the request.
-const (
-	// searchMaxResults is how many ranked hits the client gets (a quick-open list, not an index).
-	searchMaxResults = 200
-	// searchMaxScan caps tree entries walked before giving up (was 20000 — too small for real
-	// project trees, which silently truncated files that exist, e.g. late-sorted tmp/).
-	searchMaxScan = 120000
-)
-
-// searchTimeBudget bounds a search's wall-clock so a giant tree can't hang the request even
-// under the raised scan cap; hitting it marks the result truncated (partial, not "not found").
-const searchTimeBudget = 2500 * time.Millisecond
+// Search pages are bounded; filename discovery continues in the background.
+const searchMaxResults = 200
 
 // searchSkipDirs are directory names we never descend into — build artifacts, vendored
 // deps, caches and VCS internals that bury real source under tens of thousands of files.
@@ -293,7 +277,9 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "directory not found"})
 		return
 	}
-	s.invalidateFileSearchIndexes(target)
+	if r.URL.Query().Get("refresh") == "1" {
+		s.invalidateFileSearchIndexes(target)
+	}
 
 	out := make([]treeEntry, 0, len(entries))
 	for _, e := range entries {
@@ -332,7 +318,7 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 // NAME contains q (case-insensitive) — VS-Code quick-open style. Noise directories
 // (build artifacts / vendored deps / caches, see searchSkipDirs) are skipped entirely so
 // a real project's source isn't buried. Results cap at searchMaxResults; the walk caps at
-// searchMaxScan entries so a giant tree can't hang the request. An empty/unknown cwd or an
+// background discovery; requests return the currently available snapshot. An empty/unknown cwd or an
 // empty query → 200 with an empty list (soft-fail, like the other /files/* handlers).
 func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	cwd, ok := s.requestWorkbenchCWD(r)
@@ -348,6 +334,7 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	// contain EVERY term (case-insensitive, order-independent). Multiple terms may
 	// span the cwd-relative path, so "meeting final-v6" finds final-v6/meeting.md.
 	terms := strings.Fields(strings.ToLower(r.URL.Query().Get("q")))
+	sort.SliceStable(terms, func(i, j int) bool { return len(terms[i]) > len(terms[j]) })
 	if len(terms) == 0 {
 		writeJSON(w, http.StatusOK, searchResponse{Entries: []searchEntry{}})
 		return
@@ -363,33 +350,31 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	out := make([]searchEntry, 0, 64)
-	for i, item := range index.entries {
-		if i%256 == 0 && r.Context().Err() != nil {
-			return
-		}
-		path := filepath.Join(target, item.rel)
-		rel, err := filepath.Rel(cwd, path)
-		if err != nil {
-			continue
-		}
-		candidate := item.name
-		if pathQuery {
-			candidate = filepath.ToSlash(rel)
-		}
-		if !matchesFuzzy(terms, candidate) {
-			continue
-		}
-		entry := searchEntry{Name: item.name, Rel: filepath.ToSlash(rel), IsDir: item.isDir}
-		if info, err := os.Lstat(path); err == nil {
-			entry.MtimeMs = info.ModTime().UnixMilli()
-			if !item.isDir {
-				entry.Size = info.Size()
+	view, building := index.snapshot()
+	canonicalCWD, err := safeResolve(cwd, "")
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
+		return
+	}
+	scope, _ := filepath.Rel(canonicalCWD, target)
+	prefix := ""
+	if scope != "." {
+		prefix = filepath.ToSlash(scope) + "/"
+	}
+	lowerPrefix := strings.ToLower(prefix)
+	hits, err := index.matches(r.Context(), view, prefix, lowerPrefix, terms, pathQuery)
+	if err != nil {
+		return
+	}
+	out := make([]searchEntry, 0, len(hits))
+	for _, hit := range hits {
+		if info, err := os.Lstat(filepath.Join(canonicalCWD, hit.Rel)); err == nil {
+			hit.MtimeMs = info.ModTime().UnixMilli()
+			if !hit.IsDir {
+				hit.Size = info.Size()
 			}
-		} else {
-			continue
+			out = append(out, hit)
 		}
-		out = append(out, entry)
 	}
 	// Name queries keep directory hits first, then name relevance, depth and recency.
 	// Path queries additionally match inherited ancestor names, so direct name hits
@@ -440,6 +425,11 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	})
 	total := len(scored)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	requestedGeneration, _ := strconv.ParseUint(r.URL.Query().Get("generation"), 10, 64)
+	reset := offset > 0 && requestedGeneration != 0 && requestedGeneration != view.generation
+	if reset {
+		offset = 0
+	}
 	if offset < 0 {
 		offset = 0
 	}
@@ -458,9 +448,16 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request) {
 	for i, hit := range scored[offset:end] {
 		out[i] = hit.e
 	}
+	state := "ready"
+	if building {
+		state = "building"
+	} else if view.scanError != "" {
+		state = "error"
+	}
 	writeJSON(w, http.StatusOK, searchResponse{
-		Entries: out, Truncated: index.incomplete || next > 0,
-		Incomplete: index.incomplete, NextOffset: next, TotalMatches: total,
+		Entries: out, Truncated: !view.complete || next > 0,
+		Incomplete: !view.complete, NextOffset: next, TotalMatches: total,
+		IndexState: state, Scanned: len(view.entries), Generation: view.generation, Reset: reset, ScanError: view.scanError,
 	})
 }
 
@@ -850,7 +847,7 @@ func (s *Server) activePaneCWD(ctx context.Context, shellPID int) string {
 	if shellPID <= 0 || s.tmuxProvider == nil {
 		return ""
 	}
-	raw, err := s.tmuxProvider.TmuxState(ctx, shellPID)
+	raw, err := s.workbenchTmuxState(ctx, shellPID)
 	if err != nil {
 		return ""
 	}
