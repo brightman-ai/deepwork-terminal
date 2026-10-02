@@ -69,7 +69,7 @@ func registerUsageCredentialSource(owner *Server, source *credentialStore) {
 	}
 	usageCredentialSources = append(kept, usageCredentialRegistration{owner: owner, source: source})
 	usageCredentialSource = source
-	usage.UseCredentials(source)
+	useUsageCredentialSource(source)
 }
 
 func unregisterUsageCredentialSource(owner *Server) {
@@ -86,7 +86,17 @@ func unregisterUsageCredentialSource(owner *Server) {
 	if n := len(usageCredentialSources); n > 0 {
 		usageCredentialSource = usageCredentialSources[n-1].source
 	}
-	usage.UseCredentials(usageCredentialSource)
+	useUsageCredentialSource(usageCredentialSource)
+}
+
+func useUsageCredentialSource(source *credentialStore) {
+	if source == nil {
+		// A typed nil pointer converted to CredentialSource is a non-nil interface and
+		// makes kit/usage call a method through nil on its next quota query.
+		usage.UseCredentials(nil)
+		return
+	}
+	usage.UseCredentials(source)
 }
 
 func testRunWithoutIsolatedDeepworkHome() bool {
