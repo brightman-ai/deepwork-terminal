@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"math/rand"
@@ -9,9 +10,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -260,6 +264,156 @@ func TestChunkUploadConcurrentServersKeepSameNameDifferentContents(t *testing.T)
 	entries, err := os.ReadDir(cwd)
 	require.NoError(t, err)
 	require.Len(t, entries, 2, "same-name collision must produce exactly two stable files")
+}
+
+// TestChunkUploadCompleteCrossProcessWorker is invoked only by the process-level race test
+// below. Keeping completion inside separate test-binary processes bypasses chunkStoreMu, so
+// the test exercises the filesystem no-replace publication path itself.
+func TestChunkUploadCompleteCrossProcessWorker(t *testing.T) {
+	if os.Getenv("DW_CHUNK_COMPLETE_WORKER") != "1" {
+		return
+	}
+	dataDir := os.Getenv("DW_CHUNK_WORKER_DATA_DIR")
+	uploadID := os.Getenv("DW_CHUNK_WORKER_UPLOAD_ID")
+	gate := os.Getenv("DW_CHUNK_WORKER_GATE")
+	ready := os.Getenv("DW_CHUNK_WORKER_READY")
+	resultPath := os.Getenv("DW_CHUNK_WORKER_RESULT")
+	manager := NewSessionManager(4096, "/bin/sh")
+	t.Cleanup(func() { _ = manager.CloseAll() })
+	s := &Server{config: Config{DataDir: dataDir}, mgr: manager}
+	if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("parent did not release the completion gate")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	form := url.Values{"uploadId": {uploadID}}
+	req := httptest.NewRequest(http.MethodPost, "/files/upload/complete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	s.handleChunkUploadComplete(response, req)
+	if err := os.WriteFile(resultPath, response.Body.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("complete returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestChunkUploadCompleteConcurrentAcrossProcessesDoesNotOverwrite(t *testing.T) {
+	cwd := t.TempDir()
+	gate := filepath.Join(t.TempDir(), "start")
+	workers := make([]struct {
+		cmd        *exec.Cmd
+		waited     bool
+		ready      string
+		resultPath string
+		dataDir    string
+		uploadID   string
+		payload    []byte
+	}, 2)
+	for i := range workers {
+		w := &workers[i]
+		w.dataDir = t.TempDir()
+		w.uploadID = strings.Repeat(strconv.Itoa(i+1), 16)
+		w.ready = filepath.Join(t.TempDir(), "ready")
+		w.resultPath = filepath.Join(t.TempDir(), "result.json")
+		w.payload = makeChunkPayload(4 << 20)
+		if i == 1 {
+			for j := range w.payload {
+				w.payload[j] ^= 0xff
+			}
+		}
+		stagingDir := filepath.Join(w.dataDir, chunkStagingSubdir, w.uploadID)
+		require.NoError(t, writeChunkMeta(stagingDir, chunkMeta{
+			Name: "shared.bin", CWD: cwd, Size: int64(len(w.payload)), ChunkSize: chunkUploadChunkSize, TotalChunks: 1,
+		}))
+		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "0.part"), w.payload, 0o600))
+
+		cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestChunkUploadCompleteCrossProcessWorker$")
+		w.cmd = cmd
+		prefixes := []string{"DW_CHUNK_COMPLETE_WORKER=", "DW_CHUNK_WORKER_DATA_DIR=", "DW_CHUNK_WORKER_UPLOAD_ID=", "DW_CHUNK_WORKER_GATE=", "DW_CHUNK_WORKER_READY=", "DW_CHUNK_WORKER_RESULT="}
+		for _, existing := range os.Environ() {
+			skip := false
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(existing, prefix) {
+					skip = true
+					break
+				}
+			}
+			if !skip {
+				cmd.Env = append(cmd.Env, existing)
+			}
+		}
+		cmd.Env = append(cmd.Env,
+			"DW_CHUNK_COMPLETE_WORKER=1",
+			"DW_CHUNK_WORKER_DATA_DIR="+w.dataDir,
+			"DW_CHUNK_WORKER_UPLOAD_ID="+w.uploadID,
+			"DW_CHUNK_WORKER_GATE="+gate,
+			"DW_CHUNK_WORKER_READY="+w.ready,
+			"DW_CHUNK_WORKER_RESULT="+w.resultPath,
+		)
+		require.NoError(t, cmd.Start())
+	}
+	t.Cleanup(func() {
+		for _, w := range workers {
+			if w.cmd.Process != nil && !w.waited {
+				_ = w.cmd.Process.Kill()
+				_ = w.cmd.Wait()
+			}
+		}
+	})
+
+	readyDeadline := time.Now().Add(10 * time.Second)
+	for {
+		readyCount := 0
+		for _, w := range workers {
+			if _, err := os.Stat(w.ready); err == nil {
+				readyCount++
+			}
+		}
+		if readyCount == len(workers) {
+			break
+		}
+		if time.Now().After(readyDeadline) {
+			t.Fatal("not all independent completion workers reached the barrier")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.NoError(t, os.WriteFile(gate, []byte("go"), 0o600))
+	for _, w := range workers {
+		require.NoError(t, w.cmd.Wait())
+		w.waited = true
+	}
+
+	var paths []string
+	for _, w := range workers {
+		body, err := os.ReadFile(w.resultPath)
+		require.NoError(t, err)
+		var result struct {
+			Path string `json:"path"`
+		}
+		require.NoError(t, json.Unmarshal(body, &result))
+		require.NotEmpty(t, result.Path)
+		paths = append(paths, result.Path)
+	}
+	require.NotEqual(t, paths[0], paths[1], "distinct contents from separate processes need distinct no-replace targets")
+	gotA, err := os.ReadFile(paths[0])
+	require.NoError(t, err)
+	gotB, err := os.ReadFile(paths[1])
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(workers[0].payload, gotA) && bytes.Equal(workers[1].payload, gotB) ||
+		bytes.Equal(workers[0].payload, gotB) && bytes.Equal(workers[1].payload, gotA), "both processes must publish one complete payload")
+	entries, err := os.ReadDir(cwd)
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "cross-process name collision must preserve exactly two files")
 }
 
 // TC-CHK-02: a partial upload resumes — re-init reports the chunks already on disk, status
