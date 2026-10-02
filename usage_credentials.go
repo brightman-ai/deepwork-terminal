@@ -44,6 +44,63 @@ const (
 	quotaMaxAge       = 10 * time.Minute
 )
 
+// kit/usage owns one credential source per process. Keep the source used by the quota
+// reconciliation shim in lockstep with it, and hold the read lock across kit calls so a
+// second Server cannot swap the source midway through one response.
+var (
+	usageCredentialSourceMu sync.RWMutex
+	usageCredentialSource   *credentialStore
+	usageCredentialSources  []usageCredentialRegistration
+)
+
+type usageCredentialRegistration struct {
+	owner  *Server
+	source *credentialStore
+}
+
+func registerUsageCredentialSource(owner *Server, source *credentialStore) {
+	usageCredentialSourceMu.Lock()
+	defer usageCredentialSourceMu.Unlock()
+	kept := usageCredentialSources[:0]
+	for _, registration := range usageCredentialSources {
+		if registration.owner != owner {
+			kept = append(kept, registration)
+		}
+	}
+	usageCredentialSources = append(kept, usageCredentialRegistration{owner: owner, source: source})
+	usageCredentialSource = source
+	usage.UseCredentials(source)
+}
+
+func unregisterUsageCredentialSource(owner *Server) {
+	usageCredentialSourceMu.Lock()
+	defer usageCredentialSourceMu.Unlock()
+	kept := usageCredentialSources[:0]
+	for _, registration := range usageCredentialSources {
+		if registration.owner != owner {
+			kept = append(kept, registration)
+		}
+	}
+	usageCredentialSources = kept
+	usageCredentialSource = nil
+	if n := len(usageCredentialSources); n > 0 {
+		usageCredentialSource = usageCredentialSources[n-1].source
+	}
+	usage.UseCredentials(usageCredentialSource)
+}
+
+func testRunWithoutIsolatedDeepworkHome() bool {
+	return strings.HasSuffix(os.Args[0], ".test") && os.Getenv("DEEPWORK_HOME") == ""
+}
+
+func deepworkHomeDir() string {
+	if home := os.Getenv("DEEPWORK_HOME"); home != "" {
+		return home
+	}
+	userHome, _ := os.UserHomeDir()
+	return filepath.Join(userHome, ".deepwork")
+}
+
 // subscriptionCredentials is the on-disk shape of <DataDir>/usage-credentials.json.enc.
 type subscriptionCredentials struct {
 	Version       int                      `json:"version"`
@@ -78,6 +135,9 @@ type credentialStore struct {
 	mu       sync.Mutex
 	loadedAt time.Time
 	byVendor map[string]usage.Credential
+	// ExplicitProviderVendors records only ids read from the sealed user file. The
+	// built-in official Codex fallback added by load() is deliberately excluded.
+	explicitProviderVendors map[string]string
 }
 
 const credentialCacheTTL = 30 * time.Second
@@ -86,11 +146,7 @@ const credentialCacheTTL = 30 * time.Second
 const credentialFileName = "usage-credentials.json.enc"
 
 func newCredentialStore(dataDir string) *credentialStore {
-	home := os.Getenv("DEEPWORK_HOME")
-	if home == "" {
-		userHome, _ := os.UserHomeDir()
-		home = filepath.Join(userHome, ".deepwork")
-	}
+	home := deepworkHomeDir()
 	shared := filepath.Join(home, credentialFileName)
 	return &credentialStore{
 		path:      shared,
@@ -103,12 +159,29 @@ func newCredentialStore(dataDir string) *credentialStore {
 func (s *credentialStore) Credential(vendor string) (usage.Credential, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureLoadedLocked()
+	cred, ok := s.byVendor[vendor]
+	return cred, ok
+}
+
+// explicitProviderVendorsSnapshot returns only mappings authored in the sealed file;
+// the built-in OAuth fallback is intentionally absent. Explicit ownership outranks inference.
+func (s *credentialStore) explicitProviderVendorsSnapshot() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureLoadedLocked()
+	out := make(map[string]string, len(s.explicitProviderVendors))
+	for providerID, vendor := range s.explicitProviderVendors {
+		out[providerID] = vendor
+	}
+	return out
+}
+
+func (s *credentialStore) ensureLoadedLocked() {
 	if s.byVendor == nil || time.Since(s.loadedAt) > credentialCacheTTL {
 		s.byVendor = s.load()
 		s.loadedAt = time.Now()
 	}
-	cred, ok := s.byVendor[vendor]
-	return cred, ok
 }
 
 // load decrypts and parses the store. Every failure mode — absent, unreadable, corrupt — means
@@ -116,6 +189,7 @@ func (s *credentialStore) Credential(vendor string) (usage.Credential, bool) {
 // state (most hosts have none), so it is not an error and never blocks startup.
 func (s *credentialStore) load() map[string]usage.Credential {
 	out := map[string]usage.Credential{}
+	s.explicitProviderVendors = map[string]string{}
 	defer func() {
 		id := officialCodexProviderDeclaration(transcript.CodexHome())
 		if id == "" {
@@ -155,6 +229,13 @@ func (s *credentialStore) load() map[string]usage.Credential {
 		if entry.Vendor == "" || (entry.APIKey == "" && len(entry.RuntimeProviderIDs) == 0) {
 			continue
 		}
+		for _, providerID := range entry.RuntimeProviderIDs {
+			if prior, exists := s.explicitProviderVendors[providerID]; exists && prior != entry.Vendor {
+				s.explicitProviderVendors[providerID] = ""
+			} else if !exists {
+				s.explicitProviderVendors[providerID] = entry.Vendor
+			}
+		}
 		out[entry.Vendor] = usage.Credential{
 			APIKey:             entry.APIKey,
 			BaseURL:            entry.BaseURL,
@@ -175,7 +256,7 @@ func (s *credentialStore) load() map[string]usage.Credential {
 // migrated the developer's actual store — observed 2026-09-30. Tests that want migration set
 // DEEPWORK_HOME explicitly.
 func (s *credentialStore) migrateLegacy() {
-	if strings.HasSuffix(os.Args[0], ".test") && os.Getenv("DEEPWORK_HOME") == "" {
+	if testRunWithoutIsolatedDeepworkHome() {
 		return
 	}
 	legacyPath := filepath.Join(s.legacyDir, credentialFileName)
@@ -210,7 +291,10 @@ func (s *credentialStore) migrateLegacy() {
 // startQuotaWarmer installs the credential store and keeps every free-to-ask account's reading
 // fresh. It returns immediately; the loop exits with ctx.
 func (s *Server) startQuotaWarmer(ctx context.Context) {
-	usage.UseCredentials(newCredentialStore(s.config.DataDir))
+	if testRunWithoutIsolatedDeepworkHome() {
+		return // never probe or register credentials from a developer's real home in go test
+	}
+	registerUsageCredentialSource(s, newCredentialStore(s.config.DataDir))
 	go func() {
 		// One pass at startup: a server that has just come up should not serve a day-old
 		// number for the ten minutes before the first tick.
@@ -232,6 +316,8 @@ func (s *Server) startQuotaWarmer(ctx context.Context) {
 // person could act on. A failure is expected and survivable — an expired login, a laptop
 // offline — and the last-known reading stays on screen either way.
 func warmQuota(ctx context.Context) {
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
 	for _, result := range usage.RefreshStale(ctx, quotaMaxAge) {
 		if result.Status == usage.ProbeFailed {
 			logger.Info("quota refresh failed", "account", result.Display, "reason", result.Reason)

@@ -12,11 +12,15 @@ const VIEWS: Array<{ key: View; label: string }> = [{ key: 'overview', label: '�
 const view = ref<View>('overview')
 const closeRef = ref<HTMLButtonElement | null>(null)
 const expanded = ref<string>('')
-const { detail, loading, error, load } = useAgentDetail()
+const { detail, loading, error, load, reloadLoadedPages, recordOutcome } = useAgentDetail()
 const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const filter = reactive<AgentDetailFilter>({ window: props.initialWindow, timezone: localTimezone, limit: 30 })
 const timezones = [...new Set([localTimezone, 'Asia/Shanghai', 'UTC'])]
 const report = computed(() => detail.value?.report)
+const savingOutcomeFor = ref('')
+const savingOutcome = ref<'human_accepted' | 'human_rework' | ''>('')
+const outcomeErrorFor = ref('')
+const outcomeError = ref('')
 
 const runtimeLabel = (runtime: string) => runtime === 'claude' ? 'Claude' : runtime === 'codex' ? 'Codex' : runtime
 const duration = (seconds?: number) => {
@@ -50,9 +54,36 @@ const healthRule = (reason: { comparator?: string; threshold?: number; minimum_n
 function requestFilter(cursor = ''): AgentDetailFilter {
   return { ...filter, cursor }
 }
-function refresh() { void load(requestFilter()) }
+function refresh() { void reloadLoadedPages(requestFilter()) }
 function loadMore() {
   if (detail.value?.next_cursor) void load(requestFilter(detail.value.next_cursor), true)
+}
+async function saveHumanOutcome(task: AgentDetailTask, outcome: 'human_accepted' | 'human_rework') {
+  savingOutcomeFor.value = task.id
+  savingOutcome.value = outcome
+  outcomeErrorFor.value = ''
+  outcomeError.value = ''
+  try {
+    const result = await recordOutcome(task.id, outcome)
+    if ('error' in result) {
+      outcomeErrorFor.value = task.id
+      outcomeError.value = result.error
+      return
+    }
+    if (detail.value) {
+      const visibleTask = detail.value.tasks.find(item => item.id === task.id)
+      if (visibleTask) visibleTask.outcome = result.evidence.status
+      detail.value.outcome_evidence ??= {}
+      detail.value.outcome_evidence[task.id] = [...(detail.value.outcome_evidence[task.id] ?? []), result.evidence]
+    }
+    if (!await reloadLoadedPages(requestFilter())) {
+      outcomeErrorFor.value = task.id
+      outcomeError.value = '已记录；汇总刷新失败，重新打开详情可读取最新结果'
+    }
+  } finally {
+    savingOutcomeFor.value = ''
+    savingOutcome.value = ''
+  }
 }
 function close() { emit('close') }
 function onKeydown(event: KeyboardEvent) { if (props.open && event.key === 'Escape') close() }
@@ -98,6 +129,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <div v-if="loading && !detail" class="ard-state">正在建立可追溯视图…</div>
         <div v-else-if="error && !detail" class="ard-state bad">{{ error }} <button type="button" @click="refresh">重试</button></div>
         <main v-else-if="detail && report" class="ard-content" :aria-busy="loading">
+          <div v-if="loading || error" class="ard-refresh-state" :class="{ bad: !!error }" :role="error ? 'alert' : 'status'">
+            <span>{{ error ? `${error}；当前保留上次成功加载的数据。` : '正在更新；当前暂显上次成功加载的数据。' }}</span>
+            <button v-if="error" type="button" @click="refresh">重试</button>
+          </div>
           <template v-if="view === 'overview'">
             <section class="ard-health" :class="`is-${report.health.state}`">
               <div><strong>{{ report.health.label }}</strong><span>{{ report.health.headline }}</span><small>{{ report.health.policy_version }}</small></div>
@@ -108,7 +143,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <article><span>任务</span><strong>{{ report.summary.work_items }}</strong><small>{{ report.summary.completed }} 完成 · {{ report.summary.interrupted }} 中断 · {{ report.summary.errors }} 错误</small></article>
               <article><span>墙钟耗时</span><strong>{{ duration(report.summary.wall_seconds) }}</strong><small>活跃区间并集</small></article>
               <article><span>Agent 累计</span><strong>{{ duration(report.summary.cumulative_seconds) }}</strong><small>区间求和 · 并发 {{ report.summary.average_concurrency?.toFixed(2) ?? '—' }}×</small></article>
-              <article><span>结果证据</span><strong>{{ report.summary.verified_pass }}</strong><small>已验证；{{ report.summary.completed_unverified }} 完成未验证</small></article>
+              <article><span>正向结果证据</span><strong>{{ report.summary.verified_pass }}</strong><small>验证通过或人工验收；{{ report.summary.completed_unverified }} 完成未验证</small></article>
             </div>
             <section class="ard-card"><h3>子 Agent 调度 <small>根任务生命周期已去重，不重复算一次调度健康</small></h3><p>{{ report.summary.delegated_lifecycle.submitted }} 提交 · {{ report.summary.delegated_lifecycle.started }} 启动 · {{ report.summary.delegated_lifecycle.completed }} 完成 · {{ report.summary.delegated_lifecycle.interrupted }} 中断 · {{ report.summary.delegated_lifecycle.errors }} 错误 · {{ report.summary.delegated_lifecycle.never_started }} 未启动</p></section>
             <section class="ard-card"><h3>工具执行 <small>中断、运行中、未知均不混入平均耗时</small></h3><p>{{ report.tools.calls }} 次 · {{ report.tools.completed }} 完成 · {{ report.tools.errors }} 错误 · {{ report.tools.interrupted }} 中断 · {{ report.tools.open }} 运行中 · {{ report.tools.unknown }} 未知 · 平均 {{ latency(report.tools.average_duration_seconds) }}</p><small>耗时覆盖 {{ report.tools.timing_coverage.observed_n }}/{{ report.tools.timing_coverage.eligible_n }}</small></section>
@@ -148,9 +183,22 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
               <button type="button" class="ard-task-head" :aria-expanded="expanded === task.id" @click="expanded = expanded === task.id ? '' : task.id">
                 <span><b>{{ runtimeLabel(task.runtime) }}</b> · {{ outcomeLabel(task.outcome) }}</span><span>{{ dateTime(task.ended_at || task.started_at) }}</span><small>{{ task.project || '项目未采集' }} · {{ task.agent_instances }} Agent · {{ task.requests.length }} 请求 · {{ task.tool_calls }} 工具</small>
               </button>
+              <div v-if="task.status === 'completed' && task.outcome === 'completed_unverified'" class="ard-outcome-feedback">
+                <span>这项结果</span>
+                <button type="button" :disabled="loading || !!savingOutcomeFor" @click.stop="saveHumanOutcome(task, 'human_accepted')">{{ savingOutcomeFor === task.id && savingOutcome === 'human_accepted' ? '保存中…' : '有用' }}</button>
+                <button type="button" :disabled="loading || !!savingOutcomeFor" @click.stop="saveHumanOutcome(task, 'human_rework')">{{ savingOutcomeFor === task.id && savingOutcome === 'human_rework' ? '保存中…' : '需返工' }}</button>
+              </div>
+              <small v-if="outcomeErrorFor === task.id" class="ard-outcome-error">{{ outcomeError }}</small>
               <div v-if="expanded === task.id" class="ard-trace">
                 <p><b>TaskProfile</b> {{ task.task_profile.task_class || '未采集' }} / {{ task.task_profile.risk || '风险未采集' }} / {{ task.task_profile.oracle || 'oracle 未采集' }}</p>
                 <p><b>Outcome evidence</b> {{ task.diagnostics?.join(' · ') || outcomeLabel(task.outcome) }}</p>
+                <div v-if="detail.outcome_evidence?.[task.id]?.length" class="ard-outcome-evidence">
+                  <b>显式结果证据</b>
+                  <span v-for="(item, index) in detail.outcome_evidence[task.id]" :key="`${item.at}-${index}`">
+                    {{ outcomeLabel(item.status) }} · {{ dateTime(item.at) }} · {{ item.source }} / {{ item.oracle_kind }} · 置信度 {{ item.confidence }}
+                    <code v-if="item.ref">{{ item.ref }}</code>
+                  </span>
+                </div>
                 <p><b>Transcript</b> <code>{{ task.source_ref || '未关联' }}</code></p>
                 <div><b>Assignments</b><span v-for="assignment in task.assignments" :key="assignment.id">#{{ assignment.attempt }} {{ assignment.agent_instance_id }} · {{ assignment.status }}</span></div>
                 <div><b>Model requests</b><span v-for="request in task.requests" :key="request.id">{{ request.model || '未知模型' }} · {{ request.effort || 'effort?' }} · {{ request.service_tier || 'tier?' }} · {{ request.api_equivalent ? fmtCost(request.api_equivalent.amount, request.api_equivalent.currency) : '价格缺失' }}</span></div>
@@ -171,7 +219,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .ard-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 10px; }.ard-head h2 { margin: 2px 0 0; font-size: 20px; }.ard-eyebrow { color: #7892c2; font-size: 10px; }.ard-close { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid #30343d; border-radius: 8px; background: transparent; color: #aeb3bd; cursor: pointer; }
 .ard-filters { display: grid; grid-template-columns: repeat(7, minmax(0,1fr)); gap: 6px; padding: 0 18px 10px; }.ard-filter { display: grid; min-width: 0; gap: 3px; }.ard-filter > span { color: #7f8793; font-size: 9px; }.ard-filters select { width: 100%; min-width: 0; padding: 6px 7px; border: 1px solid #2b2f38; border-radius: 7px; background: #1c1f26; color: #cbd0d8; font: inherit; font-size: 10px; }.ard-filters select:disabled { opacity: .65; }
 .ard-tabs { display: flex; gap: 3px; margin: 0 18px; padding: 3px; border: 1px solid #292d35; border-radius: 8px; background: #1b1e24; }.ard-tabs button { flex: 1; padding: 6px; border: 0; border-radius: 6px; background: transparent; color: #858b96; cursor: pointer; }.ard-tabs button.on { background: #30343d; color: #f1f2f5; font-weight: 600; }
-.ard-content { min-height: 0; flex: 1; overflow: auto; padding: 14px 18px 22px; }.ard-content[aria-busy=true] { opacity: .72; }.ard-state { margin: auto; padding: 40px; color: #89909b; text-align: center; }.ard-state.bad { color: #f08b8b; }
+.ard-content { min-height: 0; flex: 1; overflow: auto; padding: 14px 18px 22px; }.ard-state { margin: auto; padding: 40px; color: #89909b; text-align: center; }.ard-state.bad { color: #f08b8b; }
+.ard-refresh-state { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; padding:8px 10px; border:1px solid #39475a; border-radius:8px; background:#202733; color:#b9c7dc; font-size:10px; }.ard-refresh-state.bad { border-color:#6b3940; background:#2b2024; color:#f0a0a0; }.ard-refresh-state button { flex:none; padding:3px 8px; border:1px solid currentColor; border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
 .ard-health { display: grid; grid-template-columns: minmax(180px,.8fr) minmax(0,2fr); gap: 12px; margin-bottom: 11px; padding: 13px; border: 1px solid #353a44; border-radius: 10px; background: #1a1d23; }.ard-health > div:first-child { display: grid; align-content: center; gap: 5px; }.ard-health > div:first-child strong { width: max-content; padding: 3px 9px; border-radius: 999px; background: rgba(148,163,184,.12); color: #cbd5e1; font-size: 15px; }.ard-health > div:first-child span { color: #b8bdc6; font-size: 11px; line-height: 1.4; }.ard-health > div:first-child small { color: #666e79; font-size: 9px; }.ard-health.is-healthy { border-color: rgba(74,222,128,.28); }.ard-health.is-healthy > div:first-child strong { color: #4ade80; }.ard-health.is-attention { border-color: rgba(251,191,36,.32); }.ard-health.is-attention > div:first-child strong { color: #fbbf24; }.ard-health.is-critical { border-color: rgba(248,113,113,.36); }.ard-health.is-critical > div:first-child strong { color: #f87171; }.ard-health-axes { display: grid; gap: 5px; }.ard-health-axes article { display: grid; grid-template-columns: 7px 38px minmax(0,1fr); align-items: center; gap: 7px; padding: 6px 8px; border-radius: 7px; background: #20242b; font-size: 10px; }.ard-health-axes i { width: 7px; height: 7px; border-radius: 50%; background: #6b7280; }.ard-health-axes b { color: #d2d5da; }.ard-health-axes span { overflow: hidden; color: #858c97; text-overflow: ellipsis; white-space: nowrap; }.ard-health-axes .is-healthy i { background: #4ade80; }.ard-health-axes .is-attention i { background: #fbbf24; }.ard-health-axes .is-critical i { background: #f87171; }
 .ard-health-reasons { grid-column: 1/-1; display: grid; gap: 7px; padding-top: 8px; border-top: 1px solid #2a2f37; }.ard-health-reasons > span { display: grid; gap: 3px; color: #bdc2ca; font-size: 10.5px; line-height: 1.4; }.ard-health-reasons b { font-weight: 500; }.ard-health-reasons small { color: #858d99; font-size: 9.5px; overflow-wrap: anywhere; }
 .ard-kpis { display: grid; grid-template-columns: repeat(4,1fr); gap: 9px; }.ard-kpis article,.ard-card,.ard-task { border: 1px solid #282c34; border-radius: 9px; background: #1a1d23; }.ard-kpis article { padding: 12px; }.ard-kpis span,.ard-kpis small { display: block; color: #7f8691; font-size: 10px; }.ard-kpis strong { display: block; margin: 5px 0; font-size: 21px; font-variant-numeric: tabular-nums; }
@@ -183,5 +232,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .ard-model { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 5px 12px; padding: 8px 0; border-top: 1px solid #252932; font-size: 10px; }.ard-model small { grid-column: 1/-1; color: #717782; }
 .ard-model .ard-model-speed { color: #8eabe7; font-variant-numeric: tabular-nums; }
 .ard-task { margin-bottom: 7px; overflow: hidden; border-left: 3px solid #737985; }.ard-task.ok { border-left-color: #4ade80; }.ard-task.bad { border-left-color: #f87171; }.ard-task-head { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 10px 12px; border: 0; background: transparent; color: #cfd3da; text-align: left; cursor: pointer; }.ard-task-head small { grid-column: 1/-1; color: #777e89; }.ard-trace { padding: 3px 12px 12px; border-top: 1px solid #272b33; color: #949ba6; font-size: 10px; }.ard-trace p { overflow-wrap: anywhere; }.ard-trace > div { display: flex; flex-direction: column; gap: 3px; margin-top: 9px; }.ard-trace code { color: #829bd0; }.ard-more { width: 100%; padding: 8px; border: 1px solid #303540; border-radius: 8px; background: #20242b; color: #aeb5c0; cursor: pointer; }
+.ard-outcome-feedback { display:flex; align-items:center; gap:6px; padding:0 12px 9px; color:#7f8793; font-size:10px; }.ard-outcome-feedback button { padding:3px 8px; border:1px solid #343a45; border-radius:6px; background:#20242b; color:#c5ccd6; font:inherit; cursor:pointer; }.ard-outcome-feedback button:hover:not(:disabled) { border-color:#7185aa; color:#e7ecf5; }.ard-outcome-feedback button:disabled { opacity:.6; cursor:wait; }.ard-outcome-feedback small { color:#f0a0a0; }
+.ard-outcome-error { display:block; padding:0 12px 9px; color:#f0a0a0; font-size:10px; }
+.ard-outcome-evidence { display:grid; gap:4px; padding:8px 10px; border-radius:7px; background:#20242b; }.ard-outcome-evidence > span { color:#aab0ba; overflow-wrap:anywhere; }.ard-outcome-evidence code { display:block; margin-top:2px; color:#829bd0; }
 @media (max-width: 760px) { .ard-backdrop { padding: 0; place-items: stretch; }.ard-panel { width: 100%; height: 100%; max-height: none; border-radius: 0; }.ard-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }.ard-health { grid-template-columns: 1fr; }.ard-kpis { grid-template-columns: repeat(2,1fr); }.ard-runtime-grid,.ard-yield-grid { grid-template-columns: repeat(2,1fr); }.ard-coverage { grid-template-columns: 90px 55px 40px; }.ard-coverage small { grid-column: 1/-1; }.ard-model { grid-template-columns: minmax(0,1fr) auto; }.ard-model > span:nth-of-type(2) { grid-column: 2; }.ard-head { padding-top: max(14px, env(safe-area-inset-top)); } }
 </style>

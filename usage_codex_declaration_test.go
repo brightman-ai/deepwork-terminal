@@ -31,3 +31,37 @@ requires_openai_auth = true
 	require.NoError(t, os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-key"}`), 0600))
 	require.Empty(t, officialCodexProviderDeclaration(home), "API billing is not a ChatGPT subscription")
 }
+
+func TestDirectOpenAIProviderIsDefault_RespectsConfiguredDefaultProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		providerID string
+		want       bool
+	}{
+		{name: "built-in default", want: true},
+		{name: "explicit OpenAI default", providerID: "openai", want: true},
+		{name: "custom default", providerID: "my-relay", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := codexConfigSnapshot{
+				homeMatchesEnvironment: true,
+				configReadable:         true,
+				providerID:             tc.providerID,
+				providers:              map[string]codexProviderSettings{},
+			}
+			require.Equal(t, tc.want, snapshot.directOpenAIProviderIsDefault())
+		})
+	}
+
+	t.Run("OpenAI redirected to custom endpoint", func(t *testing.T) {
+		snapshot := codexConfigSnapshot{
+			homeMatchesEnvironment: true,
+			configReadable:         true,
+			providerID:             "openai",
+			providers: map[string]codexProviderSettings{
+				"openai": {BaseURL: "https://relay.invalid"},
+			},
+		}
+		require.False(t, snapshot.directOpenAIProviderIsDefault())
+	})
+}

@@ -160,7 +160,7 @@ func probe(path string) (bool, error) {
 // "I could not find out" must propagate as itself, so callers retry instead of concluding.
 func noListener(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, os.ErrNotExist)
+		errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTSOCK)
 }
 
 // NoDaemonError means nothing is listening at the socket.

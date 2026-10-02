@@ -19,7 +19,7 @@ func TestClipboardTmuxSendOnceAndKeepControlRepliesAligned(t *testing.T) {
 		t.Skip("tmux unavailable")
 	}
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "clipboard.sock")
+	socket := shortTestSocket(t, "clipboard.sock")
 	t.Setenv("TMUX", socket)
 	run := func(args ...string) string {
 		t.Helper()

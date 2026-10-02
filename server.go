@@ -297,6 +297,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	ln, err := net.Listen("tcp", s.config.Addr)
 	if err != nil {
+		if closeErr := s.Close(); closeErr != nil {
+			logger.Warn("shutdown: close terminal subsystem after listen failed", "error", closeErr)
+		}
 		return fmt.Errorf("listen %s: %w", s.config.Addr, err)
 	}
 	s.mu.Lock()
@@ -327,6 +330,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		srv.Close()
+		s.clearListener(ln)
 		// Shut the subsystem down too, not just the HTTP listener.
 		//
 		// This call was missing, so on Ctrl-C the standalone binary stopped serving and
@@ -340,6 +344,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		return nil
 	case err := <-serveErr:
+		if closeErr := srv.Close(); closeErr != nil {
+			logger.Warn("shutdown: close HTTP server after Serve failed", "error", closeErr)
+		}
+		s.clearListener(ln)
+		if closeErr := s.Close(); closeErr != nil {
+			logger.Warn("shutdown: close terminal subsystem after Serve failed", "error", closeErr)
+		}
 		return err
 	}
 }
@@ -373,12 +384,21 @@ func (s *Server) Port() int {
 	return s.listener.Addr().(*net.TCPAddr).Port
 }
 
+func (s *Server) clearListener(listener net.Listener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener == listener {
+		s.listener = nil
+	}
+}
+
 // Close shuts down all sessions and stops the background agent notifier.
 func (s *Server) Close() error {
 	s.closeFileSearchIndexes()
 	if s.watchCancel != nil {
 		s.watchCancel()
 	}
+	unregisterUsageCredentialSource(s)
 	s.stopNotifier()
 	return s.mgr.CloseAll()
 }
@@ -508,6 +528,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /usage/report", wrap(s.handleUsageReport))
 	s.mux.HandleFunc("GET /usage/agent-report", wrap(s.handleAgentReport))
 	s.mux.HandleFunc("GET /usage/agent-report/detail", wrap(s.handleAgentReportDetail))
+	s.mux.HandleFunc("POST /usage/agent-report/outcome", wrap(s.handleAgentOutcome))
 }
 
 // authWrap wraps a handler with auth checking.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"github.com/stretchr/testify/require"
 	"os/exec"
-	"path/filepath"
 	"testing"
 )
 
@@ -12,7 +11,7 @@ func TestListPanesIncludesEverySession(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	socket := filepath.Join(t.TempDir(), "audit.sock")
+	socket := shortTestSocket(t, "audit.sock")
 	t.Setenv("TMUX", socket)
 	run := func(args ...string) {
 		t.Helper()

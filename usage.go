@@ -71,8 +71,18 @@ func (u *usageReporter) store(window usage.WindowKind, report usage.UsageReport)
 // handleUsageQuota → GET /api/usage/quota. Per-runtime account presence, billing mode,
 // last-known 5h/7d windows and CLI health. Read-only: it reports what the runtimes have
 // already written to disk, and never reaches out to a provider.
+func queryUsageQuotasLocked() []usage.QuotaInfo {
+	return reconcileCodexAttribution(usage.QueryAllQuotas(), usageCredentialSource)
+}
+
+func (s *Server) queryUsageQuotas() []usage.QuotaInfo {
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
+	return queryUsageQuotasLocked()
+}
+
 func (s *Server) handleUsageQuota(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"quotas": usage.QueryAllQuotas()})
+	writeJSON(w, http.StatusOK, map[string]any{"quotas": s.queryUsageQuotas()})
 }
 
 // handleUsageQuotaRefresh → POST /api/usage/quota/refresh. The USER-INITIATED refresh: it
@@ -90,9 +100,11 @@ func (s *Server) handleUsageQuota(w http.ResponseWriter, r *http.Request) {
 // an error for the caller — the response still carries the (offline) quotas, so the UI
 // degrades to the last-known reading rather than showing nothing.
 func (s *Server) handleUsageQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
 	probe := usage.ProbeAll(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"quotas": usage.QueryAllQuotas(),
+		"quotas": queryUsageQuotasLocked(),
 		"probe":  probe,
 	})
 }
@@ -106,6 +118,8 @@ func (s *Server) handleUsageQuotaRefresh(w http.ResponseWriter, r *http.Request)
 // waiting for a TTL. (This comment used to promise a short-TTL cache that a July refactor had
 // already removed, which is how four uncached full refreshes ended up queueing on one mutex.)
 func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
+	usageCredentialSourceMu.RLock()
+	defer usageCredentialSourceMu.RUnlock()
 	window := parseUsageWindow(r.URL.Query().Get("window"))
 	// New servers share the exact ModelRequestUsage materialized facts with the
 	// Agent report. This is the authoritative path for tier/effective-date/cache

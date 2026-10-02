@@ -19,16 +19,17 @@ import (
 // A has an old idle transcript; only the agent's PID and cwd identify the live turn.
 func TestSessionAgentTracker_NestedShellUsesAgentDirectory(t *testing.T) {
 	home, outer, inner := t.TempDir(), t.TempDir(), t.TempDir()
+	realInner, err := filepath.EvalSymlinks(inner)
+	require.NoError(t, err)
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("DW_CLAUDE_PROJECTS", "")
-	bin := filepath.Join(t.TempDir(), "claude")
 	sleep, err := exec.LookPath("sleep")
 	require.NoError(t, err)
-	executable, err := os.ReadFile(sleep)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(bin, executable, 0755))
-	cmd := exec.Command(bin, "60")
+	cmd := exec.Command(sleep, "60")
+	// Keep the real platform sleep executable (copying macOS's system binary into a
+	// temporary path makes it exit immediately), but give ps the agent's argv identity.
+	cmd.Args[0] = "claude"
 	cmd.Dir = inner
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
@@ -42,7 +43,7 @@ func TestSessionAgentTracker_NestedShellUsesAgentDirectory(t *testing.T) {
 	require.NoError(t, f.Close())
 	index := filepath.Join(home, ".claude", "sessions")
 	require.NoError(t, os.MkdirAll(index, 0700))
-	record, err := json.Marshal(map[string]any{"pid": cmd.Process.Pid, "cwd": inner, "sessionId": "owned"})
+	record, err := json.Marshal(map[string]any{"pid": cmd.Process.Pid, "cwd": realInner, "sessionId": "owned"})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(index, strconv.Itoa(cmd.Process.Pid)+".json"), record, 0600))
 	tr := newSessionAgentTracker()
@@ -51,7 +52,7 @@ func TestSessionAgentTracker_NestedShellUsesAgentDirectory(t *testing.T) {
 	require.Equal(t, agentintel.ToolClaude, got.AgentTool)
 	require.Equal(t, agentintel.StatusRunning, got.AgentStatus, "outer shell cwd must not bind an unrelated idle transcript")
 	require.Equal(t, string(agentintel.RuleTranscriptRunning), got.StatusRule)
-	require.Equal(t, inner, got.CWD)
+	require.Equal(t, realInner, got.CWD)
 
 	// The all-tabs card, REST snapshot and WS provider share that exact binding.
 	srv, sm := newOverviewTestServer(t)
@@ -62,7 +63,7 @@ func TestSessionAgentTracker_NestedShellUsesAgentDirectory(t *testing.T) {
 	sess.CWD = outer
 	entries := srv.sessionsOverview(context.Background())
 	require.Len(t, entries, 1)
-	require.Equal(t, inner, entries[0].CWD)
+	require.Equal(t, realInner, entries[0].CWD)
 	require.Equal(t, agentintel.StatusRunning, entries[0].AgentStatus)
 	state, err := srv.sessionAgentSnapshot(context.Background(), sess.ID)
 	require.NoError(t, err)
@@ -80,7 +81,7 @@ func TestSessionAgentTracker_NestedShellUsesAgentDirectory(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &listed))
 	require.Len(t, listed, 1)
-	require.Equal(t, inner, listed[0].CWD)
+	require.Equal(t, realInner, listed[0].CWD)
 	require.Equal(t, "running", listed[0].AgentStatus)
 
 	// A genuine completion still clears running and publishes the matching attention.

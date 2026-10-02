@@ -53,6 +53,7 @@ import MidTruncatedName from '@terminal/components/terminal-session/MidTruncated
 import { nextTreeSort, sortTreeBy, type TreeSortMode } from '@terminal/components/terminal-session/treeSort'
 import { searchPathContexts } from '@terminal/components/terminal-session/searchPathContext'
 import { mergeSearchEntries, groupedSearchRows } from '@terminal/components/terminal-session/searchGroups'
+import { searchPollDelay } from '@terminal/components/terminal-session/searchPollDelay'
 import SheetPreview from '@terminal/components/terminal-session/SheetPreview.vue'
 import AudioPreview from '@terminal/components/terminal-session/AudioPreview.vue'
 import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview.vue'
@@ -853,7 +854,7 @@ function cancelSearch(): void {
   searchRequest?.abort()
   if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
 }
-async function runSearch(q: string, offset = 0, polling = false): Promise<void> {
+async function runSearch(q: string, offset = 0, polling = false, refresh = false): Promise<void> {
   if (searchPoll) { clearTimeout(searchPoll); searchPoll = null }
   searchRequest?.abort()
   const request = new AbortController()
@@ -863,7 +864,7 @@ async function runSearch(q: string, offset = 0, polling = false): Promise<void> 
   searchError.value = ''
   try {
     const res = await filesSearch(props.sessionId, treeCwd.value || props.cwd, q, {
-      path: treeRootRel.value, offset, generation: searchGeneration.value, signal: request.signal,
+      path: treeRootRel.value, offset, generation: searchGeneration.value, refresh, signal: request.signal,
     })
     if (seq === searchSeq) {
       searchError.value = res.error || ''
@@ -879,11 +880,14 @@ async function runSearch(q: string, offset = 0, polling = false): Promise<void> 
       searchScanError.value = res.scanError || ''
       searchTruncated.value = res.incomplete ?? res.truncated
       searchTotal.value = res.totalMatches ?? res.entries.length
-      if (props.active && treeQuery.value.trim() === q && res.indexState !== 'error') {
+      // A scan error can be transient (for example, a mounted volume becoming readable
+      // again). Keep a slower idle probe so persistent failures do not trigger repeated full
+      // scans; the explicit retry button remains immediate.
+      if (props.active && treeQuery.value.trim() === q) {
         searchPoll = setTimeout(() => {
           searchPoll = null
           if (props.active && treeQuery.value.trim() === q) void runSearch(q, 0, true)
-        }, res.indexState === 'building' ? 500 : 30000)
+        }, searchPollDelay(res.indexState || '', !!res.scanError))
       }
     }
   } catch (error) {
@@ -1474,7 +1478,10 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
           data-testid="fp-search-truncated"
         >
           <template v-if="searchIndexState === 'building'">{{ searchTruncated ? '正在索引' : '正在更新索引' }} · 已发现 {{ searchScanned.toLocaleString() }} 项。结果会自动补齐，可继续输入。</template>
-          <template v-else-if="searchScanError">{{ searchScanError }}；当前结果不完整。</template>
+          <template v-else-if="searchScanError">
+            <span>{{ searchScanError }}；当前结果不完整。</span>
+            <button type="button" class="ml-1 underline underline-offset-2" :disabled="searching" @click="runSearch(treeQuery.trim(), 0, false, true)">{{ searching ? '重试中…' : '立即重试' }}</button>
+          </template>
           <template v-else>当前索引不完整，请刷新重试。</template>
         </div>
         <div class="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">

@@ -40,6 +40,12 @@ func writeSessionRecord(t *testing.T, home string, pid int, sessionID, cwd strin
 	}
 }
 
+func projectLocatorWithProcessHome(home string) *ProjectLocator {
+	return &ProjectLocator{processEnv: func(int) ([]string, error) {
+		return []string{"CLAUDE_CONFIG_DIR=" + home}, nil
+	}}
+}
+
 // writeTranscriptFor creates <projects>/<encoded cwd>/<sessionID>.jsonl with a given mtime.
 func writeTranscriptFor(t *testing.T, cwd, sessionID string, modAgo time.Duration) string {
 	t.Helper()
@@ -69,7 +75,7 @@ func TestClaudeSessionForProcess(t *testing.T) {
 		want := writeTranscriptFor(t, cwd, "sess-a", 0)
 		writeSessionRecord(t, home, 4242, "sess-a", cwd)
 
-		got, err := NewProjectLocator().ClaudeSessionForProcess(4242, cwd)
+		got, err := projectLocatorWithProcessHome(home).ClaudeSessionForProcess(4242, cwd)
 		if err != nil || got != want {
 			t.Fatalf("got %q, %v; want %q", got, err, want)
 		}
@@ -80,7 +86,7 @@ func TestClaudeSessionForProcess(t *testing.T) {
 		writeTranscriptFor(t, "/tmp/dw-identity-other", "sess-b", 0)
 		writeSessionRecord(t, home, 4243, "sess-b", "/tmp/dw-identity-other")
 
-		if _, err := NewProjectLocator().ClaudeSessionForProcess(4243, cwd); err == nil {
+		if _, err := projectLocatorWithProcessHome(home).ClaudeSessionForProcess(4243, cwd); err == nil {
 			t.Fatal("a record whose cwd is elsewhere must MISS — PID reuse is the case this guards")
 		}
 	})
@@ -89,14 +95,14 @@ func TestClaudeSessionForProcess(t *testing.T) {
 		home := claudeHomeFixture(t)
 		writeSessionRecord(t, home, 4244, "sess-not-written", cwd)
 
-		if _, err := NewProjectLocator().ClaudeSessionForProcess(4244, cwd); err == nil {
+		if _, err := projectLocatorWithProcessHome(home).ClaudeSessionForProcess(4244, cwd); err == nil {
 			t.Fatal("a session whose transcript has not appeared yet must MISS, not return a ghost path")
 		}
 	})
 
 	t.Run("no record at all", func(t *testing.T) {
-		claudeHomeFixture(t)
-		if _, err := NewProjectLocator().ClaudeSessionForProcess(4245, cwd); err == nil {
+		home := claudeHomeFixture(t)
+		if _, err := projectLocatorWithProcessHome(home).ClaudeSessionForProcess(4245, cwd); err == nil {
 			t.Fatal("a claude too old to publish the record must MISS so the caller falls back")
 		}
 	})
@@ -127,7 +133,7 @@ func TestPaneLocate_IdentityBeatsSameCWDNewest(t *testing.T) {
 	writeSessionRecord(t, home, 5001, "sess-helper", cwd)
 	writeSessionRecord(t, home, 5002, "sess-main", cwd)
 
-	m := NewPaneAgentMonitor(NewProjectLocator())
+	m := NewPaneAgentMonitor(projectLocatorWithProcessHome(home))
 
 	if got := m.locate(cwd, ToolClaude, 5001, nil, nil); got != helper {
 		t.Fatalf("helper pane bound %q, want its OWN transcript %q", got, helper)
@@ -141,12 +147,12 @@ func TestPaneLocate_IdentityBeatsSameCWDNewest(t *testing.T) {
 // that publishes no record must still be located exactly as before — otherwise this "fix" would
 // blind every pane running an older CLI.
 func TestPaneLocate_FallsBackToCWDScan(t *testing.T) {
-	claudeHomeFixture(t)
+	home := claudeHomeFixture(t)
 	cwd := "/tmp/dw-identity-norecord"
 	older := writeTranscriptFor(t, cwd, "sess-old", 30*time.Minute)
 	newest := writeTranscriptFor(t, cwd, "sess-new", 0)
 
-	m := NewPaneAgentMonitor(NewProjectLocator())
+	m := NewPaneAgentMonitor(projectLocatorWithProcessHome(home))
 
 	if got := m.locate(cwd, ToolClaude, 6001, nil, nil); got != newest {
 		t.Fatalf("with no record the newest file is still the answer: got %q want %q", got, newest)
@@ -171,7 +177,7 @@ func TestPaneEntry_RotatedSessionIsFollowed(t *testing.T) {
 	before := writeTranscriptFor(t, cwd, "sess-before-compact", 30*time.Minute)
 	writeSessionRecord(t, home, 7001, "sess-before-compact", cwd)
 
-	m := NewPaneAgentMonitor(NewProjectLocator())
+	m := NewPaneAgentMonitor(projectLocatorWithProcessHome(home))
 	m.mu.Lock()
 	pt := m.entryLocked("pane-1", cwd, ToolClaude, nil, 7001)
 	m.mu.Unlock()
@@ -212,11 +218,11 @@ func TestPaneEntry_RotatedSessionIsFollowed(t *testing.T) {
 // record there is nothing authoritative to override it with, and re-resolving by mtime is
 // exactly the theft the stickiness exists to prevent.
 func TestPaneEntry_StickyStillHoldsWithoutAnIdentityRecord(t *testing.T) {
-	claudeHomeFixture(t)
+	home := claudeHomeFixture(t)
 	cwd := "/tmp/dw-identity-sticky"
 
 	mine := writeTranscriptFor(t, cwd, "sess-mine", 30*time.Minute)
-	m := NewPaneAgentMonitor(NewProjectLocator())
+	m := NewPaneAgentMonitor(projectLocatorWithProcessHome(home))
 	m.mu.Lock()
 	pt := m.entryLocked("pane-1", cwd, ToolClaude, nil, 8001)
 	m.mu.Unlock()
