@@ -1,8 +1,11 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,34 +40,13 @@ func TestOutcomeInvalidationPreservesTranscriptAndUsageMemos(t *testing.T) {
 }
 
 func TestHumanOutcomeRoundTripRequiresCompletedWorkAndIsIdempotent(t *testing.T) {
-	dataDir := t.TempDir()
-	codexHome := filepath.Join(dataDir, "codex")
-	t.Setenv("DW_CODEX_HOME", codexHome)
-	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, "claude", "projects"))
-	t.Setenv("DEEPWORK_HOME", "")
 	now := time.Now().UTC().Truncate(time.Second)
-	path := filepath.Join(codexHome, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"), "rollout-outcome.jsonl")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	started, ended := now.Add(-time.Minute), now.Add(-time.Second)
-	reporter := newAgentReporter(dataDir)
-	reporter.now = func() time.Time { return now }
-	reporter.files[path] = agentFileProjection{
-		size: info.Size(), modUnixNano: info.ModTime().UnixNano(), runtime: "codex", sessionID: "outcome",
-		pricedWith: pricingSnapshot(),
-		dataset: agentanalytics.ActivityDataset{WorkItems: []agentanalytics.ActivityWorkItem{
-			{ID: "work-completed", Runtime: "codex", Status: agentanalytics.LifecycleCompleted, Outcome: agentanalytics.OutcomeCompletedUnverified, SourceRef: "rollout:completed", StartedAt: &started, EndedAt: &ended},
-			{ID: "work-open", Runtime: "codex", Status: agentanalytics.LifecycleStarted, Outcome: agentanalytics.OutcomeOpen, SourceRef: "rollout:open", StartedAt: &started},
-		}},
-	}
+	reporter := newOutcomeReporter(t, now, []agentanalytics.ActivityWorkItem{
+		{ID: "work-completed", Runtime: "codex", Status: agentanalytics.LifecycleCompleted, Outcome: agentanalytics.OutcomeCompletedUnverified, SourceRef: "rollout:completed", StartedAt: &started, EndedAt: &ended},
+		{ID: "work-open", Runtime: "codex", Status: agentanalytics.LifecycleStarted, Outcome: agentanalytics.OutcomeOpen, SourceRef: "rollout:open", StartedAt: &started},
+	})
+	var err error
 
 	first, err := reporter.RecordHumanOutcome(context.Background(), "work-completed", agentanalytics.OutcomeHumanAccepted)
 	if err != nil {
@@ -121,5 +103,131 @@ func TestHumanOutcomeRoundTripRequiresCompletedWorkAndIsIdempotent(t *testing.T)
 	}
 	if stored.WorkItemID != "work-completed" || stored.Status != agentanalytics.OutcomeHumanAccepted {
 		t.Fatalf("stored evidence=%+v", stored)
+	}
+}
+
+func newOutcomeReporter(t *testing.T, now time.Time, workItems []agentanalytics.ActivityWorkItem) *agentReporter {
+	t.Helper()
+	dataDir := t.TempDir()
+	codexHome := filepath.Join(dataDir, "codex")
+	t.Setenv("DW_CODEX_HOME", codexHome)
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, "claude", "projects"))
+	t.Setenv("DEEPWORK_HOME", "")
+	path := filepath.Join(codexHome, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"), "rollout-outcome.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter := newAgentReporter(dataDir)
+	reporter.now = func() time.Time { return now }
+	reporter.files[path] = agentFileProjection{
+		size: info.Size(), modUnixNano: info.ModTime().UnixNano(), runtime: "codex", sessionID: "outcome",
+		pricedWith: pricingSnapshot(),
+		dataset:    agentanalytics.ActivityDataset{WorkItems: append([]agentanalytics.ActivityWorkItem(nil), workItems...)},
+	}
+	return reporter
+}
+
+func TestAgentOutcomeHTTPRoundTripKeepsPagedDetailAndSummaryConsistent(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	newestStart, newestEnd := now.Add(-20*time.Second), now.Add(-10*time.Second)
+	targetStart, targetEnd := now.Add(-2*time.Minute), now.Add(-time.Minute)
+	openStart := now.Add(-time.Hour)
+	reporter := newOutcomeReporter(t, now, []agentanalytics.ActivityWorkItem{
+		{ID: "work-newest", Runtime: "codex", Status: agentanalytics.LifecycleCompleted, Outcome: agentanalytics.OutcomeCompletedUnverified, StartedAt: &newestStart, EndedAt: &newestEnd},
+		{ID: "work-target", Runtime: "claude", Status: agentanalytics.LifecycleCompleted, Outcome: agentanalytics.OutcomeCompletedUnverified, SourceRef: "transcript:target", StartedAt: &targetStart, EndedAt: &targetEnd},
+		{ID: "work-open", Runtime: "codex", Status: agentanalytics.LifecycleStarted, Outcome: agentanalytics.OutcomeOpen, StartedAt: &openStart},
+	})
+	srv := &Server{agentUsage: reporter}
+	detail := func(cursor string) struct {
+		Report struct {
+			Summary struct {
+				VerifiedPass int `json:"verified_pass"`
+			} `json:"summary"`
+		} `json:"report"`
+		Tasks []struct {
+			ID      string `json:"id"`
+			Outcome string `json:"outcome"`
+		} `json:"tasks"`
+		NextCursor      string                                      `json:"next_cursor"`
+		OutcomeEvidence map[string][]agentanalytics.OutcomeEvidence `json:"outcome_evidence"`
+	} {
+		query := "/usage/agent-report/detail?window=30d&timezone=UTC&limit=1"
+		if cursor != "" {
+			query += "&cursor=" + cursor // cursors are URL-safe base64
+		}
+		w := httptest.NewRecorder()
+		srv.handleAgentReportDetail(w, httptest.NewRequest(http.MethodGet, query, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("detail status=%d body=%s", w.Code, w.Body.String())
+		}
+		var got struct {
+			Report struct {
+				Summary struct {
+					VerifiedPass int `json:"verified_pass"`
+				} `json:"summary"`
+			} `json:"report"`
+			Tasks []struct {
+				ID      string `json:"id"`
+				Outcome string `json:"outcome"`
+			} `json:"tasks"`
+			NextCursor      string                                      `json:"next_cursor"`
+			OutcomeEvidence map[string][]agentanalytics.OutcomeEvidence `json:"outcome_evidence"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode detail: %v body=%s", err, w.Body.String())
+		}
+		return got
+	}
+
+	firstPage := detail("")
+	if len(firstPage.Tasks) != 1 || firstPage.Tasks[0].ID != "work-newest" || firstPage.NextCursor == "" {
+		t.Fatalf("first detail page=%+v, want newest row and next cursor", firstPage)
+	}
+	secondPage := detail(firstPage.NextCursor)
+	if len(secondPage.Tasks) != 1 || secondPage.Tasks[0].ID != "work-target" {
+		t.Fatalf("second detail page=%+v, want target row", secondPage)
+	}
+
+	postOutcome := func(id, outcome string) int {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"work_item_id": id, "outcome": outcome})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/usage/agent-report/outcome", bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		srv.handleAgentOutcome(w, r)
+		return w.Code
+	}
+	if status := postOutcome("work-target", "human_accepted"); status != http.StatusOK {
+		t.Fatalf("completed feedback status=%d, want 200", status)
+	}
+	if status := postOutcome("work-target", "human_accepted"); status != http.StatusOK {
+		t.Fatalf("idempotent retry status=%d, want 200", status)
+	}
+	if status := postOutcome("work-open", "human_accepted"); status != http.StatusConflict {
+		t.Fatalf("open work feedback status=%d, want 409", status)
+	}
+	if status := postOutcome("missing", "human_accepted"); status != http.StatusNotFound {
+		t.Fatalf("missing work feedback status=%d, want 404", status)
+	}
+
+	refreshedPage := detail(firstPage.NextCursor)
+	if len(refreshedPage.Tasks) != 1 || refreshedPage.Tasks[0].Outcome != string(agentanalytics.OutcomeHumanAccepted) {
+		t.Fatalf("paged detail did not reflect feedback: %+v", refreshedPage.Tasks)
+	}
+	if refreshedPage.Report.Summary.VerifiedPass != 1 {
+		t.Fatalf("report summary accepted count=%d, want 1", refreshedPage.Report.Summary.VerifiedPass)
+	}
+	if events := refreshedPage.OutcomeEvidence["work-target"]; len(events) != 1 || events[0].Ref != "transcript:target" {
+		t.Fatalf("paged evidence=%+v, want one attributable event", events)
 	}
 }
