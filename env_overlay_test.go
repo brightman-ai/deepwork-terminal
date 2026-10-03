@@ -299,3 +299,62 @@ func TestShellIsForeground_ParsesCommWithParensAndSpaces(t *testing.T) {
 		t.Errorf("tpgid parsed as %q, want 4242 — the comm parentheses shifted the offset", fields[5])
 	}
 }
+
+// resolvePtyEnv 的默认剥离（2026-09-28，四次同型事故后的根治）：从 harness 会话里启动的服务器
+// 不该把父会话的 CLAUDE_*/ANTHROPIC_* 传染给每个新 tab；纯 shell 启动则原样保留操作者自己的出口。
+
+func TestResolvePtyEnv_HarnessLaunchedStripsFamily(t *testing.T) {
+	base := []string{
+		"PATH=/bin", "HOME=/home/u", "SSH_AUTH_SOCK=/tmp/ssh-agent.sock", "HTTP_PROXY=http://proxy:8080",
+		"CLAUDECODE=1",
+		"ANTHROPIC_BASE_URL=https://api.kimi.com/coding/", "ANTHROPIC_API_KEY=sk-test",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL=k3[1m]",
+		"CLAUDE_CONFIG_DIR=/home/u/.claude-profiles/kimi", "CLAUDE_CODE_SESSION_ID=abc",
+		"CLAUDE_CODE_MESSAGING_TOKEN=tok", "AI_AGENT=claude-code_agent", "CLAUDE_PID=123",
+	}
+	got := envMap(resolvePtyEnv(base, nil))
+	for _, k := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_TOKEN", "AI_AGENT", "CLAUDE_PID", "CLAUDECODE"} {
+		if _, present := got[k]; present {
+			t.Errorf("harness variable %s must be stripped, got %v", k, got)
+		}
+	}
+	for _, k := range []string{"PATH", "HOME", "SSH_AUTH_SOCK", "HTTP_PROXY"} {
+		if got[k] == "" {
+			t.Errorf("unrelated variable %s must survive the strip", k)
+		}
+	}
+}
+
+func TestResolvePtyEnv_EntrypointAloneIsAlsoAMarker(t *testing.T) {
+	base := []string{"PATH=/bin", "CLAUDE_CODE_ENTRYPOINT=cli", "ANTHROPIC_MODEL=k3[1m]"}
+	if _, present := envMap(resolvePtyEnv(base, nil))["ANTHROPIC_MODEL"]; present {
+		t.Error("CLAUDE_CODE_ENTRYPOINT alone must trigger the strip")
+	}
+}
+
+func TestResolvePtyEnv_PlainShellKeepsOperatorExports(t *testing.T) {
+	// 无 marker：ANTHROPIC_BASE_URL 是操作者自己 .zshrc 的出口，不是注入物 —— 保留，
+	// 否则默认规则会破坏「我故意让所有终端走 gateway」的合法用法。
+	base := []string{"PATH=/bin", "ANTHROPIC_BASE_URL=https://gateway.example", "CLAUDE_CONFIG_DIR=/home/u/.claude-profiles/kimi"}
+	got := envMap(resolvePtyEnv(base, nil))
+	if got["ANTHROPIC_BASE_URL"] != "https://gateway.example" {
+		t.Errorf("operator's own export must survive without a marker, got %v", got)
+	}
+	if got["CLAUDE_CONFIG_DIR"] == "" {
+		t.Error("profile choice without a marker is the operator's own — keep it")
+	}
+}
+
+func TestResolvePtyEnv_OverlaySetWinsOverStrip(t *testing.T) {
+	// 逃生口：用户真的想让 tab 用某个 profile/provider 时，overlay 显式 set 盖过默认剥离。
+	base := []string{"PATH=/bin", "CLAUDECODE=1", "ANTHROPIC_BASE_URL=https://api.kimi.com/coding/"}
+	ov := &envOverlay{Set: map[string]string{"ANTHROPIC_BASE_URL": "https://gateway.example", "CLAUDE_CONFIG_DIR": "/profiles/x"}}
+	got := envMap(resolvePtyEnv(base, ov))
+	if got["ANTHROPIC_BASE_URL"] != "https://gateway.example" {
+		t.Errorf("overlay set must win over the default strip, got %v", got)
+	}
+	if got["CLAUDE_CONFIG_DIR"] != "/profiles/x" {
+		t.Errorf("overlay must be able to re-add a stripped variable, got %v", got)
+	}
+}
