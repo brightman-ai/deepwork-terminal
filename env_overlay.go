@@ -139,10 +139,78 @@ func applyEnvOverlay(base []string, ov *envOverlay) []string {
 	return out
 }
 
+// ── harness 会话变量默认剥离 ─────────────────────────────────────────────────────────────
+//
+// Claude Code（及同类 harness）会把 settings.json 的 env 块连同自己的会话标记注入**自身进程**
+// —— cc-switch 正是靠那个 env 块切 provider。从 claude 会话里启动的本服务器因此继承一整套
+// CLAUDE_*/ANTHROPIC_*：它们描述的是**父会话**（哪个 profile、哪个 provider、哪个 session id），
+// 而不是「这个服务器里新开的终端应该用什么」。空 overlay 的默认决议是全盘继承，于是每个新 tab
+// 都被冻结在启动者的 provider/profile 上，且除了重启无解——2026-08-25（gateway 残留）、
+// 2026-09-05（glm 锁定）、2026-09-26/28（kimi/GLM 两度残留）四次同型事故。
+//
+// 判别器：base 里出现任一 marker ⇒ 进程诞生于 harness 会话，那套变量是注入物，默认剥离。
+// 纯 shell 启动（无 marker）时 ANTHROPIC_BASE_URL 之类是操作者自己 .zshrc 的出口 ⇒ 保留。
+// 逃生口永远是 overlay：用户显式 set 任何变量都会盖过这条默认规则（"I gave it a value" 是
+// 更具体的意图，同 Set-wins-over-Unset 的既有原则）。
+var harnessEnvMarkers = []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+
+var harnessEnvExact = []string{"CLAUDECODE", "CLAUDE_PID", "CLAUDE_CONFIG_DIR", "CLAUDE_EFFORT", "AI_AGENT"}
+
+var harnessEnvPrefixes = []string{"CLAUDE_CODE_", "ANTHROPIC_"}
+
+func harnessLaunched(base []string) bool {
+	for _, kv := range base {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		for _, m := range harnessEnvMarkers {
+			if kv[:eq] == m {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stripHarnessEnv(base []string) []string {
+	out := make([]string, 0, len(base))
+next:
+	for _, kv := range base {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			out = append(out, kv)
+			continue
+		}
+		key := kv[:eq]
+		for _, e := range harnessEnvExact {
+			if key == e {
+				continue next
+			}
+		}
+		for _, p := range harnessEnvPrefixes {
+			if strings.HasPrefix(key, p) {
+				continue next
+			}
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// resolvePtyEnv = 继承环境（harness 诞生时先剥掉 harness 家族）→ 再 overlay。
+// 单测覆盖见 env_overlay_test.go 的 TestResolvePtyEnv_*。
+func resolvePtyEnv(base []string, ov *envOverlay) []string {
+	if harnessLaunched(base) {
+		base = stripHarnessEnv(base)
+	}
+	return applyEnvOverlay(base, ov)
+}
+
 // ptyEnviron is what a NEW session's shell should start with. Wired into SessionManager as its
 // EnvSource so the manager keeps knowing nothing about where the overlay is stored.
 func (s *Server) ptyEnviron() []string {
-	return applyEnvOverlay(os.Environ(), s.envOverlay())
+	return resolvePtyEnv(os.Environ(), s.envOverlay())
 }
 
 func (s *Server) envOverlay() *envOverlay {
