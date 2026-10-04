@@ -34,6 +34,14 @@
       </svg>
     </button>
 
+    <!-- Application history Copy Mode is separate from tmux's native `cp` action. Keep it
+         beside compose so desktop and mobile use one predictable entry. -->
+    <CopyModeButton
+      placement="toolbar"
+      :disabled="copyModeDisabled"
+      @open="$emit('openCopyMode')"
+    />
+
     <!-- 4. Chat / Compose toggle -->
     <button
       class="tb-btn"
@@ -172,6 +180,8 @@
 </template>
 
 <script setup lang="ts">
+import CopyModeButton from './CopyModeButton.vue'
+
 defineProps<{
   sessionId: string
   stickyShift: boolean
@@ -180,6 +190,7 @@ defineProps<{
   stickyAlt: boolean
   activePanel: 'none' | 'numpad' | 'compose'
   keycastOn: boolean
+  copyModeDisabled?: boolean
 }>()
 
 defineEmits<{
@@ -187,6 +198,7 @@ defineEmits<{
   (e: 'clipboard', op: 'paste'): void
   (e: 'toggleNumpad'): void
   (e: 'toggleCompose'): void
+  (e: 'openCopyMode'): void
   (e: 'toggleShift'): void
   (e: 'toggleCtrl'): void
   (e: 'toggleAlt'): void

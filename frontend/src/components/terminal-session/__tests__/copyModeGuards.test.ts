@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
  *
  *   ① 进了模式，一个按键都不许漏进 PTY。漏一个字符进 shell，比这个功能不存在更糟。
  *   ② 文本必须能用**原生方式**选中复制。这是它相对 xterm canvas 的全部优势，没了就白做。
- *   ③ attach 了 tmux 的标签不开这个模式。那时 `Ctrl+B` 整个归 tmux，再叠一层只会打架。
+ *   ③ `Ctrl+B [` 在任何 terminal 页面都不进入应用模式；应用回看只从按钮显式打开。
  *
  * 这里用**源码结构断言**（grep 级）来守，而不是行为断言：三条都埋在 SFC 里，这个项目没有组件级
  * DOM 测试设施，而"没有断言"和"断言写不出来"在回归发生时是同一个结果。结构断言便宜、机器可核查，
@@ -113,35 +113,47 @@ describe('约束②：原生文本选择', () => {
   })
 })
 
-describe('约束③（2026-09-12 改版）：tmux 标签 = 混合 leader，copyMode 归应用、其余补发前缀', () => {
+describe('约束③：Copy Mode 从键盘组合改为显式按钮', () => {
   const shortcuts = readFileSync(new URL('../../../composables/cli/useTabShortcuts.ts', import.meta.url), 'utf8')
   const state = readFileSync(new URL('../../../portals/cli/useCliState.ts', import.meta.url), 'utf8')
+  const config = readFileSync(new URL('../../../composables/cli/useShortcutsConfig.ts', import.meta.url), 'utf8')
 
-  it('tmux 标签的 leader 不再整体让位，而是进【混合】模式', () => {
+  it('leader action table no longer claims BracketLeft / CopyMode', () => {
+    const table = config.slice(config.indexOf('export const LEADER_BINDINGS'), config.indexOf('export const LEADER_CODES'))
+    expect(table).not.toContain("code: 'BracketLeft'")
+    expect(table).not.toContain("action: 'copyMode'")
+  })
+
+  it('tmux leader remains hybrid for existing tab actions', () => {
     expect(state).toContain('tmuxLeaderHybrid')
     expect(state).toContain('leaderEnabled: () => true')
     expect(shortcuts).toContain('tmuxLeaderHybrid')
   })
 
-  it('混合模式下只有 copyMode 被认领；其余组合补发前缀字节（tmux 肌肉记忆不丢）', () => {
+  it('both plain-shell and tmux paths replay the removed Ctrl+B [ prefix', () => {
     const fn = shortcuts.slice(shortcuts.indexOf('const r = resolveLeaderKey'))
     const head = fn.slice(0, fn.indexOf("if (r.type === 'action') {"))
-    // 2026-09-26：补发判定收敛到 hybridResendsLeader 谓词。此前这里手写两个 if 分支、只覆盖
-    // action/cancel —— 漏了 passthrough，正是「C-b s 丢前缀」事故的根因。
-    expect(head).toContain('hybridResendsLeader')
+    expect(head).toContain('shouldReplayLeaderPrefix')
     expect(head).toContain('onLeaderFallback')
+    const replay = shortcuts.slice(shortcuts.indexOf('export function shouldReplayLeaderPrefix'))
+    expect(replay).toContain("e.code === 'BracketLeft'")
+    expect(replay).toContain("if (!hybrid) return false")
+    expect(state).not.toContain('onCopyMode:')
+    expect(state).toContain('onLeaderFallback: (binding: string) =>')
   })
 
-  it('补发谓词覆盖「不认识的键」（passthrough）—— C-b s 事故钉', () => {
-    const pred = shortcuts.slice(shortcuts.indexOf('export function hybridResendsLeader'))
-    expect(pred).toContain("r.action !== 'copyMode'")   // copyMode 归应用，不补发
+  it('tmux native actions and cancel still replay the prefix', () => {
+    const pred = shortcuts.slice(shortcuts.indexOf('export function shouldReplayLeaderPrefix'))
     expect(pred).toContain("r.type === 'cancel'")        // C-b C-b = tmux send-prefix
-    // 无修饰的 passthrough 补发（返回 true）；带修饰的第二段保持「取消 + 一个真正的 ^C」
-    expect(pred).toContain('!(e.ctrlKey || e.altKey || e.metaKey || e.shiftKey)')
+    expect(pred).toContain("r.type === 'action'")        // mapped tmux-native actions
+    // BracketLeft 在所有页面补发；hybrid 的其他无修饰 passthrough 也补发。
+    expect(pred).toContain("r.type === 'passthrough' && e.code === 'BracketLeft' && !modified")
+    expect(pred).toContain('return !modified')
   })
 
-  it('补发的字节 = leader 代表的控制字符（Ctrl+KeyB → \\x02）', () => {
-    expect(shortcuts).toContain('export function leaderBytesFor')
+  it('standalone host replays the captured leader through the active surface', () => {
+    expect(state).toContain('onLeaderFallback: (binding: string) =>')
+    expect(state).toContain('surfaceRefs[id]?.onSendKey?.(leaderBytesFor(binding))')
   })
 
   it('应用 copy mode 不再拒绝 tmux 标签（那条拒绝语已随旧语义删除）', () => {

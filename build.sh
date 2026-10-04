@@ -113,7 +113,19 @@ if [ "$SKIP_FRONTEND" -eq 0 ]; then
     echo "error: frontend build produced no frontend/dist/index.html" >&2
     exit 1
   fi
-  if [ -z "$(find frontend/dist/index.html -newermt "@$BUILD_STARTED" 2>/dev/null)" ]; then
+  # BSD find (macOS) does not parse GNU find's `@<epoch>` date form; it exits empty,
+  # which used to reject a freshly built index.html as stale. Read the file's epoch
+  # directly with the BSD or GNU stat spelling instead.
+  FRONTEND_INDEX_MTIME=""
+  if FRONTEND_INDEX_MTIME="$(stat -f %m frontend/dist/index.html 2>/dev/null)" && [[ "$FRONTEND_INDEX_MTIME" =~ ^[0-9]+$ ]]; then
+    :
+  elif FRONTEND_INDEX_MTIME="$(stat -c %Y frontend/dist/index.html 2>/dev/null)" && [[ "$FRONTEND_INDEX_MTIME" =~ ^[0-9]+$ ]]; then
+    :
+  else
+    echo "error: could not read frontend/dist/index.html modification time" >&2
+    exit 1
+  fi
+  if [ "$FRONTEND_INDEX_MTIME" -le "$BUILD_STARTED" ]; then
     echo "error: frontend/dist/index.html predates this build — the frontend did not" >&2
     echo "       actually rebuild, and copying it would embed a stale UI." >&2
     exit 1

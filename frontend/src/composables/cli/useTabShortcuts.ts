@@ -58,8 +58,6 @@ export interface TabShortcutsAdapter {
   /** leader 专属动作 —— 它们本来就没有单修饰键绑定可给。不给 = 那个键不响应，也不吞。 */
   onOverview?: () => void
   onRename?: (id: string) => void
-  /** 进入只读回看（复制模式）。不提供 = leader + `[` 原样放行给 shell。 */
-  onCopyMode?: () => void
   /**
    * 只读回看（复制模式）此刻是否开着 —— 开着就**整层让位**。
    *
@@ -71,11 +69,8 @@ export interface TabShortcutsAdapter {
   copyModeActive?: () => boolean
 
   /**
-   * **tmux 混合 leader**（2026-09-12）：attach 了 tmux 的标签上，leader 仍然武装，但只有
-   * copyMode 一个动作归应用（长程回看复制——muxd 的 scrollback 比 tmux history 更长，且选择/
-   * 复制是原生 DOM 体验）；其余任何 leader 组合（prefix+1 切窗口、prefix+c 新窗口…）都必须把
-   * leader 字节**原样补发给 PTY**、第二键自然流入 —— tmux 的肌肉记忆一个不丢。
-   * 为 true 时，第二段里除 copyMode 外的所有组合走 onLeaderFallback。
+   * **tmux 混合 leader**：attach 了 tmux 的标签上，leader 保持武装用于 tab/overview 等应用动作；
+   * native tmux 组合把已捕获的 leader 字节补发到 PTY，再让第二键自然流入 —— tmux 的肌肉记忆不丢。
    */
   tmuxLeaderHybrid?: () => boolean
   /** hybrid 模式下第二段不归应用时的补发口：把 leader 的字节序列写进 PTY。 */
@@ -205,21 +200,25 @@ export function resolveLeaderKey(
 }
 
 /**
- * tmux 混合模式下，第二段的这一个结局要不要把 leader 的字节补发进 PTY。
+ * 第二段的这一个结局要不要把 leader 的字节补发进 PTY。
  *
  * 第一段已经把 leader 吞下（preventDefault）了 —— 凡是在真实 tmux 里也是「前缀 + 键」的组合
  * 都必须补发，否则 tmux 只剩半个前缀：C-b s 变成向 shell 敲了个 "s"，会话树纹丝不动
  * （2026-09-26 实报：attach tmux 的标签里 C-b s 失效，根因就是 passthrough 这条没补发，
  * 当初只覆盖了 action / cancel 两种结局）。
  *
- * 唯一不补发的是**带修饰键的第二段**（C-b 然后 Ctrl+C）：那是 resolveLeaderKey 明示的
- * 「取消 + 一个真正的 ^C」语义，hybrid 下照旧保留。
+ * 各页面都必须补发已经从应用 Copy Mode 移除的 Ctrl+B+[ 前缀；tmux hybrid 还要补发其它 native
+ * tmux 组合。带修饰键的第二段（C-b 然后 Ctrl+C）仍不补前缀，保留「取消 + 一个真正的 ^C」语义。
  */
-export function hybridResendsLeader(r: LeaderResolution, e: KeyboardEvent, hybrid: boolean): boolean {
+export function shouldReplayLeaderPrefix(r: LeaderResolution, e: KeyboardEvent, hybrid: boolean): boolean {
+  const modified = e.ctrlKey || e.altKey || e.metaKey || e.shiftKey
+  // Ctrl+B was already captured as a leader. The removed `[` app action must return the
+  // complete sequence to PTY on plain shells as well as tmux, or the shell loses ^B.
+  if (r.type === 'passthrough' && e.code === 'BracketLeft' && !modified) return true
   if (!hybrid) return false
   if (r.type === 'cancel') return true
-  if (r.type === 'action') return r.action !== 'copyMode'
-  return !(e.ctrlKey || e.altKey || e.metaKey || e.shiftKey)
+  if (r.type === 'action') return true
+  return !modified
 }
 
 /**
@@ -262,7 +261,6 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
     'switchTab', 'nextTab', 'prevTab', 'newTab', 'closeTab',
     ...(adapter.onOverview ? (['overview'] as const) : []),
     ...(adapter.onRename ? (['rename'] as const) : []),
-    ...(adapter.onCopyMode ? (['copyMode'] as const) : []),
   ])
 
   /**
@@ -320,7 +318,6 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
       case 'closeTab': if (activeId) adapter.onClose(activeId); break
       case 'overview': adapter.onOverview?.(); break
       case 'rename': if (activeId) adapter.onRename?.(activeId); break
-      case 'copyMode': adapter.onCopyMode?.(); break
     }
   }
 
@@ -362,12 +359,10 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
 
       const r = resolveLeaderKey(e, armed.binding, availableActions)
       clearLeader()
-      // ── tmux 混合模式（tmuxLeaderHybrid）：leader 只认领 copyMode（长程回看复制）。
-      // 其余组合（prefix+1 切窗口、prefix+c 新建、乃至不认识的键）把 leader 字节补发进 PTY、
-      // 第二键自然流入 —— 第一段已经把 C-b 吞下（preventDefault），不补发的话 tmux 收到的
-      // 就只剩半个前缀：C-b 1 会变成向 tmux 敲了个 "1"，窗口纹丝不动。
+      // tmux hybrid 把 native tmux 组合补发；被应用回看移除的 C-b [ 在所有 shell 上都补发前缀，
+      // 否则普通 shell 收到 `[` 却丢掉 C-b。
       const hybrid = adapter.tmuxLeaderHybrid?.() === true
-      if (hybridResendsLeader(r, e, hybrid)) {
+      if (shouldReplayLeaderPrefix(r, e, hybrid)) {
         adapter.onLeaderFallback?.(armed.binding)
         return
       }

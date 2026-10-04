@@ -7,8 +7,8 @@ mock.module('@terminal/api/store', () => ({
   saveStore: () => Promise.resolve(),
 }))
 
-const { parseBinding, matchesBinding, matchesPrefixDigit, resolveShortcutAction, resolveLeaderKey, leaderBytesFor, hybridResendsLeader } = await import('../useTabShortcuts')
-const { DEFAULT_SHORTCUTS_CONFIG, DEFAULT_LEADER, bindingFor } = await import('../useShortcutsConfig')
+const { parseBinding, matchesBinding, matchesPrefixDigit, resolveShortcutAction, resolveLeaderKey, leaderBytesFor, shouldReplayLeaderPrefix } = await import('../useTabShortcuts')
+const { DEFAULT_SHORTCUTS_CONFIG, DEFAULT_LEADER, bindingFor, LEADER_BINDINGS } = await import('../useShortcutsConfig')
 
 type Cfg = typeof DEFAULT_SHORTCUTS_CONFIG
 /** 手搓一个配置。leader 给默认值，这样这些用例断言的仍然只是「单修饰键前缀那条路」。 */
@@ -228,32 +228,40 @@ describe('leader 只吞它真的能执行的键', () => {
   })
 })
 
-const ALL_ACTIONS = new Set(['switchTab', 'nextTab', 'prevTab', 'newTab', 'closeTab', 'overview', 'rename', 'copyMode'] as const)
+const ALL_ACTIONS = new Set(['switchTab', 'nextTab', 'prevTab', 'newTab', 'closeTab', 'overview', 'rename'] as const)
 
-/**
- * `[` = 回看历史，和 tmux 的 copy-mode 同一个键。
- *
- * 借用 tmux 的键位在这里是**没有代价**的：这条 leader 唯一生效的场景恰恰是没有 tmux 的标签
- * （attach 上 tmux 时整个 leader 让位，见 leaderEnabled），所以两者永远不会争这个键。
- */
-describe('leader + [ = 回看历史', () => {
+describe('leader + [ is no longer an application action', () => {
   const L = DEFAULT_LEADER
 
-  it('实现了就吞，映射到 copyMode', () => {
+  it('removes BracketLeft from the action map and resolves it as passthrough', () => {
+    expect(LEADER_BINDINGS.some(binding => binding.code === 'BracketLeft')).toBe(false)
     expect(resolveLeaderKey(key({ code: 'BracketLeft', key: '[' }), L, ALL_ACTIONS))
-      .toEqual({ type: 'action', action: 'copyMode' })
-  })
-
-  it('宿主没实现 → 原样放行，绝不「吞掉又不做事」', () => {
-    const NO_COPY = new Set(['switchTab', 'newTab', 'closeTab'] as const)
-    expect(resolveLeaderKey(key({ code: 'BracketLeft', key: '[' }), L, NO_COPY))
       .toEqual({ type: 'passthrough' })
   })
 
-  it('物理键位匹配：非美式布局上 `[` 打出别的字符也照样命中', () => {
-    // 德语布局上 BracketLeft 打出的是 `ü`。匹配 key 而不是 code，就是这条 leader 在半个欧洲失效。
-    expect(resolveLeaderKey(key({ code: 'BracketLeft', key: 'ü' }), L, ALL_ACTIONS))
-      .toEqual({ type: 'action', action: 'copyMode' })
+  it('replays the captured prefix before the bracket on every terminal type', () => {
+    const r = { type: 'passthrough' } as const
+    const bracket = key({ code: 'BracketLeft', key: '[' })
+    expect(shouldReplayLeaderPrefix(r, bracket, false)).toBe(true)
+    expect(shouldReplayLeaderPrefix(r, bracket, true)).toBe(true)
+  })
+
+  it('does not replay a prefix for other unmapped keys in a plain shell', () => {
+    expect(shouldReplayLeaderPrefix(
+      { type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), false,
+    )).toBe(false)
+  })
+
+  it('still maps other leader actions and replays those to native tmux', () => {
+    const newTab = resolveLeaderKey(key({ code: 'KeyC', key: 'c' }), L, ALL_ACTIONS)
+    expect(newTab).toEqual({ type: 'action', action: 'newTab' })
+    expect(shouldReplayLeaderPrefix(newTab, key({ code: 'KeyC', key: 'c' }), true)).toBe(true)
+  })
+
+  it('does not replay for a modified second key', () => {
+    expect(shouldReplayLeaderPrefix(
+      { type: 'passthrough' }, key({ code: 'BracketLeft', key: '[', shiftKey: true }), false,
+    )).toBe(false)
   })
 })
 
@@ -270,7 +278,7 @@ describe('leaderBytesFor（tmux 混合 leader 的前缀补发字节）', () => {
 })
 
 /**
- * hybridResendsLeader —— 2026-09-26 实报「attach tmux 的标签里 C-b s 失效」的根因钉。
+ * shouldReplayLeaderPrefix —— 2026-09-26 实报「attach tmux 的标签里 C-b s 失效」的根因钉。
  *
  * 第一段已把 leader 吞下，第二段凡是「真实 tmux 里也是前缀+键」的结局都必须补发前缀字节；
  * 最初的实现只覆盖了 action / cancel，漏了 passthrough —— 而 tmux 的默认绑定（s 会话树、
@@ -279,22 +287,19 @@ describe('leaderBytesFor（tmux 混合 leader 的前缀补发字节）', () => {
 describe('tmux 混合 leader：前缀补发（C-b s 失效的根因）', () => {
   const HYBRID = true
   it('不认识的键补发 —— 设计注释明示「乃至不认识的键」，C-b s 就死在这', () => {
-    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), HYBRID)).toBe(true)
-    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyD', key: 'd' }), HYBRID)).toBe(true)
+    expect(shouldReplayLeaderPrefix({ type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), HYBRID)).toBe(true)
+    expect(shouldReplayLeaderPrefix({ type: 'passthrough' }, key({ code: 'KeyD', key: 'd' }), HYBRID)).toBe(true)
   })
-  it('已映射动作（非 copyMode）与 cancel 照旧补发（既有行为回归钉）', () => {
-    expect(hybridResendsLeader({ type: 'action', action: 'newTab' }, key({ code: 'KeyC', key: 'c' }), HYBRID)).toBe(true)
-    expect(hybridResendsLeader({ type: 'cancel' }, key({ code: 'Escape', key: 'Escape' }), HYBRID)).toBe(true)
-  })
-  it('copyMode 不补发 —— prefix+[ 归应用（长程回看复制），不进 PTY', () => {
-    expect(hybridResendsLeader({ type: 'action', action: 'copyMode' }, key({ code: 'BracketLeft', key: '[' }), HYBRID)).toBe(false)
+  it('已映射动作与 cancel 照旧补发（既有行为回归钉）', () => {
+    expect(shouldReplayLeaderPrefix({ type: 'action', action: 'newTab' }, key({ code: 'KeyC', key: 'c' }), HYBRID)).toBe(true)
+    expect(shouldReplayLeaderPrefix({ type: 'cancel' }, key({ code: 'Escape', key: 'Escape' }), HYBRID)).toBe(true)
   })
   it('带修饰键的第二段不补发 —— 「取消 + 一个真正的 ^C」语义保留', () => {
-    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyC', key: 'c', ctrlKey: true }), HYBRID)).toBe(false)
-    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyN', key: 'n', altKey: true }), HYBRID)).toBe(false)
+    expect(shouldReplayLeaderPrefix({ type: 'passthrough' }, key({ code: 'KeyC', key: 'c', ctrlKey: true }), HYBRID)).toBe(false)
+    expect(shouldReplayLeaderPrefix({ type: 'passthrough' }, key({ code: 'KeyN', key: 'n', altKey: true }), HYBRID)).toBe(false)
   })
   it('非混合模式一律不补发（没 attach tmux 的标签，前缀归 dw 自己）', () => {
-    expect(hybridResendsLeader({ type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), false)).toBe(false)
-    expect(hybridResendsLeader({ type: 'action', action: 'newTab' }, key({ code: 'KeyC', key: 'c' }), false)).toBe(false)
+    expect(shouldReplayLeaderPrefix({ type: 'passthrough' }, key({ code: 'KeyS', key: 's' }), false)).toBe(false)
+    expect(shouldReplayLeaderPrefix({ type: 'action', action: 'newTab' }, key({ code: 'KeyC', key: 'c' }), false)).toBe(false)
   })
 })
