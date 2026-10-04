@@ -155,10 +155,11 @@ describe('leader', () => {
  * 存在的键永远不被人发现。
  */
 describe('leader 键位表 → 设置页清单是派生的', () => {
-  it('新增的 [ 回看历史 出现在提示里', () => {
+  it('应用历史回看改由按钮进入，不再列为 Ctrl+B leader 动作', () => {
     const hint = leaderHintText()
-    expect(hint).toContain('[')
-    expect(hint).toContain('回看历史')
+    expect(hint).not.toContain('回看历史')
+    expect(LEADER_BINDINGS.some(binding => binding.code === 'BracketLeft')).toBe(false)
+    expect(hint).toContain('c 新建')
   })
 
   it('LEADER_CODES 由键位表派生，两者不会分家', () => {

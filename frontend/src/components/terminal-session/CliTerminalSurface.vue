@@ -113,6 +113,12 @@
         data-testid="surface-connection-status"
         @refresh="wsReconnect"
       />
+      <CopyModeButton
+        v-if="!isMobile"
+        placement="status"
+        :disabled="props.isRemote"
+        @open="openCopyMode"
+      />
       <!-- Desktop-only compose toggle. Deliberately a SIBLING of ssr-main, not inside it: that
            zone swaps between TmuxPaneBar and the non-tmux action row (surfaceActionBar.ts) and
            hides whichever isn't current, but compose must stay reachable in BOTH — same as
@@ -279,6 +285,7 @@
         :active-panel="activePanelLabel"
         :keyboard-up="activeMode === 'keyboard'"
         :keycast-on="keystrokeHudVisible"
+        :copy-mode-disabled="props.isRemote"
         @send-key="onSendKey"
         @clipboard="onClipboard"
         @toggle-numpad="onTogglePanel('numpad')"
@@ -289,6 +296,7 @@
         @toggle-hud="hudVisible = !hudVisible"
         @toggle-keycast="keystrokeHudVisible = !keystrokeHudVisible"
         @toggle-keyboard="onToggleKeyboard"
+        @open-copy-mode="openCopyMode"
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
@@ -456,6 +464,7 @@ import { copyTextToClipboard } from '@ce/utils/clipboard'
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.vue'
 import Toolbar from '@terminal/components/terminal-session/Toolbar.vue'
+import CopyModeButton from '@terminal/components/terminal-session/CopyModeButton.vue'
 import KeyboardPanel from '@terminal/components/terminal-session/KeyboardPanel.vue'
 import TmuxQuickBar from '@terminal/components/terminal-session/TmuxQuickBar.vue'
 import DwQuickBar from '@terminal/components/terminal-session/DwQuickBar.vue'
@@ -2571,8 +2580,8 @@ function openInstallGuide() { notifyQuickOpen.value = true }
  * 下面这个 xterm 原封不动地留着：实时输出照收，滚动位置一格没动，Esc 一按就回到原样 —— 这正是
  * 「不重放整段历史」这条约束在 UI 上的样子。
  *
- * attach 了 tmux 的标签**不开**：那时 `Ctrl+B` 整个归 tmux，它自己的 copy-mode 就是这件事的原生
- * 实现，我们再叠一层只会打架。
+ * 它通过状态行/移动 Toolbar 的显式按钮打开。tmux 的 `Ctrl+B [` 始终送进 PTY，由 tmux 打开自己的
+ * native copy-mode；应用历史视口不会靠键盘前缀覆盖 tmux pane。
  */
 const copyModeOpen = ref(false)
 // 复制模式历史的缓冲键：同键复用已加载行（见 openCopyMode 内的注释）。

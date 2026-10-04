@@ -188,11 +188,8 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // has one always-mounted CLI portal (no sibling portal competes for these Alt combos the way
   // pro's WindowDockOverlay does), so isActive is unconditionally true — the listener's own
   // onMounted/onBeforeUnmount lifecycle (tied to this component tree) is the only gate needed.
-  // leader（默认 Ctrl+B）走的是同一张动作表的第二条路。2026-09-12 起在 tmux 标签上改为**混合**：
-  // leader 仍然武装，但只有 copyMode（prefix+[ = 长程回看复制）归应用——muxd 的 scrollback 比
-  // tmux 的 history 更长，且选择/复制是原生 DOM 体验（Human 明确要求）；其余 leader 组合
-  // （prefix+1 切窗口、prefix+c 新建…）经 onLeaderFallback 把前缀字节原样补发进 PTY，
-  // tmux 的肌肉记忆一个不丢。attached 与补发都走表面的既有实例通路，不新拉线。
+  // leader（默认 Ctrl+B）仍承载 tab/overview 等动作。`[` 不再映射到应用 Copy Mode；onLeaderFallback
+  // 回放已捕获的前缀，使 Ctrl+B [ 在 tmux 与普通 shell 页面都完整到达 PTY。
   const { leaderPending, leaderLabel } = useTabShortcuts({
     orderedTabIds: () => visibleTabIds.value,
     activeTabId: () => activeTab.value?.id,
@@ -211,17 +208,6 @@ export function useCliState(runtime: PortalRuntimeResult) {
     copyModeActive: () => !!(activeTab.value ? surfaceRefs[activeTab.value.id]?.copyModeOpen : false),
     onOverview: toggleOverview,
     onRename: startRenameTab,
-    // 前缀 + `[` = 进入只读回看，和 tmux 的 copy-mode 同一个键。动作住在终端表面上（只有它拿得到
-    // 那个会话的历史），这里只是把 leader 转给当前标签——和 onSendKey / netStats 走的是同一条既有
-    // 通路，不新拉线。
-    onCopyMode: () => {
-      const id = activeTab.value?.id
-      if (!id) return
-      // 表面返回拒绝理由（tmux 标签 / 远程标签），这一层负责说出来 —— 一个按下去毫无反应的
-      // 快捷键，使用者只会以为是自己按错了。
-      const why = surfaceRefs[id]?.openCopyMode?.()
-      if (why) showNotice(why)
-    },
   })
 
   // D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output —
