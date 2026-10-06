@@ -31,7 +31,7 @@ import AgentReportDetail from './AgentReportDetail.vue'
 import { fmtTokens, fmtCost } from './cost'
 import Spark from './Spark.vue'
 import { placeAnchoredPopover, type RectLike } from './popoverPlacement'
-import { usageMoneyPresentation, subscriptionCovers, facadeNote, type UsageMoneySemantics, type SubscriptionAccount } from './usageBillingPresentation'
+import { usageMoneyPresentation, subscriptionCovers, facadeNote, apiSessionBillingLabel, type UsageMoneySemantics, type SubscriptionAccount } from './usageBillingPresentation'
 import { groupByVendor, type UsageVendorGroup } from './usageVendorGroups'
 import type { UsageRateCard } from './useUsageReport'
 import { groupPresentation } from './quotaStaleness'
@@ -988,7 +988,7 @@ onUnmounted(() => {
             :key="'apisess-' + s.name"
             class="uchip-dim uchip-note uchip-apirow"
             :data-testid="`uchip-apisess-${s.name}`"
-          >API 会话 · {{ s.name }} · 按量付费（{{ Math.max(0, Math.round(s.age_seconds / 60)) }} 分钟前活跃）</div>
+          >API 会话 · {{ s.name }} · {{ apiSessionBillingLabel(s, subscriptions) }}（{{ Math.max(0, Math.round(s.age_seconds / 60)) }} 分钟前活跃）</div>
           <div v-if="!subscriptions.length && !apiBilledPresent.length" class="uchip-dim uchip-empty">未检出官方订阅账号</div>
           <div class="uchip-sep" />
         </template>

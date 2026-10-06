@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { usageMoneyPresentation, subscriptionCovers, facadeNote } from '../usageBillingPresentation'
+import { usageMoneyPresentation, subscriptionCovers, facadeNote, apiSessionBillingLabel } from '../usageBillingPresentation'
 import type { UsageProviderRow } from '../useUsageReport'
 
 const row = (
@@ -210,5 +210,25 @@ describe('why a row carries no money', () => {
   test('the explanation still says something when the endpoint and model are absent', () => {
     const bare: UsageProviderRow = { ...row('moonshot', 'codex'), attribution_basis: 'endpoint' }
     expect(facadeNote(bare)?.title.length ?? 0).toBeGreaterThan(10)
+  })
+})
+
+describe('api session row billing label (UB-34)', () => {
+  // The panel must not contradict itself: a glm session under a GLM Coding Plan card is
+  // billed to that plan, not 按量付费. But a row with no vendor claim makes no claim now.
+  const held = [{ vendor: 'zhipu' }, { vendor: 'moonshot' }]
+
+  test('a mapped profile under a held plan reads 订阅抵扣', () => {
+    expect(apiSessionBillingLabel({ vendor: 'zhipu' }, held)).toBe('订阅抵扣')
+    expect(apiSessionBillingLabel({ vendor: 'moonshot' }, held)).toBe('订阅抵扣')
+  })
+
+  test('a mapped profile whose plan is absent stays 按量付费', () => {
+    expect(apiSessionBillingLabel({ vendor: 'openai' }, held)).toBe('按量付费')
+  })
+
+  test('an unmapped profile makes no vendor claim — plain API metering', () => {
+    expect(apiSessionBillingLabel({}, held)).toBe('按量付费')
+    expect(apiSessionBillingLabel({ vendor: '' }, held)).toBe('按量付费')
   })
 })

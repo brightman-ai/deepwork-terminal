@@ -143,8 +143,9 @@ export interface RuntimeQuota {
   last_probe_error?: string
   last_probe_at?: string
   /** claude-switch 双账号（2026-09-13）：官方订阅行之外，正在跑的 API profile 会话清单
-   *  （statusline 按账号分家后，每个 profile 一份心跳文件）。 */
-  api_sessions?: { name: string; captured_at: string; age_seconds: number }[]
+   *  （statusline 按账号分家后，每个 profile 一份心跳文件）。vendor 是宿主从 profile 的
+   *  base_url 推导的计费方（UB-34）；缺席 = 宿主无可声明映射，行不得冒充任何归属。 */
+  api_sessions?: { name: string; vendor?: string; captured_at: string; age_seconds: number }[]
   billing?: Billing
   /**
    * The endpoint ids this SUBSCRIPTION is spent through (kit: Credential.RuntimeProviderIDs).
