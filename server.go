@@ -157,6 +157,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	// Asking is a plain read now, so the freshness the user sees no longer depends on them
 	// having pressed a button (usage_credentials.go).
 	s.startQuotaWarmer(s.watchCtx)
+	s.startReportWarmer(s.watchCtx)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Which tab list owns the sessions this server creates. One daemon serves both deployments
 	// (standalone and the pro embed), so without this a live session with no tab is
