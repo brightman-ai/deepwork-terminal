@@ -79,6 +79,23 @@ export function subscriptionCovers(
 }
 
 /**
+ * The live session row's billing phrase (UB-34). A profile the host mapped to a vendor whose
+ * subscription account exists is billed to that plan — labelling it 按量付费 underneath the
+ * vendor's own subscription card contradicts the panel above it (observed 2026-10-06: a GLM
+ * Coding Plan card sitting over a「glm · 按量付费」row). A row with NO vendor claim stays
+ * 按量付费: these routing endpoints are API-key metered unless a plan says otherwise, and
+ *「unknown」phrasing for the common no-plan profile would be churn without information.
+ */
+export function apiSessionBillingLabel(
+  session: { vendor?: string },
+  accounts: readonly { vendor?: string }[],
+): string {
+  if (!session.vendor) return '按量付费'
+  const holdsPlan = accounts.some((account) => account.vendor === session.vendor)
+  return holdsPlan ? '订阅抵扣' : '按量付费'
+}
+
+/**
  * Place one usage row. The two tabs are 订阅 and 纯 API, and the split is EXHAUSTIVE and
  * DISJOINT — every row lands in exactly one, so no amount of money is ever shown twice.
  *

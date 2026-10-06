@@ -200,6 +200,28 @@ func (s *credentialStore) ensureLoadedLocked() {
 func (s *credentialStore) load() map[string]usage.Credential {
 	out := map[string]usage.Credential{}
 	s.explicitProviderVendors = map[string]string{}
+	// Derived subscriptions (provider profiles) merge FIRST so a sealed entry parsed below
+	// simply overwrites it — explicit authorship outranks inference without any per-key
+	// comparison. Merging before the reads (not after) also matters: the no-sealed-file
+	// early return below is a machine's steady state, and a store with no explicit
+	// subscriptions must still serve the derived ones.
+	//
+	// Derivation reads real user files, so under `go test` it only runs when the test opted
+	// in with DW_CLAUDE_PROFILES — the same discipline as migrateLegacy (observed 2026-09-30:
+	// one unguarded go test run touched the developer's real store). A test that wants
+	// derived credentials points DW_CLAUDE_PROFILES at a fixture.
+	if !strings.HasSuffix(os.Args[0], ".test") || os.Getenv("DW_CLAUDE_PROFILES") != "" {
+		derived, profileVendors := scanProfileCredentials(claudeProfilesDir())
+		for vendor, cred := range derived {
+			if _, explicit := out[vendor]; !explicit {
+				out[vendor] = cred
+			}
+		}
+		// The same scan annotates session rows (which profile bills to which vendor) — one
+		// traversal, one derivation, consumed by the quota domain through the same
+		// injection seam as the credentials themselves.
+		usage.SetProfileVendors(profileVendors)
+	}
 	defer func() {
 		id := officialCodexProviderDeclaration(transcript.CodexHome())
 		if id == "" {
@@ -296,6 +318,82 @@ func (s *credentialStore) migrateLegacy() {
 		return
 	}
 	logger.Info("usage credentials migrated to shared deepwork home", "from", legacyPath, "to", s.path)
+}
+
+// ── derived credentials (provider profiles) ──────────────────────────────────
+//
+// The sealed store is the EXPLICIT source: a human once wrote a key down for this host. A
+// claude-switch profile is the DERIVED source that needs no writing at all — it already
+// holds (routing base URL, key) pairs for exactly the vendors whose quota APIs this domain
+// can ask, so deriving the subscription from it is what lets one key mean one subscription.
+// Asking the user to enter that same key a second time is how "two answers to what am I
+// subscribed to" starts (see newCredentialStore's history), so the profile layer feeds the
+// same store, and explicit sealed entries outrank it by construction (load merges derived
+// first, sealed parsing overwrites).
+//
+// A derived credential carries the KEY only. The quota endpoints are the domain's business
+// (zhipu asks /api/monitor, not the /api/anthropic path the profile routes through), so the
+// routing URL stops here — it proves WHICH vendor, never WHERE to ask.
+
+// claudeProfilesDir is where claude-switch keeps provider profiles. DW_CLAUDE_PROFILES
+// overrides, mirroring the DW_* knobs kit/transcript honours for the same reason: a fixture
+// must never depend on — or leak — the developer's real profiles.
+func claudeProfilesDir() string {
+	if dir := strings.TrimSpace(os.Getenv("DW_CLAUDE_PROFILES")); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude-profiles")
+}
+
+// scanProfileCredentials derives subscription credentials from the provider profiles under
+// root: <name>/settings.json whose env carries ANTHROPIC_BASE_URL at a known coding-plan
+// host plus ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY). It returns two views of ONE
+// traversal: credentials by vendor (for the quota clients) and profile-name→vendor (for
+// session-row billing attribution). Deterministic — ReadDir is sorted, the first profile
+// claiming a vendor wins — and silent about everything that does not qualify: an unreadable
+// file, a profile with no env, an unknown host, an empty key are all just "nothing
+// derivable here", which is a presence fact, not an error.
+func scanProfileCredentials(root string) (map[string]usage.Credential, map[string]string) {
+	out := map[string]usage.Credential{}
+	byProfile := map[string]string{}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return out, byProfile
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, entry.Name(), "settings.json")) //nolint:gosec — our own profile dir, root comes from the operator's home
+		if err != nil {
+			continue
+		}
+		var profile struct {
+			Env map[string]string `json:"env"`
+		}
+		if json.Unmarshal(data, &profile) != nil {
+			continue
+		}
+		vendor, ok := usage.DeriveVendorFromBaseURL(profile.Env["ANTHROPIC_BASE_URL"])
+		if !ok {
+			continue
+		}
+		key := profile.Env["ANTHROPIC_AUTH_TOKEN"]
+		if key == "" {
+			key = profile.Env["ANTHROPIC_API_KEY"]
+		}
+		if key == "" {
+			continue
+		}
+		if _, claimed := out[vendor]; !claimed {
+			out[vendor] = usage.Credential{APIKey: key}
+		}
+		if _, seen := byProfile[entry.Name()]; !seen {
+			byProfile[entry.Name()] = vendor
+		}
+	}
+	return out, byProfile
 }
 
 // startQuotaWarmer installs the credential store and keeps every free-to-ask account's reading
