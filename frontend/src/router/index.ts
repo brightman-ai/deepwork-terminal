@@ -18,7 +18,8 @@ const defaultPortalPath = defaultPortal ? `/portal/${defaultPortal.id}` : '/port
 const staticChildren: RouteRecordRaw[] = [
   {
     path: "",
-    redirect: defaultPortalPath,
+    // 保留 query：/?t=<tabId> 的深链经 / 进来不能在这里丢掉（tab 深链见 portals/cli/tabDeepLink.ts）
+    redirect: (to) => ({ path: defaultPortalPath, query: to.query }),
   },
   { path: '/settings', redirect: '/portal/settings' },
 ];
