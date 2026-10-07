@@ -22,10 +22,9 @@
  *      event's clipboardData.getData('text') is reliable; execCommand's bool is not.
  *   3. Total failure → surface a visible HUD error. Never swallow.
  *
- * Transport: text is sent raw via the injected sendBinary. We do NOT wrap with
- * bracketed-paste markers (\x1b[200~ … \x1b[201~) — consistent with every other
- * paste path in this app (resolver injectPaths, onClipboard text). The PTY/tmux
- * applies bracketed paste itself; double-wrapping would corrupt input.
+ * Transport: the owning terminal performs one negotiated paste, exactly like
+ * its ordinary OS paste path. The PTY does not invent paste framing for raw
+ * keyboard bytes; neither double framing nor unframed synthetic typing is safe.
  */
 import { createLogger } from '@ce/utils/obs'
 
@@ -33,12 +32,11 @@ type HudKind = 'state' | 'error'
 
 export interface ClipboardTextOptions {
   surface: string
-  sendBinary: (data: Uint8Array) => void
+  pasteText: (text: string) => boolean
   hudRecord?: (kind: HudKind, message: string) => void
 }
 
 const log = createLogger('cli-clipboard-text')
-const encoder = new TextEncoder()
 
 export function useClipboardText(options: ClipboardTextOptions) {
   /**
@@ -55,7 +53,10 @@ export function useClipboardText(options: ClipboardTextOptions) {
       options.hudRecord?.('state', 'clipboard is empty')
       return false
     }
-    options.sendBinary(encoder.encode(text))
+    if (!options.pasteText(text)) {
+      options.hudRecord?.('error', '终端尚未连接，文本没有发送。')
+      return false
+    }
     options.hudRecord?.('state', `clipboard paste: ${text.length} chars`)
     log.info('cli.clipboard.text_injected', { surface: options.surface, source, chars: text.length })
     return true

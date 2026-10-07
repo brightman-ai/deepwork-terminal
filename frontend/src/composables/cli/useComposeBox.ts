@@ -211,8 +211,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     nextTick(autoResize)
   }
 
-  /** Convert composed text into WS-ready chunks (bracketed-paste for long/multi-line, char-by-char
-   *  for a short single line) — the SAME encode a host uses when wiring the `send` emit through to
+  /** Convert assembled text into one WS-ready paste transaction — the SAME encode a host uses when wiring the `send` emit through to
    *  the PTY. Exposed here so both hosts call one implementation instead of importing the strategy
    *  composable separately and risking the two drifting. */
   const encode = composeSend.encode
