@@ -19,7 +19,11 @@ export interface CliPasteResolverOptions {
   activeCwd?: () => string | undefined
   surface: string
   isActive?: () => boolean
-  sendBinary: (data: Uint8Array) => void
+  /** Post-upload injection and every other paste-shaped send goes through the owning
+   *  terminal's negotiated paste (xterm.paste) — the same framing an ordinary OS paste
+   *  gets. Raw sendBinary here is how an upload reference could land unframed on a view
+   *  whose bracketed-paste state was lost to a reconnect (tab 2 / mobile, 2026-10-07). */
+  pasteText: (text: string) => boolean
   openAttachmentPicker: () => void
   hudRecord?: (kind: HudKind, message: string) => void
 }
@@ -80,7 +84,6 @@ interface ClipboardMetrics {
 }
 
 const log = createLogger('cli-paste-resolver')
-const encoder = new TextEncoder()
 const metrics: ClipboardMetrics = {
   pasteEvents: 0,
   interceptedEvents: 0,
@@ -483,7 +486,11 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     // file reference instead of literal text. Idempotent (won't double-prefix).
     const referencePaths = withReferencePrefix(uniquePaths)
     const payload = formatPathsForPty(referencePaths)
-    options.sendBinary(encoder.encode(payload))
+    if (!options.pasteText(payload)) {
+      // 终端没连上时注入会静默丢失——上传成功但输入框里什么都没有，比失败更让人困惑。
+      options.hudRecord?.('error', '终端尚未连接，上传的文件引用没有送达。')
+      return
+    }
     metrics.injectedPayloads++
     options.hudRecord?.('state', `clipboard ${source}: ${referencePaths.join(' ')}`)
     log.info('cli.clipboard.injected_paths', {
@@ -518,7 +525,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
 
   /**
    * Inject already-known filesystem paths into the PTY — the SAME chokepoint the
-   * post-upload paste flow uses (formatPathsForPty → shell-quote → sendBinary). The
+   * post-upload paste flow uses (formatPathsForPty → shell-quote → pasteText). The
    * resource drawer's "插入对话" routes here so a re-used upload reaches claude/codex
    * exactly as a fresh clipboard paste would. `source` defaults to manual-attach.
    */

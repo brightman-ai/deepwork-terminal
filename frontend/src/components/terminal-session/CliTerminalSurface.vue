@@ -1377,14 +1377,26 @@ const pasteResolver = useCliPasteResolver({
   activeCwd: () => tmux.activeCwd.value,
   surface: 'workbench',
   isActive: () => props.active,
-  sendBinary: (data) => sendBinary(data, 'clipboard'),
+  pasteText: (text) => {
+    const terminal = xtermRef.value?.terminal()
+    if (!terminal) return false
+    // Use the same negotiated framing/normalization as an ordinary OS paste.
+    terminal.paste(text)
+    return true
+  },
   openAttachmentPicker: () => attachInputRef.value?.click(),
   hudRecord: (kind, message) => hud.record(kind, message),
 })
 
 const clipboardText = useClipboardText({
   surface: 'workbench',
-  sendBinary: (data) => sendBinary(data, 'clipboard'),
+  pasteText: (text) => {
+    const terminal = xtermRef.value?.terminal()
+    if (!terminal) return false
+    // Use the same negotiated framing/normalization as an ordinary OS paste.
+    terminal.paste(text)
+    return true
+  },
   hudRecord: (kind, message) => hud.record(kind, message),
 })
 
@@ -1780,7 +1792,7 @@ async function onClipboardPaste(e: ClipboardEvent) {
       e.preventDefault()
       e.stopImmediatePropagation()
       pasteArmed.value = false
-      for (const chunk of composeSend.encode(text)) sendBinary(chunk)
+      for (const chunk of composeSend.encode(text, xtermRef.value?.terminal()?.modes.bracketedPasteMode ?? false)) sendBinary(chunk)
       return
     }
   }
@@ -2289,7 +2301,7 @@ function onClipboard(op: string) {
 /** Shared by both compose skins' send handler — the actual "hand it to the PTY" step has nothing
  *  device-specific about it; only what happens to each device's own open/draft state differs. */
 function sendComposedText(text: string): void {
-  const chunks = composeSend.encode(text)
+  const chunks = composeSend.encode(text, xtermRef.value?.terminal()?.modes.bracketedPasteMode ?? false)
   for (const chunk of chunks) sendBinary(chunk)
   hud.record('keyboard', `compose: ${text.length} chars`)
 }
