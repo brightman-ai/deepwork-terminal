@@ -120,6 +120,9 @@ import { usePortalRuntime } from '@ce/composables/layout/usePortalRuntime'
 import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
+import { resolveDeepLinkTabId, syncTabQuery } from './tabDeepLink'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { CliTabBar, CliTerminalView } from './adapters'
 import RemoteTermDialog from '@terminal/components/terminal-session/RemoteTermDialog.vue'
 import UsageChip from '@terminal/components/report/UsageChip.vue'
@@ -155,7 +158,33 @@ const {
   // leader 等待态 + 它的键名。键名走 bindingLabel（绑定措辞的 SSOT），所以提示条和设置页
   // 显示的是同一个结果，不会写成两种样子。
   leaderPending, leaderLabel,
+  allTabs,
 } = useCliState(runtime)
+
+// ── tab 深链：/portal/cli?t=<tabId>（机制与取舍见 tabDeepLink.ts 头注）──────────────────
+// 读：首次 tabs 就绪时命中 ?t= 则切一次（无效/已关 → 静默落服务端兜底）；写：activeTab 变化即
+// replace 进 URL（不 push——切 tab 不是导航），刷新/分享/手机书签因此回到同一 tab。
+const route = useRoute()
+const router = useRouter()
+const deepLinkApplied = ref(false)
+watch(
+  [groups, () => route.query.t],
+  () => {
+    if (deepLinkApplied.value || !groups.value.length) return
+    const target = resolveDeepLinkTabId(route.query.t, allTabs.value)
+    deepLinkApplied.value = true
+    if (target && target !== activeTab.value?.id) switchTab(target)
+  },
+  { immediate: true },
+)
+watch(
+  () => activeTab.value?.id,
+  (id) => {
+    const t = syncTabQuery(id, route.query.t)
+    if (t !== undefined) void router.replace({ query: { ...route.query, t } })
+  },
+  { immediate: true },
+)
 </script>
 
 <style scoped>
