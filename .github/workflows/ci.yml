@@ -36,6 +36,14 @@ jobs:
         working-directory: deepwork-terminal/frontend
         run: bun install --frozen-lockfile
 
+      # The pinned @ce tree is compiled from THIS toolchain, but rollup and
+      # @vue/compiler-sfc (defineProps type resolution) resolve imports by
+      # walking up from the importing file, which never reaches our
+      # node_modules from ../../deepwork. tsc is exempt: frontend/tsconfig.json
+      # paths pin the CE tree's bare imports explicitly.
+      - name: Link the toolchain into the pinned CE source
+        run: ln -s ../deepwork-terminal/frontend/node_modules deepwork/frontend/node_modules
+
       - name: Test frontend
         working-directory: deepwork-terminal/frontend
         run: bun run test
