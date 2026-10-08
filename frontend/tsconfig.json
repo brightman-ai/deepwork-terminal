@@ -18,6 +18,24 @@
       "@ce/*": [
         "../../deepwork/frontend/src/*"
       ],
+      // The pinned CE tree is type-checked from this project, but bundler
+      // resolution walks up from the importing file and never reaches our
+      // node_modules from ../../deepwork. Map its bare imports onto THIS
+      // install so both trees type against one version source — no second
+      // install, no cross-tree type drift (lucide typed against a different
+      // vue collapsed 21 assignments; a types-less qrcode added TS7016).
+      "vue": ["node_modules/vue"],
+      "vue-router": ["node_modules/vue-router"],
+      "@vueuse/core": ["node_modules/@vueuse/core"],
+      "lucide-vue-next": ["node_modules/lucide-vue-next"],
+      "reka-ui": ["node_modules/reka-ui"],
+      "clsx": ["node_modules/clsx"],
+      "tailwind-merge": ["node_modules/tailwind-merge"],
+      "class-variance-authority": ["node_modules/class-variance-authority"],
+      // mapped to its @types package: paths-mapped modules skip the @types
+      // companion lookup, and qrcode ships no declarations of its own.
+      "qrcode": ["node_modules/@types/qrcode"],
+      "@radix-icons/vue": ["node_modules/@radix-icons/vue"],
       "src/*": [
         "src/*"
       ],
