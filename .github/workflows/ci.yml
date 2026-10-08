@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: brightman-ai/deepwork
-          ref: c57cb4925301545d32a6e30ae36b43545d969d98
+          ref: 658ee60b49489852f488e491edd0a84f9b0c906e
           path: deepwork
 
       - name: Set up Bun
@@ -36,17 +36,19 @@ jobs:
         working-directory: deepwork-terminal/frontend
         run: bun install --frozen-lockfile
 
-      # The pinned @ce tree is compiled from THIS toolchain, but resolvers
-      # disagree on where modules come from: vue-tsc uses frontend/tsconfig.json
-      # paths (pinned to this install), rollup uses the vite aliases below —
-      # and @vue/compiler-sfc (defineProps type resolution) walks the real
-      # filesystem from the importing file, which only works when the CE tree
-      # has its own node_modules. Install it for real; runtime imports are
-      # still aliased onto this repo's physical copies, so the bundle keeps a
-      # single vue context regardless of what versions land here.
-      - name: Install the pinned CE source's dependencies
-        working-directory: deepwork/frontend
-        run: bun install
+      # ── Cross-repo module resolution map (keep the three mechanisms intact) ──
+      # The pinned @ce tree is compiled from THIS toolchain, and each resolver
+      # finds modules differently:
+      #   vue-tsc            → frontend/tsconfig.json paths (pinned to this install)
+      #   rollup (vite)      → frontend/vite.config.ts aliases (same physical copies)
+      #   @vue/compiler-sfc  → real-filesystem walk-up from the importing file
+      # The link below serves the third: it gives the CE tree a node_modules
+      # view of THIS install — one version source, no second install. The
+      # relative target needs BOTH ../.. levels (frontend → deepwork → root);
+      # a one-level link dangles and compiler-sfc fails on Linux CI.
+      # (Same concern, same semantics as build.sh's own CE-shell link step.)
+      - name: Link the toolchain into the pinned CE source
+        run: ln -s ../../deepwork-terminal/frontend/node_modules deepwork/frontend/node_modules
 
       - name: Test frontend
         working-directory: deepwork-terminal/frontend

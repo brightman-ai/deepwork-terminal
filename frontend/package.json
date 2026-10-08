@@ -35,7 +35,6 @@
     "pdfjs-dist": "^5.6.205",
     "pinia": "^2.1.7",
     "qrcode": "^1.5.4",
-    "radix-vue": "^1.9.17",
     "reka-ui": "^2.9.6",
     "vue": "^3.4.0",
     "vue-router": "^4.2.0",
