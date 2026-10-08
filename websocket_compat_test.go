@@ -36,6 +36,10 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 			require.NoError(t, err)
 			payload := bytes.Repeat([]byte("终端 replay 0123456789\r\n"), 12000)[:wsReplayMaxBytes]
 			sess.Buffer.Write(payload)
+			// Every replay ends by re-asserting the session's negotiated DECSET
+			// 2004 mode; this session never enabled bracketed paste, so the
+			// bounded repaint is followed by the mode-off sequence.
+			pasteOff := []byte("\x1b[?2004l")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			conn, response, err := websocket.Dial(ctx, strings.Replace(server.URL, "http://", "ws://", 1)+"/sessions/"+sess.ID+"/ws?auth="+testAuthCode, &websocket.DialOptions{
@@ -48,7 +52,7 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 			require.Equal(t, tc.compressed, strings.Contains(response.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate"))
 			var replay []byte
 			reset := false
-			for len(replay) < len(payload) {
+			for len(replay) < len(payload)+len(pasteOff) {
 				kind, data, err := conn.Read(ctx)
 				require.NoError(t, err)
 				if kind == websocket.MessageBinary {
@@ -60,7 +64,10 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 					reset = reset || msg.Type == MsgTypeReplayReset
 				}
 			}
-			require.Equal(t, payload, replay)
+			expected := make([]byte, 0, len(payload)+len(pasteOff))
+			expected = append(expected, payload...)
+			expected = append(expected, pasteOff...)
+			require.Equal(t, expected, replay)
 			// Bidirectional control still works after the full replay.
 			require.NoError(t, conn.Write(ctx, websocket.MessageText, []byte(`{"type":"heartbeat","payload":{"sentAt":12345}}`)))
 			for {
