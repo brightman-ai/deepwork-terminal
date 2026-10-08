@@ -9,13 +9,35 @@ import { fileURLToPath, URL } from 'node:url'
 
 const devApiTarget = process.env.VITE_DEV_API_TARGET
 
+// The pinned CE tree's bare imports must resolve to THIS install: Rollup
+// walks up from the importing file and never reaches our node_modules from
+// ../../deepwork (same physics that broke the type check — see the matching
+// paths in tsconfig.json). One physical copy also keeps a single vue context
+// in the bundle. Keep in sync with the tsconfig paths list.
+const ceToolchain = [
+  'vue',
+  'vue-router',
+  '@vueuse/core',
+  'lucide-vue-next',
+  'reka-ui',
+  'clsx',
+  'tailwind-merge',
+  'class-variance-authority',
+  '@radix-icons/vue'
+]
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [vue()],
   resolve: {
     alias: {
       '@terminal': fileURLToPath(new URL('./src', import.meta.url)),
-      '@ce': fileURLToPath(new URL('../../deepwork/frontend/src', import.meta.url))
+      '@ce': fileURLToPath(new URL('../../deepwork/frontend/src', import.meta.url)),
+      ...Object.fromEntries(
+        ceToolchain.map((pkg) => [pkg, fileURLToPath(new URL(`./node_modules/${pkg}`, import.meta.url))])
+      ),
+      // runtime wants the real package; the tsconfig maps it to @types for checking
+      qrcode: fileURLToPath(new URL('./node_modules/qrcode', import.meta.url))
     }
   },
   server: {
