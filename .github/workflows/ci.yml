@@ -36,13 +36,17 @@ jobs:
         working-directory: deepwork-terminal/frontend
         run: bun install --frozen-lockfile
 
-      # The pinned @ce tree is compiled from THIS toolchain, but rollup and
-      # @vue/compiler-sfc (defineProps type resolution) resolve imports by
-      # walking up from the importing file, which never reaches our
-      # node_modules from ../../deepwork. tsc is exempt: frontend/tsconfig.json
-      # paths pin the CE tree's bare imports explicitly.
-      - name: Link the toolchain into the pinned CE source
-        run: ln -s ../deepwork-terminal/frontend/node_modules deepwork/frontend/node_modules
+      # The pinned @ce tree is compiled from THIS toolchain, but resolvers
+      # disagree on where modules come from: vue-tsc uses frontend/tsconfig.json
+      # paths (pinned to this install), rollup uses the vite aliases below —
+      # and @vue/compiler-sfc (defineProps type resolution) walks the real
+      # filesystem from the importing file, which only works when the CE tree
+      # has its own node_modules. Install it for real; runtime imports are
+      # still aliased onto this repo's physical copies, so the bundle keeps a
+      # single vue context regardless of what versions land here.
+      - name: Install the pinned CE source's dependencies
+        working-directory: deepwork/frontend
+        run: bun install
 
       - name: Test frontend
         working-directory: deepwork-terminal/frontend
