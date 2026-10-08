@@ -11,6 +11,14 @@ on:
 permissions:
   contents: write   # create the GitHub Release + upload assets
 
+# GitHub double-fired this workflow for a single tag push (v0.13.0, v0.13.1:
+# both tags pointed at the commit that was also the just-pushed main head),
+# and the loser always dies on 422 already_exists asset uploads. Collapse
+# duplicates to one surviving publishing run.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
