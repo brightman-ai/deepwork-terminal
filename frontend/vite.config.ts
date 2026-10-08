@@ -60,7 +60,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           'vue-vendor': ['vue', 'vue-router', 'pinia'],
-          'ui-vendor': ['radix-vue', 'lucide-vue-next']
+          'ui-vendor': ['reka-ui', 'lucide-vue-next']
         }
       }
     }
