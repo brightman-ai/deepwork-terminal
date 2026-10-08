@@ -36,6 +36,15 @@ jobs:
         working-directory: deepwork-terminal/frontend
         run: bun install --frozen-lockfile
 
+      # The pinned @ce source is type-checked with THIS repo's toolchain. Give
+      # its bare imports (vue, radix-vue, …) a node_modules view by linking the
+      # one install: bundler resolution walks up from the importing file, so
+      # without this the shared tree resolves nothing and every SFC there
+      # collapses to type '{}' (539 errors, Linux-only — macOS only passes on
+      # machines that happen to carry a deepwork/frontend/node_modules).
+      - name: Link the shared toolchain into the pinned CE source
+        run: ln -s ../deepwork-terminal/frontend/node_modules deepwork/frontend/node_modules
+
       - name: Test frontend
         working-directory: deepwork-terminal/frontend
         run: bun run test
