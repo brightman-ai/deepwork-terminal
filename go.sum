@@ -1,5 +1,5 @@
-github.com/brightman-ai/kit v0.20.0 h1:18mngHiFPJGxPl+t6QYQp2qeEzMYsJdDTszJlJr1vRY=
-github.com/brightman-ai/kit v0.20.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
+github.com/brightman-ai/kit v0.22.0 h1:6Y/bR/dO0AG6d1cizvkkm4dgmNZYCKqW7A7eFgmykdM=
+github.com/brightman-ai/kit v0.22.0/go.mod h1:F2yoC9gJPnNiaR2I+7T5CZkjg4I02kRnGwXbgd2IAfQ=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
