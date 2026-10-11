@@ -164,7 +164,7 @@ func (s *Server) handleClipboardSend(w http.ResponseWriter, r *http.Request) {
 			err = getErr
 		} else {
 			text := body.Text
-			if on, known := sess.PasteMode(); known && on {
+			if on, known := s.effectivePasteMode(r.Context(), sess); known && on {
 				text = "\x1b[200~" + text + "\x1b[201~"
 			}
 			err = sess.WriteInput([]byte(text + "\r"))

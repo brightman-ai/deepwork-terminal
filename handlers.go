@@ -509,7 +509,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	full, keep := sess.ReplayTail(wsReplayMaxBytes)
 	replayRaw := full[len(full)-keep:]
 	replayTruncated := bufferBytes > len(replayRaw)
-	pasteEnabled, pasteKnown := sess.PasteMode()
+	pasteEnabled, pasteKnown := s.effectivePasteMode(ctx, sess)
 	replay := replayWithPasteMode(stripDeviceQueries(replayRaw), pasteEnabled, pasteKnown)
 	terminalWSConnectionsTotal.Inc()
 	terminalLogger.Info(attachLogCtx, "cli ws connected",
