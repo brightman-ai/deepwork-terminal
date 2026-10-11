@@ -36,10 +36,12 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 			require.NoError(t, err)
 			payload := bytes.Repeat([]byte("终端 replay 0123456789\r\n"), 12000)[:wsReplayMaxBytes]
 			sess.Buffer.Write(payload)
-			// Every replay ends by re-asserting the session's negotiated DECSET
-			// 2004 mode; this session never enabled bracketed paste, so the
-			// bounded repaint is followed by the mode-off sequence.
-			pasteOff := []byte("\x1b[?2004l")
+			// A replay restates the session's negotiated DECSET 2004 mode only when
+			// somebody has actually seen the program negotiate it. This session's
+			// program never announced anything, so its mode is UNKNOWN and the replay
+			// is exactly the bounded repaint — asserting "off" for an unobserved mode
+			// is what used to switch bracketed paste off in every browser after a
+			// server restart (see TestTerminalWSReplayRestatesObservedPasteMode).
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			conn, response, err := websocket.Dial(ctx, strings.Replace(server.URL, "http://", "ws://", 1)+"/sessions/"+sess.ID+"/ws?auth="+testAuthCode, &websocket.DialOptions{
@@ -52,7 +54,7 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 			require.Equal(t, tc.compressed, strings.Contains(response.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate"))
 			var replay []byte
 			reset := false
-			for len(replay) < len(payload)+len(pasteOff) {
+			for len(replay) < len(payload) {
 				kind, data, err := conn.Read(ctx)
 				require.NoError(t, err)
 				if kind == websocket.MessageBinary {
@@ -64,10 +66,7 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 					reset = reset || msg.Type == MsgTypeReplayReset
 				}
 			}
-			expected := make([]byte, 0, len(payload)+len(pasteOff))
-			expected = append(expected, payload...)
-			expected = append(expected, pasteOff...)
-			require.Equal(t, expected, replay)
+			require.Equal(t, payload, replay)
 			// Bidirectional control still works after the full replay.
 			require.NoError(t, conn.Write(ctx, websocket.MessageText, []byte(`{"type":"heartbeat","payload":{"sentAt":12345}}`)))
 			for {
@@ -83,6 +82,47 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 					break
 				}
 			}
+		})
+	}
+}
+
+// The other half of the contract above: once the program's bracketed-paste mode HAS been
+// observed (or restored from the daemon after a server restart), every replay restates it after
+// the bounded repaint — the replay window itself may no longer contain the DECSET.
+func TestTerminalWSReplayRestatesObservedPasteMode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		suffix  string
+	}{
+		{"enabled", true, "\x1b[?2004h"},
+		{"disabled", false, "\x1b[?2004l"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, sm, _ := newDrawerTestServer(t)
+			sess, err := sm.Create("paste-mode-replay")
+			require.NoError(t, err)
+			sess.metaSaver = func(string, []byte) error { return nil } // no daemon write from this test
+			payload := []byte("repaint without any mode toggle in the retained window\r\n")
+			sess.Buffer.Write(payload)
+			sess.notePasteMode(tc.enabled)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, _, err := websocket.Dial(ctx, strings.Replace(server.URL, "http://", "ws://", 1)+"/sessions/"+sess.ID+"/ws?auth="+testAuthCode, nil)
+			require.NoError(t, err)
+			defer conn.CloseNow()
+
+			want := append(append([]byte(nil), payload...), tc.suffix...)
+			var replay []byte
+			for len(replay) < len(want) {
+				kind, data, err := conn.Read(ctx)
+				require.NoError(t, err)
+				if kind == websocket.MessageBinary {
+					replay = append(replay, data...)
+				}
+			}
+			require.Equal(t, want, replay)
 		})
 	}
 }
