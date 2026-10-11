@@ -215,6 +215,7 @@
         :active="props.active"
         :history="terminalHistory"
         :title="props.sessionName"
+        :alt-screen="copyModeAltScreen"
         @close="closeCopyMode"
       />
       <!-- 终端内查找 (Ctrl/Cmd+F 等价物, findInTerminal shortcut). v-if'd — a fresh instance each
@@ -2596,6 +2597,8 @@ function openInstallGuide() { notifyQuickOpen.value = true }
  * native copy-mode；应用历史视口不会靠键盘前缀覆盖 tmux pane。
  */
 const copyModeOpen = ref(false)
+// 打开回看那一刻，终端里的程序是否在备用屏幕（不含 tmux 标签）。见 openCopyMode。
+const copyModeAltScreen = ref(false)
 // 复制模式历史的缓冲键：同键复用已加载行（见 openCopyMode 内的注释）。
 let historyFor = ''
 // cliFetch，不是裸 fetch：认证头和 401/429 的处理只有那一处（useCliAuth）。这里再写一份的下场是
@@ -2624,6 +2627,11 @@ function openCopyMode(): string {
     terminalHistory.reset()
     historyFor = historyKey
   }
+  // 备用屏幕里的程序（Codex 默认模式 / vim / less）不进 muxd 的历史 —— 回看拿到的是它启动之前
+  // 停放的那块普通屏幕。打开的那一刻问 xterm 一次，让视图能先把话说清楚。tmux 标签不受此限：
+  // 它的历史来自 tmux 自己的 capture-pane，而 tmux 自己就占着备用屏幕。
+  copyModeAltScreen.value = !tmuxAttached.value
+    && xtermRef.value?.terminal?.()?.buffer.active.type === 'alternate'
   copyModeOpen.value = true
   hud.record('state', '进入回看历史')
   return ''
