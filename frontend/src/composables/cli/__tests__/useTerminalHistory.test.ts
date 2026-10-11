@@ -114,22 +114,48 @@ describe('select through end after jumping to an older search result', () => {
 describe('useTerminalHistory — 分页', () => {
   it('open 取的是【最近】一页，不是从第 0 行开始', async () => {
     // 使用者是从实时终端切过来的：他要看的是刚刚滚过去的东西，不是这个会话开机时的第一行。
-    const calls = stubFetch((url) => {
-      if (url.searchParams.get('screen') === '1') return { lines: [line(9000)], total: 9000, base: 0 }
-      if (url.searchParams.get('count') === '1') return { lines: [], total: 9000, base: 0 }
-      return { lines: [line(8600), line(8601)], total: 9000, base: 0 }
-    })
+    const calls = stubFetch(() => ({ lines: [line(8600), line(8601)], total: 9000, base: 0 }))
     const h = useTerminalHistory(() => 's1', doFetch)
     await h.open()
-    const page = calls.find((u) => u.searchParams.get('count') === String(HISTORY_PAGE))
-    expect(page).toBeDefined()
-    expect(Number(page!.searchParams.get('from'))).toBe(9000 - HISTORY_PAGE)
+    expect(calls.length).toBe(1)
+    expect(calls[0].searchParams.get('tail')).toBe(String(HISTORY_PAGE))
+  })
+
+  it('open 只发【一个】请求：没有探针、没有单独取可见屏（RTT 几百 ms 时每多一个就是多一个来回）', async () => {
+    // 回归：曾经是 探针(count=1) → 尾页 → 可见屏 三个严格串行请求，点一下"回看"就是三个来回。
+    const calls = stubFetch(() => ({ lines: [line(100), line(101), line(102, 'screen')], total: 102, base: 0 }))
+    const h = useTerminalHistory(() => 's1', doFetch)
+    await h.open()
+    expect(calls.length).toBe(1)
+    expect(calls.some((u) => u.searchParams.get('count') === '1')).toBe(false)
+    expect(calls.some((u) => u.searchParams.get('screen') === '1')).toBe(false)
+    // 尾页和可见屏来自同一个响应，所以中间不会有洞。
+    expect(h.lines.value.map((l) => l.n)).toEqual([100, 101, 102])
+    expect(h.total.value).toBe(102)
+    expect(h.loading.value).toBe(false)
+  })
+
+  it('open 用新取到的内容【替换】旧内容（行号体系可能已变，两套合并会乱序）', async () => {
+    stubFetch(() => ({ lines: [line(500), line(501)], total: 501, base: 0 }))
+    const h = useTerminalHistory(() => 's1', doFetch)
+    h.lines.value = [line(1), line(2), line(3)]
+    await h.open()
+    expect(h.lines.value.map((l) => l.n)).toEqual([500, 501])
+  })
+
+  it('open 请求失败时保留已有内容、只记 error', async () => {
+    stubFetch(() => null)
+    const h = useTerminalHistory(() => 's1', doFetch)
+    h.lines.value = [line(1)]
+    await h.open()
+    expect(h.lines.value.map((l) => l.n)).toEqual([1])
+    expect(h.error.value).toBe('HTTP 500')
+    expect(h.loading.value).toBe(false)
   })
 
   it('loadOlder 把更早的一页【并】进来，按行号有序，不丢已有的', async () => {
     stubFetch((url) => {
-      if (url.searchParams.get('screen') === '1') return { lines: [], total: 1000, base: 0 }
-      if (url.searchParams.get('count') === '1') return { lines: [], total: 1000, base: 0 }
+      if (url.searchParams.has('tail')) return { lines: [line(998), line(999)], total: 1000, base: 0 }
       const from = Number(url.searchParams.get('from'))
       return { lines: [line(from), line(from + 1)], total: 1000, base: 0 }
     })
@@ -146,11 +172,7 @@ describe('useTerminalHistory — 分页', () => {
   })
 
   it('已经到最早一行时 loadOlder 是 0，不再发请求', async () => {
-    const calls = stubFetch((url) => {
-      if (url.searchParams.get('count') === '1') return { lines: [], total: 100, base: 90 }
-      if (url.searchParams.get('screen') === '1') return { lines: [], total: 100, base: 90 }
-      return { lines: [line(90)], total: 100, base: 90 }
-    })
+    const calls = stubFetch(() => ({ lines: [line(90)], total: 100, base: 90 }))
     const h = useTerminalHistory(() => 's1', doFetch)
     await h.open()
     const n = calls.length
@@ -181,11 +203,14 @@ describe('useTerminalHistory — 样式表增量', () => {
     expect(h.styles.value[1]).toEqual({ fg: 'i1' })
     expect(h.styles.value[2]).toEqual({ fg: 'i2' })
 
-    // 第一次之后，每次都带上"我已经有几条"。
-    const asked = calls.map((u) => Number(u.searchParams.get('styles') ?? '0'))
-    expect(asked[0]).toBe(0)
-    expect(asked.slice(1).every((n) => n > 0)).toBe(true)
+    // 第一次请求什么都没有，所以问 0；
+    expect(Number(calls[0].searchParams.get('styles') ?? '0')).toBe(0)
+    // 之后每次都带上"我已经有几条"。
     await h.ensureVisible(999)
+    await h.loadOlder()
+    const asked = calls.map((u) => Number(u.searchParams.get('styles') ?? '0'))
+    expect(asked.length).toBeGreaterThan(1)
+    expect(asked.slice(1).every((n) => n === table.length)).toBe(true)
     expect(h.styles.value.length).toBe(table.length) // 再取几页也不会长胖
   })
 })
@@ -193,12 +218,7 @@ describe('useTerminalHistory — 样式表增量', () => {
 describe('useTerminalHistory — 失败与降级', () => {
   it('请求失败时保留已有历史，只记 error', async () => {
     let fail = false
-    stubFetch((url) => {
-      if (fail) return null
-      if (url.searchParams.get('screen') === '1') return { lines: [], total: 500, base: 0 }
-      if (url.searchParams.get('count') === '1') return { lines: [], total: 500, base: 0 }
-      return { lines: [line(100), line(101)], total: 500, base: 0 }
-    })
+    stubFetch(() => (fail ? null : { lines: [line(100), line(101)], total: 500, base: 0 }))
     const h = useTerminalHistory(() => 's1', doFetch)
     await h.open()
     expect(h.lines.value.length).toBe(2)
@@ -227,9 +247,7 @@ describe('useTerminalHistory — 失败与降级', () => {
   })
 
   it('reset 把状态清干净（切标签后不能残留上一个终端的历史）', async () => {
-    stubFetch((url) => (url.searchParams.get('count') === '1'
-      ? { lines: [], total: 10, base: 0 }
-      : { lines: [line(1)], total: 10, base: 0, styles: [{}], stylesTotal: 1 }))
+    stubFetch(() => ({ lines: [line(1)], total: 10, base: 0, styles: [{}], stylesTotal: 1 }))
     const h = useTerminalHistory(() => 's1', doFetch)
     await h.open()
     expect(h.lines.value.length).toBeGreaterThan(0)
@@ -291,10 +309,8 @@ describe('搜索覆盖历史 + 当前可见屏', () => {
   it('屏幕上的命中也算数（服务端搜不到它）', async () => {
     stubFetch((url) => {
       if (url.pathname.includes('/search')) return { lines: [], total: 100, base: 0 }
-      if (url.searchParams.get('screen') === '1') {
-        return { lines: [{ n: 100, seg: [{ t: 'MARKER on the live screen', s: 0 }] }], total: 100, base: 0 }
-      }
-      return { lines: [line(50)], total: 100, base: 0 }
+      // open() 一个响应里同时带尾页和可见屏（屏幕行号从 total 起）。
+      return { lines: [line(50), { n: 100, seg: [{ t: 'MARKER on the live screen', s: 0 }] }], total: 100, base: 0 }
     })
     const h = useTerminalHistory(() => 's1', doFetch)
     await h.open()
@@ -307,10 +323,7 @@ describe('搜索覆盖历史 + 当前可见屏', () => {
   it('服务端搜挂了，屏幕上那半边照样是真答案', async () => {
     stubFetch((url) => {
       if (url.pathname.includes('/search')) return null // 500
-      if (url.searchParams.get('screen') === '1') {
-        return { lines: [{ n: 10, seg: [{ t: 'still findable', s: 0 }] }], total: 10, base: 0 }
-      }
-      return { lines: [], total: 10, base: 0 }
+      return { lines: [{ n: 10, seg: [{ t: 'still findable', s: 0 }] }], total: 10, base: 0 }
     })
     const h = useTerminalHistory(() => 's1', doFetch)
     await h.open()
