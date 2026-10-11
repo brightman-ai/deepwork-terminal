@@ -26,6 +26,7 @@ import {
   type HistoryMatch,
   type TerminalHistory,
 } from '../../composables/cli/useTerminalHistory'
+import { altScreenNotice, emptyHistoryText } from '../../composables/cli/copyModeNotice'
 
 const props = withDefaults(defineProps<{
   history: TerminalHistory
@@ -33,7 +34,10 @@ const props = withDefaults(defineProps<{
   active?: boolean
   /** 标签名，印在标题栏上——多标签时它是唯一能说清"这是谁的历史"的东西。 */
   title?: string
-}>(), { active: true })
+  /** 打开时，这个终端里的程序在备用屏幕（且历史来自 muxd，不是 tmux）。见 copyModeNotice。 */
+  altScreen?: boolean
+}>(), { active: true, altScreen: false })
+const altNotice = computed(() => altScreenNotice(props.altScreen))
 const emit = defineEmits<{ (e: 'close'): void }>()
 
 const scroller = ref<HTMLElement | null>(null)
@@ -387,6 +391,10 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
       <span role="status" class="copy-mode__hint">{{ copyStatus || (selectedText ? `已选 ${selectedText.length} 字符` : selection ? '已定起点' : '') }}</span>
     </div>
 
+    <!-- 备用屏幕里的程序（Codex 默认模式 / vim / less）不进历史：先说清楚，别让人对着一屏陈旧的
+         shell 提示符以为回看坏了。 -->
+    <div v-if="altNotice" class="copy-mode__notice" role="note" data-testid="copy-mode-alt-notice">{{ altNotice }}</div>
+
     <div v-if="searchOpen" class="copy-mode__search">
       <input
         ref="searchInput"
@@ -415,8 +423,8 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
     >
       <div v-if="h.loading.value && h.lines.value.length === 0" class="copy-mode__empty">载入中…</div>
       <div v-else-if="!h.enabled.value" class="copy-mode__empty">{{ statusText }}</div>
-      <div v-else-if="h.lines.value.length === 0" class="copy-mode__empty">
-        这个终端还没有滚出去的历史。
+      <div v-else-if="h.lines.value.length === 0" class="copy-mode__empty" data-testid="copy-mode-empty">
+        {{ emptyHistoryText(h.error.value) }}
       </div>
       <!-- 撑高块 + 绝对定位的可视窗口：DOM 里始终只有几十行，与历史深度无关。 -->
       <div v-else class="copy-mode__sizer" :style="{ height: totalHeight + 'px' }">
@@ -570,5 +578,15 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
   padding: 24px;
   color: #8b949e;
   font-size: 13px;
+}
+
+/* 提醒条：和标题栏同宽，不抢行；文字偏长，允许折行。 */
+.copy-mode__notice {
+  padding: 6px 12px;
+  color: #d4b36a;
+  background: rgba(212, 179, 106, 0.08);
+  border-bottom: 1px solid rgba(212, 179, 106, 0.25);
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>
