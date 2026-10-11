@@ -1,9 +1,16 @@
 package terminal
 
-// A reconnect/resize may cut away the DECSET that enabled bracketed paste.
-// The continuous output observer owns the current negotiated state; reassert
-// it after the bounded screen replay so native browser pastes stay atomic.
-func replayWithPasteMode(replay []byte, enabled bool) []byte {
+// A reconnect/resize may cut away the DECSET that enabled bracketed paste. The session owns the
+// negotiated state (paste_mode.go); reassert it after the bounded screen replay so native
+// browser pastes stay atomic.
+//
+// An UNKNOWN mode is not asserted. "Off" used to be the zero value here, so a restarted server
+// — which has not yet seen the program announce anything — told every browser the program had
+// switched bracketed paste off, and Codex then received each pasted character as a keystroke.
+func replayWithPasteMode(replay []byte, enabled, known bool) []byte {
+	if !known {
+		return replay
+	}
 	mode := "\x1b[?2004l"
 	if enabled {
 		mode = "\x1b[?2004h"

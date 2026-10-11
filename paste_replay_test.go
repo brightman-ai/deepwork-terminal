@@ -15,9 +15,25 @@ func TestReplayCutPreservesNegotiatedPasteMode(t *testing.T) {
 		observer.feed(original, false, func(string, int64, bool) {})
 		browserState := !enabled
 		browser := clipboardScanner{pasteMode: func(value bool) { browserState = value }}
-		browser.feed(replayWithPasteMode([]byte("\x1b[2Jrepaint"), current), false, func(string, int64, bool) {})
+		browser.feed(replayWithPasteMode([]byte("\x1b[2Jrepaint"), current, true), false, func(string, int64, bool) {})
 		if browserState != enabled {
 			t.Fatalf("reconnected browser paste mode=%t want %t", browserState, enabled)
 		}
+	}
+}
+
+// A mode nobody has observed must not be sent to the browser as "off".
+func TestReplayLeavesUnknownPasteModeUnasserted(t *testing.T) {
+	replay := []byte("\x1b[2Jrepaint")
+	got := replayWithPasteMode(replay, false, false)
+	if string(got) != string(replay) {
+		t.Fatalf("unknown paste mode altered the replay: %q", got)
+	}
+	// And a browser that already believes the mode is on keeps believing it.
+	browserState := true
+	browser := clipboardScanner{pasteMode: func(value bool) { browserState = value }}
+	browser.feed(got, false, func(string, int64, bool) {})
+	if !browserState {
+		t.Fatal("an unknown mode switched the browser's bracketed paste off")
 	}
 }
