@@ -194,17 +194,18 @@ export function useTerminalHistory(
   async function open(): Promise<void> {
     loading.value = true
     try {
-      // 先问一次拿到 total，才知道"最近一页"从哪开始 —— 不能假设 0。
-      const probe = await fetchPage({ from: '0', count: '1' })
-      if (!probe) return
+      // **一个请求**：最近一页历史 + 可见屏，服务端在本机凑齐（见 history_tail.go）。
+      //
+      // 这里过去是三个严格串行的请求 —— 先探一下拿 total（才知道"最近一页"从哪开始），再取尾页，
+      // 再取可见屏。每个都要等上一个回来，RTT 几百 ms 的链路上点一下"回看"就是三个来回，
+      // 什么都还没画。total 本来就在每个响应里，探针问的是服务端自己一步就能答的问题。
+      //
+      // 可见屏必须接在历史后面：没有它，历史的末尾和终端正在显示的内容之间会空出一屏的洞，
+      // 而那个洞有多大只有服务端知道 —— 所以它和尾页必须来自同一个响应。
+      const page = await fetchPage({ tail: String(HISTORY_PAGE) })
+      if (!page) return
       lines.value = []
-      const from = Math.max(probe.base, probe.total - HISTORY_PAGE)
-      const page = await fetchPage({ from: String(from), count: String(HISTORY_PAGE) })
-      if (page) merge(page.lines)
-      // 可见屏接在历史后面。没有它，历史的末尾和终端正在显示的内容之间会空出一屏的洞，
-      // 而那个洞有多大只有服务端知道。
-      const screen = await fetchPage({ screen: '1' })
-      if (screen) merge(screen.lines)
+      merge(page.lines)
     } finally {
       loading.value = false
     }

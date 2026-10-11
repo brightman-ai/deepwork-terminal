@@ -144,9 +144,14 @@ const defaultHistoryPage = 500
 // local link shrugs at (only fetched when the user opens the copy view).
 const tmuxCaptureCap = 20000
 
-// 打开复制模式的头两秒要串行走三个请求（探测/尾页/当前屏），每个都真抓一次 capture 的话，
-// 冷启动就是 6 次 capture + 往返——Human 实测"卡 3 秒才进得去"。缓存 3 秒：同一次进入的
-// 三个请求共享一次 capture；3 秒后的下一次进入再真抓（新输出不会缺席太久）。
+// maxHistoryTail bounds ?tail=N. It equals the daemon's own per-read cap: asking for more could
+// only be answered with less, and a short page would leave a hole before the live screen.
+const maxHistoryTail = 2000
+
+// 缓存 3 秒：打开复制模式曾要串行走三个请求（探测/尾页/当前屏），每个都真抓一次 capture 的话，
+// 冷启动就是 6 次 capture + 往返——Human 实测"卡 3 秒才进得去"。现在进入只发一个 ?tail= 请求，
+// 但上滚加载更早页、搜索跳转仍是连续的几个请求：同一次浏览共享一次 capture；3 秒后的下一次
+// 进入再真抓（新输出不会缺席太久）。
 type tmuxCaptureEntry struct {
 	at              time.Time
 	history, screen []string
@@ -196,6 +201,9 @@ type tmuxPaneCapture interface {
 //	?from=N     absolute line to start at (clamped to the oldest line still held)
 //	?count=N    how many lines (default 500; the daemon caps it)
 //	?screen=1   the live visible grid instead, numbered as if it continued the scrollback
+//	?tail=N     the newest N lines of history FOLLOWED BY the live screen, in one response (see
+//	            tailHistory). This is how the copy view opens; from/count/screen are for paging
+//	            further back from there.
 //	?styles=N   how many style-table entries the client already has
 //
 // The response always carries `base` and `total` so a viewer can tell "you have reached the
@@ -226,20 +234,11 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
-			lines := make([]historyLineJSON, 0, len(history)+len(screen))
-			n := 0
-			for _, l := range history {
-				n++
-				lines = append(lines, historyLineJSON{N: int64(n), Seg: []historySegment{{T: l}}})
-			}
-			total := n
-			for _, l := range screen {
-				n++
-				lines = append(lines, historyLineJSON{N: int64(n), Seg: []historySegment{{T: l}}})
-			}
+			// The capture is the whole buffer, but a request wants a window of it: shipping all of
+			// it every time made each page of the copy view cost the full history in JSON.
 			writeJSON(w, http.StatusOK, map[string]any{
 				"enabled": true, "broken": false,
-				"lines": lines, "base": 0, "total": total,
+				"lines": tmuxHistoryLines(q, history, screen), "base": 0, "total": len(history),
 				"styles":      []historyStyleJSON{{}},
 				"stylesTotal": 1,
 			})
@@ -252,7 +251,12 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 		Screen:     q.Get("screen") == "1",
 		StylesFrom: int(atoi64(q.Get("styles"), 0)),
 	}
-	ack, err := sess.History(req)
+	var ack muxd.HistoryAck
+	if tail := min(int(atoi64(q.Get("tail"), 0)), maxHistoryTail); tail > 0 {
+		ack, err = tailHistory(sess.History, tail, req.StylesFrom)
+	} else {
+		ack, err = sess.History(req)
+	}
 	if err != nil {
 		// A daemon older than this binary is not a server error and not a bug the user can act
 		// on by retrying. Say what is true — this session has no history available — and let the
