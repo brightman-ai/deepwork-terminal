@@ -48,6 +48,13 @@ type sessionMeta struct {
 	// its meta predates the fix — is the worse failure. New sessions always carry it, so the
 	// ambiguity does not outlive the sessions that predate this change.
 	Origin string `json:"origin,omitempty"`
+
+	// Paste is the last bracketed-paste mode (DECSET 2004) the program in this session was
+	// seen to negotiate; nil means never seen. It lives here, in the daemon's blob, because
+	// the daemon outlives every server restart while the bytes that announced the mode do
+	// not: the mode is usually announced once, at program start, and is long gone from the
+	// bounded replay window by the time a restarted server looks. See paste_mode.go.
+	Paste *bool `json:"paste,omitempty"`
 }
 
 func (m sessionMeta) encode() []byte {
@@ -413,7 +420,7 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 	outputLogCtx := obs.WithStage(context.Background(), stgTerminalOutput)
 	var signals ansisignal.Scanner
 	var replayClipboard replayClipboardFilter
-	clipboard := clipboardScanner{offset: stream.ReplayFrom, pasteMode: sess.bracketedPaste.Store}
+	clipboard := clipboardScanner{offset: stream.ReplayFrom, pasteMode: sess.notePasteMode}
 	emitClipboard := func(text string, offset int64, historical bool) {
 		if m.OnClipboard != nil {
 			m.OnClipboard(sess, text, offset, historical)
@@ -458,17 +465,15 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 				n := min(int64(len(data)), replayLeft)
 				// Reconstruct scanner framing without re-firing historical BEL/OSC.
 				_ = signals.Feed(data[:n])
-				if m.OnClipboard != nil {
-					clipboard.feed(data[:n], true, emitClipboard)
-				}
+				// Not gated on OnClipboard: this scanner also owns the paste-mode state,
+				// and emitClipboard already ignores a missing hook.
+				clipboard.feed(data[:n], true, emitClipboard)
 				historyOutput = replayClipboard.feed(data[:n], true)
 				replayLeft -= n
 				live = data[n:]
 			}
 			if len(live) > 0 {
-				if m.OnClipboard != nil {
-					clipboard.feed(live, false, emitClipboard)
-				}
+				clipboard.feed(live, false, emitClipboard)
 				sess.mu.Lock()
 				sess.LastActive = time.Now()
 				sess.mu.Unlock()
@@ -851,6 +856,10 @@ func (m *SessionManager) reconcile() error {
 		if detectTmuxByPID(sum.ShellPID) {
 			sess.TmuxDetected = true
 		}
+		// What the program negotiated before this server existed. Seeded BEFORE the attach so
+		// the scrollback replay below can only refine it (the last toggle in stream order
+		// wins), never start from a blank that gets mistaken for "off".
+		sess.seedPasteMode(meta.Paste)
 		m.sessions.Store(sum.ID, sess)
 		terminalActive.Add(1)
 
@@ -889,6 +898,10 @@ func refreshFromDaemon(sess *Session, sum muxd.SessionSummary) {
 		sess.pty = g
 	}
 	sess.mu.Unlock()
+	// Only fills a gap: this process's own observation is newer than the daemon's copy, but a
+	// session we have never seen negotiate anything may have been observed by another server
+	// sharing this daemon.
+	sess.seedPasteMode(meta.Paste)
 	if !sum.Alive {
 		sess.doneOnce.Do(func() {
 			sess.mu.Lock()

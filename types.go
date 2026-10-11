@@ -28,7 +28,13 @@ const (
 // Session represents a single terminal session backed by a PTY.
 // [Ref: T5-B3]
 type Session struct {
-	bracketedPaste atomic.Bool
+	// Bracketed-paste state of the program in the PTY (DECSET 2004), THREE-valued and
+	// persisted in the daemon's meta blob. See paste_mode.go for why "unknown" must exist.
+	paste       atomic.Int32 // pasteModeUnknown | pasteModeOn | pasteModeOff
+	pasteSaved  atomic.Int32 // the value last written to the daemon's meta blob
+	pasteSaving atomic.Bool  // a debounced save is already scheduled
+	// metaSaver replaces the daemon call in tests; nil in production.
+	metaSaver func(id string, meta []byte) error
 
 	ID        string      `json:"id"`
 	Name      string      `json:"name"`
@@ -188,14 +194,11 @@ func (s *Session) SetName(name string) {
 	s.mu.Lock()
 	s.Name = name
 	s.Title = ""
-	meta := sessionMeta{
-		Name: name, Engine: s.Engine, CWD: s.CWD,
-		ShellPath: s.ShellPath, CreatedAt: s.CreatedAt,
-		// Carried through, not re-derived: this rewrites the ENTIRE meta blob, so any field
-		// omitted here is a field erased in the daemon. Dropping Origin would make a renamed
-		// session look like it belongs to nobody.
-		Origin: s.Origin,
-	}
+	// This rewrites the ENTIRE meta blob, so any field omitted is a field erased in the daemon
+	// (dropping Origin makes a renamed session look like it belongs to nobody; dropping the
+	// paste mode forgets what the program negotiated). Built by the one shared snapshot so a
+	// field added later cannot be remembered here and forgotten there.
+	meta := s.metaLocked()
 	client := s.mux
 	s.mu.Unlock()
 
