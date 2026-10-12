@@ -109,6 +109,12 @@ func (rb *RingBuffer) ReadTail(n int) []byte {
 }
 
 // readTailLocked requires rb.mu.
+//
+// Raising the n a caller asks for only moves WHERE a cut can land mid-escape-sequence or
+// mid-rune; it cannot stop it landing there (the user's own observation — see
+// escSafeTailStart's doc comment). So instead of handing back a byte-exact tail, this pulls a
+// little extra lookback context and asks escSafeTailStart to nudge the start forward past
+// whatever it would otherwise split — a handful of bytes shorter than requested, never longer.
 func (rb *RingBuffer) readTailLocked(n int) []byte {
 	total := rb.writePos
 	if rb.full {
@@ -121,6 +127,22 @@ func (rb *RingBuffer) readTailLocked(n int) []byte {
 		n = total
 	}
 
+	extendedN := n + escSafeLookback
+	if extendedN > total {
+		extendedN = total
+	}
+	extended := rb.readRawTailLocked(extendedN)
+
+	proposedOffset := len(extended) - n
+	if proposedOffset < 0 {
+		proposedOffset = 0
+	}
+	return extended[escSafeTailStart(extended, proposedOffset):]
+}
+
+// readRawTailLocked returns the byte-exact last n bytes with no escape-sequence or UTF-8
+// awareness — requires rb.mu and n <= the buffer's current total.
+func (rb *RingBuffer) readRawTailLocked(n int) []byte {
 	result := make([]byte, n)
 	if !rb.full {
 		// Linear: just copy the tail of [0..writePos).
