@@ -1,10 +1,12 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,4 +186,88 @@ func TestTerminalWSReplayAssertsInferredPasteModeForAnAgentSession(t *testing.T)
 		}
 	}
 	require.Equal(t, want, replay)
+}
+
+// The connect budget is deliberately shorter than a cold ps, so the answer that matters most —
+// a Codex that announced bracketed paste long ago, right after a server restart — routinely
+// misses it. The late re-ask is what the browser is owed then.
+func TestLatePasteModeFramePushesInference(t *testing.T) {
+	stubDetector(t, always(agentintel.ToolCodex))
+	frame := (&Server{}).latePasteModeFrame(context.Background(), sessionWithShell(4242))
+	require.Equal(t, "\x1b[?2004h", string(frame))
+}
+
+// A mode that became known on its own rides the live stream to the browser; the late answer
+// must not double-assert it.
+func TestLatePasteModeFrameSilentWhenModeBecameKnown(t *testing.T) {
+	stubDetector(t, always(agentintel.ToolCodex))
+	sess := sessionWithShell(4242)
+	sess.notePasteMode(false)
+	require.Nil(t, (&Server{}).latePasteModeFrame(context.Background(), sess))
+}
+
+func TestLatePasteModeFrameSilentWhenStillUnknown(t *testing.T) {
+	stubDetector(t, always(agentintel.ToolNone))
+	require.Nil(t, (&Server{}).latePasteModeFrame(context.Background(), sessionWithShell(4242)))
+}
+
+// End to end: connect while the detector is too slow for the connect budget (the cold-ps case),
+// then let it answer. The replay must go out with NO assertion (unknown is never asserted), and
+// the resolution must arrive as its own frame — without the inferred byte ever entering the
+// session's stream, where it would be replayed later as if observed.
+func TestTerminalWSPushesLatePasteModeAfterUnknownConnect(t *testing.T) {
+	gate := make(chan struct{})
+	var calls atomic.Int32
+	stubDetector(t, func(ctx context.Context, _ int) agentintel.AgentTool {
+		if calls.Add(1) == 1 {
+			<-ctx.Done() // the connect-time ask: outrun by the budget, like a cold ps
+			return agentintel.ToolNone
+		}
+		<-gate // the late re-ask: hold until the replay is verifiably out
+		return agentintel.ToolCodex
+	})
+
+	server, sm, _ := newDrawerTestServer(t)
+	sess, err := sm.Create("restart-cold-codex")
+	require.NoError(t, err)
+	sess.mu.Lock()
+	sess.shellPID = 31337
+	sess.mu.Unlock()
+	payload := []byte("a repaint with no mode toggle in the retained window\r\n")
+	sess.Buffer.Write(payload)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, strings.Replace(server.URL, "http://", "ws://", 1)+"/sessions/"+sess.ID+"/ws?auth="+testAuthCode, nil)
+	require.NoError(t, err)
+	defer conn.CloseNow()
+
+	// The replay is exactly the payload: no assertion, and no silent "off" either.
+	var replay []byte
+	for len(replay) < len(payload) {
+		kind, data, err := conn.Read(ctx)
+		require.NoError(t, err)
+		if kind == websocket.MessageBinary {
+			replay = append(replay, data...)
+		}
+	}
+	require.Equal(t, payload, replay)
+
+	close(gate)
+	var late []byte
+	for late == nil {
+		kind, data, err := conn.Read(ctx)
+		require.NoError(t, err)
+		if kind == websocket.MessageBinary && bytes.Equal(data, []byte("\x1b[?2004h")) {
+			late = data
+		}
+	}
+
+	// The pushed byte never entered the session stream: the next replay must not present this
+	// inference as an observed fact, and notePasteMode must not have persisted a guess.
+	full, _ := sess.ReplayTail(1 << 20)
+	require.NotContains(t, string(full), "?2004")
+	if _, observed := sess.PasteMode(); observed {
+		t.Fatal("an inferred mode leaked into the session's observed state")
+	}
 }

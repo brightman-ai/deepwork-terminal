@@ -572,6 +572,26 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			"replay_truncated", replayTruncated)
 	}
 
+	// A connect that went out with the mode UNKNOWN owes this browser the answer once one
+	// exists. The connect budget (250ms) is routinely outrun by a cold ps (~0.5s on this
+	// machine) — exactly the case a server restart produces for every session at once. Re-ask
+	// once, off the critical path, and hand the frame to the writer below; pushing it into the
+	// session's stream instead would let a guess masquerade as an observation in the next
+	// replay (see latePasteModeFrame).
+	pasteCh := make(chan []byte, 1)
+	if !pasteKnown {
+		go func() {
+			frame := s.latePasteModeFrame(ctx, sess)
+			if frame == nil {
+				return
+			}
+			select {
+			case pasteCh <- frame:
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	// Push session metadata immediately after replay so the frontend can enable
 	// gesture hints based on TmuxDetected without requiring a round-trip.
 	sess.mu.Lock()
@@ -726,6 +746,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		localAgentCh := agentCh // local copy for nil-safe select
 		for {
 			select {
+			case frame := <-pasteCh:
+				// The late paste-mode answer (see the re-ask above the writer). Rides the
+				// single writer like everything else; one frame, the channel is then dead.
+				err := writeWS(ctx, conn, websocket.MessageBinary, frame)
+				if err != nil {
+					logger.Debug("ws paste-mode push failed", "id", id, "error", err)
+					return
+				}
 			case msg := <-statusCh:
 				if presentation.Load()&wsPresentationActive == 0 {
 					continue
