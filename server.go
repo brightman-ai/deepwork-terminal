@@ -158,6 +158,10 @@ func NewServer(opts ...Option) (*Server, error) {
 	// having pressed a button (usage_credentials.go).
 	s.startQuotaWarmer(s.watchCtx)
 	s.startReportWarmer(s.watchCtx)
+	// The WS connect path bounds paste-mode inference at 250ms; a cold ps outruns that.
+	// Prime the shared snapshot so the first connections after this restart don't all miss
+	// and fall back on the late push (paste_infer.go).
+	s.startProcessWarmer(s.watchCtx)
 	s.mgr = NewSessionManager(s.config.BufferSize, s.config.DefaultShell)
 	// Which tab list owns the sessions this server creates. One daemon serves both deployments
 	// (standalone and the pro embed), so without this a live session with no tab is

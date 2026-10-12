@@ -1,7 +1,10 @@
 package agentintel
 
 import (
+	"context"
+	"os"
 	"testing"
+	"time"
 )
 
 func TestToolFromCommand(t *testing.T) {
@@ -128,5 +131,21 @@ func TestParsePS(t *testing.T) {
 	}
 	if procs[2].Command != "claude --dangerously-skip-permissions" {
 		t.Errorf("unexpected command: %q", procs[2].Command)
+	}
+}
+
+// A warmed cache must serve even a caller whose ctx is already dead — that is the whole point
+// of warming: the connect-path budget is shorter than a cold ps, so the snapshot must come from
+// the cache, not from a fork that cannot finish in time.
+func TestWarmServesCancelledCallers(t *testing.T) {
+	pi := NewProcessInspector()
+	pi.Warm(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_ = pi.DetectToolCtx(ctx, os.Getpid())
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("detect under a dead ctx took %s; a warm cache must answer without forking ps", d)
 	}
 }
