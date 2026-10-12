@@ -56,6 +56,16 @@ func (pi *ProcessInspector) DetectToolCtx(ctx context.Context, shellPID int) Age
 	return pi.DetectAgentCtx(ctx, shellPID).Tool
 }
 
+// Warm primes the snapshot cache. One cold `ps` on a busy machine measures
+// 430-640ms — longer than the budget of the most latency-sensitive caller (the
+// WS connect path, which bounds its answer at 250ms), so a server that starts
+// cold makes every early caller miss. Call once at startup, best-effort: a
+// failed or cancelled warm leaves the cache as-is and costs nothing but the
+// attempt.
+func (pi *ProcessInspector) Warm(ctx context.Context) {
+	pi.processSnapshot(ctx)
+}
+
 // DetectAgentCtx returns the deepest matching process, which is the native CLI
 // process rather than its shell/package-manager wrapper whenever both exist.
 func (pi *ProcessInspector) DetectAgentCtx(ctx context.Context, shellPID int) DetectedAgent {
