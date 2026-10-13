@@ -14,7 +14,7 @@ import { leaderBytesFor, useTabShortcuts } from '@terminal/composables/cli/useTa
 import { computeVisibleTabOrder } from '@terminal/composables/cli/useVisibleTabOrder'
 import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
 import { useSessionsOverview } from '@terminal/composables/cli/useSessionsOverview'
-import { useOverviewUnits, type EffectiveStatus, type OverviewUnit } from '@terminal/composables/cli/useAgentOverview'
+import { useOverviewUnits, URGENCY_ORDER, type EffectiveStatus, type OverviewUnit } from '@terminal/composables/cli/useAgentOverview'
 import { useTabContextMenu } from '@terminal/composables/cli/useTabContextMenu'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { type TabLiveness, type TabNotLive } from '@terminal/composables/cli/tabLiveness'
@@ -60,7 +60,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
   const {
     loading, error, groups, activeTab, allTabs, showGroupHeaders,
     load, resync, addTab, setTabCwd, removeTab, renameTab, adoptRemoteTabName, setActiveTab,
-    toggleGroupCollapsed, bindSession, unbindSession,
+    toggleGroupCollapsed, bindSession, unbindSession, setTabSplit,
   } = useWorkbench()
 
   // Timestamp of this device's own last local rename, by sessionId — see commitRename and the
@@ -127,7 +127,23 @@ export function useCliState(runtime: PortalRuntimeResult) {
     activeTab.value ? (surfaceRefs[activeTab.value.id]?.netStats ?? null) : null,
   )
   const activeRtt = computed<number>(() => activeNetStats.value?.rtt ?? 0)
+  // 当前 tab 聚焦的 tmux window index（pane 深链读/写两侧都用这一个值）；非 tmux 或快照未到为 null。
+  const activeTmuxWindowIndex = computed<number | null>(() =>
+    activeTab.value ? (surfaceRefs[activeTab.value.id]?.tmuxActiveWindowIndex ?? null) : null,
+  )
+  // pane 深链的"写"那一半：URL 变化驱动真的切 window，转给当前激活 tab 的 surface 执行（与
+  // activeSendKey/activeOpenInstallGuide 同一条"路由到 surfaceRefs[activeTab]"模式）。
+  function selectActiveTabWindow(index: number) {
+    if (activeTab.value) surfaceRefs[activeTab.value.id]?.selectTmuxWindow?.(index)
+  }
   const activeSessionId = computed<string | undefined>(() => activeTab.value?.sessionId)
+  // toolbar 的分屏控制条要不要渲染——跟右键菜单 openTabMenu 的 splitAllowed 同一条规则（移动端
+  // + tmux-attached 都排除，tmux 已经有自己的 TmuxQuickBar vsplit/hsplit/zoom，两套并存只会让
+  // 人分不清刚点的是哪一种），这里复用 surfaceRefs 暴露的 tmuxAttached，跟 activeTmuxWindowIndex
+  // 同一种"路由到 surfaceRefs[activeTab]"模式，不另起一条判断。
+  const activeTabSplitAllowed = computed<boolean>(() =>
+    !breakpoint.isMobile.value && !(activeTab.value && surfaceRefs[activeTab.value.id]?.tmuxAttached),
+  )
   const allTabsWithSession = computed(() => allTabs.value.filter(t => !!t.sessionId))
 
   // Per-surface connection props, derived from the SINGLE source (resolveTabConnection). The
@@ -149,6 +165,9 @@ export function useCliState(runtime: PortalRuntimeResult) {
         // Classify a live connection failure (auth code? IP/port unreachable? HTTPS→HTTP block?)
         // by hitting the SAME REST the WS relies on. Reuses probePeer (SSOT) — no second classifier.
         diagnose: () => remotePeers.probePeer(conn.httpBase, conn.authToken),
+        // terminal-split：副格共享主格同一条 resolveTabConnection（REQ-009——remote tab 分出来的
+        // 两格连同一台机器，不支持跨机混合）；view 层只管渲染，连接解析单源在这里。
+        split: t.split,
       }
     }),
   )
@@ -221,9 +240,17 @@ export function useCliState(runtime: PortalRuntimeResult) {
   /** 可见标签顺序 → 卡片编号的钥匙串。没有 session 的标签（进程已结束）占一个 `tab:` 占位号：
    *  卡片编号同时也是标签栏的「终端N」和 前缀+N 快捷键的目标，一旦跳号，三者就对不上了。占位 id
    *  不可能撞上真实 session id，useSessionsOverview 会把它当"没有对应 session"直接滤掉。 */
-  const overviewIdOrder = computed<string[]>(() =>
-    visibleTabIds.value.map((tabId) => allTabs.value.find(t => t.id === tabId)?.sessionId || `tab:${tabId}`),
-  )
+  const overviewIdOrder = computed<string[]>(() => {
+    const out: string[] = []
+    for (const tabId of visibleTabIds.value) {
+      const tab = allTabs.value.find(t => t.id === tabId)
+      out.push(tab?.sessionId || `tab:${tabId}`)
+      // terminal-split REQ-006：副格也要进这份推送清单，否则服务端压根不知道要为它推状态，
+      // tab 点的汇总就永远只看得到主格那一半。
+      if (tab?.split?.secondSessionId) out.push(tab.split.secondSessionId)
+    }
+    return out
+  })
   const { entries: sessionEntries, units: liveOverviewUnits } = useSessionsOverview(
     () => activeTab.value?.sessionId,
     () => overviewIdOrder.value,
@@ -297,7 +324,12 @@ export function useCliState(runtime: PortalRuntimeResult) {
     const bySession = new Map(overviewUnits.value.map(u => [u.key, overview.effectiveStatus(u)]))
     const out = new Map<string, EffectiveStatus>()
     for (const tab of allTabs.value) {
-      const s = tab.sessionId ? bySession.get(tab.sessionId) : undefined
+      const primary = tab.sessionId ? bySession.get(tab.sessionId) : undefined
+      const second = tab.split?.secondSessionId ? bySession.get(tab.split.secondSessionId) : undefined
+      // terminal-split REQ-006：任一格更紧急，tab 点就显示那个——复用既有 URGENCY_ORDER（tmux
+      // window 级红点"可能来自后台 pane"同一条规则），不新造第二套优先级。
+      const s = !second ? primary : !primary ? second
+        : (URGENCY_ORDER.indexOf(primary) <= URGENCY_ORDER.indexOf(second) ? primary : second)
       if (s) out.set(tab.id, s)
     }
     return out
@@ -343,6 +375,8 @@ export function useCliState(runtime: PortalRuntimeResult) {
     tabCount: () => visibleTabIds.value.length,
     forceKillForeground: (id) => { void forceKillForegroundTab(id) },
     applyEnvHere: (id) => { void applyEnvToTab(id) },
+    splitTab: (id, orientation) => { void splitTab(id, orientation) },
+    unsplitTab: (id) => { void unsplitTab(id) },
   })
 
   function openTabMenu(e: MouseEvent, tabId: string): void {
@@ -351,7 +385,18 @@ export function useCliState(runtime: PortalRuntimeResult) {
     const isTmux = tab.sessionId
       ? (sessionEntries.value.find(entry => entry.id === tab.sessionId)?.tmuxDetected ?? false)
       : false
-    tabMenu.openAt(e, { id: tabId, name: tabDisplayName(tabId, tab.name), cwd: liveCwd(tabId), isTmux })
+    tabMenu.openAt(e, {
+      id: tabId,
+      name: tabDisplayName(tabId, tab.name),
+      cwd: liveCwd(tabId),
+      isTmux,
+      isSplit: !!tab.split,
+      splitOrientation: tab.split?.orientation,
+      // terminal-split REQ-010：移动端不提供新建分屏入口；已有分屏在移动端照常可见/可取消。
+      // 同时不在 tmux-attached 的 tab 上提供——它已经有自己的分屏（TmuxQuickBar 的 vsplit/
+      // hsplit），两套并存只会让人分不清刚才点的到底是哪一种（spec §4：两条手段并行，不是叠加）。
+      splitAllowed: !breakpoint.isMobile.value && !isTmux,
+    })
   }
 
   // D6: guide banner's "去设置" deep-links to the shortcuts settings section.
@@ -437,11 +482,99 @@ export function useCliState(runtime: PortalRuntimeResult) {
       const conn = remotePeers.resolveTabConnection(tab)
       try { await tabFetch(conn, `/sessions/${tab.sessionId}`, { method: 'DELETE' }) } catch { /* silent */ }
     }
+    // terminal-split REQ-008：分屏 tab 关闭 = 两格的 shell 一起终止，不留孤儿进程。副格复用同一条
+    // resolveTabConnection（它和主格永远连同一台机器，见 surfaceTabs 的 split 字段注释）。
+    if (tab?.split?.secondSessionId) {
+      const conn = remotePeers.resolveTabConnection(tab)
+      try { await tabFetch(conn, `/sessions/${tab.split.secondSessionId}`, { method: 'DELETE' }) } catch { /* silent */ }
+    }
     delete tabRuntimes[tabId]
+    delete tabRuntimes[splitRuntimeKey(tabId)]
     delete surfaceRefs[tabId]
+    delete surfaceRefs[splitRuntimeKey(tabId)]
     delete tabLiveness[tabId]
     forgetTerminalNotice(tab?.sessionId)
     removeTab(tabId)
+  }
+
+  // ─── terminal-split：原生浏览器内分屏（docs/product/terminal-split/spec.md）──────────────────
+  // 副格的 runtime/surfaceRefs 用这个派生 key，和主格（直接用 tabId）分开两个槽位，互不覆盖。
+  function splitRuntimeKey(tabId: string): string { return `${tabId}__split2` }
+
+  /** 左右/上下分屏一个标准 tab：先落一个 ratio=0.5、`secondSessionId` 未定的占位状态（UI 立刻能看见
+   *  分屏骨架），再起第二个 shell（继承父 tab 的 cwd，REQ-002 已选方案）；起败了就撤销占位，不留一个
+   *  永远起不来的空格子。*/
+  async function splitTab(tabId: string, orientation: 'row' | 'column'): Promise<void> {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab || tab.split) return // 已分屏——菜单本该已经隐藏这个入口，这里是最后一道防线
+    setTabSplit(tabId, { orientation, ratio: 0.5 })
+    const sessionId = await createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~' })
+    if (!sessionId) {
+      setTabSplit(tabId, undefined)
+      showNotice('分屏失败：新终端没能起来')
+      return
+    }
+    setTabSplit(tabId, { orientation, ratio: 0.5, secondSessionId: sessionId })
+    ensureRuntime(splitRuntimeKey(tabId))
+  }
+
+  /** 取消分屏：关掉副格的 shell（真的终止，非仅隐藏 DOM），tab 回到今天的单格渲染路径（REQ-007）。*/
+  async function unsplitTab(tabId: string): Promise<void> {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab?.split) return
+    const secondId = tab.split.secondSessionId
+    setTabSplit(tabId, undefined)
+    delete tabRuntimes[splitRuntimeKey(tabId)]
+    delete surfaceRefs[splitRuntimeKey(tabId)]
+    if (secondId) {
+      const conn = remotePeers.resolveTabConnection(tab)
+      try { await tabFetch(conn, `/sessions/${secondId}`, { method: 'DELETE' }) } catch { /* silent */ }
+    }
+  }
+
+  /** 拖拽分隔条松手时持久化比例（拖拽过程中的高频中间值只做本地视觉反馈，不逐帧写盘——
+   *  和 setTabCwd"值没变就不写"同一种"别为了一次拖拽发一串请求"的克制）。 */
+  function setSplitRatio(tabId: string, ratio: number): void {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab?.split) return
+    const clamped = Math.min(0.9, Math.max(0.1, ratio))
+    if (clamped === tab.split.ratio) return
+    setTabSplit(tabId, { ...tab.split, ratio: clamped })
+  }
+
+  /** toolbar 的左右/上下分屏按钮入口——按钮本身常驻不随分屏状态消失（2026-10-12 拍定）：
+   *    未分屏              → 按哪个就分成哪个方向（splitTab）
+   *    已分屏但方向是另一个  → 原地切换方向，两个格子都还在，不重开 session
+   *    已分屏且方向就是这个  → **什么都不做**。这一下在按钮那层是"切换焦点"（纯前端，不到这里）。
+   *  2026-10-13 之前第三支是"取消分屏"，而取消分屏会结束第二格的 session —— 一个画着版面的按钮
+   *  悄悄关窗口、丢东西（Human："意符和作用不符"）。这里也守住，不靠调用方自觉：关闭一格只有
+   *  closeSplitPane 这一个显式入口（画着 × 的按钮、要点两次确认；或右键菜单里写明"关闭右边那格"）。 */
+  async function setSplitOrientation(tabId: string, orientation: 'row' | 'column'): Promise<void> {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab) return
+    if (!tab.split) { await splitTab(tabId, orientation); return }
+    if (tab.split.orientation === orientation) return
+    // 切换方向：两个 session 都还活着，只是改了 flex 排列轴；zoom 态一并清掉——zoom 记的是
+    // "第几格"，方向变了格子还是那两个，但没有理由让一次改朝向顺带保留一个无关的放大态。
+    setTabSplit(tabId, { ...tab.split, orientation, zoomed: undefined })
+  }
+
+  /** 显式关闭第二格（= 取消分屏，第二格的 session 被结束）。唯一会丢东西的分屏操作，所以单独一个
+   *  名字，调用方一眼看得出它的代价。 */
+  async function closeSplitPane(tabId: string): Promise<void> {
+    await unsplitTab(tabId)
+  }
+
+  /** 放大/缩小某一格（tmux pane-zoom 那套手感），两个格子各一个按钮、常驻、toggle 高亮——跟
+   *  分屏按钮同一个范式：再点一次已放大的那格 = 恢复双格；点另一格 = 直接切过去（不用先退出
+   *  再进，toggleZoom 自己就把"切换"包含了：zoomed 从 'first' 变成 'second' 是一次赋值，不是
+   *  两步）。未分屏时调用方不会渲染这组按钮（单格本来就是满屏，"放大"无意义），这里仍做一次
+   *  防御——没有 split 就是个 no-op，不假设调用方永远守规矩。 */
+  function toggleZoom(tabId: string, which: 'first' | 'second'): void {
+    const tab = allTabs.value.find(t => t.id === tabId)
+    if (!tab?.split) return
+    const next = tab.split.zoomed === which ? undefined : which
+    setTabSplit(tabId, { ...tab.split, zoomed: next })
   }
 
   // ─── 轻提示（一次性、不阻塞）────────────────────────────────────────────────
@@ -583,6 +716,14 @@ export function useCliState(runtime: PortalRuntimeResult) {
         if (code === undefined) continue
         settled.add(t.id)
         await settleExitedTab(t.id, code)
+      }
+      // terminal-split：副格没有"留卡片说明情况"这个中间态可去（那是整个 tab 的概念，副格只是
+      // 它的一半）——不管退出码，折回单格就是这类子面板唯一诚实的处置：shell 没了，格子跟着收起，
+      // 主格（tab 本身）不受影响。不走 settled/settleExitedTab 那条路径，那条是给整 tab 用的。
+      for (const t of allTabs.value.slice()) {
+        if (!t.split?.secondSessionId || t.remotePeerId) continue
+        if (!exited.has(t.split.secondSessionId)) continue
+        await unsplitTab(t.id)
       }
     }
 
@@ -756,7 +897,12 @@ export function useCliState(runtime: PortalRuntimeResult) {
   function adoptOrphanSessions(sessions: LocalSessionBrief[] | null): void {
     if (!sessions) return
     const bound = new Set<string>()
-    for (const t of allTabs.value) if (t.sessionId) bound.add(t.sessionId)
+    for (const t of allTabs.value) {
+      if (t.sessionId) bound.add(t.sessionId)
+      // terminal-split：副格的 session 一样是"有标签指着"的，不然每次孤儿认领都会把它当成失联
+      // 的会话，凭空造一个新标签出来——这正是本函数文件头注警告过的那类"静默多出一个"。
+      if (t.split?.secondSessionId) bound.add(t.split.secondSessionId)
+    }
     const orphans = sessions.filter(s => s.ownedHere && !s.exited && !bound.has(s.id))
     if (!orphans.length) return
     const gid = groups.value[0]?.id
@@ -944,10 +1090,16 @@ export function useCliState(runtime: PortalRuntimeResult) {
     toggleGroupCollapsed,
     tabRuntimes, registerSurface,
     activeWsStatus, activeAgentState, activeAgentNotifications, activeRtt, activeNetStats,
-    activeSessionId, activeSendKey, activeOpenInstallGuide,
+    activeSessionId, activeSendKey, activeOpenInstallGuide, activeTabSplitAllowed,
+    // pane（tmux window）深链：当前聚焦 window index + 由 URL 驱动切换
+    activeTmuxWindowIndex, selectActiveTabWindow,
     allTabsWithSession, stripTabs, surfaceTabs,
     onTabAgentState, onTabAgentNotifications, onTabSessionExit, onTabConnectionChange,
     switchTab, closeTab,
+    // terminal-split：拖拽分隔条松手时持久化比例；setSplitOrientation/toggleZoom/closeSplitPane
+    // 是常驻 toolbar 按钮的入口（右键菜单路径仍走原来的 splitTab/unsplitTab，两条入口共用同一个
+    // setTabSplit 落盘点，互不冲突）。切换焦点是纯前端（CliTerminalView），不经过这里。
+    setSplitRatio, setSplitOrientation, toggleZoom, closeSplitPane,
     renamingTabId, renameValue, startRenameTab, commitRename, cancelRename,
     quickCreateTab,
     // remote-terminal (mesh)

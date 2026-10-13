@@ -79,6 +79,7 @@
         ref="textareaRef"
         v-model="text"
         class="compose-input"
+        data-compose-input
         placeholder="Enter = newline, tap send to submit"
         @input="onInput"
         @focus="onTextareaFocus"
@@ -113,7 +114,7 @@ import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
  * on mount and whenever it changes to a fresh value, REPLACING the current text so
  * the user lands in an editable compose with the inserted text ready to refine.
  */
-const props = defineProps<{ draft?: string }>()
+const props = defineProps<{ draft?: string; sessionId?: string }>()
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
@@ -126,11 +127,12 @@ const {
   copyFeedback, showUndo,
   toggleSnippets, toggleHistory, saveSnippet, insertSnippet, deleteSnippet, clearHistory, insertFromHistory,
   onInput, onTextareaFocus,
-  send, copyAll, clearAll, undoClear, moveCursor,
+  send, copyAll, clearAll, undoClear, insertAtCursor, moveCursor,
 } = useComposeBox({
   maxLines: 5, // screen is scarce here — see ComposeBarDesktop.vue for why desktop's cap differs
   diagnosticSurface: 'compose-textarea-mobile',
   draft: () => props.draft,
+  draftScope: () => props.sessionId,
   focusEl: focusWithoutViewportScroll,
   // iOS may keep a stale page scroll after the IME checkmark dismisses the keyboard. The app
   // shell owns visual viewport height; compose only keeps the root scroll pinned so the textarea
@@ -142,6 +144,9 @@ const {
   },
   emit: { send: (t) => emit('send', t) },
 })
+
+// 宿主（CliTerminalSurface）在输入框里贴图时，把上传后的文件引用插到光标处。
+defineExpose({ insertAtCursor })
 </script>
 
 <style scoped>

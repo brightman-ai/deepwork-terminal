@@ -1,5 +1,14 @@
 <template>
   <div class="compose-bar-desktop" data-testid="compose-bar-desktop">
+    <!-- Drag handle: the panel is bottom-anchored (see .compose-bar-desktop's layout comment
+         below), so dragging this UP grows it — same direction a user already expects from a
+         bottom-docked panel (VSCode's terminal/panel resize grip, browser devtools, etc). -->
+    <div
+      class="cbd-resize-handle"
+      data-testid="compose-desktop-resize-handle"
+      title="拖动调整高度"
+      @pointerdown="onResizeStart"
+    ><div class="cbd-resize-grip" /></div>
     <!-- Toolbar: DelAll + Snippets + History. No cursor-nav buttons here — unlike mobile, a
          desktop user already has arrow keys / Home / End on the keyboard sitting under the
          textarea; on-screen duplicates would be pure clutter. See ComposeBar.vue (mobile). -->
@@ -77,6 +86,7 @@
         ref="textareaRef"
         v-model="text"
         class="cbd-input"
+        data-compose-input
         placeholder="Shift+Enter 换行，Ctrl/Cmd+Enter 发送"
         @input="onInput"
         @focus="onTextareaFocus"
@@ -106,7 +116,7 @@
 import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 import { useComposeBox } from '@terminal/composables/cli/useComposeBox'
 
-const props = defineProps<{ draft?: string }>()
+const props = defineProps<{ draft?: string; sessionId?: string }>()
 
 const emit = defineEmits<{
   (e: 'send', text: string): void
@@ -121,12 +131,13 @@ const {
   showSnippets, showHistory, snippets, history,
   copyFeedback, showUndo,
   toggleSnippets, toggleHistory, saveSnippet, insertSnippet, deleteSnippet, clearHistory, insertFromHistory,
-  onInput, onTextareaFocus,
-  send, copyAll, clearAll, undoClear,
+  onInput, onTextareaFocus, onResizeStart,
+  send, copyAll, clearAll, undoClear, insertAtCursor,
 } = useComposeBox({
   maxLines: 13, // desktop screens have vertical room mobile's ~5-line cap was never about
   diagnosticSurface: 'compose-textarea-desktop',
   draft: () => props.draft,
+  draftScope: () => props.sessionId,
   focusEl: (el) => el?.focus(),
   // No onFocusSideEffects — desktop has no soft-keyboard viewport to correct for.
   emit: { send: (t) => emit('send', t) },
@@ -141,6 +152,9 @@ function onKeydown(e: KeyboardEvent): void {
     emit('close')
   }
 }
+
+// 宿主（CliTerminalSurface）在输入框里贴图时，把上传后的文件引用插到光标处。
+defineExpose({ insertAtCursor })
 </script>
 
 <style scoped>
@@ -177,6 +191,25 @@ function onKeydown(e: KeyboardEvent): void {
   background: var(--cbd-bg);
   border-top: 1px solid var(--cbd-border);
   box-shadow: 0 -6px 24px rgba(0,0,0,0.35);
+}
+
+.cbd-resize-handle {
+  flex-shrink: 0;
+  height: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+}
+.cbd-resize-handle:hover .cbd-resize-grip,
+.cbd-resize-handle:active .cbd-resize-grip { background: #6a80d8; }
+.cbd-resize-grip {
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: #484868;
+  transition: background 0.1s;
 }
 
 .cbd-toolbar {

@@ -11,6 +11,21 @@ export interface WorkbenchGroup {
   collapsed: boolean
 }
 
+/** 一个标准 tab 原生分屏成两个独立终端格子（scope: terminal-split，docs/product/terminal-split/）。
+ *  主格继续用 `WorkbenchTab.sessionId`；这里只装副格那一半 + 布局。可选字段 → 未分屏 tab 的既有数据
+ *  形状逐字节不变（`split` 整个不存在），零回归面。故意不叫 `layout`——`ResourceDrawer.vue` 已用这个
+ *  词表达一个无关概念（文件抽屉贴边/悬浮，纯本机偏好，非 per-tab），避免同词异义的混淆。 */
+export interface TabSplit {
+  orientation: 'row' | 'column'   // row=左右并排，column=上下堆叠
+  ratio: number                    // 0.1–0.9，主格占比；拖拽分隔条改它
+  secondSessionId?: string         // 副格的 session；分屏瞬间尚未起好新 shell 时短暂为 undefined
+  /** 某一格临时占满整个 tab（另一格不渲染但进程仍在跑，退出 zoom 原样恢复）。undefined = 都不
+   *  放大（正常双格）。走跟 orientation/ratio 一样的同步路径——分屏本身选的是"跨设备同步"，
+   *  zoom 作为同一份 split 状态的一部分，没有理由单独走一条不同步的本地态，省一套机制。
+   *  [假设] 这条沿用了 split 本身的同步口径，未逐条问过，Human 见此节点可翻。 */
+  zoomed?: 'first' | 'second'
+}
+
 export interface WorkbenchTab {
   id: string
   groupId: string
@@ -24,6 +39,7 @@ export interface WorkbenchTab {
   remotePeerId?: string // when set, this tab connects to a registered remote peer (mesh
                         // direct-connect) instead of the same-origin host. Optional →
                         // backward compatible (a tab without it is local). See useRemotePeers.
+  split?: TabSplit    // undefined = 未分屏（今天的全部行为，一字节不改）
 }
 
 export interface WorkbenchConfig {

@@ -107,6 +107,26 @@ describe('mergeWorkbench — 字段级', () => {
 
     expect(find(mergeWorkbench(base, local, server), 't1')?.sessionId).toBeUndefined()
   })
+
+  // terminal-split scope: `split` 漏在 TAB_FIELDS 之外会静默丢分屏状态——同文件头注早已点名
+  // "漏一个字段会静默丢一次用户改动"，这条就是那条规则的活体回归，不是装饰性覆盖率。
+  it('本地刚分的屏不被服务端那份陈旧的未分屏状态盖掉（split 必须在 TAB_FIELDS 里）', () => {
+    const base = cfg([tab('t1')])
+    const local = cfg([tab('t1', { split: { orientation: 'row', ratio: 0.5, secondSessionId: 's2' } })])
+    const server = cfg([tab('t1')]) // 服务端这份还没见过这台设备刚做的分屏
+
+    expect(find(mergeWorkbench(base, local, server), 't1')?.split).toEqual({
+      orientation: 'row', ratio: 0.5, secondSessionId: 's2',
+    })
+  })
+
+  it('本地取消分屏（split=undefined）不被服务端的旧分屏状态盖回去', () => {
+    const base = cfg([tab('t1', { split: { orientation: 'row', ratio: 0.5, secondSessionId: 's2' } })])
+    const local = cfg([tab('t1', { split: undefined })])
+    const server = cfg([tab('t1', { split: { orientation: 'row', ratio: 0.5, secondSessionId: 's2' } })])
+
+    expect(find(mergeWorkbench(base, local, server), 't1')?.split).toBeUndefined()
+  })
 })
 
 describe('mergeWorkbench — 顺序与焦点', () => {

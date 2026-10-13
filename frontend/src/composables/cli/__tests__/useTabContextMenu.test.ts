@@ -152,3 +152,28 @@ describe('useTabContextMenu — 把环境变量应用到此终端', () => {
     expect(menu.open.value).toBe(false)
   })
 })
+
+// 2026-10-13：取消分屏 = 结束第二格的 session。菜单里必须写明关的是哪一格，并归入 danger 组。
+describe('useTabContextMenu — 关闭分屏的第二格', () => {
+  const split = { splitTab: () => {}, unsplitTab: (id: string) => { void id } }
+
+  it('左右分屏：写明"关闭右边那格"，且是 danger', () => {
+    const { menu } = harness(split)
+    menu.openAt(fakeEvent().e, { id: 't1', name: '终端 1', isSplit: true, splitOrientation: 'row' })
+    expect(item(menu, 'unsplit').label).toBe('关闭右边那格（取消分屏）')
+    expect(item(menu, 'unsplit').danger).toBe(true)
+  })
+
+  it('上下分屏：写明"关闭下边那格"', () => {
+    const { menu } = harness(split)
+    menu.openAt(fakeEvent().e, { id: 't1', name: '终端 1', isSplit: true, splitOrientation: 'column' })
+    expect(item(menu, 'unsplit').label).toBe('关闭下边那格（取消分屏）')
+  })
+
+  it('标成 danger 后，danger 项仍然连续排在最后', () => {
+    const { menu } = harness(split)
+    menu.openAt(fakeEvent().e, { id: 't1', name: '终端 1', isSplit: true, splitOrientation: 'row' })
+    const firstDanger = menu.items.value.findIndex((i) => i.danger)
+    expect(menu.items.value.slice(firstDanger).every((i) => i.danger)).toBe(true)
+  })
+})
