@@ -244,6 +244,12 @@ func (a *transcriptAccum) ingest(row map[string]any) bool {
 
 	switch rowType {
 	case "user":
+		// Injected context (/rename notice, compaction summary, skill body) is not a prompt:
+		// counting it opened a phantom turn whose "input" was a system-reminder. Same predicate
+		// the status driver uses, so the two never disagree about where a turn starts.
+		if claudeSyntheticUserRow(row) {
+			return true
+		}
 		text, isToolResultOnly, errs := inspectUserContent(msg)
 		if errs > 0 {
 			a.toolErrors += errs

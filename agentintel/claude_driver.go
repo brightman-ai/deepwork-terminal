@@ -1,7 +1,6 @@
 package agentintel
 
 import (
-	"os"
 	"strings"
 	"time"
 )
@@ -28,18 +27,61 @@ type ClaudeSessionState struct {
 // pendingReplyWindow bounds how long "your prompt is newer than the agent's last word" may be
 // read as RUNNING.
 //
-// That rule has no corroborating signal — unlike a pending tool_use (a named tool), a fresh
-// mtime (the writing gate) or a spinner (the pane). It is pure row order, so a turn that never
-// got a reply stays running forever: a killed CLI, a crashed session, a machine that slept
-// mid-turn. Ten hours of green was the observed case.
+// That rule has no corroborating signal — unlike a pending tool_use (a named tool), or a spinner
+// (the pane). It is pure row order, so a turn that never got a reply stays running forever: a
+// killed CLI, a crashed session, a machine that slept mid-turn. Ten hours of green was the
+// observed case.
 //
 // The window is generous on purpose — extended thinking before the first assistant token is
 // real, and cutting a working agent to idle would fire a false "done". It is also only half the
-// test: staleness ALONE never downgrades anything. The transcript must additionally have gone
-// untouched for this long (see State), and a working agent writes continuously — thinking
-// blocks, tool calls, results. So the only thing that trips this is a transcript nothing is
-// writing to, which is not a running agent by any definition.
+// test: staleness ALONE never downgrades anything. The conversation must additionally have
+// gone quiet for this long — no ACTIVITY row (claudeRowIsActivity) since — and a working agent
+// writes activity continuously: thinking blocks, tool calls, results, retries.
+//
+// This used to read the file's mtime instead, and that was defeated in production: Claude Code
+// appends untimestamped bookkeeping rows (last-prompt, mode, permission-mode, atis-latch,
+// titles — ~40 batches per session observed) at moments that have nothing to do with a turn,
+// so an abandoned pending reply kept looking "just written" and flipped back to running every
+// time one landed. Bookkeeping is not work; only activity rows count.
 const pendingReplyWindow = 15 * time.Minute
+
+// claudeSyntheticUserRow reports a "user" row that Claude Code writes on the user's behalf as
+// context, not as a prompt — no assistant turn ever answers it on its own, so reading it as
+// "your prompt landed, the reply is coming" pins a pane Running while the agent sits idle.
+//   - isCompactSummary: the continuation summary at a compaction boundary.
+//   - isMeta: injected context — the /rename notice ("The user named this session …"), a
+//     skill's body after its <command-name> row, local-command caveats. Observed on two live
+//     panes (2026-10-13): each finished on end_turn, the user ran /rename, and the isMeta
+//     notice that followed held the tab Running for a day.
+//
+// A real prompt or a tool result is never marked this way, so a skill invocation still runs:
+// its <command-name> row is an ordinary user row. Shared by the status driver and the turn
+// metrics so the two cannot disagree about what a turn is.
+func claudeSyntheticUserRow(row map[string]any) bool {
+	if compact, _ := row["isCompactSummary"].(bool); compact {
+		return true
+	}
+	meta, _ := row["isMeta"].(bool)
+	return meta
+}
+
+// claudeRowIsActivity reports a row that is evidence the conversation is moving: the agent
+// speaking, a tool result coming back, progress, a retry. Rows without a timestamp are
+// bookkeeping by construction and never count; neither do synthetic user rows nor local
+// slash-command echoes (system/local_command — /rename, /model…), which the user ran at the
+// CLI and which neither start nor continue an agent turn.
+func claudeRowIsActivity(rowType string, row map[string]any) bool {
+	switch rowType {
+	case "assistant", "progress":
+		return true
+	case "user":
+		return !claudeSyntheticUserRow(row)
+	case "system":
+		subtype, _ := row["subtype"].(string)
+		return subtype != "local_command"
+	}
+	return false
+}
 
 // textEndsQuestion is a best-effort "did the agent ASK the user something" heuristic for a
 // free-text turn end — the transcript can't otherwise tell a plain-language question from a
@@ -74,11 +116,13 @@ func isElicitationTool(name string) bool { return elicitationTools[name] }
 // ClaudeDriver parses a Claude Code JSONL transcript and derives session state.
 type ClaudeDriver struct {
 	sessionID string
-	jsonlPath string // kept for pendingReplyStale: "has anything been written since" needs the file, not just its parsed rows
 	reader    *JSONLReader
 	usage     *UsageAccumulator
 	state     ClaudeSessionState
 	agentTree claudeAgentTree // subagent ("Agent" tool) spawn tree — see claude_agent_tree.go
+	// lastActivityAt is the newest claudeRowIsActivity row seen — pendingReplyStale's "has the
+	// conversation moved since" half. Driver-private: consumers read Status, not this.
+	lastActivityAt time.Time
 }
 
 // NewClaudeDriver creates a driver for the given JSONL path. sessionID is used as
@@ -86,7 +130,6 @@ type ClaudeDriver struct {
 func NewClaudeDriver(jsonlPath, sessionID string) *ClaudeDriver {
 	return &ClaudeDriver{
 		sessionID: sessionID,
-		jsonlPath: jsonlPath,
 		reader:    NewJSONLReader(jsonlPath),
 		usage:     NewUsageAccumulator(),
 		state:     ClaudeSessionState{Status: StatusIdle},
@@ -95,19 +138,13 @@ func NewClaudeDriver(jsonlPath, sessionID string) *ClaudeDriver {
 }
 
 // pendingReplyStale reports whether a prompt that never got an answer has gone cold: older
-// than pendingReplyWindow AND with nothing appended to the transcript since. Both halves are
-// required — the clock alone would cut off a long think, while the file alone says nothing
-// about whose turn it is. A transcript that cannot be stat'd is treated as NOT stale: an
-// unreadable file is a reason to keep the last known reading, not to invent a new one.
+// than pendingReplyWindow AND with no activity row since. Both halves are required — the clock
+// alone would cut off a long think, while activity alone says nothing about whose turn it is.
 func (cd *ClaudeDriver) pendingReplyStale(now time.Time) bool {
 	if cd.state.LastUserAt.IsZero() || now.Sub(cd.state.LastUserAt) <= pendingReplyWindow {
 		return false
 	}
-	info, err := os.Stat(cd.jsonlPath)
-	if err != nil {
-		return false
-	}
-	return now.Sub(info.ModTime()) > pendingReplyWindow
+	return now.Sub(cd.lastActivityAt) > pendingReplyWindow
 }
 
 // Update reads new JSONL lines and updates state.
@@ -115,9 +152,21 @@ func (cd *ClaudeDriver) Update() error {
 	err := cd.reader.ReadNewFunc(func(row map[string]any) bool {
 		rowType, _ := row["type"].(string)
 		now := time.Now()
+		if claudeRowIsActivity(rowType, row) {
+			if ts := parseTime(row); ts.After(cd.lastActivityAt) {
+				cd.lastActivityAt = ts
+			}
+		}
 
 		switch rowType {
 		case "user":
+			// Context Claude Code injected on the user's behalf (compaction summary, /rename
+			// notice, skill body…) — not a prompt, never answered on its own. Skip it entirely,
+			// same as an unrecognized row type: leave whatever LastUserAt/LastAssistAt already
+			// said stand. See claudeSyntheticUserRow for the observed cases.
+			if claudeSyntheticUserRow(row) {
+				break
+			}
 			ts := parseTime(row)
 			if ts.After(cd.state.LastUserAt) {
 				cd.state.LastUserAt = ts
