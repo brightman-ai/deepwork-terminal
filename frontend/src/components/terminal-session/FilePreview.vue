@@ -26,6 +26,7 @@ import { renderMarkdown } from '@terminal/utils/markdown'
 import { highlightCode, addCopyButtons, renderDiagrams, renderMath, loadHljs } from '@terminal/utils/markdownEnhance'
 import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { filesRawImageUrl } from '@terminal/api/files'
+import { handleFindShortcut } from './terminalFindShortcut'
 
 const props = defineProps<{
   name: string
@@ -120,8 +121,17 @@ watch(
 // ── reader chrome state ──────────────────────────────────────────────────────────────
 const scrollEl = ref<HTMLElement>()
 const contentEl = ref<HTMLElement>()
+// Claim keyboard focus the moment a file lands (and again each time a different file replaces it
+// in the same mounted instance — props change, not remount). Reason: CliTerminalSurface.vue's
+// global findInTerminal shortcut (Ctrl/Cmd+F) only yields when document.activeElement is actually
+// inside `.filepreview` — without this, DOM focus stays wherever it last was (usually xterm's
+// hidden textarea) even though the user's attention has visibly moved to this reader, so Ctrl+F
+// opens the LEFT terminal's search instead of this document's own (2026-10-12 user-reported).
+watch(() => props.name, () => void nextTick(() => scrollEl.value?.focus()), { immediate: true })
 const wrap = ref(true)
-const fontScale = ref(1)
+// 1.2，非 1：Human 截图实测——默认 1 的 0.78rem/0.72rem 偏小，点两下 `+`（每下 +0.1）才到舒适阅读
+// 大小；直接把起点设在那两下落点上，省掉"每次打开都先点两下"这个重复动作。
+const fontScale = ref(1.2)
 const FONT_MIN = 0.8, FONT_MAX = 1.6
 function bumpFont(d: number): void {
   fontScale.value = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round((fontScale.value + d) * 10) / 10))
@@ -433,6 +443,23 @@ function toggleFind(): void {
   else void nextTick(() => findInputEl.value?.focus())
 }
 const findInputEl = ref<HTMLInputElement>()
+/** Already open, Ctrl/Cmd+F pressed again: send focus back and reselect the query (same "直接改词
+ *  重搜" convention as the terminal's own refocusTerminalSearch), not re-toggle closed. */
+function refocusFind(): void {
+  findInputEl.value?.focus()
+  findInputEl.value?.select()
+}
+/** Ctrl/Cmd+F while the reader has keyboard focus (see the `watch(() => props.name, …)` above):
+ *  judged by the exact same pure function CliTerminalSurface.vue uses for its own findInTerminal,
+ *  so "open vs refocus vs ignore" behaves identically — just pointed at this reader's own find bar
+ *  instead of the terminal's. */
+function onPreviewKeydown(e: KeyboardEvent): void {
+  handleFindShortcut(
+    e,
+    { active: true, matches: (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'f', open: findOpen.value },
+    { open: toggleFind, refocus: refocusFind },
+  )
+}
 
 async function copyText(text: string): Promise<void> {
   if (await copyTextToClipboard(text)) emit('toast', '已复制')
@@ -448,7 +475,9 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
     class="filepreview relative h-full overflow-auto"
     :data-fp-theme="theme"
     data-testid="file-preview"
+    tabindex="0"
     @scroll="onScroll"
+    @keydown="onPreviewKeydown"
   >
     <!-- reading-progress bar -->
     <div class="fp-progress"><span :style="{ transform: `scaleX(${progress})` }" /></div>
@@ -579,6 +608,9 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
   -webkit-user-select: text;
   user-select: text;
   scroll-behavior: smooth;
+  /* tabindex="0" so Ctrl/Cmd+F lands here (see the watch(() => props.name, …) focus call above);
+     it holds focus for as long as the reader is open, so a permanent ring would be noise, not signal. */
+  outline: none;
 }
 
 /* ── reading palette ──────────────────────────────────────────────────────────
