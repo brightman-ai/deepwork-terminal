@@ -13,10 +13,14 @@
  *    "中断"。这样按钮出现本身就说明了它此刻做什么，不需要再解释一遍。
  */
 
-export type SurfaceActionId = 'search' | 'to-bottom' | 'copy' | 'interrupt'
+export type SurfaceActionId = 'search' | 'page-up' | 'page-down' | 'delete' | 'to-bottom' | 'copy' | 'interrupt'
 
-/** 出场顺序。位置由这里定死，与可见性无关。 */
-export const SURFACE_ACTION_ORDER: readonly SurfaceActionId[] = ['search', 'to-bottom', 'copy', 'interrupt']
+/** 出场顺序。位置由这里定死，与可见性无关。
+ *  page-up/page-down/delete 插在 search 之后——2026-10-12 笔记本缺键补充：没有独立 PgUp/PgDn/
+ *  前向 Delete 键位的笔记本（常见于紧凑键盘）没法做这几件事，键态只是"缺"不是"条件"，所以跟
+ *  search 一样常驻可见，不挂判定。原有四项（to-bottom…）的相对顺序不动。 */
+export const SURFACE_ACTION_ORDER: readonly SurfaceActionId[] =
+  ['search', 'page-up', 'page-down', 'delete', 'to-bottom', 'copy', 'interrupt']
 
 /**
  * 「中断」发出去的字节：**Esc**。
@@ -45,8 +49,15 @@ export interface SurfaceActionDeps {
   openSearch(): void
   scrollToBottom(): void
   copySelection(): void
-  /** 往 PTY 里发一段原始字节。 */
+  /** 往 PTY 里发一段原始字节——走的是无分流的裸发送，Delete 这种"任何缓冲区下都该原样转发"
+   *  的键用它就够。PageUp/PageDown 不走这条：见 pageUp/pageDown。 */
   sendKey(sequence: string): void
+  /** PgUp/PgDn 需要「normal buffer 下滚 xterm 自己的 scrollback、alt-screen/tmux 下转发给
+   *  PTY」这层分流判断（CliTerminalSurface.vue 的 onSendKey 已经做好、已验证），所以单独两个
+   *  槽位，不能跟 sendKey 共用——直接裸发 \x1b[5~/\x1b[6~ 在普通 shell 下会静默无反应
+   *  （shell 根本不认这两个字节，只有 scrollback 才是这块屏幕上唯一存着历史的地方）。 */
+  pageUp(): void
+  pageDown(): void
 }
 
 export interface SurfaceAction {
@@ -57,8 +68,16 @@ export interface SurfaceAction {
   hint: string
   /** 图标角上的小数字；'' = 不显示。 */
   badge: string
+  /** 非空 = 渲染成键帽文字而不是图标。只给"补一个物理键"的动作用：用户找的就是 PgUp/Del 这个键，
+   *  键名本身就是最直白的意符（2026-10-13 实测：一排图标只有搜索看得懂，Delete 图标还长得像退格）。 */
+  keycap: string
   visible: boolean
   run(): void
+}
+
+/** tooltip 全文：主文 + 第二段。按钮自己不再带 title —— 原生 title 要停一秒多才出、还会和这条叠两层。 */
+export function surfaceActionTip(a: Pick<SurfaceAction, 'label' | 'hint'>): string {
+  return a.hint ? `${a.label} · ${a.hint}` : a.label
 }
 
 /** 三位数以上不再逐个数——"99+"就够回答"下面积了很多"这个问题了。 */
@@ -81,36 +100,67 @@ export function buildSurfaceActions(
   const byId: Record<SurfaceActionId, SurfaceAction> = {
     search: {
       id: 'search',
-      label: '搜索',
+      label: '在终端里搜索',
       hint: searchHint,
       badge: '',
+      keycap: '',
       // 常驻：它是这一行唯一一个"什么时候都可能想要"的动作，也是此前只有快捷键、意符完全缺失的那个。
       visible: true,
       run: deps.openSearch,
     },
+    'page-up': {
+      id: 'page-up',
+      label: '向上翻页（PageUp）',
+      hint: '看更早的输出',
+      badge: '',
+      keycap: 'PgUp',
+      visible: true, // 笔记本缺键，不是条件动作——任何时候都可能想翻页，见上方头注
+      run: deps.pageUp,
+    },
+    'page-down': {
+      id: 'page-down',
+      label: '向下翻页（PageDown）',
+      hint: '往新的方向翻',
+      badge: '',
+      keycap: 'PgDn',
+      visible: true,
+      run: deps.pageDown,
+    },
+    delete: {
+      id: 'delete',
+      label: '向前删除（Delete）',
+      hint: '删掉光标右边的一个字，不是退格',
+      badge: '',
+      keycap: 'Del',
+      visible: true,
+      run: () => deps.sendKey('\x1b[3~'),
+    },
     'to-bottom': {
       id: 'to-bottom',
-      label: '回到最新',
+      label: '回到最新输出',
       // 数字回答的是"我错过了多少"，不是装饰：贴底时这个动作根本不存在，所以它一出现就一定有数可说。
       hint: state.newLinesBelow > 0 ? `${state.newLinesBelow} 行新输出` : '',
       badge: badgeFor(state.newLinesBelow),
+      keycap: '',
       visible: !state.atBottom,
       run: deps.scrollToBottom,
     },
     copy: {
       id: 'copy',
-      label: '复制选中',
+      label: '复制选中的文字',
       hint: '',
       badge: '',
+      keycap: '',
       // 有选区才出现 = 语义无歧义（"复制什么"永远有答案），顺带精确解掉浏览器/手机上最疼的那一下。
       visible: state.hasSelection,
       run: deps.copySelection,
     },
     interrupt: {
       id: 'interrupt',
-      label: '中断',
+      label: '中断 agent',
       hint: '发送 Esc — 停止当前生成，会话保留',
       badge: '',
+      keycap: '',
       visible: state.agentRunning,
       run: () => deps.sendKey(INTERRUPT_SEQUENCE),
     },

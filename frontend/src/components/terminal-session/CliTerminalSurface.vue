@@ -1,5 +1,6 @@
 <template>
   <div
+    ref="surfaceRootRef"
     class="cli-terminal-surface"
     data-testid="cli-terminal-surface"
     :class="{ 'is-mobile': isMobile, 'is-desktop': !isMobile }"
@@ -34,6 +35,9 @@
          (TopTabBar ServerIcon + peer name) and the ConnectionStatus widget already carries the
          target-label, so a standalone 本机/远端 chip in this row was pure redundancy. -->
     <div class="surface-status-row" :class="{ 'is-tmux': tmuxAttached }" data-testid="surface-status-row">
+      <!-- 一个 Provider 管整行的提示：从一个按钮滑到相邻按钮时提示直接切换，不再重等一次延迟。
+           它不产生 DOM，flex 布局不受影响。 -->
+      <TooltipProvider :delay-duration="250" :skip-delay-duration="400">
       <div class="ssr-main">
         <TmuxPaneBar
           v-if="tmuxReady && tmuxAttached"
@@ -60,21 +64,27 @@
              tmux 那半边一个字未动。 -->
         <template v-else-if="tmuxReady">
           <div class="ssr-actions" data-testid="surface-actions">
-            <button
-              v-for="a in surfaceActions"
-              :key="a.id"
-              class="ssr-action"
-              :class="{ 'is-alert': a.id === 'interrupt' }"
-              type="button"
-              :title="a.hint ? `${a.label} · ${a.hint}` : a.label"
-              :aria-label="a.label"
-              :data-testid="`surface-action-${a.id}`"
-              @click="a.run()"
-            ><component :is="a.icon" :size="15" aria-hidden="true" /><span
-              v-if="a.badge"
-              class="ssr-action-badge"
-              :data-testid="`surface-action-badge-${a.id}`"
-            >{{ a.badge }}</span></button>
+            <!-- 键帽文字（PgUp/PgDn/Del）代替图标：这几个按钮补的就是一个物理键，键名本身最直白；
+                 其余用图标 + 即时提示。不再挂原生 title —— 它要停一秒多才出，还会和提示叠两层。 -->
+            <HoverTip v-for="a in surfaceActions" :key="a.id" :label="a.label" :hint="a.hint">
+              <button
+                class="ssr-action"
+                :class="{ 'is-alert': a.id === 'interrupt', 'is-keycap': !!a.keycap }"
+                type="button"
+                :aria-label="surfaceActionTip(a)"
+                :data-testid="`surface-action-${a.id}`"
+                @click="a.run()"
+              ><span v-if="a.keycap" class="ssr-keycap">{{ a.keycap }}</span><component
+                :is="a.icon"
+                v-else
+                :size="15"
+                aria-hidden="true"
+              /><span
+                v-if="a.badge"
+                class="ssr-action-badge"
+                :data-testid="`surface-action-badge-${a.id}`"
+              >{{ a.badge }}</span></button>
+            </HoverTip>
           </div>
           <!-- 窄屏降级：这一格只占剩余宽度（flex:1 + min-width:0），文字超出就省略号，永远不换行、
                不把动作或右侧心跳挤走；再窄先砍 cwd 档（价值最低），最后整格收起，按钮一个不砍。 -->
@@ -113,31 +123,26 @@
         data-testid="surface-connection-status"
         @refresh="wsReconnect"
       />
-      <CopyModeButton
+      <!-- 远程终端时按钮是 disabled 的：禁用元素收不到指针事件，这条提示出不来，原因改由按钮
+           自带的原生 title 说（CopyModeButton 只在 disabled 时保留 title）。 -->
+      <HoverTip
         v-if="!isMobile"
-        placement="status"
-        :disabled="props.isRemote"
-        @open="openCopyMode"
-      />
-      <!-- Desktop-only compose toggle. Deliberately a SIBLING of ssr-main, not inside it: that
-           zone swaps between TmuxPaneBar and the non-tmux action row (surfaceActionBar.ts) and
-           hides whichever isn't current, but compose must stay reachable in BOTH — same as
-           mobile's compose toggle, which lives in its own always-present Toolbar row rather than
-           inside the tmux-conditional action bar. -->
-      <button
-        v-if="!isMobile"
-        class="ssr-compose-toggle"
-        type="button"
-        :class="{ 'is-active': desktopComposeOpen }"
-        aria-label="输入条"
-        :title="`输入条 (${composeShortcutLabel}) — 先在本地打好整段文字，发送时才一次性送进终端`"
-        data-testid="surface-compose-toggle"
-        @click="toggleDesktopCompose"
+        label="回看历史（Copy Mode）"
+        hint="把这个终端的全部输出打开成可滚动、可搜索、可复制的一页"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-        </svg>
-      </button>
+        <CopyModeButton
+          placement="status"
+          :disabled="props.isRemote"
+          @open="openCopyMode"
+        />
+      </HoverTip>
+      <!-- 宿主往这一行里补的按钮（分屏/放大，见 CliTerminalView）。放在这一行而不是另起一行：
+           2026-10-13 Human 实测"两行占我的屏幕空间"。
+           必须在最右端、心跳的**右边**：心跳是内容定宽的（有延迟才显示 "1ms"、有流量才显示速率），
+           放在它左边的按钮会跟着它的宽度左右跳（实测：点"放大"落到了心跳上）。右端这一段全是定宽
+           元素、锚在行尾，所以这里的按钮一个像素都不会动。 -->
+      <slot name="status-extra" />
+      </TooltipProvider>
     </div>
 
     <!-- 终端区域 -->
@@ -174,6 +179,38 @@
            this pill, which is exactly the case that used to look "silent" and get retried
            into 3-4 duplicate paths in the PTY. -->
       <UploadProgressFloat :entries="pasteResolver.uploads.value" @dismiss="pasteResolver.dismissUpload" />
+      <!-- 宿主盖在终端上的纯视觉浮层（如分屏切换焦点时闪一下的 LEFT/RIGHT）。只是 DOM，不经过
+           xterm、不进 PTY 字节流，所以 scrollback、回看、F5 回放里都不会留下它。 -->
+      <slot name="overlay" />
+      <!-- Desktop-only compose toggle, floating bottom-LEFT of the terminal itself (moved from
+           bottom-right 2026-10-13, Human: "放到屏幕左边" — see .compose-fab CSS) (not the
+           top status row) — the open panel is bottom-anchored (ComposeBarDesktop.vue), so the
+           control that opens it now sits right next to where it appears instead of forcing a
+           top-to-bottom mouse trip every time (2026-10-13, Human-reported: "位置太远了,点不到").
+           Nudged up when the search bar is open (TerminalSearchBar.vue is bottom:0 full-width)
+           so the two never fight for the same pixels — same convention as the top-right floats'
+           header comment on z-index ownership. Stays visible (and highlighted) while compose is
+           open: same toggle re-closes it, no second "Esc" affordance needed to find. -->
+      <TooltipProvider v-if="!isMobile" :delay-duration="250">
+        <HoverTip
+          side="right"
+          :label="desktopComposeOpen ? `收起输入条（${composeShortcutLabel}）` : `输入条（${composeShortcutLabel}）`"
+          hint="先在本地打好整段文字，发送时才一次性送进终端"
+        >
+          <button
+            class="compose-fab"
+            type="button"
+            :class="{ 'is-active': desktopComposeOpen, 'is-raised': terminalSearchOpen }"
+            aria-label="输入条"
+            data-testid="surface-compose-toggle"
+            @click="toggleDesktopCompose"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+            </svg>
+          </button>
+        </HoverTip>
+      </TooltipProvider>
       <!-- KeyCastr keystroke display (mobile only). Toggled from the main Toolbar's keycast button;
            defaults ON. No left-edge HUD tab — the toolbar is the SSOT toggle.
            Lives INSIDE .terminal-body (its `position: relative` is the anchor) because the pills are
@@ -301,14 +338,16 @@
         @attach="onAttachClick"
       />
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
-      <ComposeBar v-if="activeMode === 'compose'" :draft="composeDraft" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
+      <ComposeBar v-if="activeMode === 'compose'" ref="composeBarRef" :draft="composeDraft" :session-id="sessionId" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
 
     <!-- Desktop compose bar — real flex row (see ComposeBarDesktop.vue), sibling of .terminal-body
          so it pushes the terminal up instead of covering it, same as mobile's bottom-bar above. -->
     <ComposeBarDesktop
       v-if="!isMobile && desktopComposeOpen"
+      ref="composeDesktopRef"
       :draft="desktopComposeDraft"
+      :session-id="sessionId"
       @send="onDesktopComposeSend"
       @close="closeDesktopCompose"
     />
@@ -458,6 +497,8 @@ let drawerWidthCssVarOwner: string | null = null
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, type Component } from 'vue'
 import { ArrowDownToLine, Copy, Search, Square } from 'lucide-vue-next'
+import { TooltipProvider } from 'reka-ui'
+import HoverTip from '@terminal/components/terminal-session/HoverTip.vue'
 import { Terminal } from '@xterm/xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { createTerminalConnectionGate } from '@terminal/composables/cli/terminalConnectionGate'
@@ -490,6 +531,7 @@ import CopyModeView from '@terminal/components/terminal-session/CopyModeView.vue
 import type { TerminalFindOptions } from '@terminal/components/terminal-session/terminalSearchOptions'
 import { handleFindShortcut } from '@terminal/components/terminal-session/terminalFindShortcut'
 import {
+  surfaceActionTip,
   surfaceSlot,
   visibleSurfaceActions,
   type SurfaceActionId,
@@ -564,6 +606,13 @@ const props = defineProps<{
    */
   dwRollup?: Record<EffectiveStatus, number>
   dwOverviewOpen?: boolean
+  /**
+   * 落在**任何终端表面之外**的粘贴（焦点在页面其它地方）由谁处理。每个表面都在 document 上挂了
+   * 粘贴监听；未分屏时一个 tab 只有一个表面，谁处理都一样；分屏时两格都是 active，若都处理，
+   * 一张图会被上传两次、引用打进两格。宿主（CliTerminalView）只给"当前格"传 true。
+   * 落在某个表面**之内**的粘贴永远只归那个表面，与本开关无关。不传 = true。
+   */
+  pasteFallback?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -695,6 +744,9 @@ const keystrokeHudVisible = ref(true)
 const xtermRef = ref<InstanceType<typeof XtermTerminal>>()
 const mobileOverlayRef = ref<InstanceType<typeof MobileOverlay>>()
 const terminalBodyRef = ref<HTMLDivElement>()
+const surfaceRootRef = ref<HTMLDivElement>()
+const composeBarRef = ref<InstanceType<typeof ComposeBar>>()
+const composeDesktopRef = ref<InstanceType<typeof ComposeBarDesktop>>()
 const attachInputRef = ref<HTMLInputElement>()
 const bottomBarRef = ref<HTMLDivElement>()
 
@@ -718,16 +770,20 @@ function openTerminalSearch(): void {
 function refocusTerminalSearch(): void {
   terminalSearchBarRef.value?.focus(true)
 }
-/** 键盘和动作条按钮走同一条：没开就开，已开就送回焦点 —— 两个入口一个行为。 */
-function openOrRefocusTerminalSearch(): void {
-  if (terminalSearchOpen.value) refocusTerminalSearch()
-  else openTerminalSearch()
-}
 function closeTerminalSearch(): void {
   terminalSearchOpen.value = false
   xtermRef.value?.clearSearch()
   // Escape/关闭必须把焦点还给终端 — 否则会停在一个已经卸载的 <input> 上，敲键盘毫无反应。
   void nextTick(() => xtermRef.value?.terminal?.()?.focus())
+}
+/** 工具栏按钮专用：真正的开关（没开就开，已开就关），不是 refocus —— 一枚图标按钮，用户预期
+ *  点第二下收起，不是"又选中一遍查询词"。2026-10-12 用户实报：点两下才能关，得去搜索条自己的
+ *  × 才能收起，点击次数太多。键盘快捷键那条（onFindShortcutKeydown → handleFindShortcut，直接
+ *  传 openTerminalSearch/refocusTerminalSearch 这对）刻意不动：那是已验证过的"改词重搜"手感，
+ *  键盘场景下"再按一次"从不是用户想关闭的意思（想关用 Esc）。两个入口从此各自对应各自的直觉。 */
+function toggleTerminalSearch(): void {
+  if (terminalSearchOpen.value) closeTerminalSearch()
+  else openTerminalSearch()
 }
 function onTerminalSearch(term: string, options: TerminalFindOptions, incremental: boolean): void {
   xtermRef.value?.findNext(term, options, incremental)
@@ -753,6 +809,11 @@ function onFindShortcutKeydown(e: KeyboardEvent): void {
   // 自己的搜索（2026-09-08 实测；Linux 上 findInTerminal 默认 Ctrl+Shift+F，正是复制模式里的搜索键）。
   // 让位 = 不碰 event，让它继续走到 CopyModeView。
   if (copyModeOpen.value) return
+  // 抽屉里的文档预览（FilePreview.vue）打开文件时会自己抓焦点，并且挂了同一个 handleFindShortcut
+  // 判定、指向它自己的查找条 —— 这里同样让位：不然它永远抢不到 Ctrl/Cmd+F（document 捕获阶段、
+  // 挂载即注册，比"用户点开某个文件"更早），表现正是用户实报的"预览搜不了，搜的是左边 xterm"
+  // (2026-10-12)。判定用真实 DOM 焦点而非 tab-active，因为预览和终端同属一个 active 的 tab。
+  if (document.activeElement?.closest('.filepreview')) return
   handleFindShortcut(
     e,
     {
@@ -835,7 +896,8 @@ const composeShortcutLabel = computed(() =>
   bindingLabel(bindingFor(shortcutsConfig.value, 'toggleComposeDesktop')),
 )
 
-const SURFACE_ACTION_ICON: Record<SurfaceActionId, Component> = {
+/** page-up/page-down/delete 不在这里：它们渲染成键帽文字（SurfaceAction.keycap）。 */
+const SURFACE_ACTION_ICON: Partial<Record<SurfaceActionId, Component>> = {
   search: Search,
   'to-bottom': ArrowDownToLine,
   copy: Copy,
@@ -851,10 +913,15 @@ const surfaceActions = computed(() =>
       agentRunning: surfaceAgentRunning.value,
     },
     {
-      openSearch: openOrRefocusTerminalSearch,
+      openSearch: toggleTerminalSearch,
       scrollToBottom: scrollTerminalToBottom,
       copySelection: () => { void copyTerminalSelection() },
       sendKey: (seq: string) => { sendBinary(encoder.encode(seq)) },
+      // onSendKey, 不是裸 sendBinary——normal buffer 下把 PgUp/PgDn 滚 xterm 自己的
+      // scrollback，alt-screen/tmux 下转发给 PTY，是已验证过的同一套分流（见 onSendKey 内
+      // 对 '\x1b[5~'/'\x1b[6~' 的分支），工具栏按钮和物理键盘走同一个判断，不会有两种行为。
+      pageUp: () => onSendKey('\x1b[5~'),
+      pageDown: () => onSendKey('\x1b[6~'),
     },
     // 快捷键文案取自用户自己的配置（可改键），措辞用 bindingLabel —— 和设置页里显示的逐字同一套。
     bindingLabel(bindingFor(shortcutsConfig.value, 'findInTerminal')),
@@ -1797,6 +1864,25 @@ async function onClipboardPaste(e: ClipboardEvent) {
       return
     }
   }
+  // 一次粘贴只归一个表面（分屏时两格都在 document 上监听，见 pasteFallback 头注）。
+  const target = e.target instanceof Element ? e.target : null
+  const owner = target?.closest('.cli-terminal-surface')
+  if (owner ? owner !== surfaceRootRef.value : props.pasteFallback === false) return
+
+  // 焦点在输入条里贴图/贴文件：引用插到输入框光标处（所见即所得），不绕过输入框直接打进终端
+  // （2026-10-13 Human 实测：路径跑进了 claude 的输入行，"割裂"）。纯文本粘贴 resolver 不拦，
+  // 浏览器默认行为本来就插进输入框。选区在这一刻快照——上传是异步的。
+  const composeInput = target?.closest('[data-compose-input]')
+  if (composeInput instanceof HTMLTextAreaElement) {
+    const anchor = { start: composeInput.selectionStart, end: composeInput.selectionEnd, value: composeInput.value }
+    await pasteResolver.handlePasteEvent(e, (text) => {
+      const box = isMobile.value ? composeBarRef.value : composeDesktopRef.value
+      if (!box) return false
+      box.insertAtCursor(text, anchor)
+      return true
+    })
+    return
+  }
   await pasteResolver.handlePasteEvent(e)
 }
 
@@ -2643,7 +2729,22 @@ function closeCopyMode(): void {
   void nextTick(() => { if (props.active) xtermRef.value?.terminal?.()?.focus() })
 }
 
-defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, openCopyMode, copyModeOpen })
+// 这个 tab 当前聚焦的 tmux window（pane bar 的"pane"）index；非 tmux 或还没拿到快照时为 null。
+// 供 useCliState 的 URL 深链读（pane 深链，见 tabDeepLink.ts 头注），与 tmuxAttached 同一来源
+// （tmux.windows），不另造一份判定。
+const tmuxActiveWindowIndex = computed<number | null>(() => tmux.windows.value.find((w) => w.active)?.index ?? null)
+// URL → pane 的那一半：外部驱动的 window 切换（前进/后退/手改地址栏/带 p 的深链打开），直接复用
+// pane bar 点击走的同一条 tmux.selectWindow（best-effort，SSOT）。
+function selectTmuxWindow(index: number): void {
+  void tmux.selectWindow(index)
+}
+
+/** 把键盘焦点交给这个终端（分屏"切换焦点"用）。 */
+function focusTerminal(): void {
+  xtermRef.value?.terminal?.()?.focus()
+}
+
+defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, copyModeOpen })
 </script>
 
 <style scoped>
@@ -2757,6 +2858,22 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
 .ssr-action:active { transform: scale(0.92); }
 /* 触屏上 24px 太小 —— 手指目标放大到 30px，但视觉尺寸（图标）不变。 */
 .is-mobile .ssr-action { width: 30px; height: 30px; }
+/* 键帽按钮：宽度随键名走，高度与图标按钮一致，所以这一行的高度不变。 */
+.ssr-action.is-keycap { width: auto; padding: 0 3px; }
+.is-mobile .ssr-action.is-keycap { width: auto; padding: 0 5px; }
+/* 画成一枚小键帽（底边加厚 = 键的侧面），一眼看出"这是一个键"而不是一个抽象图标。 */
+.ssr-keycap {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 4px 0;
+  border: 1px solid currentColor;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  font: 600 0.6rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.01em;
+  text-align: center;
+  opacity: 0.9;
+}
 /* 「中断」是唯一一个会改变正在跑的东西的动作，hover 时用红色说明这一点（静止态仍与其余同重量，
    它不该在没事发生时也喊）。 */
 .ssr-action.is-alert:hover { color: #ff6b6b; background: rgba(255, 82, 82, 0.12); }
@@ -2838,22 +2955,36 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   padding: 0 8px;
 }
 
-.ssr-compose-toggle {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 100%;
-  margin-right: 4px;
-  background: transparent;
-  border: none;
-  color: hsl(var(--muted-foreground, 240 4% 65%));
+/* Floating compose toggle — bottom-right of the terminal itself, NOT the top status row (see
+   its template comment for why). `bottom`/`right` picked to clear TerminalSearchBar (bottom:0,
+   full-width, z-index:60) when raised, and to sit below the top-right notify/upload floats'
+   territory rather than compete with it — four corners of .terminal-body, four different jobs. */
+/* 左下角（2026-10-13 Human："放到屏幕左边，好操作也好看到"）：终端文字左对齐，眼睛和鼠标都在
+   左侧；宽屏上右下角离得太远。代价是它会压住最后几行的行首几列 —— 所以静止时半透明（看得见
+   底下的字），鼠标移上去或输入条打开时才实心。 */
+.compose-fab {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 50;
+  display: inline-grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: rgba(30, 30, 46, 0.92);
+  border: 1px solid #383850;
+  color: #b0b0c8;
   cursor: pointer;
-  transition: color 0.1s, background 0.1s;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  opacity: 0.55;
+  transition: bottom 0.15s ease, opacity 0.12s, color 0.1s, background 0.1s, border-color 0.1s;
 }
-.ssr-compose-toggle:hover { color: hsl(var(--foreground, 0 0% 95%)); background: rgba(255,255,255,0.06); }
-.ssr-compose-toggle.is-active { color: #4a80d8; background: rgba(74,128,216,0.14); }
+.compose-fab:hover { opacity: 1; color: #e8e8f8; background: rgba(42, 43, 62, 0.95); }
+.compose-fab:focus-visible { opacity: 1; }
+.compose-fab.is-active { opacity: 1; color: #4a80d8; border-color: #4a80d8; background: rgba(26, 58, 90, 0.92); }
+.compose-fab.is-raised { bottom: 56px; }
 
 /* WS7 primary entries — float top-right above xterm; small and unobtrusive so they
    never cover terminal content the user is reading. A quick notify bell sits beside

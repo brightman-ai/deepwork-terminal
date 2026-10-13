@@ -11,6 +11,9 @@ type PasteSource =
   | 'native-clipboard-path'
   | 'manual-attach'
 
+/** 一次粘贴的文件引用送达处：返回 false = 没送到（终端未连上 / 输入框已关）。 */
+export type PasteSink = (text: string) => boolean
+
 export interface CliPasteResolverOptions {
   sessionId: () => string
   httpBase?: () => string | undefined
@@ -119,7 +122,13 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
   let lastFingerprint = ''
   let lastWasIntercepted = false
 
-  async function handlePasteEvent(e: ClipboardEvent): Promise<boolean> {
+  /**
+   * `sink`：这一次粘贴产生的文件引用（`@./tmp/…`）送去哪。不传 = 终端（options.pasteText）。
+   * 输入条（compose）里贴图时由宿主传入"插到输入框光标处"——引用出现在用户正在写的那段话里，
+   * 所见即所得，而不是绕过输入框直接打进终端（2026-10-13 Human 实测："割裂"）。纯文本粘贴不经过
+   * sink：返回 false，交给浏览器默认行为，本来就会插进获得焦点的输入框。
+   */
+  async function handlePasteEvent(e: ClipboardEvent, sink?: PasteSink): Promise<boolean> {
     if (options.isActive && !options.isActive()) return false
 
     const snapshot = snapshotClipboardEvent(e)
@@ -162,7 +171,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
       const nativePaths = await readNativeClipboardPaths(trace, env)
       if (nativePaths.length > 0) {
         metrics.nativePathInjections++
-        injectPaths(nativePaths, 'native-clipboard-path', trace)
+        injectPaths(nativePaths, 'native-clipboard-path', trace, sink)
         return true
       }
       metrics.nativeMissFallbacks++
@@ -183,7 +192,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
       const source: PasteSource = snapshot.files.every(file => file.type.startsWith('image/'))
         ? 'paste-event-image'
         : 'paste-event-file'
-      await uploadAndInjectFiles(snapshot.files, source, trace)
+      await uploadAndInjectFiles(snapshot.files, source, trace, sink)
       return true
     }
 
@@ -194,7 +203,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
       const nativePaths = await readNativeClipboardPaths(trace, env)
       if (nativePaths.length > 0) {
         metrics.nativePathInjections++
-        injectPaths(nativePaths, 'native-clipboard-path', trace)
+        injectPaths(nativePaths, 'native-clipboard-path', trace, sink)
         return true
       }
     }
@@ -205,7 +214,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
       metrics.interceptedEvents++
       const files = await readAsyncClipboardImages(trace)
       if (files.length > 0) {
-        await uploadAndInjectFiles(files, 'async-clipboard-image', trace)
+        await uploadAndInjectFiles(files, 'async-clipboard-image', trace, sink)
         return true
       }
       if (snapshot.hasFileHint) {
@@ -230,7 +239,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
       lastWasIntercepted = true
       metrics.interceptedEvents++
       if (env.canUseServerNativeClipboard) {
-        injectPaths(uriPaths, 'native-clipboard-path', trace)
+        injectPaths(uriPaths, 'native-clipboard-path', trace, sink)
       } else {
         openAttachmentFallback('remote-file-uri', trace, snapshot, env)
       }
@@ -269,7 +278,12 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     await uploadAndInjectFiles(files, source, trace)
   }
 
-  async function uploadAndInjectFiles(files: File[], source: PasteSource, trace: TraceContext): Promise<boolean> {
+  async function uploadAndInjectFiles(
+    files: File[],
+    source: PasteSource,
+    trace: TraceContext,
+    sink?: PasteSink,
+  ): Promise<boolean> {
     if (files.length === 0) return false
     const uploadFiles = await dedupeFilesForUpload(files, source, trace)
     log.info('cli.clipboard.upload_batch_started', {
@@ -286,7 +300,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     for (const file of uploadFiles) {
       const mime = file.type || 'application/octet-stream'
       const filename = file.name || uploadFallbackName(mime)
-      const result = await runUploadWithRetry(file, mime, filename, source, trace)
+      const result = await runUploadWithRetry(file, mime, filename, source, trace, sink)
       if (result.savedPath) {
         paths.push(result.textForPTY)
         metrics.uploadFiles++
@@ -308,7 +322,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
       return false
     }
 
-    injectPaths(paths, source, trace)
+    injectPaths(paths, source, trace, sink)
     return true
   }
 
@@ -331,6 +345,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     filename: string,
     source: PasteSource,
     trace: TraceContext,
+    sink?: PasteSink,
   ): Promise<import('./useClipboardPaste').PasteResult> {
     const attempt = (attemptTrace: TraceContext, revealImmediately: boolean): Promise<import('./useClipboardPaste').PasteResult> =>
       clipboardPaste.uploadFile(file, mime, {
@@ -343,7 +358,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
             const retryTrace = createTrace('terminal/clipboard')
             const result = await attempt(retryTrace, true)
             if (result.savedPath) {
-              injectPaths([result.textForPTY], source, retryTrace)
+              injectPaths([result.textForPTY], source, retryTrace, sink)
             }
           })()
         },
@@ -478,7 +493,7 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     }
   }
 
-  function injectPaths(paths: string[], source: PasteSource, trace: TraceContext): void {
+  function injectPaths(paths: string[], source: PasteSource, trace: TraceContext, sink?: PasteSink): void {
     const uniquePaths = uniqueOrderedPaths(paths)
     const deduped = paths.length - uniquePaths.length
     if (deduped > 0) metrics.dedupedInjectedPaths += deduped
@@ -486,9 +501,11 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     // file reference instead of literal text. Idempotent (won't double-prefix).
     const referencePaths = withReferencePrefix(uniquePaths)
     const payload = formatPathsForPty(referencePaths)
-    if (!options.pasteText(payload)) {
+    if (!(sink ?? options.pasteText)(payload)) {
       // 终端没连上时注入会静默丢失——上传成功但输入框里什么都没有，比失败更让人困惑。
-      options.hudRecord?.('error', '终端尚未连接，上传的文件引用没有送达。')
+      options.hudRecord?.('error', sink
+        ? '输入条已关闭，上传的文件引用没有送达。'
+        : '终端尚未连接，上传的文件引用没有送达。')
       return
     }
     metrics.injectedPayloads++

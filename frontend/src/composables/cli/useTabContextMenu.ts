@@ -24,6 +24,17 @@ export interface TabMenuTarget {
   name: string
   cwd?: string
   isTmux?: boolean
+  /** 这个 tab 当前是不是已经分屏了（scope: terminal-split）——决定菜单显示"左右/上下分屏"
+   *  两项，还是单独一项"取消分屏"。undefined 当 false（未分屏）处理。 */
+  isSplit?: boolean
+  /** 已分屏时的方向——只用来把"关闭哪一格"说成人话（右边/下边那格），不是门控。 */
+  splitOrientation?: 'row' | 'column'
+  /** 当前视口允不允许分屏（移动端不提供入口，见 spec §4 非目标）。按 target 而非 actions 门控，
+   *  是因为它要跟着视口宽度实时变——actions 在 `useTabContextMenu(actions)` 调用时就固定了，
+   *  没法对后续的 resize 保持反应性；target 每次打开菜单都重新传入，天然是热的。undefined 当
+   *  true（允许）处理，保持与 `isSplit` 同一种"不传=默认开"的读法。已分屏的 tab 不受这条限制
+   *  （"取消分屏"任何视口都该能点，收起比放出宽松）。 */
+  splitAllowed?: boolean
 }
 
 /** What the host shell can actually do. `closeOthers` is optional — a shell that cannot express it
@@ -56,6 +67,12 @@ export interface TabMenuActions {
    *  和「新建终端」是两条路而不是一条：这条不杀任何进程（你正在跑的东西继续跑），代价是它只对
    *  这个 shell 之后启动的子进程生效 —— 已经在跑的那个 `claude` 不会因此换供应商。 */
   applyEnvHere(id: string): void
+  /** 原生左右/上下分屏这个 tab（scope: terminal-split）。可选，像 `closeOthers`——宿主不传就不渲染
+   *  这组条目，而不是渲染一个点了没反应的死控件（本轮非目标：移动端不提供这组入口，见 spec §4）。 */
+  splitTab?(id: string, orientation: 'row' | 'column'): void
+  /** 取消分屏，tab 回到单格。与 splitTab 成对——传了一个就该传另一个，分开可选只是为了复用
+   *  "可选回调=条目消失"这同一套门控，不代表两者该被分别启用。 */
+  unsplitTab?(id: string): void
 }
 
 export interface TabMenuItem {
@@ -119,6 +136,27 @@ export function useTabContextMenu(actions: TabMenuActions) {
         run: () => run(() => actions.applyEnvHere(t.id)),
       },
     ]
+    // 分屏（scope: terminal-split）。未分屏 → 两个方向各一项；已分屏 → 一项"取消分屏"，不与
+    // "分屏"同屏共存（分屏了就不该再问"往哪分"）。宿主不传回调 = 这组条目整体不出现。
+    if (!t.isSplit) {
+      if (actions.splitTab && t.splitAllowed !== false) {
+        list.push(
+          { key: 'split-row', label: '左右分屏', run: () => run(() => actions.splitTab!(t.id, 'row')) },
+          { key: 'split-column', label: '上下分屏', run: () => run(() => actions.splitTab!(t.id, 'column')) },
+        )
+      }
+    } else if (actions.unsplitTab) {
+      // 取消分屏 = 结束第二格的 session（里面的程序和输出都没了），所以说清关的是哪一格、并归入
+      // danger 组（2026-10-13 Human："可能会丢东西……要显化"）。它本来就排在 danger 组紧前面，
+      // 标成 danger 后 "danger 项连续成组" 这条不变量照样成立。
+      const place = t.splitOrientation === 'column' ? '下边' : t.splitOrientation === 'row' ? '右边' : '第二'
+      list.push({
+        key: 'unsplit',
+        label: `关闭${place}那格（取消分屏）`,
+        danger: true,
+        run: () => run(() => actions.unsplitTab!(t.id)),
+      })
+    }
     // Not offered for tmux tabs: see TabMenuTarget.isTmux. Absent rather than disabled — a
     // disabled entry still implies "this could work here", which isn't true for tmux.
     if (!t.isTmux) {

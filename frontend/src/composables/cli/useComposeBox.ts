@@ -24,8 +24,43 @@ import { useComposeSendStrategy } from '@terminal/composables/cli/useComposeSend
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const DRAFT_KEY = 'cli-compose-draft'
+/** Manually-dragged textarea height (px) — a UI preference, not content, so it is intentionally
+ *  ONE global key shared across every tab/session, same as "I like a taller box" would be if this
+ *  were a settings toggle instead of a drag gesture. */
+const HEIGHT_KEY = 'cli-compose-height'
 const HISTORY_MAX = 15
 const UNDO_VISIBLE_MS = 6000
+
+/** 粘贴那一刻输入框的选区快照——上传是异步的，完成时用它把引用放回用户贴的那个位置。 */
+export interface ComposeSelectionAnchor {
+  start: number
+  end: number
+  /** 快照时的全文；完成时全文已变（用户继续打了字）就不信快照位置，改用当时的光标。 */
+  value: string
+}
+
+/**
+ * 把一段文件引用（`@./tmp/clip/x.png `）拼进输入框文本的 [start,end) 处，返回新文本和光标位置。
+ * 两侧补空格只为"和相邻文字分开"：前面紧贴非空白字符就补一个，后面紧贴非空白就保留引用自带的
+ * 尾随空格，否则去掉，避免出现双空格。
+ */
+export function spliceAtSelection(
+  value: string,
+  start: number,
+  end: number,
+  insert: string,
+): { value: string; caret: number } {
+  const s = Math.max(0, Math.min(start, value.length))
+  const e = Math.max(s, Math.min(end, value.length))
+  const before = value.slice(0, s)
+  const after = value.slice(e)
+  const core = insert.trim()
+  if (!core) return { value, caret: s }
+  const lead = before && !/\s$/.test(before) ? ' ' : ''
+  const trail = after && /^\s/.test(after) ? '' : ' '
+  const piece = lead + core + trail
+  return { value: before + piece + after, caret: before.length + piece.length }
+}
 
 export interface UseComposeBoxOptions {
   /** Cap on visible lines before the box scrolls internally instead of growing further. Mobile's
@@ -39,6 +74,13 @@ export interface UseComposeBoxOptions {
    *  A getter, not a Ref, so each host's own `defineProps<{draft?: string}>()` stays the SSOT for
    *  its own prop — this module just reads it. */
   draft: () => string | undefined
+  /** Which tab/session this draft belongs to — scopes the localStorage draft key so two tabs
+   *  stop clobbering each other's in-progress text (previously ONE global key for every tab).
+   *  A getter for the same reason `draft` is one: the host's own session id can change under an
+   *  already-mounted instance (e.g. ResourceDrawer reusing one compose box across drawer opens).
+   *  Omit it to keep the pre-existing single-global-draft behavior (host doesn't have a stable id
+   *  to key on). */
+  draftScope?: () => string | undefined
   /** Focus strategy. Mobile must dodge the soft-keyboard's viewport jump (see
    *  useVisualKeyboardInset); desktop has no such thing — a plain `el?.focus()` is correct there.
    *  Caller decides; this module has no opinion on what a device's keyboard does to the viewport. */
@@ -78,12 +120,19 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     opts.focusEl(textareaRef.value)
   }
 
-  // --- Draft persistence ---
+  // --- Draft persistence (per-tab: DRAFT_KEY suffixed with draftScope when the host has one) ---
+  function draftKey(): string {
+    const scope = opts.draftScope?.()
+    return scope ? `${DRAFT_KEY}:${scope}` : DRAFT_KEY
+  }
   function saveDraft() {
-    try { localStorage.setItem(DRAFT_KEY, text.value) } catch {}
+    try { localStorage.setItem(draftKey(), text.value) } catch {}
   }
   function loadDraft() {
-    try { text.value = localStorage.getItem(DRAFT_KEY) || '' } catch {}
+    try { text.value = localStorage.getItem(draftKey()) || '' } catch {}
+  }
+  function removeDraft() {
+    try { localStorage.removeItem(draftKey()) } catch {}
   }
 
   // --- Injected draft (host-supplied, e.g. ResourceDrawer 重发) ---
@@ -170,10 +219,17 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
   }
 
   // --- Auto-resize + input handler ---
-  // Grow with content up to `opts.maxLines`, then scroll internally.
+  // Grow with content up to `opts.maxLines`, then scroll internally — UNLESS the user has
+  // dragged a manual height (manualHeight below), which then replaces `opts.maxLines` as the
+  // cap until dragged again. A manual drag is a stronger signal of intent than the content-driven
+  // default, so it wins rather than being overwritten on the next keystroke.
   function autoResize() {
     const ta = textareaRef.value
     if (!ta) return
+    if (manualHeight.value != null) {
+      ta.style.height = manualHeight.value + 'px'
+      return
+    }
     ta.style.height = 'auto'
     const cs = getComputedStyle(ta)
     const lineHeight = parseFloat(cs.lineHeight) || 21
@@ -181,6 +237,74 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     const cap = lineHeight * opts.maxLines + vPad
     ta.style.height = Math.min(ta.scrollHeight, cap) + 'px'
   }
+
+  // --- Manual resize (drag handle, desktop-only UI but the state lives here so it's testable
+  // without a DOM drag simulation) ---
+  const manualHeight = ref<number | null>(null)
+  function loadManualHeight() {
+    try {
+      const raw = localStorage.getItem(HEIGHT_KEY)
+      const n = raw ? parseFloat(raw) : NaN
+      manualHeight.value = Number.isFinite(n) ? n : null
+    } catch {}
+  }
+  function saveManualHeight() {
+    try {
+      if (manualHeight.value != null) localStorage.setItem(HEIGHT_KEY, String(manualHeight.value))
+    } catch {}
+  }
+  let resizeStartY = 0
+  let resizeStartHeight = 0
+  function onResizeMove(e: PointerEvent) {
+    // Handle sits ABOVE the textarea, which is bottom-anchored — dragging the handle UP
+    // (decreasing clientY) must grow the box, hence startY - currentY rather than the reverse.
+    const delta = resizeStartY - e.clientY
+    const next = Math.min(Math.max(resizeStartHeight + delta, 40), window.innerHeight * 0.7)
+    manualHeight.value = next
+    const ta = textareaRef.value
+    if (ta) ta.style.height = next + 'px'
+  }
+  function onResizeEnd() {
+    window.removeEventListener('pointermove', onResizeMove)
+    saveManualHeight()
+  }
+  function onResizeStart(e: PointerEvent) {
+    const ta = textareaRef.value
+    if (!ta) return
+    e.preventDefault()
+    resizeStartY = e.clientY
+    resizeStartHeight = ta.offsetHeight
+    window.addEventListener('pointermove', onResizeMove)
+    window.addEventListener('pointerup', onResizeEnd, { once: true })
+  }
+  /**
+   * 把文件引用插进输入框（输入框里贴图时用，见 CliTerminalSurface.onClipboardPaste）。anchor 是
+   * 粘贴那一刻的选区；上传期间用户又改了文字就退回到此刻的光标处。插完光标落在引用后面。
+   */
+  function insertAtCursor(insert: string, anchor?: ComposeSelectionAnchor): void {
+    const ta = textareaRef.value
+    const cur = text.value
+    let start = cur.length
+    let end = cur.length
+    if (anchor && anchor.value === cur) {
+      start = anchor.start
+      end = anchor.end
+    } else if (ta) {
+      start = ta.selectionStart
+      end = ta.selectionEnd
+    }
+    const next = spliceAtSelection(cur, start, end, insert)
+    text.value = next.value
+    saveDraft()
+    void nextTick(() => {
+      autoResize()
+      const el = textareaRef.value
+      if (!el) return
+      el.focus()
+      el.selectionStart = el.selectionEnd = next.caret
+    })
+  }
+
   function onInput(e: Event) {
     const ie = e as InputEvent
     reportCliInputDiagnostic('compose.input', {
@@ -207,7 +331,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     pushHistory(val)
     opts.emit.send(val)
     text.value = ''
-    try { localStorage.removeItem(DRAFT_KEY) } catch {}
+    removeDraft()
     nextTick(autoResize)
   }
 
@@ -230,7 +354,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
   function clearAll() {
     const prev = text.value
     text.value = ''
-    try { localStorage.removeItem(DRAFT_KEY) } catch {}
+    removeDraft()
     nextTick(() => {
       autoResize()
       focus()
@@ -309,6 +433,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
   }
 
   onMounted(async () => {
+    loadManualHeight()
     loadDraft()
     const injected = opts.draft()
     if (injected != null) text.value = injected
@@ -327,6 +452,9 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     cleanupInputDiagnostics = null
     if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer)
     if (undoTimer) clearTimeout(undoTimer)
+    // In-flight drag at unmount (host closed the panel mid-resize) — drop the window listener,
+    // it would otherwise keep firing against a detached textareaRef.
+    window.removeEventListener('pointermove', onResizeMove)
   })
 
   return {
@@ -334,7 +462,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     showSnippets, showHistory, snippets, history,
     copyFeedback, showUndo,
     toggleSnippets, toggleHistory, saveSnippet, insertSnippet, deleteSnippet, clearHistory, insertFromHistory,
-    onInput, onTextareaFocus, autoResize,
-    send, encode, copyAll, clearAll, undoClear, moveCursor,
+    onInput, onTextareaFocus, autoResize, onResizeStart,
+    send, encode, copyAll, clearAll, undoClear, moveCursor, insertAtCursor,
   }
 }

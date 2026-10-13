@@ -28,7 +28,7 @@
  *    挂了两小时的页面，此前会一直显示两小时前的标签列表。
  */
 import { ref, computed } from 'vue'
-import type { WorkbenchConfig, WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
+import type { WorkbenchConfig, WorkbenchGroup, WorkbenchTab, TabSplit } from '@terminal/types/workbench'
 import { createTab, createGroup, createDefaultWorkbenchConfig } from '@terminal/types/workbench'
 import { fetchWorkbenchConfig, saveWorkbenchConfig } from '@terminal/api/workbench'
 import { mergeWorkbench } from '@terminal/composables/cli/workbenchMerge'
@@ -372,6 +372,19 @@ export function useWorkbench() {
 
   // ─── session binding ──────────────────────────────────────────────────────
 
+  // ─── split (terminal-split scope) ────────────────────────────────────────
+
+  /** 写 / 清一个 tab 的分屏状态（`undefined` = 取消分屏，tab 回到今天的单格形态）。和
+   *  `bindSession`/`setTabCwd` 同一条"找 tab → 直接改字段 → save()"模式，走同一份乐观并发 rev
+   *  三方合并，不另立第二套持久化通路。 */
+  function setTabSplit(tabId: string, split: TabSplit | undefined): void {
+    const group = findGroupForTab(tabId)
+    const tab = group?.tabs.find(t => t.id === tabId)
+    if (!tab) return
+    tab.split = split
+    save()
+  }
+
   function bindSession(tabId: string, sessionId: string): void {
     const group = findGroupForTab(tabId)
     const tab = group?.tabs.find(t => t.id === tabId)
@@ -417,6 +430,7 @@ export function useWorkbench() {
     renameGroup,
     setActiveGroup,
     toggleGroupCollapsed,
+    setTabSplit,
     bindSession,
     unbindSession,
   }

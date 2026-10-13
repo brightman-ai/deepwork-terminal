@@ -15,7 +15,7 @@ const emit = defineEmits<{ (event: 'open'): void }>()
     class="copy-mode-entry"
     :class="`copy-mode-entry--${placement}`"
     :disabled="disabled"
-    :title="disabled ? '远程终端暂不支持回看历史' : '回看历史（应用 Copy Mode）'"
+    :title="disabled ? '远程终端暂不支持回看历史' : (placement === 'status' ? undefined : '回看历史（应用 Copy Mode）')"
     :aria-label="disabled ? '回看历史不可用：远程终端暂不支持' : '回看历史 Copy Mode'"
     data-testid="app-copy-mode-entry"
     @click="emit('open')"

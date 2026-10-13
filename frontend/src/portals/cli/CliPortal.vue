@@ -56,12 +56,17 @@
       :tabs-with-session="surfaceTabs"
       :dw-rollup="overviewRollup"
       :dw-overview-open="overviewOpen"
+      :split-allowed="activeTabSplitAllowed"
       @register-surface="registerSurface"
       @agent-state="onTabAgentState"
       @agent-notifications="onTabAgentNotifications"
       @session-exit="onTabSessionExit"
       @connection-change="onTabConnectionChange"
       @dw-toggle-overview="toggleOverview"
+      @split-ratio="setSplitRatio"
+      @split-orientation="setSplitOrientation"
+      @toggle-zoom="toggleZoom"
+      @close-split="closeSplitPane"
     />
 
     <!-- 服务重启后原来那张「假装恢复成功」的空终端，换成如实说明 + 两个明确选择。 -->
@@ -120,7 +125,7 @@ import { usePortalRuntime } from '@ce/composables/layout/usePortalRuntime'
 import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
-import { resolveDeepLinkTabId, syncTabQuery } from './tabDeepLink'
+import { resolveDeepLinkTabId, syncTabQuery, resolveDeepLinkPaneIndex, syncPaneQuery } from './tabDeepLink'
 import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CliTabBar, CliTerminalView } from './adapters'
@@ -159,6 +164,8 @@ const {
   // 显示的是同一个结果，不会写成两种样子。
   leaderPending, leaderLabel,
   allTabs,
+  activeTmuxWindowIndex, selectActiveTabWindow,
+  setSplitRatio, setSplitOrientation, toggleZoom, closeSplitPane, activeTabSplitAllowed,
 } = useCliState(runtime)
 
 // ── tab 深链：/portal/cli?t=<tabId>（机制与取舍见 tabDeepLink.ts 头注）──────────────────
@@ -182,6 +189,35 @@ watch(
   (id) => {
     const t = syncTabQuery(id, route.query.t)
     if (t !== undefined) void router.replace({ query: { ...route.query, t } })
+  },
+  { immediate: true },
+)
+
+// ── pane（tmux window）深链：/portal/cli?t=<tabId>&p=<windowIndex>，双向 ──────────────────
+// 2026-10-11 推翻 tabDeepLink.ts 头注里 2026-10-07 的"v1 不做"决定（机制与取舍见该文件头注 +
+// docs/.tg/work/20261011-230813-cli-tabs-term/request.md）。与 tab 的"只读一次"不同，这里是真
+// 双向：读（URL→切 window）持续监听（不是 immediate 应用一次就收手），因为 Human 明确要的是前进/
+// 后退、手改地址栏也能把视图拽到那个 pane；写（切 window→URL）复用同一条 diff-suppression
+// 防自激环路（syncPaneQuery 返回 undefined 即不动）。
+watch(
+  [() => route.query.p, activeTab],
+  () => {
+    const target = resolveDeepLinkPaneIndex(route.query.p)
+    if (target !== undefined && target !== activeTmuxWindowIndex.value) {
+      selectActiveTabWindow(target)
+    }
+  },
+  { immediate: true },
+)
+watch(
+  activeTmuxWindowIndex,
+  () => {
+    const p = syncPaneQuery(activeTmuxWindowIndex.value, route.query.p)
+    if (p === undefined) return
+    const nextQuery = { ...route.query }
+    if (p === null) delete nextQuery.p
+    else nextQuery.p = p
+    void router.replace({ query: nextQuery })
   },
   { immediate: true },
 )
