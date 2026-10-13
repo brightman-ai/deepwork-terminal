@@ -222,3 +222,35 @@ func TestSessionMetrics_EmptyWhenNoTranscript(t *testing.T) {
 		t.Errorf("turns must be non-nil empty slice for clean JSON []")
 	}
 }
+
+// TestSessionMetrics_InjectedContextIsNotATurn: Claude Code writes isMeta user rows on the user's
+// behalf (/rename notice, a skill's body after its <command-name> row) and an isCompactSummary
+// row at a compaction boundary. None of them is a prompt; counting them opened phantom turns
+// whose "input" was a system-reminder and split a skill invocation's tokens away from the turn
+// that invoked it.
+func TestSessionMetrics_InjectedContextIsNotATurn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	jsonl := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-10-12T05:00:00.000Z","message":{"content":"<command-name>/whiteboard-ng</command-name>"}}`,
+		`{"type":"user","isMeta":true,"timestamp":"2026-10-12T05:00:00.100Z","message":{"content":"skill body"}}`,
+		`{"type":"assistant","timestamp":"2026-10-12T05:00:02.000Z","message":{"model":"claude-opus-5","id":"m1","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"done"}]}}`,
+		`{"type":"user","isMeta":true,"timestamp":"2026-10-12T05:56:13.000Z","message":{"content":"<system-reminder>The user named this session \"itdr设计-1012\".</system-reminder>"}}`,
+		`{"type":"user","isCompactSummary":true,"timestamp":"2026-10-12T06:00:00.000Z","message":{"content":"summary"}}`,
+		"",
+	}, "\n")
+	writeMetricsTranscript(t, home, cwd, "session.jsonl", jsonl)
+
+	m := SessionMetricsForCWD(NewProjectLocator(), cwd, "sess", "s", true)
+	if len(m.Turns) != 1 {
+		t.Fatalf("turns = %d, want 1 — injected context must not open turns", len(m.Turns))
+	}
+	if got := m.Turns[0].UserInput; !strings.Contains(got, "/whiteboard-ng") {
+		t.Errorf("turn input = %q, want the skill invocation, not its injected body", got)
+	}
+	if m.Turns[0].InputTokens == nil || *m.Turns[0].InputTokens != 10 {
+		t.Errorf("turn input_tokens = %v, want 10 — the reply belongs to the invoking turn", m.Turns[0].InputTokens)
+	}
+}

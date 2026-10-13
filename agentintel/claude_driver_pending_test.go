@@ -88,18 +88,94 @@ func TestClaudeDriver_StalePendingReplyGoesIdle(t *testing.T) {
 }
 
 // TestClaudeDriver_StaleClockAloneDoesNotDowngrade is the safety half, and the more important of
-// the two: an agent that thinks for a long time before its first token IS running, and cutting it
-// to idle would fire a false "done". So the clock alone never decides — the transcript must ALSO
-// have gone quiet, and a working agent writes continuously.
+// the two: an agent still working on an old prompt IS running, and cutting it to idle would fire
+// a false "done". So the clock alone never decides — the conversation must ALSO have gone quiet,
+// and a working agent keeps producing activity (here: the request being retried).
+//
+// This used to be modelled as "the file's mtime is fresh". That proxy is exactly what Claude
+// Code's bookkeeping rows defeated in production (see the next test); the intent it stood for —
+// something is still moving the conversation — is what is pinned here.
 func TestClaudeDriver_StaleClockAloneDoesNotDowngrade(t *testing.T) {
 	now := time.Now()
 	cd := driverFor(t, []map[string]any{
 		rowAt("assistant", now.Add(-2*time.Hour), nil),
 		rowAt("user", now.Add(-time.Hour), nil),
-	}, 0) // …but the file was just written
+		rowAt("system", now.Add(-time.Minute), map[string]any{"subtype": "api_error"}),
+	}, 0)
 
 	if got := cd.AgentState().Status; got != StatusRunning {
-		t.Fatalf("status = %s, want running — the file is still being written, so something IS working", got)
+		t.Fatalf("status = %s, want running — the request is still being worked a minute ago", got)
+	}
+}
+
+// TestClaudeDriver_BookkeepingRowsDoNotKeepStalePendingRunning is the production regression
+// behind the mtime proxy's removal: Claude Code appends untimestamped bookkeeping rows
+// (last-prompt, mode, permission-mode, atis-latch, titles) at moments unrelated to any turn, and
+// a slash command the user runs echoes system/local_command rows. Both refreshed the file mtime,
+// so an abandoned pending reply read "just written" and flipped back to running every time one
+// landed. Neither is the agent working.
+func TestClaudeDriver_BookkeepingRowsDoNotKeepStalePendingRunning(t *testing.T) {
+	now := time.Now()
+	cd := driverFor(t, []map[string]any{
+		rowAt("assistant", now.Add(-2*time.Hour), nil),
+		rowAt("user", now.Add(-time.Hour), nil),
+		{"type": "last-prompt"},
+		{"type": "mode"},
+		{"type": "permission-mode"},
+		{"type": "atis-latch"},
+		{"type": "custom-title"},
+		rowAt("system", now.Add(-time.Minute), map[string]any{"subtype": "local_command"}),
+	}, 0) // file just written — by bookkeeping
+
+	if got := cd.AgentState().Status; got != StatusIdle {
+		t.Fatalf("status = %s, want idle — bookkeeping and a local slash-command echo are not an agent at work", got)
+	}
+}
+
+// TestClaudeDriver_RenameNoticeDoesNotPinRunning: /rename injects an isMeta user row ("The user
+// named this session …") after a finished turn. Observed on two live panes that each showed
+// Running for a day while sitting at an empty prompt. It is context, not a prompt — nothing ever
+// answers it — and the needs-you fact from the end_turn before it must survive.
+func TestClaudeDriver_RenameNoticeDoesNotPinRunning(t *testing.T) {
+	now := time.Now()
+	cd := driverFor(t, []map[string]any{
+		rowAt("user", now.Add(-2*time.Hour), nil),
+		rowAt("assistant", now.Add(-2*time.Hour+time.Minute), map[string]any{"message": map[string]any{
+			"role": "assistant", "stop_reason": "end_turn",
+			"content": []any{map[string]any{"type": "text", "text": "done"}},
+		}}),
+		rowAt("system", now.Add(-2*time.Second), map[string]any{"subtype": "local_command"}),
+		rowAt("user", now.Add(-time.Second), map[string]any{
+			"isMeta": true,
+			"message": map[string]any{"role": "user",
+				"content": "<system-reminder>\nThe user named this session \"ueba基线-1012\".\n</system-reminder>"},
+		}),
+	}, time.Second)
+
+	as := cd.AgentState()
+	if as.Status != StatusIdle {
+		t.Fatalf("status = %s, want idle — a /rename notice is not a prompt awaiting a reply", as.Status)
+	}
+	if !as.AwaitingUser {
+		t.Fatal("the last real turn ended on end_turn — that needs-you fact must survive a /rename")
+	}
+}
+
+// TestClaudeDriver_RealPromptAfterRenameRunsAgain: the isMeta skip must not swallow the next
+// real turn.
+func TestClaudeDriver_RealPromptAfterRenameRunsAgain(t *testing.T) {
+	now := time.Now()
+	cd := driverFor(t, []map[string]any{
+		rowAt("assistant", now.Add(-time.Hour), map[string]any{"message": map[string]any{
+			"role": "assistant", "stop_reason": "end_turn",
+			"content": []any{map[string]any{"type": "text", "text": "done"}},
+		}}),
+		rowAt("user", now.Add(-30*time.Minute), map[string]any{"isMeta": true}),
+		rowAt("user", now.Add(-5*time.Second), nil),
+	}, 5*time.Second)
+
+	if got := cd.AgentState().Status; got != StatusRunning {
+		t.Fatalf("status = %s, want running — a real prompt after a /rename is a real turn", got)
 	}
 }
 
@@ -114,6 +190,50 @@ func TestClaudeDriver_FreshPendingReplyStaysRunning(t *testing.T) {
 
 	if got := cd.AgentState().Status; got != StatusRunning {
 		t.Fatalf("status = %s, want running — a prompt seconds old is exactly what running looks like", got)
+	}
+}
+
+// TestClaudeDriver_CompactSummaryDoesNotPinRunning: compaction while the agent is genuinely idle
+// writes a synthetic user row carrying the continuation summary (isCompactSummary=true). By row
+// order alone that row is newer than the last assistant turn, which used to read as "your prompt
+// landed, the reply is coming" — pinning the pane Running even though the on-screen text right
+// after it literally says the session was compacted WHILE IDLE. No assistant row ever answers
+// this row, so unlike an ordinary prompt it cannot self-correct by someone eventually replying.
+func TestClaudeDriver_CompactSummaryDoesNotPinRunning(t *testing.T) {
+	now := time.Now()
+	cd := driverFor(t, []map[string]any{
+		rowAt("user", now.Add(-2*time.Hour), nil),
+		rowAt("assistant", now.Add(-2*time.Hour+time.Minute), map[string]any{"message": map[string]any{
+			"role": "assistant", "stop_reason": "end_turn",
+			"content": []any{map[string]any{"type": "text", "text": "done"}},
+		}}),
+		rowAt("user", now.Add(-time.Second), map[string]any{"isCompactSummary": true}),
+	}, time.Second)
+
+	as := cd.AgentState()
+	if as.Status != StatusIdle {
+		t.Fatalf("status = %s, want idle — a compact summary is not a prompt awaiting a reply", as.Status)
+	}
+	if !as.AwaitingUser {
+		t.Fatal("the last real turn already ended on end_turn — that needs-you fact must survive a compaction boundary")
+	}
+}
+
+// TestClaudeDriver_RealPromptAfterCompactSummaryRunsAgain: the skip must not be sticky — a real
+// prompt typed after the compaction boundary is an ordinary running turn.
+func TestClaudeDriver_RealPromptAfterCompactSummaryRunsAgain(t *testing.T) {
+	now := time.Now()
+	cd := driverFor(t, []map[string]any{
+		rowAt("assistant", now.Add(-time.Hour), map[string]any{"message": map[string]any{
+			"role": "assistant", "stop_reason": "end_turn",
+			"content": []any{map[string]any{"type": "text", "text": "done"}},
+		}}),
+		rowAt("user", now.Add(-30*time.Minute), map[string]any{"isCompactSummary": true}),
+		rowAt("user", now.Add(-5*time.Second), nil),
+	}, 5*time.Second)
+
+	if got := cd.AgentState().Status; got != StatusRunning {
+		t.Fatalf("status = %s, want running — a real prompt after the compaction boundary is a real turn", got)
 	}
 }
 
