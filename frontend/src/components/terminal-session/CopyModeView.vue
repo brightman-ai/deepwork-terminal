@@ -489,12 +489,18 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
   background: #3b8eea;
   color: #fff;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
-.copy-mode__title { color: #d4d4d4; font-weight: 600; }
-.copy-mode__status { color: #8b949e; }
+/* title/status 长度不定（session 名/状态文案）；退出/搜索这两个操作按钮必须永远有位置站——
+   2026-10-12 用户实报移动端「误点进回看，点不到 Esc 退出」：窄屏下这一整条 bar 没有
+   flex-wrap，谁先被挤就看运气，退出偏偏排在最后，一长的 title 就能把它顶出可视区域。
+   修法：把"可以被压扁"的责任明确交给 title/status（截断成省略号），操作按钮一律 flex-shrink: 0，
+   永远保留原始尺寸、永远在可视区域内。 */
+.copy-mode__title { color: #d4d4d4; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; }
+.copy-mode__status { color: #8b949e; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; }
 .copy-mode__spacer { flex: 1 1 auto; }
-.copy-mode__hint { color: #8b949e; }
+.copy-mode__hint { color: #8b949e; flex-shrink: 0; }
 
 /* 键位图例。这个视口的键是一张**显式白名单**（表外的键一律吞掉），UI 上不写出来就只能靠猜 ——
    用户按 C-u/C-b 没反应，第一反应是"坏了"而不是"没这个键"。手机没有物理键盘，窄屏收起。 */
@@ -516,6 +522,8 @@ watch(() => h.lines.value.length, () => { nextTick(syncViewport) })
   color: #d4d4d4;
   font-size: 12px;
   cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .copy-mode__btn:hover { background: #3a3a3a; }
 .copy-mode__btn:disabled { opacity: .45; cursor: default; }
