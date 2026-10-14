@@ -1,5 +1,5 @@
 <template>
-  <div class="cli-terminal-view" data-testid="cli-portal-terminal-view">
+  <div ref="rootEl" class="cli-terminal-view" data-testid="cli-portal-terminal-view">
     <!-- Loading / error / empty states -->
     <div v-if="loading" class="terminal-state-msg" data-testid="cli-portal-loading">
       加载中…
@@ -67,19 +67,26 @@
                已知约束）；副格注册在 `${tab.id}__split2` 这个派生 key 下。
                zoom：被放大的那格用 v-show 隐藏另一格（不是 v-if——连接必须活着，退出 zoom 要原样
                恢复，不是重新连），:style 覆盖成占满交叉轴；分隔条在 zoom 态也隐藏，拖不动一条看
-               不见的线没有意义。 -->
+               不见的线没有意义。
+               看不见的格子不是观看者（折叠、zoom 同一条规则）：v-show 藏起的同时 `active` 取 false，
+               不连接、不声明尺寸，已连上的撤回；重新可见时它成为观看者的边沿，重新声明。
+               折叠（split-narrow，splitCollapse.ts）：容器放不下两个可用面板（手机竖屏、窄窗口）时
+               只显示当前格、占满整个区域（否则藏起的那格会按自己的窄容器把那个会话的 PTY 压成几列）。
+               容器放得下、只是存下来的比例太极端时不折叠，渲染期把比例夹进可用范围。折叠与夹取都只是
+               渲染态，同步的分屏模型一个字没动，回到宽屏原样并排。 -->
           <div
             v-else
             class="cli-terminal-view__split"
-            :class="tab.split.orientation"
+            :class="[tab.split.orientation, { 'is-collapsed': layoutOf(tab.id).collapsed }]"
+            :data-collapsed="layoutOf(tab.id).collapsed"
             :data-testid="`cli-portal-split-${tab.id}`"
           >
             <CliTerminalSurface
-              v-show="!tab.split.zoomed || tab.split.zoomed === 'first'"
-              :style="paneStyleFor(tab.id, tab.split.ratio, false, tab.split.zoomed)"
+              v-show="layoutOf(tab.id).visible.first"
+              :style="paneStyleFor(tab.id, layoutOf(tab.id).ratio, false, layoutOf(tab.id).solo)"
               :session-id="tab.sessionId!"
               :session-name="tab.name"
-              :active="tab.id === activeTabId"
+              :active="tab.id === activeTabId && layoutOf(tab.id).visible.first"
               :http-base="tab.httpBase"
               :ws-base="tab.wsBase"
               :auth-token="tab.authToken"
@@ -91,19 +98,28 @@
               :dw-overview-open="dwOverviewOpen"
               :ref="(el) => onSurfaceRef(tab.id, el)"
               :data-testid="`cli-portal-surface-${tab.id}`"
-              :class="{ 'is-focused-pane': isFocusedPane(tab.id, tab.split, 'first') }"
-              :paste-fallback="currentPane(tab.split, focusedPaneOf(tab.id)) === 'first'"
+              :class="{ 'is-focused-pane': isFocusedPane(tab.id, 'first') }"
+              :paste-fallback="currentPaneOf(tab.id) === 'first'"
               @focusin="(e: FocusEvent) => onPaneFocusIn(tab.id, 'first', e)"
+              @pointerdown.capture.passive="(e: PointerEvent) => onPanePointerDown(tab.id, 'first', e)"
               @agent-state="(s) => emit('agent-state', tab.id, s)"
               @agent-notifications="(s) => emit('agent-notifications', tab.id, s)"
               @session-exit="(code) => emit('session-exit', tab.id, code)"
               @connection-change="(s) => emit('connection-change', tab.id, s)"
               @dw-toggle-overview="emit('dw-toggle-overview')"
             >
-              <!-- 主格：分屏方向（高亮那个 = 切换焦点）+ 放大本格。主格被藏起来（副格放大）时方向
-                   按钮由副格接手，见下。 -->
-              <template v-if="splitAllowed" #status-extra>
+              <!-- 主格：分屏方向（高亮那个 = 切换焦点）+ 放大本格。主格被藏起来（副格放大 / 折叠只显示
+                   副格）时方向按钮由副格接手，见下。折叠时多一个面板切换器——手机上 splitAllowed 为
+                   false（不给分屏入口），切换器与此无关，折叠了就必须有。 -->
+              <template v-if="splitAllowed || switcherOn(tab.id, 'first')" #status-extra>
+                <SplitPaneSwitcher
+                  v-if="switcherOn(tab.id, 'first')"
+                  :orientation="tab.split.orientation"
+                  visible="first"
+                  @switch="switchPane(tab)"
+                />
                 <SplitControlBar
+                  v-if="splitAllowed"
                   :split="tab.split"
                   pane="first"
                   :focused-pane="focusedPaneOf(tab.id)"
@@ -129,18 +145,18 @@
                  不会卡在这个占位态。 -->
             <template v-if="tab.split.secondSessionId">
               <div
-                v-show="!tab.split.zoomed"
+                v-show="layoutOf(tab.id).divider"
                 class="cli-terminal-view__divider"
                 :class="tab.split.orientation"
                 :data-testid="`cli-portal-split-divider-${tab.id}`"
                 @pointerdown="onDividerDown($event, tab.id, tab.split.orientation)"
               />
               <CliTerminalSurface
-                v-show="!tab.split.zoomed || tab.split.zoomed === 'second'"
-                :style="paneStyleFor(tab.id, 1 - tab.split.ratio, true, tab.split.zoomed)"
+                v-show="layoutOf(tab.id).visible.second"
+                :style="paneStyleFor(tab.id, 1 - layoutOf(tab.id).ratio, true, layoutOf(tab.id).solo)"
                 :session-id="tab.split.secondSessionId"
                 :session-name="`${tab.name} · 2`"
-                :active="tab.id === activeTabId"
+                :active="tab.id === activeTabId && layoutOf(tab.id).visible.second"
                 :http-base="tab.httpBase"
                 :ws-base="tab.wsBase"
                 :auth-token="tab.authToken"
@@ -153,16 +169,24 @@
                 :ref="(el) => onSurfaceRef(`${tab.id}__split2`, el)"
                 :data-testid="`cli-portal-surface-${tab.id}__split2`"
                 class="is-second-pane"
-                :class="{ 'is-focused-pane': isFocusedPane(tab.id, tab.split, 'second') }"
-                :paste-fallback="currentPane(tab.split, focusedPaneOf(tab.id)) === 'second'"
+                :class="{ 'is-focused-pane': isFocusedPane(tab.id, 'second') }"
+                :paste-fallback="currentPaneOf(tab.id) === 'second'"
                 @focusin="(e: FocusEvent) => onPaneFocusIn(tab.id, 'second', e)"
+                @pointerdown.capture.passive="(e: PointerEvent) => onPanePointerDown(tab.id, 'second', e)"
                 @agent-state="(s) => emit('agent-state', `${tab.id}__split2`, s)"
               >
-                <template v-if="splitAllowed" #status-extra>
+                <template v-if="splitAllowed || switcherOn(tab.id, 'second')" #status-extra>
+                  <SplitPaneSwitcher
+                    v-if="switcherOn(tab.id, 'second')"
+                    :orientation="tab.split.orientation"
+                    visible="second"
+                    @switch="switchPane(tab)"
+                  />
                   <SplitControlBar
+                    v-if="splitAllowed"
                     :split="tab.split"
                     pane="second"
-                    :show-split-toggles="tab.split.zoomed === 'second'"
+                    :show-split-toggles="layoutOf(tab.id).solo === 'second'"
                     :focused-pane="focusedPaneOf(tab.id)"
                     :data-testid="`cli-portal-split-ctl-${tab.id}__split2`"
                     @split-orientation="(o) => emit('split-orientation', tab.id, o)"
@@ -193,11 +217,24 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
 import SplitControlBar from '@terminal/components/terminal-session/SplitControlBar.vue'
-import { currentPane, otherPane, paneWord, type PaneId } from '@terminal/components/terminal-session/splitControl'
+import SplitPaneSwitcher from '@terminal/components/terminal-session/SplitPaneSwitcher.vue'
+import { claimsPaneFocus, otherPane, paneWord, type PaneId } from '@terminal/components/terminal-session/splitControl'
+import {
+  acceptViewSize,
+  clampDragRatio,
+  dragRatioBounds,
+  estimateCellMetrics,
+  renderRatio,
+  shouldCollapse,
+  splitLayout,
+  type SplitLayout,
+  type ViewSize,
+} from '@terminal/components/terminal-session/splitCollapse'
 import type { EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
+import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
 import type { TabSplit } from '@terminal/types/workbench'
 
@@ -217,7 +254,7 @@ interface TabWithSession {
   split?: TabSplit
 }
 
-defineProps<{
+const props = defineProps<{
   loading: boolean
   error: string | null
   activeTabId: string | undefined
@@ -250,6 +287,59 @@ const emit = defineEmits<{
   (e: 'close-split', tabId: string): void
 }>()
 
+// ── 分屏折叠（split-narrow）：容器放不下两个可用面板 → 只显示当前格 ──────────────────────────────
+// 判定是纯函数（splitCollapse.ts）；这里只提供它的输入：容器尺寸 + 字符格估计。
+// 容器就是根节点：每个 tab 槽位都是 flex:1 填满它，分屏容器 = 根节点大小，一个观察器管所有 tab。
+// 初值取窗口尺寸——它是容器的上界，所以"窗口都放不下"是确定的：竖屏手机在**第一帧**就折叠，副格
+// 从不以 active 挂载（不会先连上、先声明一个窄尺寸再被撤回）。窗口放得下而容器放不下（侧栏/抽屉
+// 占了宽度）的窄桌面窗口，等 ResizeObserver 首次回调修正。
+const { isMobile } = useDeviceDetection()
+const rootEl = ref<HTMLElement | null>(null)
+const viewSize = ref<ViewSize>(
+  typeof window === 'undefined' ? { width: 0, height: 0 } : { width: window.innerWidth, height: window.innerHeight },
+)
+let viewObserver: ResizeObserver | null = null
+
+function measureView(): void {
+  const el = rootEl.value
+  if (!el) return
+  viewSize.value = acceptViewSize(viewSize.value, { width: el.clientWidth, height: el.clientHeight })
+}
+
+onMounted(() => {
+  measureView()
+  if (rootEl.value && typeof ResizeObserver !== 'undefined') {
+    viewObserver = new ResizeObserver(measureView)
+    viewObserver.observe(rootEl.value)
+  }
+})
+onBeforeUnmount(() => {
+  viewObserver?.disconnect()
+  viewObserver = null
+})
+
+const cellMetrics = computed(() => estimateCellMetrics(isMobile.value))
+
+/** 每个已分屏 tab 此刻怎么渲染。折叠与比例夹取都是派生的渲染态，不写回 tab.split。 */
+const layoutByTab = computed<Record<string, SplitLayout>>(() => {
+  const out: Record<string, SplitLayout> = {}
+  for (const tab of props.tabsWithSession) {
+    const split = tab.split
+    if (!split) continue
+    // 没有第二格（session 还在起）就没有"放不下两格"可言：占位态照旧渲染。
+    const collapsed = !!split.secondSessionId
+      && shouldCollapse(viewSize.value, split.orientation, cellMetrics.value)
+    const ratio = renderRatio(viewSize.value, split.orientation, cellMetrics.value, split.ratio)
+    out[tab.id] = splitLayout(split, collapsed, focusedPane[tab.id], ratio)
+  }
+  return out
+})
+
+const NO_SPLIT_LAYOUT: SplitLayout = splitLayout({}, false)
+function layoutOf(tabId: string): SplitLayout {
+  return layoutByTab.value[tabId] ?? NO_SPLIT_LAYOUT
+}
+
 /** 本地也记一份 surface 实例——切换焦点要直接调某一格的 focusTerminal()。 */
 const paneRefs: Record<string, InstanceType<typeof CliTerminalSurface> | null> = {}
 
@@ -267,14 +357,32 @@ function focusedPaneOf(tabId: string): PaneId {
   return focusedPane[tabId] ?? 'first'
 }
 
-/** 当前格的常驻标记（状态行底边一道强调色）。放大态只剩一格，不需要标。 */
-function isFocusedPane(tabId: string, split: TabSplit, pane: PaneId): boolean {
-  return !split.zoomed && focusedPaneOf(tabId) === pane
+/** 折叠时的面板切换器只挂在显示着的那一格上——屏幕上（DOM 里）永远只有一个。 */
+function switcherOn(tabId: string, pane: PaneId): boolean {
+  const lay = layoutOf(tabId)
+  return lay.collapsed && lay.solo === pane
+}
+
+/** 此刻的"当前格"：独占整个区域的那格（放大 / 折叠）；并排时是最后获得焦点的那格。 */
+function currentPaneOf(tabId: string): PaneId {
+  return layoutOf(tabId).solo ?? focusedPaneOf(tabId)
+}
+
+/** 当前格的常驻标记（状态行底边一道强调色）。只剩一格（放大 / 折叠）时不需要标。 */
+function isFocusedPane(tabId: string, pane: PaneId): boolean {
+  return !layoutOf(tabId).solo && focusedPaneOf(tabId) === pane
 }
 
 function onPaneFocusIn(tabId: string, pane: PaneId, e: FocusEvent): void {
-  const target = e.target as Element | null
-  if (target?.closest?.('.split-ctl')) return
+  if (!claimsPaneFocus(e.target as Element | null)) return
+  focusedPane[tabId] = pane
+}
+
+/** 触屏点一下这一格就把当前格让给它（REQ-SPL-05）。触屏上点击落在全屏触控球层上、终端的 helper
+ *  textarea 随即被 blur，根本没有 focusin，所以不能只靠 onPaneFocusIn。挂在捕获阶段 + passive：
+ *  只记一个本地状态，不 preventDefault、不 stopPropagation，滚动 / 长按选择 / 触控球手势照旧。 */
+function onPanePointerDown(tabId: string, pane: PaneId, e: PointerEvent): void {
+  if (!claimsPaneFocus(e.target as Element | null)) return
   focusedPane[tabId] = pane
 }
 
@@ -294,14 +402,19 @@ function clearFlash(tabId: string): void {
   delete paneFlash[tabId]
 }
 
-/** 切到另一格：放大态下改为放大另一格（另一格此刻看不见，只换焦点没有意义），否则只移焦点。 */
+/** 切到另一格：放大态下改为放大另一格（另一格此刻看不见，只换焦点没有意义），否则只移焦点。
+ *  折叠态下只换本机显示哪一格——**绝不**发 toggle-zoom：那会改同步的分屏模型，把桌面的放大状态
+ *  一起改了（REQ-SPL-03）。 */
 function switchPane(tab: TabWithSession): void {
   const split = tab.split
   if (!split) return
-  const target = otherPane(currentPane(split, focusedPaneOf(tab.id)))
-  if (split.zoomed) emit('toggle-zoom', tab.id, target)
+  const lay = layoutOf(tab.id)
+  const target = otherPane(currentPaneOf(tab.id))
+  if (split.zoomed && !lay.collapsed) emit('toggle-zoom', tab.id, target)
   focusedPane[tab.id] = target
   paneFlash[tab.id] = { pane: target, seq: ++flashSeq }
+  // 手机上不去 focus 终端：那会把软键盘顶出来，而点切换器只是想换一格看。
+  if (isMobile.value) return
   // 放大目标切换要等 v-show 生效后那格才可聚焦（display:none 的元素拿不到焦点）。
   void nextTick(() => requestAnimationFrame(() => {
     paneRefs[target === 'first' ? tab.id : `${tab.id}__split2`]?.focusTerminal()
@@ -340,7 +453,8 @@ function onDividerMove(e: PointerEvent): void {
   const raw = orientation === 'row'
     ? (e.clientX - startRect.left) / startRect.width
     : (e.clientY - startRect.top) / startRect.height
-  liveRatio.value = Math.min(0.9, Math.max(0.1, raw))
+  // 夹在"两格都还够用"的范围内：拖到某格 < 下限会触发折叠，分隔条随之消失、再也拖不回来。
+  liveRatio.value = clampDragRatio(raw, dragRatioBounds(viewSize.value, orientation, cellMetrics.value))
 }
 
 function onDividerUp(): void {
@@ -356,17 +470,18 @@ function onDividerUp(): void {
 // props 更新，这个覆盖自然让位（liveRatio 已在 onDividerUp 里清空）。`isSecond` 翻转副格的值
 // ——liveRatio 算的始终是"主格那一侧"的比例，副格永远是它的互补值，两者在拖拽的每一帧都必须
 // 加起来等于 1，否则中间会露缝或重叠一帧。
-// zoomed 存在时整个 ratio 计算让位——被放大的格子占满交叉轴（另一格靠 v-show 隐藏，不占流），
-// 这样退出 zoom 时两格的 flex-basis 立刻恢复成拖拽前的 ratio，不需要额外记一份"zoom 前的值"。
+// solo（放大 / 折叠独占的那格）存在时整个 ratio 计算让位——独占的格子占满交叉轴（另一格靠 v-show
+// 隐藏，不占流），这样退出 zoom / 回到宽屏时两格的 flex-basis 立刻恢复成原来的 ratio，不需要额外
+// 记一份"之前的值"。
 function paneStyleFor(
   tabId: string,
   restRatio: number,
   isSecond = false,
-  zoomed?: 'first' | 'second',
+  solo?: PaneId,
 ): { flex: string } {
-  if (zoomed) {
-    const isZoomedPane = (isSecond && zoomed === 'second') || (!isSecond && zoomed === 'first')
-    return paneStyle(isZoomedPane ? 1 : 0)
+  if (solo) {
+    const isSoloPane = (isSecond && solo === 'second') || (!isSecond && solo === 'first')
+    return paneStyle(isSoloPane ? 1 : 0)
   }
   if (dragState.value?.tabId === tabId && liveRatio.value != null) {
     return paneStyle(isSecond ? 1 - liveRatio.value : liveRatio.value)
