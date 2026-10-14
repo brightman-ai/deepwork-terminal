@@ -208,6 +208,11 @@ type vt struct {
 	// returns the carriage. It is an option rather than a mode there, so RIS does not clear it. The
 	// browser's terminal starts with it on (convertEol: true), and so does NewTerminalModel.
 	lnm bool
+	// lnmSet says the stream itself set or reset LNM (`CSI 20 h|l`), as opposed to it being the default
+	// the model started with. A snapshot carries it so that a restore knows whether the NewlineMode it
+	// reads is the stream's word or only a default (see History.Restore). Like the option it mirrors, RIS
+	// and DECSTR leave it alone.
+	lnmSet bool
 
 	// repWidth is the width of the last character printed — 0 once any control, escape or CSI
 	// sequence has run since. It is what REP (`CSI n b`) repeats: xterm keeps the parser's join
@@ -1062,7 +1067,7 @@ func (v *vt) dispatchCSI(body []byte, inter string, final byte) {
 			case 4:
 				v.insertMode = final == 'h'
 			case 20:
-				v.lnm = final == 'h'
+				v.lnm, v.lnmSet = final == 'h', true
 			}
 		}
 	case 'J': // ED — erase in display
@@ -1380,7 +1385,11 @@ func (v *vt) applySGR(params []int) {
 			s.Attrs |= AttrHidden
 		case n == 9:
 			s.Attrs |= AttrStrike
-		case n == 21 || n == 22:
+		case n == 21:
+			// Double underline in xterm.js 6.0.0 — not "bold off". The model keeps one kind of underline,
+			// so it is that (24 turns it off, as for the single one).
+			s.Attrs |= AttrUnderline
+		case n == 22:
 			s.Attrs &^= AttrBold | AttrDim
 		case n == 23:
 			s.Attrs &^= AttrItalic
