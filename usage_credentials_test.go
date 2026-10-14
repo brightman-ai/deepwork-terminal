@@ -274,3 +274,95 @@ func TestCredentialStore_SealedRemovalFallsBackToDerived(t *testing.T) {
 		t.Fatalf("removing the explicit entry must let the derived subscription resurface, got (%q, %v)", cred.APIKey, ok)
 	}
 }
+
+// ── own-account declaration (ChatGPT login under a custom codex provider id) ─────────────────
+//
+// kit/usage reads codex's in-band rate_limits only from rollouts that ran on the user's own
+// OpenAI account. A vendor mapping (runtime_provider_ids) says whose BILL an id lands on and is
+// not that proof: the only ownership this store declares is the one officialCodexProviderDeclaration
+// verified (ChatGPT login, default service URL), and it declares it in OwnAccountProviderIDs.
+
+// officialAliasCodexHome points the process at a codex home whose config officialCodexProviderDeclaration
+// verifies as the user's own ChatGPT login under the custom provider id `alias`.
+func officialAliasCodexHome(t *testing.T, alias string) {
+	t.Helper()
+	for _, key := range []string{"OPENAI_BASE_URL", "OPENAI_API_BASE", "CHATGPT_BASE_URL", "CODEX_CHATGPT_BASE_URL", "OPENAI_API_KEY", "CODEX_HOME"} {
+		t.Setenv(key, "")
+	}
+	home := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", home)
+	config := "model_provider = \"" + alias + "\"\n[model_providers." + alias + "]\nname = \"Local\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auth := `{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-token"}}`
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(auth), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCredentialStore_VerifiedOfficialAliasIsDeclaredOwnAccount(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	officialAliasCodexHome(t, "local_codex")
+
+	store := newCredentialStore(filepath.Join(t.TempDir(), "data"))
+	cred, ok := store.Credential("openai")
+	if !ok {
+		t.Fatal("a verified official alias must produce the openai declaration")
+	}
+	if got := cred.RuntimeProviderIDs; len(got) != 1 || got[0] != "local_codex" {
+		t.Errorf("RuntimeProviderIDs = %v, want [local_codex] (billing attribution is kept)", got)
+	}
+	if got := cred.OwnAccountProviderIDs; len(got) != 1 || got[0] != "local_codex" {
+		t.Errorf("OwnAccountProviderIDs = %v, want [local_codex]: the verified ChatGPT login runs on the user's own account", got)
+	}
+}
+
+// The user already said (sealed file) that this id bills to OpenAI, and the config verifies it is
+// their own login: ownership must still be declared, and the id must not be listed twice.
+func TestCredentialStore_ExplicitOpenAIMappingStillGetsVerifiedOwnership(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	officialAliasCodexHome(t, "local_codex")
+
+	store := newCredentialStore(filepath.Join(t.TempDir(), "data"))
+	seed(t, store, `{"version":1,"subscriptions":[{"vendor":"openai","runtime_provider_ids":["local_codex"]}]}`)
+
+	cred, _ := store.Credential("openai")
+	if got := cred.RuntimeProviderIDs; len(got) != 1 || got[0] != "local_codex" {
+		t.Errorf("RuntimeProviderIDs = %v, want exactly [local_codex]", got)
+	}
+	if got := cred.OwnAccountProviderIDs; len(got) != 1 || got[0] != "local_codex" {
+		t.Errorf("OwnAccountProviderIDs = %v, want [local_codex]", got)
+	}
+}
+
+// An explicit declaration for ANOTHER vendor outranks the adapter: nothing is claimed for openai.
+func TestCredentialStore_ExplicitOtherVendorMappingBeatsVerifiedAlias(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	officialAliasCodexHome(t, "local_codex")
+
+	store := newCredentialStore(filepath.Join(t.TempDir(), "data"))
+	seed(t, store, `{"version":1,"subscriptions":[{"vendor":"moonshot","api_key":"k","runtime_provider_ids":["local_codex"]}]}`)
+
+	if cred, ok := store.Credential("openai"); ok {
+		t.Fatalf("an id the user mapped to moonshot must not also be declared an openai account: %+v", cred)
+	}
+}
+
+// Billing is not ownership: a user-authored vendor mapping, with no verified login behind it,
+// declares a bill — never an own account.
+func TestCredentialStore_VendorMappingAloneDeclaresNoOwnership(t *testing.T) {
+	t.Setenv("DEEPWORK_HOME", t.TempDir())
+	t.Setenv("DW_CODEX_HOME", t.TempDir()) // nothing verifiable here
+
+	store := newCredentialStore(filepath.Join(t.TempDir(), "data"))
+	seed(t, store, `{"version":1,"subscriptions":[{"vendor":"openai","runtime_provider_ids":["my-relay"]}]}`)
+
+	cred, _ := store.Credential("openai")
+	if got := cred.RuntimeProviderIDs; len(got) != 1 || got[0] != "my-relay" {
+		t.Errorf("RuntimeProviderIDs = %v, want [my-relay]", got)
+	}
+	if len(cred.OwnAccountProviderIDs) != 0 {
+		t.Errorf("OwnAccountProviderIDs = %v, want none: a vendor mapping is not proof of ownership", cred.OwnAccountProviderIDs)
+	}
+}
