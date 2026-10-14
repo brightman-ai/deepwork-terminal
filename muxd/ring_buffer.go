@@ -163,6 +163,31 @@ func (rb *RingBuffer) readRawTailLocked(n int) []byte {
 	return result
 }
 
+// ReadFrom returns exactly the bytes after stream position `from`, and the position they end at.
+// ok=false when `from` is no longer held (evicted, or from before a Reset) or lies in the future.
+//
+// Positions are Seq() values: the buffer holds the stream bytes (Seq()-Len(), Seq()] — writes move
+// both by the same n, and a Reset empties the buffer while bumping Seq, so the identity holds
+// across both. A caller that tracks its own place in the stream by Seq can therefore ask for
+// "everything since I last looked" and get it with no gap and no overlap.
+//
+// Byte-exact on purpose: unlike ReadTail, the start is NOT moved to an escape-sequence boundary.
+// That adjustment exists for callers starting a terminal cold; a caller resuming a parser that
+// already holds the first half of a sequence needs the second half, not a cleaned-up start.
+func (rb *RingBuffer) ReadFrom(from uint64) (data []byte, end uint64, ok bool) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	held := rb.writePos
+	if rb.full {
+		held = rb.capacity
+	}
+	oldest := rb.seq - uint64(held)
+	if from < oldest || from > rb.seq {
+		return nil, rb.seq, false
+	}
+	return rb.readRawTailLocked(int(rb.seq - from)), rb.seq, true
+}
+
 // ReadTailAt returns the last n bytes together with the seq those bytes END at, both read
 // under one lock.
 //
@@ -189,6 +214,9 @@ func (rb *RingBuffer) Len() int {
 	}
 	return rb.writePos
 }
+
+// Cap is the buffer's capacity in bytes — the most it can ever hold.
+func (rb *RingBuffer) Cap() int { return rb.capacity }
 
 // IsFull returns true if the buffer has been completely filled at least once.
 // [Ref: T6-A4.1 testability requirement]

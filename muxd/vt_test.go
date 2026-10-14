@@ -18,7 +18,7 @@ func newTestVT(t *testing.T, rows, cols int) (*vt, *[]string) {
 	v := newVT(rows, cols, newStyleTable())
 	v.trackAlt = true
 	var got []string
-	v.onScrollOff = func(row []cell) { got = append(got, strings.TrimRight(rowText(row), " ")) }
+	v.onScrollOff = func(row []cell, _ bool) { got = append(got, strings.TrimRight(rowText(row), " ")) }
 	return v, &got
 }
 
@@ -136,13 +136,16 @@ func TestVT_WideCharactersTakeTwoColumns(t *testing.T) {
 
 func TestVT_CombiningMarksDoNotAdvanceTheCursor(t *testing.T) {
 	v, _ := newTestVT(t, 3, 10)
-	// KNOWN LIMITATION, asserted so it is a decision rather than a surprise: a combining mark
-	// belongs to the previous cell, and a cell holds one rune, so the mark is dropped. Terminal
-	// output is overwhelmingly precomposed; storing marks would need a per-cell rune slice, which
-	// doubles the cell for a case that affects rendering only — never layout, never search.
-	writeAll(v, "éx")
-	if got := v.textLines()[0]; got != "ex" {
-		t.Fatalf("got %q, want %q", got, "ex")
+	// A combining mark belongs to the previous cell: it is stored with it (xterm keeps the cell as the
+	// string "e" + U+0301, and a text read of the row returns both) and the cursor does not move for
+	// it, so the next character lands in the very next column. (This test used to assert that the
+	// mark was DROPPED — a limitation of a cell that held one rune; see vt_combine.go.)
+	writeAll(v, "e\u0301x")
+	if got := v.textLines()[0]; got != "e\u0301x" {
+		t.Fatalf("got %q, want %q", got, "e\u0301x")
+	}
+	if v.col != 2 {
+		t.Fatalf("cursor at column %d after e, a mark and x; want 2 (the mark takes no column)", v.col)
 	}
 }
 
@@ -220,15 +223,70 @@ func TestVT_RegionStartingAtTheTopDoesFeedHistory(t *testing.T) {
 func TestVT_ScrollUpAndDownSequences(t *testing.T) {
 	v, got := newTestVT(t, 4, 20)
 	writeAll(v, "a\r\nb\r\nc\r\nd")
-	writeAll(v, "\x1b[2S") // SU 2 — two lines leave the top
-	if want := []string{"a", "b"}; !eqLines(*got, want) {
-		t.Fatalf("SU pushed %q, want %q", *got, want)
+	// SU 2 — two lines leave the top. A terminal could keep them as scrollback; xterm.js 6.0.0 does
+	// not (InputHandler.scrollUp splices them out: "FIXME: scrolled out lines at top = 1 should add
+	// to scrollback"), and a model that must match the browser's history cannot hold lines the
+	// browser does not.
+	writeAll(v, "\x1b[2S")
+	if len(*got) != 0 {
+		t.Fatalf("SU pushed %q into history; xterm drops those lines", *got)
+	}
+	if rows := v.textLines(); len(rows) < 2 || rows[0] != "c" || rows[1] != "d" {
+		t.Fatalf("SU did not scroll the screen: %q", rows)
 	}
 	before := len(*got)
 	writeAll(v, "\x1b[2T") // SD 2 — lines leave the BOTTOM, which is not history
 	if len(*got) != before {
 		t.Fatalf("SD fed history %q — content pushed off the bottom is gone, not scrollback", *got)
 	}
+}
+
+// The cursor, save/restore, insert-mode and REP rules below are xterm.js 6.0.0's, and several are
+// not what a textbook terminal does. Each case was run through @xterm/headless 6.0.0 and its screen
+// recorded; xterm_parity_test.go checks the same rules against thousands of random streams, these
+// say what they are.
+func TestVT_XtermCursorRules(t *testing.T) {
+	cases := []struct {
+		name       string
+		rows, cols int
+		in         string
+		want       []string
+		history    int // lines that left the top of the screen
+	}{
+		// CUB first pulls a pending wrap back onto the last column and only then moves left.
+		{"CUB from a pending wrap", 3, 5, "abcde\x1b[DX", []string{"abcXe"}, 0},
+		// VPA puts the cursor back on the screen too, so the pending wrap is gone.
+		{"VPA cancels a pending wrap", 3, 5, "abcde\x1b[2dX", []string{"abcde", "    X"}, 0},
+		// CUU/CUD stop at the margins of the region when the cursor starts inside it.
+		{"CUU stops at the top margin", 6, 8, "\x1b[3;5r\x1b[4;1H\x1b[10Ax", []string{"", "", "x"}, 0},
+		{"CUD stops at the bottom margin", 6, 8, "\x1b[2;4r\x1b[3;1H\x1b[10Bx", []string{"", "", "", "x"}, 0},
+		{"REP repeats the last character", 2, 10, "ab\x1b[3bc", []string{"abbbbc"}, 0},
+		{"IRM shifts the row right", 2, 10, "abcdef\x1b[1;1H\x1b[4hXY", []string{"XYabcdef"}, 0},
+		// The saved row is absolute in the buffer, so every line that scrolls off moves it up the
+		// screen: two line feeds at the bottom and DECRC lands on row 0, not row 2.
+		{"DECRC after scrolling", 3, 4, "\x1b[3;1H\x1b7\r\n\r\n\x1b8Z", []string{"Z"}, 2},
+		{"DECRC keeps the content it was saved on", 3, 4, "a\r\nb\r\nc\x1b7\r\nd\r\n\x1b8Z", []string{"cZ", "d"}, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, got := newTestVT(t, tc.rows, tc.cols)
+			writeAll(v, tc.in)
+			if rows := v.textLines(); !eqLines(rows, tc.want) {
+				t.Fatalf("screen %q, want %q", rows, tc.want)
+			}
+			if len(*got) != tc.history {
+				t.Fatalf("%d lines left the screen (%q), want %d", len(*got), *got, tc.history)
+			}
+		})
+	}
+
+	t.Run("SD does not take the background", func(t *testing.T) {
+		v, _ := newTestVT(t, 3, 4)
+		writeAll(v, "\x1b[44ma\r\nb\r\nc\x1b[1T")
+		if got := v.cells[0][0].style; got != DefaultStyleID {
+			t.Fatalf("the row SD scrolled in has style %d; xterm gives it the default one", got)
+		}
+	})
 }
 
 func TestVT_InsertAndDeleteLinesNeverFeedHistory(t *testing.T) {

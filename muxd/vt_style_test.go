@@ -129,6 +129,19 @@ func TestRuneWidth(t *testing.T) {
 		{"combining acute", 0x0301, 0},
 		{"zero width joiner", 0x200D, 0},
 		{"soft hyphen is drawn", 0x00AD, 1},
+		// Unicode 11, as xterm.js with the addon draws them (checked against it for every code point
+		// in TestRuneWidthMatchesXtermUnicode11): the robots and money bags of an agent's output are two
+		// columns; the ⏺ ✻ ⚠ it also uses are one, with or without a variation selector after them.
+		{"robot face", '🤖', 2},
+		{"money bag", '💰', 2},
+		{"brain", '🧠', 2},
+		{"sparkles", '✨', 2},
+		{"record button stays narrow", '⏺', 1},
+		{"teardrop asterisk stays narrow", '✻', 1},
+		{"warning sign stays narrow", '⚠', 1},
+		{"variation selector 16", 0xFE0F, 0},
+		{"enclosing keycap", 0x20E3, 0},
+		{"regional indicator", '🇦', 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

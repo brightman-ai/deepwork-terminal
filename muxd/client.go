@@ -470,6 +470,15 @@ func (c *Client) Destroy(id string) error {
 	return c.roundTrip(requireDaemon, MsgDestroy, SimpleReq{ID: id}, MsgOK, nil)
 }
 
+// ScreenSnap reads the session's live visible state and the ring offset it was taken at.
+// Gate on Peer().Has(FeatureScreenSnap): a daemon predating the message answers bad_frame,
+// which is why the feature exists.
+func (c *Client) ScreenSnap(id string) (ScreenSnapAck, error) {
+	var ack ScreenSnapAck
+	err := c.roundTrip(requireDaemon, MsgScreenSnap, ScreenSnapReq{ID: id}, MsgScreenSnapAck, &ack)
+	return ack, err
+}
+
 // SetMeta replaces a session's opaque metadata blob.
 func (c *Client) SetMeta(id string, meta []byte) error {
 	return c.roundTrip(requireDaemon, MsgSetMeta, SetMetaReq{ID: id, Meta: meta}, MsgOK, nil)

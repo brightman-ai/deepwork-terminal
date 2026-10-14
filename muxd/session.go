@@ -599,6 +599,35 @@ func (s *Session) ShellPID() int {
 // do not have to branch.
 func (s *Session) History() *History { return s.history }
 
+// ScreenSnap is one consistent read of the session's terminal state and the ring offset it is true
+// at — so a caller can replay exactly the bytes that came after, no gap, no double-print.
+//
+// Locking: s.mu first because readLoop holds it while writing BOTH the ring and the history's vt
+// model; under it the offset and the state describe the same instant. The history reads then take
+// h.mu, which nests inside s.mu in the same order readLoop nests them. This is the one history read
+// that deliberately pays for s.mu — it happens once per server attach, and an offset that does not
+// match the state is not a slightly-wrong answer, it is a corrupted one.
+func (s *Session) ScreenSnap() ScreenSnapAck {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.history
+	if h == nil {
+		return ScreenSnapAck{Enabled: false}
+	}
+	st, _, ok := h.State(0)
+	stats := h.Stats()
+	if !ok {
+		return ScreenSnapAck{Enabled: true, Broken: true}
+	}
+	return ScreenSnapAck{
+		Enabled:      true,
+		Broken:       stats.Broken,
+		TermState:    st,
+		Offset:       int64(s.ring.Seq()),
+		HistoryTotal: stats.Total,
+	}
+}
+
 // Subscribe registers a live-output channel and returns the replay bytes that precede
 // it, the ring offset those bytes end at, plus the session geometry.
 //
