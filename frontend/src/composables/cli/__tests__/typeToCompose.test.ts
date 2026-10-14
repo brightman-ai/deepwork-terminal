@@ -374,3 +374,38 @@ describe('REQ-TI-01 输入法：Safari 的顺序（compositionstart 在 keydown 
     expect(h.log.openForIme).toBe(2) // 窗口过了，不当成同一次，重新开
   })
 })
+
+// 2026-10-14 Human 实报：终端区按一下 Shift（输入法切中英），有时连切两次——中→英→中，像没按。
+// 输入法激活时 Chrome 把 Shift 的 keydown 也报成 keyCode 229；按 229 当成"拼写开始"拦下，就会弹框、
+// 在按键中途把焦点换走，输入法在新的输入上下文里又切一次。
+describe('单独的修饰键（Shift 切中英）：永远不拦、不开框、不换焦点', () => {
+  for (const [name, extra] of [
+    ['Shift，keyCode 229（macOS 输入法激活）', { keyCode: 229 }],
+    ['Shift，key=Process（Windows 输入法）', { key: 'Process', code: 'ShiftLeft', keyCode: 229 }],
+    ['右 Shift', { code: 'ShiftRight', keyCode: 229 }],
+    ['CapsLock（部分输入法用它切中英）', { key: 'CapsLock', code: 'CapsLock', keyCode: 229 }],
+  ] as Array<[string, Partial<KeyEventLike>]>) {
+    it(name, () => {
+      const h = harness()
+      const { e, calls } = keyEvent('Shift', { shiftKey: true, ...extra } as Partial<KeyEventLike>)
+      expect(h.ctl.wouldIntercept(e)).toBe(false)
+      expect(h.ctl.onKeydown(e)).toBe(false)
+      expect(calls.preventDefault + calls.stopPropagation + calls.stopImmediatePropagation).toBe(0)
+      expect(h.log.openForIme).toBe(0)
+    })
+  }
+
+  it('对照：真正的拼音第一键（key 是字母、keyCode 229）照旧拦下、开框', () => {
+    const h = harness()
+    expect(h.ctl.onKeydown(keyEvent('n', { keyCode: 229, code: 'KeyN' }).e)).toBe(true)
+    expect(h.log.openForIme).toBe(1)
+  })
+
+  it('切完中英、紧接着敲拼音：Shift 不占用那次"开框"，第一键照常开框', () => {
+    const h = harness()
+    h.ctl.onKeydown(keyEvent('Shift', { keyCode: 229, code: 'ShiftLeft' }).e)
+    expect(h.log.openForIme).toBe(0)
+    h.ctl.onKeydown(keyEvent('n', { keyCode: 229, code: 'KeyN' }).e)
+    expect(h.log.openForIme).toBe(1)
+  })
+})
