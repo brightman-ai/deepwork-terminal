@@ -308,7 +308,6 @@ func TestKeyframe_RestartedServerIsSeededWithWhatItsReplayCannotReach(t *testing
 		snapshots bool
 	}{
 		{"daemon with snapshots (exact)", true},
-		{"daemon without snapshots (graft)", false},
 	} {
 		t.Run(tier.name, func(t *testing.T) {
 			old := daemonSnapshots
@@ -389,16 +388,67 @@ func TestKeyframe_RestartedServerIsSeededWithWhatItsReplayCannotReach(t *testing
 			ref := muxd.NewHistory(g, 50_000)
 			ref.Write([]byte(all.String()))
 			want, have := observe(t, ref, keyframeLines), observe(t, got, keyframeLines)
-			if !tier.snapshots {
-				// An older daemon cannot report modes set before the replay; they are unknown, and
-				// an unknown mode is not asserted (paste_mode.go covers bracketed paste from the
-				// session's metadata).
-				require.Equal(t, "[]", have.modes)
-				have.modes = want.modes
-			}
 			requireSameTerminal(t, want, have, 400)
 		})
 	}
+}
+
+// An older daemon (no ScreenSnap) is never grafted. It can hand over its screen but not its cursor,
+// and its screen joined to a cursor rebuilt from the replay is two terminals stitched together: an
+// inline TUI that redraws "N lines up" then erases the wrong rows and leaves its old status lines on
+// screen, through every F5 (18074, 2026-10-14). The keyframe must be exactly what the bytes since
+// the attach say — content and cursor from one stream — while the program keeps redrawing
+// relatively, the way Claude Code's footer does.
+func TestKeyframe_AnOlderDaemonIsNeverGrafted(t *testing.T) {
+	old := daemonSnapshots
+	daemonSnapshots = func(*muxd.Client) bool { return false }
+	t.Cleanup(func() { daemonSnapshots = old })
+
+	const ring = 16 << 10
+	sm, write := newSeedTestManager(t, ring)
+	sess, err := sm.Create("inline-tui")
+	require.NoError(t, err)
+
+	var all strings.Builder
+	emit := func(s string) { all.WriteString(s); write(s) }
+	// An inline UI: a transcript that scrolls, and a two-line footer redrawn in place by moving up
+	// two lines and erasing them — no absolute addressing anywhere.
+	footer := func(i int) string {
+		return fmt.Sprintf("\x1b[2A\r\x1b[2Kstatus %d tokens\r\n\x1b[2Khint %d · ← for agents\r\n", i, i)
+	}
+	emit("\r\n\r\n")
+	for i := 0; i < 400; i++ {
+		if i%7 == 0 {
+			emit(fmt.Sprintf("\x1b[2A\r\x1b[Jtranscript line %d\r\n\r\n\r\n", i))
+		}
+		emit(footer(i))
+	}
+	total := uint64(all.Len())
+	require.Eventually(t, func() bool { return sess.Buffer.Seq() >= total }, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, sm.CloseAll())
+	restored := NewSessionManager(ring, "/bin/sh")
+	restored.muxSocket = sm.muxSocket
+	t.Cleanup(func() { _ = restored.CloseAll() })
+	require.NoError(t, restored.Restore())
+	again, err := restored.Get(sess.ID)
+	require.NoError(t, err)
+	for i := 400; i < 460; i++ { // the program keeps redrawing after the restart
+		emit(footer(i))
+	}
+	total = uint64(all.Len())
+	require.Eventually(t, func() bool {
+		return again.Buffer.Seq()-again.streamBaseRing() >= total-uint64(again.streamBaseDaemon())
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // give a (wrong) seed every chance to land
+
+	again.subMu.Lock()
+	again.viewers["browser"] = &viewer{ch: make(chan viewerFrame, 1<<10)}
+	again.subMu.Unlock()
+	got := restoreOnto(t, again, "browser", sess.PTYSize())
+	ref := muxd.NewTerminalModel(sess.PTYSize(), keyframeLines)
+	ref.Write([]byte(all.String()[again.streamBaseDaemon():]))
+	requireSameTerminal(t, observe(t, ref, keyframeLines), observe(t, got, keyframeLines), 400)
 }
 
 // TestKeyframe_RestoreDrawsTheSameIntoATerminalLeftInAnyState is the reviewer's first finding: a
