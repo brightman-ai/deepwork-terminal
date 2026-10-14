@@ -1,0 +1,11 @@
+{
+  "name": "xtermvectors",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Differential vectors for muxd's terminal model: random streams run through xterm.js headless with the Unicode 11 addon, as the frontend runs it",
+  "type": "module",
+  "dependencies": {
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/headless": "6.0.0"
+  }
+}

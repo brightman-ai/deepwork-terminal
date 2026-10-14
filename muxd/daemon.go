@@ -116,7 +116,6 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-
 // patrolSignalKeys periodically enforces the one terminal invariant the kernel will not:
 // a session whose shell owns the foreground must have ISIG on. A TUI that crashed without
 // restoring its raw mode leaves it off forever (zsh never re-enables it — see
@@ -538,6 +537,19 @@ func (d *Daemon) handleConn(c net.Conn) {
 				ack.Styles, ack.StylesTotal = h.StylesFrom(req.StylesFrom)
 			}
 			_ = write(MsgHistoryAck, ack)
+
+		case MsgScreenSnap:
+			var req ScreenSnapReq
+			if err := json.Unmarshal(payload, &req); err != nil {
+				fail(ErrCodeBadFrame, err.Error())
+				continue
+			}
+			s, ok := d.Get(req.ID)
+			if !ok {
+				fail(ErrCodeNotFound, "no such session: "+req.ID)
+				continue
+			}
+			_ = write(MsgScreenSnapAck, s.ScreenSnap())
 
 		case MsgHistorySearch:
 			var req HistorySearchReq

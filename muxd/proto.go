@@ -129,6 +129,11 @@ const (
 	MsgHistorySearch    MsgType = 36
 	MsgHistorySearchAck MsgType = 37
 
+	// MsgScreenSnap asks for the session's terminal state (TermState) as one consistent read,
+	// together with the ring offset it was true at. See ScreenSnapAck.
+	MsgScreenSnap    MsgType = 38
+	MsgScreenSnapAck MsgType = 39
+
 	// Stream-scoped lifecycle notice on an attached connection.
 	MsgExited MsgType = 32 // daemon → client: {"exit_code":N}
 )
@@ -272,10 +277,20 @@ const (
 	// the feature, for a capability nothing they are doing depends on, and the only cure for
 	// that warning is a restart that ends all their sessions.
 	FeatureScrollback = "scrollback"
+
+	// FeatureScreenSnap: this daemon answers MsgScreenSnap with a session's full terminal
+	// state — both screens, cursor, pen, modes — and the ring offset it was true at, so a
+	// client can rebuild "what the terminal is right now" without the ring's retained window
+	// limiting how old the on-screen content may be.
+	//
+	// Same advertisement asymmetry as FeatureScrollback: a client that does not see it falls
+	// back to what it can rebuild from the ring and History, which is right for recent
+	// content and approximate for a screen whose rows are older than the ring.
+	FeatureScreenSnap = "screensnap"
 )
 
 // DaemonFeatures is what a daemon built from THIS source advertises.
-var DaemonFeatures = []string{FeaturePerAttachmentGeometry, FeatureScrollback}
+var DaemonFeatures = []string{FeaturePerAttachmentGeometry, FeatureScrollback, FeatureScreenSnap}
 
 // RequiredDaemonFeatures is what a client built from this source needs the daemon to do.
 //
@@ -446,6 +461,31 @@ type SessionSummary struct {
 // ListAck carries every session the daemon holds.
 type ListAck struct {
 	Sessions []SessionSummary `json:"sessions"`
+}
+
+// ScreenSnapReq names the session to snapshot.
+type ScreenSnapReq struct {
+	ID string `json:"id"`
+}
+
+// ScreenSnapAck is one consistent read of a session's terminal state (see TermState) and of where
+// in the session's output stream that state was true.
+//
+// Offset is the point of the message. History(Screen) can describe a screen, but not where in the
+// byte stream the description held, and without that a client cannot append exactly the bytes that
+// followed: it either re-applies some (a scrolling shell prints them twice) or skips some. State and
+// Offset are read under the session's feed lock, so the ring from Offset onwards continues this
+// state with no gap and no overlap.
+//
+// HistoryTotal is the scrollback's line count at the same instant: lines numbered below it are the
+// ones that had left the top of this screen, so a client paging History up to (not past) it gets a
+// scrollback that meets the snapshot exactly, however many lines scroll off while it pages.
+type ScreenSnapAck struct {
+	Enabled bool `json:"enabled"`
+	Broken  bool `json:"broken,omitempty"`
+	TermState
+	Offset       int64 `json:"offset"`
+	HistoryTotal int64 `json:"history_total"`
 }
 
 // HistoryReq asks for a page of a session's scrollback.
