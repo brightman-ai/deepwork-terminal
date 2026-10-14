@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -227,16 +228,24 @@ func (s *credentialStore) load() map[string]usage.Credential {
 		if id == "" {
 			return
 		}
-		// An explicit host declaration is stronger than the default-profile adapter.
-		for _, cred := range out {
-			for _, declared := range cred.RuntimeProviderIDs {
-				if declared == id {
-					return
-				}
+		// An explicit declaration for ANOTHER vendor is stronger than the default-profile adapter.
+		for vendor, cred := range out {
+			if vendor != "openai" && slices.Contains(cred.RuntimeProviderIDs, id) {
+				return
 			}
 		}
+		// The verified id is declared twice, because they are two facts: it bills to OpenAI
+		// (RuntimeProviderIDs, attribution) and — the config proved a ChatGPT login at the default
+		// service URL — it runs on the user's OWN account (OwnAccountProviderIDs), which is what
+		// lets kit/usage read the rate_limits codex records under it. A user-authored vendor
+		// mapping alone is only the first; it is never promoted to the second.
 		cred := out["openai"]
-		cred.RuntimeProviderIDs = append(cred.RuntimeProviderIDs, id)
+		if !slices.Contains(cred.RuntimeProviderIDs, id) {
+			cred.RuntimeProviderIDs = append(slices.Clone(cred.RuntimeProviderIDs), id)
+		}
+		if !slices.Contains(cred.OwnAccountProviderIDs, id) {
+			cred.OwnAccountProviderIDs = append(slices.Clone(cred.OwnAccountProviderIDs), id)
+		}
 		out["openai"] = cred
 	}()
 	sealed, err := os.ReadFile(s.path) //nolint:gosec — our own sealed store
