@@ -7,7 +7,7 @@
  * 只在需要它的测试文件里 import；注册的是进程级 bun 插件，但只拦 `.vue`（及其中两个被替身顶掉的）。
  */
 import { plugin } from 'bun'
-import { compileScript, parse } from '@vue/compiler-sfc'
+import { compileScript, parse } from 'vue/compiler-sfc' // vue's own re-export: no second package to declare
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 

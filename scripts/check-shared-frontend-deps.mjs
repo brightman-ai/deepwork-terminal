@@ -40,7 +40,8 @@ const SRC = join(TERMINAL_ROOT, 'frontend', 'src')
 // Import specifiers that are NOT npm packages: build-time aliases (resolved by each consumer's
 // own vite config) and runtime-provided namespaces.
 const NON_PACKAGE_PREFIXES = ['@terminal/', '@ce/', 'node:', 'bun:', 'virtual:']
-const NON_PACKAGE_EXACT = new Set(['deepwork-terminal'])
+// `bun` is the test runner's own module (its plugin API), provided by the runtime like `bun:test`.
+const NON_PACKAGE_EXACT = new Set(['deepwork-terminal', 'bun'])
 
 // Directories with nothing authored in them. Skipping node_modules is not just speed: a
 // dependency's own source would otherwise be read as if this repo had written it.
