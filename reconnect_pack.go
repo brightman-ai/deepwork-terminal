@@ -198,8 +198,9 @@ func (it *rowReader) next() (col int, r rune, w int, style muxd.StyleID, ok bool
 			case w == 2:
 				it.hidden, it.hiddenRune, it.hiddenStyle = true, h.R, h.Style
 			case col+2 == it.cols && it.marks != "":
-				// xterm does this at the margin (see drawRow); the cell behind is part of the character.
+				// xterm does this at the margin (see drawRow); the cell behind stays as it was.
 				it.widened = true
+				it.hiddenRune, it.hiddenStyle = h.R, h.Style
 				it.col++
 			default:
 				// Elsewhere the widening is not something output can be told to do; the marks stack on
@@ -478,15 +479,21 @@ func (p *packer) drawRow(ln muxd.Line, scrub, continued bool) rowEnd {
 		if it.widened {
 			// A narrow character that marks have made two columns wide, in the last two. xterm makes
 			// one when a wide character is dropped at the margin (autowrap off) and a mark then joins
-			// the cell before it, taking the dropped character's width.
+			// the cell before it, taking the dropped character's width; the cell behind it is not
+			// touched, so it is written first, and the cursor put back on it.
 			if it.lone {
 				p.w.WriteString("\x1b[m")
 				p.pen = muxd.DefaultStyle
 			}
 			p.setPen(st)
 			p.w.WriteRune(r)
+			if it.hiddenRune > 0 {
+				p.setPen(p.styleOf(it.hiddenStyle))
+				p.w.WriteRune(it.hiddenRune)
+				p.cha(p.cols - 1)
+			}
 			p.w.WriteString("\x1b[?7l" + wideFiller + it.marks + "\x1b[?7h")
-			x = p.cols
+			x = p.cols - 1
 			end = p.cols
 			scrub = false
 			continue
@@ -658,16 +665,6 @@ func (p *packer) placeCursor(lines []muxd.Line, row, col int) {
 			c, r, w, id, ok := it.next()
 			if !ok {
 				break
-			}
-			if it.widened {
-				p.cup(row, c)
-				p.setPen(p.styleOf(id))
-				p.w.WriteRune(r)
-				p.w.WriteString("\x1b[?7l" + wideFiller + it.marks)
-				if !p.wrapOff {
-					p.w.WriteString("\x1b[?7h")
-				}
-				return
 			}
 			if c+w == p.cols && r != 0 {
 				if it.hidden && it.hiddenRune <= 0 {
@@ -844,11 +841,13 @@ func serializeKeyframe(st muxd.TermState, scrollback []muxd.Line) []byte {
 		p.setPen(st.Pen)
 	}
 	// The two ANSI modes that move characters. LNM is not reset by the prelude (xterm keeps it as an
-	// option), so it is stated either way; insert mode goes last because it would shift the cell the
-	// pending-wrap placement above writes.
-	if st.NewlineMode {
+	// option: the browser's convertEol), so it is stated when it is on, and when the stream turned it
+	// off — a model whose default is off (the daemon archive) says nothing about it. Insert mode goes
+	// last because it would shift the cell the pending-wrap placement above writes.
+	switch {
+	case st.NewlineMode:
 		p.w.WriteString("\x1b[20h")
-	} else {
+	case st.NewlineModeSet:
 		p.w.WriteString("\x1b[20l")
 	}
 	if st.InsertMode {

@@ -93,8 +93,8 @@ func compareModelStates(a muxd.TermState, scrollA []muxd.Line, b muxd.TermState,
 		case !writtenAt(ln, a.Cols-1):
 			wantCol-- // a cursor still waiting to wrap after an erased cell: not something output can leave
 			reasons["cursor waiting to wrap after an erased last cell (cursor one column short)"]++
-		case widenedByMark(ln, a.Cols):
-			wantCol-- // the last cell is the one a mark's widening kept hidden
+		case endsWidened(ln, a.Cols):
+			wantCol-- // after a mark's widening at the margin the cursor stands on the cell behind it
 			reasons["cursor waiting to wrap after a cell a combining mark widened (cursor one column short)"]++
 		}
 	}
@@ -252,7 +252,9 @@ func compareModelRows(what string, a muxd.TermState, rowsA []muxd.Line, b muxd.T
 			continue
 		}
 		want = withoutMidRowHidden(want, a.Cols, reasons)
-		if x, y := canonicalRow(a, want), canonicalRow(b, rowsB[i]); x != y {
+		got := withoutWidenedHidden(rowsB[i], b.Cols)
+		want = withoutWidenedHidden(want, a.Cols)
+		if x, y := canonicalRow(a, want), canonicalRow(b, got); x != y {
 			return fmt.Sprintf("%s row %d:\n   got  %s\n   want %s", what, i, y, x)
 		}
 	}
@@ -297,6 +299,11 @@ func withoutMidRowHidden(ln muxd.Line, cols int, reasons map[string]int) muxd.Li
 		return ln
 	}
 	ln.Hidden = keep
+	return withoutNulls(ln, gone)
+}
+
+// withoutNulls takes the given columns out of the row's null runs.
+func withoutNulls(ln muxd.Line, gone []uint16) muxd.Line {
 	var nulls []uint16
 	for i := 0; i+1 < len(ln.Nulls); i += 2 {
 		from := ln.Nulls[i]
@@ -318,6 +325,40 @@ func withoutMidRowHidden(ln muxd.Line, cols int, reasons map[string]int) muxd.Li
 	}
 	ln.Nulls = nulls
 	return ln
+}
+
+// withoutWidenedHidden drops the cell kept behind a narrow character that marks widened away from
+// the margin, where the widening is not reproduced.
+func withoutWidenedHidden(ln muxd.Line, cols int) muxd.Line {
+	if len(ln.Hidden) == 0 {
+		return ln
+	}
+	it := newRowReader(ln, cols)
+	var gone []uint16
+	for {
+		col, _, _, _, ok := it.next()
+		if !ok {
+			break
+		}
+		if it.owe > 0 {
+			gone = append(gone, uint16(col+1))
+		}
+	}
+	if len(gone) == 0 {
+		return ln
+	}
+	var keep []muxd.HiddenCell
+	for _, h := range ln.Hidden {
+		isGone := false
+		for _, g := range gone {
+			isGone = isGone || g == h.Col
+		}
+		if !isGone {
+			keep = append(keep, h)
+		}
+	}
+	ln.Hidden = keep
+	return withoutNulls(ln, gone)
 }
 
 // lastCellMarkedEmpty says the row's last cell is an empty one in a style with more than a
@@ -383,6 +424,19 @@ func widenedByMark(ln muxd.Line, cols int) bool {
 			return false
 		}
 		if it.owe > 0 {
+			return true
+		}
+	}
+}
+
+// endsWidened says the row's last two columns are a narrow character widened by marks.
+func endsWidened(ln muxd.Line, cols int) bool {
+	it := newRowReader(ln, cols)
+	for {
+		if _, _, _, _, ok := it.next(); !ok {
+			return false
+		}
+		if it.widened || it.owe > 0 {
 			return true
 		}
 	}
