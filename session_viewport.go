@@ -37,6 +37,7 @@ package terminal
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
@@ -53,6 +54,10 @@ type viewer struct {
 	// size is the window this browser is displaying the session in; the zero Grid means
 	// OBSERVER — still receiving output, no longer voting on the size.
 	size muxd.Grid
+	// stale is set when this viewer lost output — its queue was full when a frame arrived —
+	// and cleared by syncViewer. While set, the viewer is sent no output at all. See
+	// markStaleLocked.
+	stale atomic.Bool
 }
 
 // viewerFrame is one thing that happened on this session, carried to a viewer in the order
@@ -66,6 +71,9 @@ type viewer struct {
 type viewerFrame struct {
 	Data   []byte
 	Resize *muxd.Grid // the session's grid is now this big, as of this point in the stream
+	// Resync says the viewer must be brought to the present again (syncViewer) before anything
+	// else is written to it: it lost output, or the restore point changed under it.
+	Resync bool
 }
 
 // Viewport returns the size this server declares on its attachment: the window of the
@@ -241,8 +249,10 @@ func (s *Session) SetViewerSize(subID string, cols, rows int) error {
 func (s *Session) tellViewer(subID string, g muxd.Grid) {
 	s.subMu.RLock()
 	defer s.subMu.RUnlock()
-	if v, ok := s.viewers[subID]; ok {
-		pushViewerControl(v.ch, viewerFrame{Resize: &g})
+	// A stale viewer gets nothing but its one Resync — its sync announces the grid — so its queue
+	// only ever drains from here, and that Resync can never be pushed out by what follows it.
+	if v, ok := s.viewers[subID]; ok && !v.stale.Load() {
+		pushViewerResizeLocked(v, g)
 	}
 }
 
@@ -304,21 +314,29 @@ func (s *Session) noteDeclared(g muxd.Grid) {
 	s.geomMu.Unlock()
 }
 
-// fanOutData delivers output to every viewer.
+// fanOutLocked delivers output to every viewer. Caller holds subMu (read): the pump calls it in
+// the same critical section that writes the bytes to the ring and the keyframe, which is what lets
+// syncViewer split the stream exactly (see session_screen.go).
 //
-// Output is expendable: a browser too slow to drain its channel misses live bytes and gets
-// them back from the replay on its next attach. It is refused AT THE TAIL rather than
-// evicted from the head — see viewerControlReserve for why the difference matters.
-func (s *Session) fanOutData(data []byte) {
-	s.subMu.RLock()
-	defer s.subMu.RUnlock()
+// A viewer whose queue is full does not get this frame — the pump never blocks on a browser —
+// and that is a LOSS, not a delay: a byte stream with a hole in it is a different screen (a lost
+// ESC turns the rest of its sequence into visible text). So the viewer is marked stale and
+// receives nothing further until it has been brought back to the present in one piece. Refused
+// at the tail rather than evicted from the head, so what it already holds stays a clean prefix —
+// see viewerControlReserve.
+func (s *Session) fanOutLocked(data []byte) {
 	for _, v := range s.viewers {
+		if v.stale.Load() {
+			continue
+		}
 		if !admitViewerOutput(v.ch) {
+			markStaleLocked(v)
 			continue
 		}
 		select {
 		case v.ch <- viewerFrame{Data: data}:
 		default:
+			markStaleLocked(v)
 		}
 	}
 }
@@ -340,11 +358,17 @@ func (s *Session) applyGrid(g muxd.Grid) {
 	// Through the one writer, so that the grid-epoch mark cannot be skipped by whichever
 	// path happened to learn the new size first.
 	s.setPTYSizeFromDaemon(g)
+	// The keyframe takes the old grid's bytes at the old size, then the new size — the pump is
+	// the caller, which is what lets it mutate the keyframe under the read lock.
+	s.kfResizeLocked(g)
 	// One pointer, shared by every viewer on purpose: a Grid is a value nobody mutates
 	// after it is announced, and handing out N copies of the same two numbers only invites
 	// someone to wonder whether they can differ.
 	for _, v := range s.viewers {
-		pushViewerControl(v.ch, viewerFrame{Resize: &g})
+		if v.stale.Load() {
+			continue // its sync announces the grid it draws on
+		}
+		pushViewerResizeLocked(v, g)
 	}
 }
 
@@ -362,11 +386,23 @@ func admitViewerOutput(ch chan viewerFrame) bool {
 	return muxd.AdmitExpendable(ch, viewerControlReserve)
 }
 
-// pushViewerControl delivers a frame that must not be lost. The reserve above means this
-// normally just sends; the eviction path survives only for a consumer stalled long enough
-// to fill even the reserve, where the newest grid is the one worth keeping. It never
-// blocks: a viewer whose reader has stopped entirely must not stall the output pump for
-// everyone else.
+// pushViewerResizeLocked hands a viewer a new grid, in order with its output. The reserve above
+// means this normally just sends. A viewer stalled long enough to fill even the reserve gets
+// nothing evicted — an evicted output frame is a hole in its stream, an evicted resize a grid it
+// was never told about — it is marked stale instead, and the re-sync announces the grid along with
+// the screen drawn for it. Never blocks: a viewer whose reader has stopped entirely must not stall
+// the output pump for everyone else. Caller holds subMu (read or write).
+func pushViewerResizeLocked(v *viewer, g muxd.Grid) {
+	select {
+	case v.ch <- viewerFrame{Resize: &g}:
+	default:
+		markStaleLocked(v)
+	}
+}
+
+// pushViewerControl delivers the one frame that may evict: a stale viewer's Resync. Everything
+// still queued ahead of it is superseded by the sync it asks for, so making room by discarding
+// the oldest loses nothing the viewer would have drawn.
 func pushViewerControl(ch chan viewerFrame, f viewerFrame) {
 	muxd.PushNewestOnFull(ch, f)
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,8 +157,10 @@ func TestPasteModeInferenceIsBoundedInTime(t *testing.T) {
 	}
 }
 
-// Wiring: the real WS handler must use the inferred mode, or none of the above reaches a browser.
-func TestTerminalWSReplayAssertsInferredPasteModeForAnAgentSession(t *testing.T) {
+// Wiring: the real WS handler must deliver the inferred mode, or none of the above reaches a
+// browser — as its own frame right after the restore, never by holding the first screen back while
+// the process table and tmux are asked (their locks outlive any deadline).
+func TestTerminalWSDeliversInferredPasteModeAfterTheRestore(t *testing.T) {
 	stubDetector(t, always(agentintel.ToolCodex))
 	server, sm, _ := newDrawerTestServer(t)
 	sess, err := sm.Create("old-codex-session")
@@ -176,16 +177,17 @@ func TestTerminalWSReplayAssertsInferredPasteModeForAnAgentSession(t *testing.T)
 	require.NoError(t, err)
 	defer conn.CloseNow()
 
-	want := append(append([]byte(nil), payload...), "\x1b[?2004h"...)
-	var replay []byte
-	for len(replay) < len(want) {
+	want := append([]byte(restorePrelude), payload...)
+	want = append(want, "\x1b[?2004h"...)
+	var got []byte
+	for len(got) < len(want) {
 		kind, data, err := conn.Read(ctx)
 		require.NoError(t, err)
 		if kind == websocket.MessageBinary {
-			replay = append(replay, data...)
+			got = append(got, data...)
 		}
 	}
-	require.Equal(t, want, replay)
+	require.Equal(t, want, got)
 }
 
 // The connect budget is deliberately shorter than a cold ps, so the answer that matters most —
@@ -211,20 +213,19 @@ func TestLatePasteModeFrameSilentWhenStillUnknown(t *testing.T) {
 	require.Nil(t, (&Server{}).latePasteModeFrame(context.Background(), sessionWithShell(4242)))
 }
 
-// End to end: connect while the detector is too slow for the connect budget (the cold-ps case),
-// then let it answer. The replay must go out with NO assertion (unknown is never asserted), and
-// the resolution must arrive as its own frame — without the inferred byte ever entering the
+// End to end: connect while the detector is slow (the cold-ps case), then let it answer. The
+// restore must go out without waiting for it and with NO assertion (unknown is never asserted),
+// and the resolution must arrive as its own frame — without the inferred byte ever entering the
 // session's stream, where it would be replayed later as if observed.
 func TestTerminalWSPushesLatePasteModeAfterUnknownConnect(t *testing.T) {
 	gate := make(chan struct{})
-	var calls atomic.Int32
 	stubDetector(t, func(ctx context.Context, _ int) agentintel.AgentTool {
-		if calls.Add(1) == 1 {
-			<-ctx.Done() // the connect-time ask: outrun by the budget, like a cold ps
+		select {
+		case <-gate: // hold until the replay is verifiably out
+			return agentintel.ToolCodex
+		case <-ctx.Done():
 			return agentintel.ToolNone
 		}
-		<-gate // the late re-ask: hold until the replay is verifiably out
-		return agentintel.ToolCodex
 	})
 
 	server, sm, _ := newDrawerTestServer(t)
@@ -242,16 +243,17 @@ func TestTerminalWSPushesLatePasteModeAfterUnknownConnect(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.CloseNow()
 
-	// The replay is exactly the payload: no assertion, and no silent "off" either.
+	// The replay is exactly the prelude and the payload: no assertion, and no silent "off" either.
+	want := append([]byte(restorePrelude), payload...)
 	var replay []byte
-	for len(replay) < len(payload) {
+	for len(replay) < len(want) {
 		kind, data, err := conn.Read(ctx)
 		require.NoError(t, err)
 		if kind == websocket.MessageBinary {
 			replay = append(replay, data...)
 		}
 	}
-	require.Equal(t, payload, replay)
+	require.Equal(t, want, replay)
 
 	close(gate)
 	var late []byte

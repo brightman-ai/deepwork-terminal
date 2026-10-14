@@ -34,7 +34,8 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 			sm.bufferSize = 1 << 20
 			sess, err := sm.Create("compat-replay")
 			require.NoError(t, err)
-			payload := bytes.Repeat([]byte("终端 replay 0123456789\r\n"), 12000)[:wsReplayMaxBytes]
+			unit := []byte("终端 replay 0123456789\r\n")
+			payload := bytes.Repeat(unit, wsReplayMaxBytes/len(unit)+1)[:wsReplayMaxBytes]
 			sess.Buffer.Write(payload)
 			// A replay restates the session's negotiated DECSET 2004 mode only when
 			// somebody has actually seen the program negotiate it. This session's
@@ -50,11 +51,12 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 			})
 			require.NoError(t, err)
 			defer conn.CloseNow()
-			conn.SetReadLimit(1 << 20)
+			conn.SetReadLimit(2 << 20) // the replay is the whole 1 MiB ring plus the restore prelude
 			require.Equal(t, tc.compressed, strings.Contains(response.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate"))
+			want := append([]byte(restorePrelude), payload...)
 			var replay []byte
 			reset := false
-			for len(replay) < len(payload) {
+			for len(replay) < len(want) {
 				kind, data, err := conn.Read(ctx)
 				require.NoError(t, err)
 				if kind == websocket.MessageBinary {
@@ -66,7 +68,7 @@ func TestTerminalWSBrowserCompatibility(t *testing.T) {
 					reset = reset || msg.Type == MsgTypeReplayReset
 				}
 			}
-			require.Equal(t, payload, replay)
+			require.Equal(t, want, replay)
 			// Bidirectional control still works after the full replay.
 			require.NoError(t, conn.Write(ctx, websocket.MessageText, []byte(`{"type":"heartbeat","payload":{"sentAt":12345}}`)))
 			for {
@@ -113,7 +115,9 @@ func TestTerminalWSReplayRestatesObservedPasteMode(t *testing.T) {
 			require.NoError(t, err)
 			defer conn.CloseNow()
 
-			want := append(append([]byte(nil), payload...), tc.suffix...)
+			// The mode goes BEFORE the retained bytes — where the parser is provably at ground —
+			// not after them, where it could land inside a sequence the next frame completes.
+			want := append([]byte(restorePrelude+tc.suffix), payload...)
 			var replay []byte
 			for len(replay) < len(want) {
 				kind, data, err := conn.Read(ctx)
