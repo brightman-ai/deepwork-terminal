@@ -22,17 +22,34 @@ function _startFlush(): void {
   _flushTimer = setInterval(_flush, FLUSH_INTERVAL_MS)
 }
 
-async function _flush(): Promise<void> {
+// A flush that fails puts its events back instead of dropping them. The moments this channel
+// exists for are exactly the ones when its requests stall: on 2026-10-13 the page's HTTP queued in
+// the browser for ten minutes while its terminals kept working, every flush was aborted at 5s,
+// and each one threw its batch away — the server learned nothing about the very stall it was
+// asked to explain. A slow or failed flush is itself reported (cli.diag.transport), so the stall
+// shows up as data once a request gets through.
+const SLOW_FLUSH_MS = 2_000
+let _failedFlushes = 0
+
+function _requeue(events: DiagEvent[]): void {
+  _buf.unshift(...events)
+  if (_buf.length > MAX_BUFFER) _buf.splice(0, _buf.length - MAX_BUFFER)
+}
+
+async function _flush(keepalive = false): Promise<void> {
   if (_flushing || _buf.length === 0) return
   _flushing = true
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 5000)
   const events = _buf.splice(0)
   const auth = typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_STORAGE_KEY) ?? '' : ''
+  const started = Date.now()
+  let outcome = 'ok'
   try {
-    await fetch(cliApi('/debug/logs'), {
+    const res = await fetch(cliApi('/debug/logs'), {
       signal: controller.signal,
       method: 'POST',
+      keepalive,
       headers: {
         'Content-Type': 'application/json',
         'X-CLI-Auth': auth,
@@ -40,18 +57,61 @@ async function _flush(): Promise<void> {
       },
       body: JSON.stringify({ events }),
     })
+    if (!res.ok) outcome = `http_${res.status}`
   } catch {
-    // Best-effort — drop on network error.
+    outcome = controller.signal.aborted ? 'timeout' : 'network'
   } finally {
     clearTimeout(timeout)
     _flushing = false
   }
+  const tookMs = Date.now() - started
+  if (outcome !== 'ok') {
+    _failedFlushes++
+    _requeue(events)
+  }
+  if (outcome !== 'ok' || tookMs >= SLOW_FLUSH_MS) {
+    _buf.push({
+      ts: Date.now(), msg: 'cli.diag.transport', outcome, tookMs,
+      failedFlushes: _failedFlushes, queued: _buf.length,
+      visibility: typeof document !== 'undefined' ? document.visibilityState : 'unknown',
+    })
+    if (outcome === 'ok') _failedFlushes = 0
+  } else {
+    _failedFlushes = 0
+  }
+}
+
+/** Test seam: run one flush now and report what is still queued. */
+export async function _flushNowForTest(): Promise<DiagEvent[]> {
+  await _flush()
+  return _buf.slice()
 }
 
 function _pushEvent(msg: string, ext: Record<string, unknown>): void {
   _buf.push({ ts: Date.now(), msg, ...ext })
   if (_buf.length > MAX_BUFFER) _buf.splice(0, _buf.length - MAX_BUFFER)
   _startFlush()
+}
+
+// Leaving or hiding the page: hand the queue over with keepalive, which outlives the page and is
+// not subject to the background-tab timer throttling that delays the 2s interval to once a minute.
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void _flush(true)
+  })
+  window.addEventListener('pagehide', () => { void _flush(true) })
+  // How this page came to be: a reload the user asked for, or Chrome bringing back a page it
+  // discarded in the background (which reconnects every tab at once). The two look identical
+  // from the server.
+  try {
+    const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
+    _pushEvent('cli.page.load', {
+      navigation: nav?.type ?? 'unknown',
+      wasDiscarded: (document as Document & { wasDiscarded?: boolean }).wasDiscarded ?? false,
+    })
+  } catch {
+    // Observability must never break the page.
+  }
 }
 
 /**

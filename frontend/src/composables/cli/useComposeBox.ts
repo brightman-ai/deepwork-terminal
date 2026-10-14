@@ -21,6 +21,8 @@ import {
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useServerStore } from '@terminal/composables/cli/useServerStore'
 import { useComposeSendStrategy } from '@terminal/composables/cli/useComposeSendStrategy'
+import * as typedTriggerOps from '@terminal/composables/cli/composeTypedTrigger'
+import type { TypedTrigger } from '@terminal/composables/cli/composeTypedTrigger'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 
 const DRAFT_KEY = 'cli-compose-draft'
@@ -255,10 +257,13 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
   }
   let resizeStartY = 0
   let resizeStartHeight = 0
+  /** +1: the grip sits BELOW the textarea (floating desktop box), dragging DOWN grows it;
+   *  -1: the grip sits ABOVE a bottom-anchored textarea (the original docked bar), dragging UP grows it. */
+  let resizeSign: 1 | -1 = -1
   function onResizeMove(e: PointerEvent) {
-    // Handle sits ABOVE the textarea, which is bottom-anchored — dragging the handle UP
-    // (decreasing clientY) must grow the box, hence startY - currentY rather than the reverse.
-    const delta = resizeStartY - e.clientY
+    // Docked/bottom-anchored: the handle sits ABOVE the textarea, so dragging UP (decreasing
+    // clientY) must grow the box — startY - currentY. A grip BELOW the textarea is the mirror image.
+    const delta = resizeSign * (e.clientY - resizeStartY)
     const next = Math.min(Math.max(resizeStartHeight + delta, 40), window.innerHeight * 0.7)
     manualHeight.value = next
     const ta = textareaRef.value
@@ -268,10 +273,11 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     window.removeEventListener('pointermove', onResizeMove)
     saveManualHeight()
   }
-  function onResizeStart(e: PointerEvent) {
+  function onResizeStart(e: PointerEvent, grip: 'above' | 'below' = 'above') {
     const ta = textareaRef.value
     if (!ta) return
     e.preventDefault()
+    resizeSign = grip === 'below' ? 1 : -1
     resizeStartY = e.clientY
     resizeStartHeight = ta.offsetHeight
     window.addEventListener('pointermove', onResizeMove)
@@ -305,6 +311,66 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     })
   }
 
+  // --- Typed trigger (desktop "打字即成框", terminal-input REQ-TI-01/03) ---
+  // The box was opened BY a keystroke the terminal never saw. The bookkeeping lives in
+  // composeTypedTrigger.ts (pure, tested); this block only applies its results to the refs and the
+  // per-tab draft, so Esc on an untouched box can hand the keystroke back to the terminal and
+  // leave the draft as it was.
+  let typedTrigger: TypedTrigger | null = null
+
+  function placeCaretAtEnd(): void {
+    const ta = textareaRef.value
+    if (!ta) return
+    const end = ta.value.length
+    try { ta.setSelectionRange(end, end) } catch {}
+  }
+
+  /** Box opened by a visible character: append it to whatever draft was loaded, focus, caret last. */
+  function beginTyped(typed: string): void {
+    const begun = typedTriggerOps.beginTyped(text.value, typed)
+    typedTrigger = begun.trigger
+    text.value = begun.text
+    saveDraft()
+    focus() // synchronously — the next keystroke must find the box, not the terminal
+    void nextTick(() => { autoResize(); placeCaretAtEnd() })
+  }
+
+  /** Box opened by an IME about to compose inside it. Focus must move NOW (same microtask checkpoint as the keydown). */
+  function beginImeTyped(): void {
+    typedTrigger = typedTriggerOps.beginIme(text.value)
+    focus()
+  }
+
+  /** Text composed elsewhere (the terminal's own textarea, Safari's event order) handed over once committed. */
+  function adoptCommitted(committed: string): void {
+    if (!committed) return
+    const adopted = typedTriggerOps.adoptCommitted(typedTrigger, text.value, committed)
+    typedTrigger = adopted.trigger
+    text.value = adopted.text
+    saveDraft()
+    void nextTick(() => { autoResize(); focus(); placeCaretAtEnd() })
+  }
+
+  /** compositionend inside the box: the first one after an IME-opened box defines "what the trigger was". */
+  function noteCompositionEnd(): void {
+    // After Vue's v-model has taken the committed text.
+    void nextTick(() => { typedTrigger = typedTriggerOps.noteCompositionEnd(typedTrigger, text.value) })
+  }
+
+  /**
+   * Esc on the box. If it still holds exactly what the triggering keystroke put there, take that
+   * keystroke back: restore the draft as it was and return the text for the caller to re-send to the
+   * terminal. Anything else (edited, or not opened by typing) → null, and the caller just closes.
+   */
+  function consumePristineTrigger(): string | null {
+    const taken = typedTriggerOps.consumePristine(typedTrigger, text.value)
+    typedTrigger = null
+    if (!taken) return null
+    text.value = taken.restoreText
+    if (taken.restoreText) saveDraft(); else removeDraft()
+    return taken.typed
+  }
+
   function onInput(e: Event) {
     const ie = e as InputEvent
     reportCliInputDiagnostic('compose.input', {
@@ -328,6 +394,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     const val = text.value
     if (!val) return
     reportCliInputDiagnostic('compose.send', { value: summarizeText(val) })
+    typedTrigger = null
     pushHistory(val)
     opts.emit.send(val)
     text.value = ''
@@ -352,6 +419,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
 
   // --- Clear all (undoable) ---
   function clearAll() {
+    typedTrigger = null
     const prev = text.value
     text.value = ''
     removeDraft()
@@ -464,5 +532,6 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     toggleSnippets, toggleHistory, saveSnippet, insertSnippet, deleteSnippet, clearHistory, insertFromHistory,
     onInput, onTextareaFocus, autoResize, onResizeStart,
     send, encode, copyAll, clearAll, undoClear, moveCursor, insertAtCursor,
+    beginTyped, beginImeTyped, adoptCommitted, noteCompositionEnd, consumePristineTrigger,
   }
 }

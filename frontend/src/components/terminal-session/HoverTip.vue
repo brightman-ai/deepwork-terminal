@@ -20,8 +20,10 @@ withDefaults(defineProps<{
   label: string
   /** 第二行（可选）：按下会发生什么 / 快捷键 / 代价。 */
   hint?: string
+  /** 再往下的若干行（可选）：逐项读数，如延迟的分段。每项一行，样式同 hint。 */
+  details?: string[]
   side?: 'top' | 'bottom' | 'left' | 'right'
-}>(), { hint: '', side: 'bottom' })
+}>(), { hint: '', details: () => [], side: 'bottom' })
 </script>
 
 <template>
@@ -43,6 +45,7 @@ withDefaults(defineProps<{
       >
         <span class="dw-hover-tip__label">{{ label }}</span>
         <span v-if="hint" class="dw-hover-tip__hint">{{ hint }}</span>
+        <span v-for="(line, i) in details" :key="i" class="dw-hover-tip__hint" data-testid="hover-tip-detail">{{ line }}</span>
       </TooltipContent>
     </TooltipPortal>
   </TooltipRoot>

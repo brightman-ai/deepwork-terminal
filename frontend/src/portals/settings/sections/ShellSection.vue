@@ -2,11 +2,18 @@
 import { onMounted, ref } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { useTypeToComposeSetting } from '@terminal/composables/cli/useTypeToComposeSetting'
 
 interface TerminalSettings { shell: string; bufferSize: number; maxSessions: number }
 const { cliFetch } = useCliAuth()
 const s = ref<TerminalSettings | null>(null)
 const loading = ref(true)
+
+// ─── 输入：打字即成框（terminal-input REQ-TI-08）──────────────────────────────────────────
+// 没读到服务端的值之前不让改：此时 useServerStore 不会落盘，改动会在读到的那一刻被覆盖，开关看着
+// 拨了、刷新又弹回去 —— 和 envHydrated 同一个教训。
+const typeToCompose = useTypeToComposeSetting()
+const typeToComposeReady = ref(false)
 
 function formatBytes(b: number): string {
   if (b >= 1 << 20) return `${(b / (1 << 20)).toFixed(1)} MB`
@@ -79,6 +86,10 @@ onMounted(async () => {
   try { const r = await cliFetch('/api/settings'); if (r.ok) s.value = await r.json() } catch { /* ignore */ } finally { loading.value = false }
   await loadEnv()
 })
+onMounted(async () => {
+  await typeToCompose.load()
+  typeToComposeReady.value = typeToCompose.isHydrated()
+})
 </script>
 
 <template>
@@ -91,6 +102,31 @@ onMounted(async () => {
       <div class="ssec-card"><span class="ssec-card-label">Max Sessions</span><span class="ssec-card-value">{{ s?.maxSessions ?? '—' }}</span></div>
     </div>
     <p class="ssec-hint">以上三项为只读。如需修改，请编辑启动参数或配置文件。</p>
+
+    <div class="ssec-block input-block" data-testid="settings-type-to-compose">
+      <div class="ssec-header">输入</div>
+      <label class="tc-row">
+        <input
+          type="checkbox"
+          data-testid="settings-type-to-compose-toggle"
+          :checked="typeToCompose.enabled.value"
+          :disabled="!typeToComposeReady"
+          @change="typeToCompose.setEnabled(($event.target as HTMLInputElement).checked)"
+        />
+        <span class="tc-title">打字即成框</span>
+      </label>
+      <p class="ssec-hint">
+        在 Claude Code / Codex / Gemini / OpenCode 等待输入或运行中时，直接在终端里敲字，会自动弹出一个浮在终端之上的
+        输入框，已敲的字带进去；<strong>Enter 发送并提交</strong>，Shift+Enter 换行。这样每个字先在本地回显，
+        不必等网络和程序重绘。
+      </p>
+      <p class="ssec-hint">
+        普通 shell、全屏程序（vim / less）、权限确认和选项菜单、回看和搜索打开时、带 Ctrl / ⌘ / Alt 的组合键，
+        以及提示为空时以 <code>/</code> <code>!</code> <code>#</code> 开头的命令，都照旧直达终端。关掉之后，
+        只有左下角浮钮或快捷键能打开输入框。
+      </p>
+      <p v-if="!typeToComposeReady" class="ssec-hint">正在读取设置…（读不到时先不要改）</p>
+    </div>
 
     <div class="ssec-block env-block">
       <div class="ssec-header">新终端的环境变量</div>
@@ -142,6 +178,11 @@ onMounted(async () => {
 
 <style scoped>
 .env-block { margin-top: 24px; }
+.input-block { margin-top: 24px; }
+.tc-row { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; margin: 6px 0; }
+.tc-row input { cursor: pointer; }
+.tc-row input:disabled { cursor: not-allowed; }
+.tc-title { font-size: 13px; font-weight: 600; color: hsl(var(--foreground)); }
 .env-group-label {
   font-size: 10px;
   text-transform: uppercase;
