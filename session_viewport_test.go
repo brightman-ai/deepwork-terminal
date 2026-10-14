@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -248,9 +249,9 @@ func TestResizeReachesViewersInStreamOrder(t *testing.T) {
 	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+8)}
 	sess.viewers["a"] = v
 
-	sess.fanOutData([]byte("BEFORE"))
+	fanOut(sess, "BEFORE")
 	sess.applyGrid(muxd.Grid{Cols: 80, Rows: 24})
-	sess.fanOutData([]byte("AFTER"))
+	fanOut(sess, "AFTER")
 
 	var got []string
 	for i := 0; i < 3; i++ {
@@ -270,6 +271,13 @@ func TestResizeReachesViewersInStreamOrder(t *testing.T) {
 	}
 }
 
+// fanOut is the pump's fan-out, with the lock the pump holds around it.
+func fanOut(sess *Session, data string) {
+	sess.subMu.RLock()
+	sess.fanOutLocked([]byte(data))
+	sess.subMu.RUnlock()
+}
+
 // TestControlFramesAreNeverEvictedForLaterOnes is the backpressure policy.
 //
 // "When full, discard the oldest frame" looks like it protects control frames — it always
@@ -279,7 +287,9 @@ func TestResizeReachesViewersInStreamOrder(t *testing.T) {
 // before, which it was never told to leave. That is a reordering, not a thinning.
 //
 // So output is refused at the TAIL while the top of the queue is reserved, and nothing that
-// is already queued is ever removed.
+// is already queued is ever removed. And a refusal is a LOSS — the viewer's copy of the stream
+// now has a hole — so it is marked stale: it is sent one Resync and nothing else (no output, no
+// resize) until it has been brought back to the present, whose restore announces the grid.
 func TestControlFramesAreNeverEvictedForLaterOnes(t *testing.T) {
 	sess := &Session{ID: "backpressure", viewers: map[string]*viewer{}}
 	// Deliberately small: four output slots under a full reserve, so the queue is driven
@@ -289,30 +299,69 @@ func TestControlFramesAreNeverEvictedForLaterOnes(t *testing.T) {
 
 	sess.applyGrid(muxd.Grid{Cols: 80, Rows: 24})
 	for i := 0; i < 40; i++ { // far more output than the queue can hold
-		sess.fanOutData([]byte("bytes drawn at 80"))
+		fanOut(sess, "bytes drawn at 80")
 	}
 	sess.applyGrid(muxd.Grid{Cols: 100, Rows: 30})
 
-	var grids []muxd.Grid
-	var outputs int
+	if !v.stale.Load() {
+		t.Fatal("a viewer that lost output was not marked stale — it would go on painting a stream with a hole in it")
+	}
+	var frames []string
 	for len(v.ch) > 0 {
 		f := <-v.ch
-		if f.Resize != nil {
-			grids = append(grids, *f.Resize)
-		} else {
-			outputs++
+		switch {
+		case f.Resync:
+			frames = append(frames, "resync")
+		case f.Resize != nil:
+			frames = append(frames, fmt.Sprintf("resize%dx%d", f.Resize.Cols, f.Resize.Rows))
+		default:
+			frames = append(frames, "out")
 		}
 	}
-	if len(grids) != 2 {
-		t.Fatalf("got %d resize frames %v, want both — the earlier one was sacrificed for "+
-			"the later one, so the output queued between them paints onto a grid the viewer "+
-			"was never given", len(grids), grids)
+	if len(frames) < 3 || frames[0] != "resize80x24" || frames[1] != "out" || frames[len(frames)-1] != "resync" {
+		t.Fatalf("queue = %v, want [resize80x24 out… resync]: the grid before the output it governs, "+
+			"a clean prefix of output, then exactly one resync", frames)
 	}
-	if grids[0] != (muxd.Grid{Cols: 80, Rows: 24}) || grids[1] != (muxd.Grid{Cols: 100, Rows: 30}) {
-		t.Fatalf("grids arrived as %v, want [[80 24] [100 30]] in that order", grids)
+	for _, f := range frames[1 : len(frames)-1] {
+		if f != "out" {
+			t.Fatalf("queue = %v: after the loss the viewer must receive nothing but the resync", frames)
+		}
 	}
-	if outputs == 0 {
-		t.Fatal("no output got through at all — the reserve swallowed the whole queue")
+}
+
+// A burst of resizes against a stalled viewer must not thin its queue silently either (codex review
+// 2026-10-14): once even the control reserve is full, admitting one more resize used to evict the
+// oldest frame — output or an earlier resize — without marking anything, so a viewer that later
+// drained found a hole and was never re-synced. Now the resize that does not fit makes the viewer
+// stale, and the re-sync announces the grid with the screen drawn for it.
+func TestAResizeThatDoesNotFitMakesTheViewerStaleInsteadOfEvicting(t *testing.T) {
+	sess := &Session{ID: "resize-burst", viewers: map[string]*viewer{}}
+	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+4)}
+	sess.viewers["stuck"] = v
+
+	for i := 0; i < 4; i++ { // exactly the output capacity: nothing lost yet
+		fanOut(sess, "drawn at the spawn size")
+	}
+	if v.stale.Load() {
+		t.Fatal("setup: output that fits must not make the viewer stale")
+	}
+	for i := 0; i < viewerControlReserve; i++ { // fills the reserve: still nothing lost
+		sess.applyGrid(muxd.Grid{Cols: 80 + i, Rows: 24})
+	}
+	if v.stale.Load() {
+		t.Fatal("setup: resizes that fit in the reserve must not make the viewer stale")
+	}
+	sess.applyGrid(muxd.Grid{Cols: 120, Rows: 40}) // one more than the queue can hold
+
+	if !v.stale.Load() {
+		t.Fatal("a resize that did not fit was admitted by evicting a queued frame, and the viewer was not re-synced")
+	}
+	var last viewerFrame
+	for len(v.ch) > 0 {
+		last = <-v.ch
+	}
+	if !last.Resync {
+		t.Fatalf("the queue must end in the Resync that replaces everything before it, got %+v", last)
 	}
 }
 

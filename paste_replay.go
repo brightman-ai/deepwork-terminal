@@ -19,3 +19,16 @@ func replayWithPasteMode(replay []byte, enabled, known bool) []byte {
 	result = append(result, replay...)
 	return append(result, mode...)
 }
+
+// pasteModeAssertion is the DECSET/DECRST that states a known bracketed-paste mode, or nothing for
+// an unknown one (see replayWithPasteMode for why unknown is never asserted as "off").
+func pasteModeAssertion(enabled, known bool) string {
+	switch {
+	case !known:
+		return ""
+	case enabled:
+		return "\x1b[?2004h"
+	default:
+		return "\x1b[?2004l"
+	}
+}

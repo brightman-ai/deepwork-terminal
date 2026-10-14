@@ -82,6 +82,14 @@ type Session struct {
 	// SessionManager.SetActiveConn). It only goes up, so a connection that was preempted
 	// mid-handshake cannot take the grid back from the one that replaced it.
 	ownerEpoch uint64
+	// kf is the restore point viewers are brought to the present from — see session_screen.go
+	// for what it is and for its locking, which is subMu's but asymmetric: the pump mutates it
+	// under the READ lock (together with the fan-out of the same bytes), everyone else under the
+	// write lock.
+	kf keyframe
+	// streamBase maps the current attachment's daemon offsets onto ring positions (seeding
+	// uses it to place a daemon snapshot). Protected by subMu.
+	streamBase streamBase
 	subMu      sync.RWMutex
 
 	// geomMu serializes "re-derive the smallest window and declare it to the daemon".

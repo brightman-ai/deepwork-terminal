@@ -22,10 +22,13 @@ const (
 	// wsWriteTimeout is the timeout for writing a single WS message.
 	wsWriteTimeout = 10 * time.Second
 
-	// wsReplayMaxBytes caps attach/reconnect replay. The ring buffer still keeps
-	// 1 MiB for local history, but pushing the full buffer before interactive WS
-	// traffic makes remote tabs feel sticky on reconnect.
-	wsReplayMaxBytes = 256 * 1024
+	// wsReplayMaxBytes caps attach/reconnect replay. It equals the ring size: the replay IS
+	// the reconnect's screen and scrollback, and capping it below the ring was what left a
+	// refreshed browser with a few pages of scrollback and a half-drawn inline TUI (2026-10-13,
+	// Human-reported). xterm is a full emulator — the ring IS the most faithful snapshot we
+	// have until the daemon offers one (MsgScreenSnap). The old 256KB rationale ("remote tabs
+	// feel sticky") is now a measured budget instead of a fixed cut: replay_ms is logged.
+	wsReplayMaxBytes = 1 << 20
 
 	// tmuxStatePollInterval controls how often the WS writer recomputes tmux
 	// topology and pushes a tmux_state frame on change. Kept light (~1s) so the
@@ -487,7 +490,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Subscribe to PTY output. The grid comes back WITH the subscription, not from a
 	// separate read afterwards — see Subscribe.
-	dataCh, gridCols, gridRows, unsub := s.mgr.Subscribe(sess, subID)
+	dataCh, _, _, unsub := s.mgr.Subscribe(sess, subID)
 	defer unsub()
 
 	// This connection preempted whoever was here (SetActiveConn, above), so it also takes the
@@ -497,30 +500,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	sess.SetViewerOwner(subID, connEpoch)
 	defer sess.ReleaseViewerOwner(subID)
 
-	// Send replay buffer first. Strip terminal report-queries (DA/DSR/color/…): replaying them
-	// would make the browser terminal re-answer, and on a reconnect into tmux copy-mode those
-	// stray answers are read as keys (the mysterious "(search up)"). See stripDeviceQueries.
-	//
-	// Capped at the current grid epoch: bytes older than the last resize were drawn for a
-	// window this browser is not on, and re-executing them here is what stacked a copy of the
-	// screen per resize. See Session.gridSeq.
-	bufferBytes := sess.Buffer.Len()
-	// One call, so the bytes and the grid boundary describe the same instant — see ReplayTail.
-	full, keep := sess.ReplayTail(wsReplayMaxBytes)
-	replayRaw := full[len(full)-keep:]
-	replayTruncated := bufferBytes > len(replayRaw)
-	pasteEnabled, pasteKnown := s.effectivePasteMode(ctx, sess)
-	replay := replayWithPasteMode(stripDeviceQueries(replayRaw), pasteEnabled, pasteKnown)
 	terminalWSConnectionsTotal.Inc()
 	terminalLogger.Info(attachLogCtx, "cli ws connected",
 		"session_id", id,
 		"sub_id", subID,
 		"remote_addr", r.RemoteAddr,
 		"compression_policy", int(compression),
-		"buffer_bytes", bufferBytes,
-		"replay_bytes", len(replay),
-		"replay_limit_bytes", wsReplayMaxBytes,
-		"replay_truncated", replayTruncated)
+		"buffer_bytes", sess.Buffer.Len())
 	// Wrap in a closure so time.Since is evaluated at disconnect (when the deferred
 	// func runs), not at defer registration — otherwise duration_ms is always ~0.
 	defer func() {
@@ -532,44 +518,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			"received_messages", receivedMessages,
 			"compression_policy", int(compression))
 	}()
-	// Tell this browser the grid BEFORE the replay, not after.
-	//
-	// The session may already be smaller than this window — another client is watching it
-	// through a narrower one — and the replay is a screen that was drawn at that size. Send
-	// it first and the browser reflows the scrollback of a terminal it has never seen at a
-	// width it never had; a full-screen TUI's repaint then lands on the wrong grid, which
-	// reads as a corrupt program rather than as a window that has not been told its size.
-	{
-		payload, _ := json.Marshal(ResizedPayload{Cols: gridCols, Rows: gridRows})
-		msg, _ := json.Marshal(WSControlMessage{Type: MsgTypeResized, Payload: payload})
-		_ = writeWS(ctx, conn, websocket.MessageText, msg)
-	}
 
-	// Then: everything after this frame is a fresh screen, not a continuation.
-	//
-	// Sent even when the replay is empty. An empty replay means the grid changed and nothing
-	// has been drawn at the new one yet — precisely the case where whatever the browser is
-	// still showing was drawn for a window it is no longer on. Keeping it would be keeping the
-	// corruption; clearing costs one repaint, which any full-screen program does anyway.
-	{
-		msg, _ := json.Marshal(WSControlMessage{Type: MsgTypeReplayReset})
-		_ = writeWS(ctx, conn, websocket.MessageText, msg)
-	}
-
-	if len(replay) > 0 {
-		terminalWSReplayBytesTotal.Add(uint64(len(replay)))
-		err = writeWS(ctx, conn, websocket.MessageBinary, replay)
-		if err != nil {
-			logger.Debug("ws replay write failed", "id", id, "error", err)
-			return
-		}
-		terminalLogger.Info(attachLogCtx, "cli ws replay sent",
-			"session_id", id,
-			"sub_id", subID,
-			"buffer_bytes", bufferBytes,
-			"replay_bytes", len(replay),
-			"replay_limit_bytes", wsReplayMaxBytes,
-			"replay_truncated", replayTruncated)
+	// Bring this browser to the present: grid, clear, restore point (session_screen.go). Device
+	// queries are stripped from the verbatim part — replaying them would make the browser answer
+	// them a second time, and on a reconnect into tmux copy-mode those stray answers are read as
+	// keys (the mysterious "(search up)"). See stripDeviceQueries.
+	var boundary parserBoundary // the browser parser's position in what this connection sent
+	pasteKnown, err := s.restoreViewer(ctx, attachLogCtx, conn, sess, subID, "connect", &boundary)
+	if err != nil {
+		logger.Debug("ws restore write failed", "id", id, "error", err)
+		return
 	}
 
 	// A connect that went out with the mode UNKNOWN owes this browser the answer once one
@@ -744,11 +702,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(writerDone)
 		localAgentCh := agentCh // local copy for nil-safe select
+		var latePaste []byte    // a paste-mode answer waiting for the parser to reach ground
 		for {
 			select {
 			case frame := <-pasteCh:
 				// The late paste-mode answer (see the re-ask above the writer). Rides the
 				// single writer like everything else; one frame, the channel is then dead.
+				// Never into the middle of a sequence: a DECSET inserted between two halves
+				// of one cancels it and turns the rest into visible text.
+				if !boundary.atGround() {
+					latePaste = frame
+					continue
+				}
 				err := writeWS(ctx, conn, websocket.MessageBinary, frame)
 				if err != nil {
 					logger.Debug("ws paste-mode push failed", "id", id, "error", err)
@@ -767,6 +732,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return
 				}
+				// This viewer lost output, or its restore point changed under it: everything it
+				// shows is suspect, so it is brought to the present again — by the same routine as
+				// a connect, and nothing queued before this point is written (syncViewer drops it).
+				if frame.Resync {
+					if _, err := s.restoreViewer(ctx, attachLogCtx, conn, sess, subID, "resync", &boundary); err != nil {
+						logger.Debug("ws resync failed", "id", id, "error", err)
+						return
+					}
+					continue
+				}
 				// Output and resizes come down ONE channel, so they reach the browser in the
 				// order they happened. Two channels here would put the ordering back in the
 				// hands of a select, and "which grid were these bytes drawn for" is not a
@@ -781,6 +756,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					logger.Debug("ws write failed", "id", id, "error", err)
 					return
+				}
+				if msgType == websocket.MessageBinary {
+					boundary.feed(payload)
+					// A paste-mode answer that arrived while the stream was mid-sequence goes
+					// out at the first point the browser's parser is back at ground.
+					if latePaste != nil && boundary.atGround() {
+						if err := writeWS(ctx, conn, websocket.MessageBinary, latePaste); err != nil {
+							logger.Debug("ws paste-mode push failed", "id", id, "error", err)
+							return
+						}
+						latePaste = nil
+					}
 				}
 			case agentData, ok := <-localAgentCh:
 				if !ok {

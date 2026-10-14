@@ -384,10 +384,12 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 	// So: if the replay does not begin exactly where we stopped, throw our copy away and
 	// let the replay refill it. Losing scrollback is a visible, honest loss; silently
 	// inventing it is not.
+	fresh := since == nil
 	if since != nil && stream.ReplayFrom != *since {
 		logger.Warn("scrollback is not contiguous with the daemon's; resetting this server's copy",
 			"id", sess.ID, "askedFrom", *since, "replayFrom", stream.ReplayFrom)
-		sess.Buffer.Reset()
+		sess.restartLocalCopy()
+		fresh = true
 	}
 
 	sess.mu.Lock()
@@ -397,9 +399,21 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 	// Adopt the geometry the daemon reports. This is the size the program on the other
 	// end actually believes it is drawing into, and the replay grid must match it — a
 	// second guess here is precisely how the overview's screen replay drifted before.
-	sess.setPTYSizeFromDaemon(muxd.Grid{Cols: int(stream.Cols), Rows: int(stream.Rows)})
+	grid := muxd.Grid{Cols: int(stream.Cols), Rows: int(stream.Rows)}
+	sess.setPTYSizeFromDaemon(grid)
 	sess.noteDeclared(viewport)
-	go m.pumpStream(sess, stream)
+	// The keyframe follows the ring: started over with it, or carried across a contiguous
+	// re-attach (resized if the grid moved while we were away). The pump is not running yet,
+	// but viewers may be syncing — hence the write lock.
+	sess.subMu.Lock()
+	if fresh || sess.kf.model == nil {
+		sess.kfResetLocked(grid)
+	} else {
+		sess.kfResizeLocked(grid)
+	}
+	sess.streamBase = streamBase{daemon: stream.ReplayFrom, ring: sess.Buffer.Seq()}
+	sess.subMu.Unlock()
+	go m.pumpStream(sess, stream, fresh)
 
 	// A viewer may have resized while the attach was in flight — its syncViewport would
 	// have found no stream to declare on and returned. Re-deriving now closes that window:
@@ -416,7 +430,11 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 // convenience: a resize delivered out of band could land before the bytes drawn at the old
 // size, and an exit taken out of band could be handled while the program's final line was
 // still queued.
-func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
+//
+// fresh says this stream's replay STARTS the server's copy (first attach, or one that could not
+// resume): once that replay has been taken in, the keyframe is seeded with what the daemon saw
+// before it, if the replay did not reach back to the beginning — see seedKeyframe.
+func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream, fresh bool) {
 	outputLogCtx := obs.WithStage(context.Background(), stgTerminalOutput)
 	var signals ansisignal.Scanner
 	var replayClipboard replayClipboardFilter
@@ -429,6 +447,12 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 	replayLeft := stream.Offset - stream.ReplayFrom
 	exited := false
 	code := 0
+	// Seeding is needed only when the replay does not reach back to the session's first byte:
+	// a replay from offset 0 IS the whole session, and the keyframe built from it is complete.
+	seed := fresh && stream.ReplayFrom > 0
+	if seed && replayLeft == 0 {
+		go m.seedKeyframe(sess, stream)
+	}
 
 	for ev := range stream.Events {
 		switch {
@@ -457,10 +481,10 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 		default:
 			data := ev.Data
 			observeTerminalOutput(outputLogCtx, sess.ID, data)
-			sess.Buffer.Write(data)
 
 			live := data
 			var historyOutput []byte
+			replayDone := false
 			if replayLeft > 0 {
 				n := min(int64(len(data)), replayLeft)
 				// Reconstruct scanner framing without re-firing historical BEL/OSC.
@@ -470,6 +494,7 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 				clipboard.feed(data[:n], true, emitClipboard)
 				historyOutput = replayClipboard.feed(data[:n], true)
 				replayLeft -= n
+				replayDone = replayLeft == 0
 				live = data[n:]
 			}
 			if len(live) > 0 {
@@ -478,12 +503,23 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream) {
 				sess.LastActive = time.Now()
 				sess.mu.Unlock()
 			}
+			output := replayClipboard.feed(live, false)
 
+			// Ring, keyframe and fan-out are ONE critical section: a viewer syncing under the
+			// write lock then sees each chunk either in its restore point or in its queue,
+			// never both and never neither. See session_screen.go.
+			sess.subMu.RLock()
+			sess.ingestLocked(data)
 			if len(historyOutput) > 0 {
-				sess.fanOutData(historyOutput)
+				sess.fanOutLocked(historyOutput)
 			}
-			if output := replayClipboard.feed(live, false); len(output) > 0 {
-				sess.fanOutData(output)
+			if len(output) > 0 {
+				sess.fanOutLocked(output)
+			}
+			sess.subMu.RUnlock()
+
+			if seed && replayDone {
+				go m.seedKeyframe(sess, stream)
 			}
 
 			// Signal tap — deliberately AFTER the buffer write and the subscriber fan-out,
@@ -548,7 +584,7 @@ func (m *SessionManager) reattach(sess *Session, since int64, holed bool) {
 	if holed {
 		logger.Warn("stream lost bytes; taking a full replay instead of resuming",
 			"id", sess.ID, "untrustedResumePoint", since)
-		sess.Buffer.Reset()
+		sess.restartLocalCopy()
 		resume = nil
 	}
 	for _, wait := range reattachBackoff {
