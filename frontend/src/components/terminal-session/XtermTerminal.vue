@@ -35,6 +35,7 @@ import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
 import type { TerminalFindOptions } from './terminalSearchOptions'
 import { canMeasureTerminal, rememberGridSize, lastGoodGridSize } from './terminalFit'
+import { enableUnicode11 } from './terminalUnicode'
 import { noteRenderer, noteContextLost, noteRenderMetrics } from '@terminal/composables/cli/renderHealth'
 import { currentVisibilityEpoch, isRenderSampleTrustworthy } from '@terminal/composables/cli/renderSampleGate'
 import {
@@ -69,6 +70,13 @@ const props = defineProps<{
   imeFallbackEnabled?: boolean
   /** Diagnostic surface label used by CLI input telemetry */
   diagnosticSurface?: string
+  /**
+   * First look at every keydown aimed at the terminal. Return true = the host consumed it (xterm
+   * must not process it). Runs from xterm's own key handler on the helper textarea — i.e. AFTER every
+   * document-level capture shortcut (tab shortcuts, leader, find) has had its turn — which is
+   * exactly what type-to-compose needs: it must only see keys nobody else claimed.
+   */
+  keyIntercept?: (e: KeyboardEvent) => boolean
 }>()
 
 const emit = defineEmits<{
@@ -534,6 +542,9 @@ function initTerminal() {
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
   terminal.loadAddon(new WebLinksAddon())
+  // emoji 按 2 格算，和 Claude Code / Codex 排版时的假设一致；必须早于 open() 和第一次 write()。
+  // 见 terminalUnicode.ts（含它管不到的符号）。
+  enableUnicode11(terminal)
 
   searchAddon = new SearchAddon()
   terminal.loadAddon(searchAddon)
@@ -557,6 +568,9 @@ function initTerminal() {
     noteRenderMetrics(summary)
   })
   const helperTextarea = configureInputAnchor()
+  // keydown only: keypress / keyup of a consumed key never reach this textarea (the host moved focus
+  // away), and returning false for them would only suppress xterm's own refocus-on-keyup.
+  terminal.attachCustomKeyEventHandler((ev) => !(ev.type === 'keydown' && props.keyIntercept?.(ev) === true))
   diagnosticCleanups.push(attachXtermKeydownFallback(helperTextarea))
   diagnosticCleanups.push(
     attachCliInputDiagnostics(helperTextarea, 'xterm-helper', { disableProxy: props.disableProxy }),
@@ -730,8 +744,12 @@ onUnmounted(() => {
 /**
  * Write data to the terminal display.
  * Called when binary data arrives from the WebSocket.
+ *
+ * `onParsed` fires when the parser has consumed THIS data (xterm's write callback) — not when it is
+ * on screen. The restore overlay and the input-latency probe both need that distinction, so they
+ * hang their own "painted" step off this callback (see framePaint.ts).
  */
-function write(data: string | Uint8Array) {
+function write(data: string | Uint8Array, onParsed?: () => void) {
   initTerminal()
   // Short-circuit, not just a guarded call: shouldSyncRenderAfterWrite fully TextDecoder's the
   // frame and runs three regexes over it. With the forced repaint off, that scan has no consumer,
@@ -767,6 +785,7 @@ function write(data: string | Uint8Array) {
       sampleTrustworthy() ? performance.now() - started : undefined,
     )
     if (shouldRefresh) scheduleRenderSyncRefresh()
+    onParsed?.()
   })
   appendTranscript(data)
 }

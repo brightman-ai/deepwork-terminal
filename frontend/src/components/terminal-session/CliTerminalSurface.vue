@@ -106,23 +106,31 @@
           /><span class="ssr-note-text">{{ surfaceSlotContent.text }}</span></div>
         </template>
       </div>
-      <ConnectionChip
-        class="ssr-health"
-        :state="wsStatus"
-        :rtt="netStats.rtt ?? 0"
-        :download-bps="netStats.downloadBps ?? 0"
-        :upload-bps="netStats.uploadBps ?? 0"
-        :tx-total="netStats.txTotal ?? 0"
-        :rx-total="netStats.rxTotal ?? 0"
-        :uptime-sec="netStats.uptimeSec ?? 0"
-        :target-label="machineLabel || '本机'"
-        :diagnostic="connDiagnostic"
-        :labels="CLI_CONN_LABELS"
-        :refreshable="true"
-        testid-prefix="cli-connection"
-        data-testid="surface-connection-status"
-        @refresh="wsReconnect"
-      />
+      <!-- 数字 = 体验延迟（按键/发送 → 回显画到屏幕上，近 20 次中位），不是心跳往返；悬停给分段与纯
+           网络往返（REQ-TS-17，见 latencyProbe.ts）。chip 自带的原生 title（连接目标）会在 HoverTip
+           之后又弹一层，所以这里用空 title 盖掉它（Vue 的透传属性后写者胜）；「目标」仍在点开的详情里。
+           p95 > 1s 时 .ssr-health--slow 把数字和底色变红——chip 自己的阈值只看这一个数字。 -->
+      <HoverTip :label="latencyDisplay.label" :details="latencyDisplay.lines">
+        <ConnectionChip
+          class="ssr-health"
+          :class="{ 'ssr-health--slow': latencyDisplay.slow }"
+          title=""
+          :state="wsStatus"
+          :rtt="latencyDisplay.chipRtt"
+          :download-bps="netStats.downloadBps ?? 0"
+          :upload-bps="netStats.uploadBps ?? 0"
+          :tx-total="netStats.txTotal ?? 0"
+          :rx-total="netStats.rxTotal ?? 0"
+          :uptime-sec="netStats.uptimeSec ?? 0"
+          :target-label="machineLabel || '本机'"
+          :diagnostic="connDiagnostic"
+          :labels="CLI_CONN_LABELS"
+          :refreshable="true"
+          testid-prefix="cli-connection"
+          data-testid="surface-connection-status"
+          @refresh="wsReconnect"
+        />
+      </HoverTip>
       <!-- 远程终端时按钮是 disabled 的：禁用元素收不到指针事件，这条提示出不来，原因改由按钮
            自带的原生 title 说（CopyModeButton 只在 disabled 时保留 title）。 -->
       <HoverTip
@@ -184,23 +192,23 @@
       <slot name="overlay" />
       <!-- Desktop-only compose toggle, floating bottom-LEFT of the terminal itself (moved from
            bottom-right 2026-10-13, Human: "放到屏幕左边" — see .compose-fab CSS) (not the
-           top status row) — the open panel is bottom-anchored (ComposeBarDesktop.vue), so the
-           control that opens it now sits right next to where it appears instead of forcing a
-           top-to-bottom mouse trip every time (2026-10-13, Human-reported: "位置太远了,点不到").
+           top status row), so the control that opens the box sits next to where the user is looking
+           instead of forcing a top-to-bottom mouse trip (2026-10-13, Human-reported: "位置太远了,点不到").
            Nudged up when the search bar is open (TerminalSearchBar.vue is bottom:0 full-width)
-           so the two never fight for the same pixels — same convention as the top-right floats'
-           header comment on z-index ownership. Stays visible (and highlighted) while compose is
-           open: same toggle re-closes it, no second "Esc" affordance needed to find. -->
-      <TooltipProvider v-if="!isMobile" :delay-duration="250">
+           so the two never fight for the same pixels.
+           Hidden while the box is open (terminal-input, 2026-10-14): the box floats over the terminal
+           and, anchored at the cursor row, often lands exactly where this button sits — two
+           controls on the same pixels. The box has its own Esc button and the same shortcut. -->
+      <TooltipProvider v-if="!isMobile && !desktopComposeOpen" :delay-duration="250">
         <HoverTip
           side="right"
-          :label="desktopComposeOpen ? `收起输入条（${composeShortcutLabel}）` : `输入条（${composeShortcutLabel}）`"
-          hint="先在本地打好整段文字，发送时才一次性送进终端"
+          :label="`输入条（${composeShortcutLabel}）`"
+          hint="先在本地打好整段文字，Enter 一次性送进终端并提交；在 agent 里直接打字也会自动弹出"
         >
           <button
             class="compose-fab"
             type="button"
-            :class="{ 'is-active': desktopComposeOpen, 'is-raised': terminalSearchOpen }"
+            :class="{ 'is-raised': terminalSearchOpen }"
             aria-label="输入条"
             data-testid="surface-compose-toggle"
             @click="toggleDesktopCompose"
@@ -229,15 +237,31 @@
         :active="active"
         :disable-proxy="!isMobile"
         :ime-fallback-enabled="isMobile && activeMode === 'keyboard'"
+        :key-intercept="onTerminalKeyIntercept"
         diagnostic-surface="workbench"
         @data="onTerminalData"
         @resize="onTerminalResize"
         @ready="onTerminalReady"
       />
+      <!-- Desktop compose box — FLOATS over the terminal (absolute inside .terminal-body), so opening,
+           closing or dragging it never changes the terminal's cols×rows (terminal-input REQ-TI-06).
+           Mobile keeps its docked ComposeBar in the bottom-bar below. -->
+      <ComposeBarDesktop
+        v-if="!isMobile && desktopComposeOpen"
+        ref="composeDesktopRef"
+        :draft="desktopComposeDraft"
+        :session-id="sessionId"
+        :anchor-top="desktopComposeAnchor"
+        :application-cursor-keys="terminalApplicationCursorKeys"
+        @send="onDesktopComposeSend"
+        @close="closeDesktopCompose"
+        @passthrough="returnKeyToTerminal"
+        @cancel-typed="returnKeyToTerminal"
+      />
       <!-- Resync overlay: covers xterm's untouched (visually black) canvas between "socket open"
            and "server's initial burst landed" so a slow/cellular reconnect reads as catching up,
            not as the tab being gone. pointer-events:none — never steals the tap that would
-           otherwise focus/position the terminal underneath. See hasSyncedSinceConnect above. -->
+           otherwise focus/position the terminal underneath. When it shows and hides: restoreGate.ts. -->
       <div
         v-if="resyncOverlayVisible"
         class="terminal-resync-overlay"
@@ -340,17 +364,6 @@
       <KeyboardPanel v-if="activeMode === 'numpad'" @send-key="onSendKey" @clipboard="onClipboard" @close="onToggleKeyboard" />
       <ComposeBar v-if="activeMode === 'compose'" ref="composeBarRef" :draft="composeDraft" :session-id="sessionId" @send="onComposeSend" @close="() => { activeMode = 'idle' }" />
     </div>
-
-    <!-- Desktop compose bar — real flex row (see ComposeBarDesktop.vue), sibling of .terminal-body
-         so it pushes the terminal up instead of covering it, same as mobile's bottom-bar above. -->
-    <ComposeBarDesktop
-      v-if="!isMobile && desktopComposeOpen"
-      ref="composeDesktopRef"
-      :draft="desktopComposeDraft"
-      :session-id="sessionId"
-      @send="onDesktopComposeSend"
-      @close="closeDesktopCompose"
-    />
 
     <!-- Dedicated paste-capture sheet (HTTP-only fallback). Its OWN focusable textarea — NOT
          the compose box — so the compose draft is never touched. inputmode="none" keeps the
@@ -495,13 +508,14 @@ let drawerWidthCssVarOwner: string | null = null
 </script>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, type Component } from 'vue'
+import { ref, shallowRef, reactive, computed, watch, nextTick, onMounted, onUnmounted, type Component } from 'vue'
 import { ArrowDownToLine, Copy, Search, Square } from 'lucide-vue-next'
 import { TooltipProvider } from 'reka-ui'
 import HoverTip from '@terminal/components/terminal-session/HoverTip.vue'
 import { Terminal } from '@xterm/xterm'
 import XtermTerminal from '@terminal/components/terminal-session/XtermTerminal.vue'
 import { createTerminalConnectionGate } from '@terminal/composables/cli/terminalConnectionGate'
+import type { NetStats } from '@terminal/composables/cli/useWebSocketClient'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import AuthDialog from '@terminal/components/terminal-session/AuthDialog.vue'
 import MobileOverlay from '@terminal/components/terminal-session/MobileOverlay.vue'
@@ -548,6 +562,11 @@ import { useFocusStateMachine } from '@terminal/composables/cli/useFocusStateMac
 import { useAnchorStateMachine } from '@terminal/composables/cli/useAnchorStateMachine'
 import { useTerminalCoordMapper } from '@terminal/composables/cli/useTerminalCoordMapper'
 import { useComposeSendStrategy } from '@terminal/composables/cli/useComposeSendStrategy'
+import { agentInputFacts, createPromptTracker } from '@terminal/composables/cli/composeIntercept'
+import { createTypeToCompose } from '@terminal/composables/cli/typeToCompose'
+import { cursorRowTop } from '@terminal/composables/cli/composePlacement'
+import { useTypeToComposeSetting } from '@terminal/composables/cli/useTypeToComposeSetting'
+import { clearXtermHelperTextareaValue } from '@terminal/composables/cli/useXtermHelperTextarea'
 import { useHudCollector } from '@terminal/composables/cli/useHudCollector'
 import { useCliPasteResolver } from '@terminal/composables/cli/useCliPasteResolver'
 import { useClipboardText } from '@terminal/composables/cli/useClipboardText'
@@ -569,7 +588,17 @@ import { useKeyCastrHud } from '@terminal/composables/cli/useKeyCastrHud'
 import { useShortcutsConfig, bindingFor, bindingLabel } from '@terminal/composables/cli/useShortcutsConfig'
 import { matchesBinding } from '@terminal/composables/cli/useTabShortcuts'
 import { focusWithoutViewportScroll, resetViewportScroll, useVisualKeyboardInset } from '@terminal/composables/cli/useVisualKeyboardInset'
-import { reportCliInputDiagnostic, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
+import { reportCliInputDiagnostic, reportServerEvent, summarizeBytes, summarizeText, useCliTerminalInputTelemetry } from '@terminal/composables/cli/useCliInputDiagnostics'
+import { browserFrameScheduler } from '@terminal/composables/cli/framePaint'
+import {
+  RESYNC_OVERLAY_DELAY_MS,
+  createDelayedReveal,
+  createRestoreGate,
+  restoreOverlayDue,
+} from '@terminal/composables/cli/restoreGate'
+import { handleControlFrame, handleOutputFrame, type OutputFrameDeps } from '@terminal/composables/cli/outputFrames'
+import { createLatencyTracker, expectsEcho, latencyView, sameSummary, type LatencySummary } from '@terminal/composables/cli/latencyProbe'
+import { currentVisibilityEpoch } from '@terminal/composables/cli/renderSampleGate'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
 import type { AgentState, AgentTool, TmuxWindowState, TmuxPaneState } from '@terminal/types/terminal'
 import { REPLAY_RESET_SEQUENCE, parseServerGrid } from '@terminal/types/terminal'
@@ -1377,6 +1406,10 @@ const activePanelLabel = computed<'none' | 'numpad' | 'compose'>(() => {
 })
 
 const encoder = new TextEncoder()
+const utf8Decoder = new TextDecoder()
+// 「agent 的提示现在大概是空的吗」——凡是直达终端的用户输入都在 sendTerminalData 里过一遍账。
+// 打字即成框靠它认出"提示里已经有字了"（比如 `/` 放行之后的第二个字符不能再被拦），见 composeIntercept.ts。
+const promptTracker = createPromptTracker()
 
 // ─── WebSocket client ─────────────────────────────────────────────────────────
 
@@ -1424,8 +1457,31 @@ const inputTelemetry = useCliTerminalInputTelemetry({
   sessionId: () => props.sessionId,
 })
 
+// ─── 体验延迟（REQ-TS-17）─────────────────────────────────────────────────────
+//
+// 右上角的数字曾经只是心跳往返（WS 来回一趟，不经过 PTY、解析、绘制），所以终端卡 5 秒它也显示
+// 几十毫秒。现在显示的是"从按键/发送到回显画到屏幕上"的近 20 次中位数；配对规则与局限见
+// latencyProbe.ts。没有输入样本时退回纯网络往返（悬停里会说明）。
+const latency = createLatencyTracker()
+const latencySummary = shallowRef<LatencySummary | null>(null)
+function refreshLatencySummary(): void {
+  const next = latency.summary(performance.now())
+  if (!sameSummary(latencySummary.value, next)) latencySummary.value = next
+}
+const latencyDisplay = computed(() => latencyView(latencySummary.value, netStats.rtt ?? 0))
+// 对外（标签栏的状态条读 activeNetStats.rtt）与芯片用同一个数字：一个事实，一个出处。
+const displayNetStats = computed<NetStats>(() => ({ ...netStats, rtt: latencyDisplay.value.chipRtt }))
+// 5s 一拍：样本过了保鲜期要退回网络往返；满周期的样本汇总一并上报诊断（rare, decision-grade）。
+const latencyTimer = setInterval(() => {
+  refreshLatencySummary()
+  const report = latency.takeReport(performance.now())
+  if (report) reportServerEvent('cli.latency', { sessionId: props.sessionId, networkRtt: netStats.rtt ?? 0, ...report })
+}, 5_000)
+onUnmounted(() => clearInterval(latencyTimer))
+
 function sendBinary(data: Uint8Array, route = 'direct'): void {
   inputTelemetry.recordSend(data, route)
+  if (wsStatus.value === 'connected' && expectsEcho(data)) latency.noteSend(performance.now(), currentVisibilityEpoch())
   sendBinaryRaw(data)
 }
 
@@ -1577,35 +1633,31 @@ const runtimeDiag = ref('')
 let everConnected = false
 let diagInFlight = false
 
-// A (re)connect opens the socket before the server's replay/session_meta burst has arrived —
-// `wsStatus` flips to 'connected' on the WS handshake alone, not on "there is something to look
-// at yet". Between those two moments .terminal-body is xterm's untouched default background:
-// visually identical to broken, and on a slow/cellular reconnect (mobile picking up a tab that
-// was live on another device, replay up to 256KB) that gap is long enough to read as "this tab
-// is gone" rather than "still catching up". `session_meta` is the server's universal "I'm past
-// the initial burst" signal — sent after replay even when replay was empty — so it (or the first
-// binary frame, whichever lands first) is what ends the gap; a fresh connect's ~0 diff never
-// shows the overlay long enough to be seen, so no first-connect distinction is needed.
-const hasSyncedSinceConnect = ref(false)
-const showResyncOverlay = computed(() =>
-  !hasSyncedSinceConnect.value
-  && (wsStatus.value === 'connecting' || wsStatus.value === 'reconnecting' || wsStatus.value === 'connected'),
-)
-// Debounced reveal: a LAN (re)connect closes this gap in single-digit ms, and flashing a label
-// for one frame reads as a glitch, not a status. Only a gap that outlives the debounce is real.
+// 「正在恢复终端内容」遮罩（REQ-TS-16）。
+//
+// A (re)connect opens the socket before the server's restore has arrived, and `wsStatus` flips to
+// 'connected' on the WS handshake alone. The server then sends
+//     resized → replay_reset → ONE binary frame with the restore → session_meta
+// and the screen is only right once xterm has PARSED that frame and PAINTED it. This overlay is owed
+// from the start of a (re)connect — and again at every replay_reset (a resync after dropped output)
+// — until exactly that moment. It used to end at "any frame arrived", so the first `resized` (or a
+// heartbeat ack) took it down, replay_reset blanked the screen, and the user watched the restore
+// draw in. The state machine, and why each rule is the way it is, lives in restoreGate.ts.
+//
+// Two more rules live there: the 150ms debounce runs from the moment the overlay is both owed AND
+// on someone's screen (a never-activated tab is "due" from mount, long before anyone sees it), and
+// replay_reset's clear is folded into the restore's own write so the old screen stays until the new
+// one is complete.
+const restoreOwed = ref(true)
+const restoreGate = createRestoreGate((owed) => { restoreOwed.value = owed })
 const resyncOverlayVisible = ref(false)
-let resyncOverlayTimer: ReturnType<typeof setTimeout> | null = null
-watch(showResyncOverlay, (should) => {
-  if (resyncOverlayTimer) {
-    clearTimeout(resyncOverlayTimer)
-    resyncOverlayTimer = null
-  }
-  if (should) {
-    resyncOverlayTimer = setTimeout(() => { resyncOverlayVisible.value = true }, 150)
-  } else {
-    resyncOverlayVisible.value = false
-  }
-}, { immediate: true })
+const resyncReveal = createDelayedReveal(RESYNC_OVERLAY_DELAY_MS, (visible) => { resyncOverlayVisible.value = visible })
+watch(
+  () => restoreOverlayDue({ owed: restoreOwed.value, active: props.active, status: wsStatus.value }),
+  (due) => resyncReveal.set(due),
+  { immediate: true },
+)
+onUnmounted(() => resyncReveal.dispose())
 async function classifyFailure(): Promise<void> {
   if (diagInFlight || !props.isRemote || !props.diagnose || everConnected) return
   diagInFlight = true
@@ -1624,7 +1676,9 @@ const connDiagnostic = computed(() => props.connError || runtimeDiag.value)
 watch(wsStatus, (val) => {
   emit('connection-change', val)
   hud.updateSnapshot({ ws: val })
-  if (val === 'connecting' || val === 'reconnecting') hasSyncedSinceConnect.value = false
+  if (val === 'connecting' || val === 'reconnecting') restoreGate.connecting()
+  // The samples describe THIS connection's path; a new one starts blank (REQ-TS-17).
+  if (val !== 'connected') { latency.reset(); refreshLatencySummary() }
   if (val === 'connected') {
     wasViewer = false
     lastDeclaredGrid = null
@@ -1837,6 +1891,8 @@ function onKeydownDirect(e: KeyboardEvent) {
   if (!isWKWebView) return
   if (e.isComposing || e.metaKey || e.altKey || e.ctrlKey) return
   if (e.key.length !== 1) return
+  // 打字即成框要拦的键，这条直发路径必须让位，否则字在被拦之前就已经进了 PTY。
+  if (typeCompose.wouldIntercept(e)) return
   // Don't capture when a non-xterm input/textarea has focus (e.g. tab rename)
   const active = document.activeElement
   if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')
@@ -1845,6 +1901,7 @@ function onKeydownDirect(e: KeyboardEvent) {
   // internal onData/onKey don't double-send. xterm.js still processes the event for
   // cursor management, but our onKey guard (XtermTerminal.vue) also skips printable ASCII.
   e.preventDefault()
+  promptTracker.noteSent(e.key)
   sendBinary(encoder.encode(e.key), 'document-keydown')
 }
 
@@ -1930,6 +1987,12 @@ function onTerminalBodyTouchMove(e: TouchEvent) {
 
 onMounted(() => {
   void loadShortcutsConfig()
+  void typeToComposeSetting.load()
+  // composition 事件没有"别的监听器先到"的顺序问题，挂 document 捕获即可；keydown 的拦截走 xterm 的
+  // 回调（onTerminalKeyIntercept），原因见 typeToCompose.ts 头注。
+  document.addEventListener('compositionstart', onTypeComposeCompositionStart, { capture: true })
+  document.addEventListener('compositionupdate', onTypeComposeCompositionUpdate, { capture: true })
+  document.addEventListener('compositionend', onTypeComposeCompositionEnd, { capture: true })
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('blur', onWindowBlur)
   window.addEventListener('focus', onWindowFocus)
@@ -1963,6 +2026,9 @@ onUnmounted(() => {
   document.removeEventListener('keydown', onKeydownDirect, { capture: true })
   document.removeEventListener('keydown', onFindShortcutKeydown, { capture: true })
   document.removeEventListener('keydown', onComposeShortcutKeydown, { capture: true })
+  document.removeEventListener('compositionstart', onTypeComposeCompositionStart, { capture: true })
+  document.removeEventListener('compositionupdate', onTypeComposeCompositionUpdate, { capture: true })
+  document.removeEventListener('compositionend', onTypeComposeCompositionEnd, { capture: true })
   document.removeEventListener('paste', onClipboardPaste, { capture: true })
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('blur', onWindowBlur)
@@ -2001,6 +2067,24 @@ function scheduleGhostRefresh(): void {
       if (ghostRefreshOwed && viewerNow()) scheduleGhostRefresh()
     })
   }, 180)
+}
+
+// Where a server frame meets the terminal: frames are written, and the moment each is PARSED and
+// PAINTED is reported to the restore overlay (REQ-TS-16) and, when it is the echo of something the
+// user just sent, to the latency probe (REQ-TS-17). The sequencing lives in outputFrames.ts.
+const outputFrames: OutputFrameDeps = {
+  gate: restoreGate,
+  latency,
+  write: (data, onParsed) => xtermRef.value?.write(data, onParsed),
+  sched: browserFrameScheduler,
+  now: () => performance.now(),
+  visibilityEpoch: currentVisibilityEpoch,
+  hidden: () => document.hidden,
+  resetBytes: new TextEncoder().encode(REPLAY_RESET_SEQUENCE),
+  onLatencySample: refreshLatencySummary,
+  // Output is not evidence of corruption: on a slow link our own redraw can
+  // arrive after any echo timer and start an endless full-screen resend loop.
+  onFrame: (bytes) => inputTelemetry.recordOutput(bytes, 'ws-binary'),
 }
 
 function onTerminalReady(terminal: Terminal) {
@@ -2062,22 +2146,15 @@ function onTerminalReady(terminal: Terminal) {
   terminalRows.value = terminal.rows
 
   onMessage(
-    (data: ArrayBuffer) => {
-      const bytes = new Uint8Array(data)
-      hasSyncedSinceConnect.value = true
-      inputTelemetry.recordOutput(bytes, 'ws-binary')
-      xtermRef.value?.write(bytes)
-      // Output is not evidence of corruption: on a slow link our own redraw can
-      // arrive after any echo timer and start an endless full-screen resend loop.
-    },
+    (data: ArrayBuffer) => handleOutputFrame(outputFrames, new Uint8Array(data)),
     (msg: WSControlMessage) => {
-      // ANY control message closes the resync gap, not just 'session_meta' specifically. A
-      // session that exits or gets preempted in the instant right after connect — before
-      // session_meta's write() completes — would otherwise leave the overlay's "正在恢复终端
-      // 内容…" stuck on top of the shell_exit/preempted notice this same switch is about to
-      // write into the terminal one line down. Narrow but real: session_meta and shell_exit are
-      // two separate server-side writes, not one atomic step, so ordering isn't guaranteed.
-      hasSyncedSinceConnect.value = true
+      // Which control frames end the restore debt is restoreGate's call (restoreGate.ts): NOT "any
+      // frame" — `resized` and a heartbeat ack both arrive before the restore and used to take the
+      // overlay down early. What stays true from the old rule: a session that exits or is preempted
+      // right after connect must not leave "正在恢复终端内容…" stuck on top of the notice written
+      // below, so shell_exit / preempted / error release at once (and settle a still-deferred clear
+      // first, so the notice lands on a cleared screen like it always did).
+      handleControlFrame(outputFrames, msg.type)
       switch (msg.type) {
         case 'shell_exit': {
           xtermRef.value?.write('\r\n[进程已退出]\r\n')
@@ -2097,8 +2174,11 @@ function onTerminalReady(terminal: Terminal) {
         // 的机制）。屏上此刻留着的是上一次 attach 重放的同一批内容，再写一遍就是同一个界面画两遍
         // ——用户看到的"重复的底行"。重放帧和实时输出都是 binary，收到时分不出来，所以边界只能由
         // 服务端明说（见 Go 侧 MsgTypeReplayReset）。
+        //
+        // 清屏**不在这里写**：handleControlFrame 开启一次新的恢复，清屏被并进紧随其后的恢复帧的
+        // 同一次 write（见 outputFrames.ts）。现在就清的话，从这一帧到恢复帧到达之间，使用者看到的
+        // 是一块被清空的屏。
         case 'replay_reset':
-          xtermRef.value?.write(REPLAY_RESET_SEQUENCE)
           break
         // 会话现在多大——由服务端裁决（本机浏览器里由持有连接的那个独占；daemon 再对跨主机的客户端
         // 取最小值），不是我那次 resize 的回声。
@@ -2169,8 +2249,10 @@ function sendTerminalData(data: Uint8Array) {
     if (stickyCtrl.value) { byte = byte & 0x1f; stickyCtrl.value = false }
     if (stickyAlt.value) { sendBinary(encoder.encode('\x1b'), 'sticky-alt'); stickyAlt.value = false }
     if (stickyShift.value) { if (byte >= 0x61 && byte <= 0x7a) byte -= 0x20; stickyShift.value = false }
+    promptTracker.noteSent(String.fromCharCode(byte))
     sendBinary(new Uint8Array([byte]), 'xterm-data')
   } else {
+    promptTracker.noteSent(utf8Decoder.decode(data))
     sendBinary(data, 'xterm-data')
   }
 }
@@ -2399,24 +2481,149 @@ function onComposeSend(text: string) {
   composeDraft.value = undefined
 }
 
-// ─── Desktop compose bar ────────────────────────────────────────────────────────────────────
+// ─── Desktop compose box (terminal-input) ───────────────────────────────────────────────────
 // Mobile reaches ComposeBar through activeMode==='compose' (toggled from its own bottom-bar,
 // which only mounts when isMobile). Desktop has no such toolbar, so it gets its own open flag +
 // draft, deliberately NOT folded into activeMode — that enum's other values (keyboard/numpad)
 // are mobile-only concepts, and cramming an unrelated desktop boolean into it would make it lie
 // about what it represents.
+//
+// Three doors, ONE box (REQ-TI-07): the FAB, the shortcut, and typing into an agent's prompt all
+// call openDesktopCompose() — same component, same per-tab draft, same keys, same placement rule.
 const desktopComposeOpen = ref(false)
 const desktopComposeDraft = ref<string | undefined>(undefined)
+/** Where the box opens by default: the top of the cursor's row, px from .terminal-body's top.
+ *  null = the cursor is not on screen (scrolled back / unmeasurable) → the box sits at the bottom. */
+const desktopComposeAnchor = ref<number | null>(null)
+const typeToComposeSetting = useTypeToComposeSetting()
+
+function measureComposerAnchor(): number | null {
+  const term = xtermRef.value?.terminal?.()
+  const body = terminalBodyRef.value
+  const screen = term?.element?.querySelector('.xterm-screen') as HTMLElement | null
+  if (!term || !body || !screen) return null
+  const buf = term.buffer.active
+  const screenRect = screen.getBoundingClientRect()
+  return cursorRowTop({
+    baseY: buf.baseY,
+    cursorY: buf.cursorY,
+    viewportY: buf.viewportY,
+    rows: term.rows,
+    screenOffsetTop: screenRect.top - body.getBoundingClientRect().top,
+    screenHeight: screenRect.height,
+  })
+}
+
+/** 终端是否处于「应用光标键」模式：空框直通方向键时决定发 `ESC O A` 还是 `ESC [ A`。 */
+function terminalApplicationCursorKeys(): boolean {
+  return xtermRef.value?.terminal?.()?.modes.applicationCursorKeysMode ?? false
+}
+
+/**
+ * 打开输入框。seed 说明是谁敲门：
+ *   · typed  —— 打字唤起：那次敲的字进框，焦点在框里；
+ *   · ime    —— 输入法唤起：只把焦点交过去，拼写发生在框里；
+ *   · 缺省   —— 浮钮 / 快捷键：照常聚焦。
+ * 焦点必须在**这个 await 之后的同一个微任务检查点**内交出去——下一次按键（或输入法的 compositionstart）
+ * 到来之前，输入框必须已经是焦点，否则第二个字符还会落进终端。
+ */
+async function openDesktopCompose(seed?: { typed: string } | { ime: true }): Promise<void> {
+  if (isMobile.value) return
+  if (!desktopComposeOpen.value) {
+    desktopComposeAnchor.value = measureComposerAnchor()
+    desktopComposeOpen.value = true
+    await nextTick()
+  }
+  const box = composeDesktopRef.value
+  if (!box) return
+  if (seed && 'typed' in seed) box.beginTyped(seed.typed)
+  else if (seed && 'ime' in seed) box.beginImeTyped()
+  else box.focusInput()
+}
+
 function toggleDesktopCompose(): void {
-  desktopComposeOpen.value = !desktopComposeOpen.value
+  if (desktopComposeOpen.value) closeDesktopCompose()
+  else void openDesktopCompose()
 }
 function closeDesktopCompose(): void {
   desktopComposeOpen.value = false
+  // 焦点还给终端：框一收起，键盘落点要立刻回到"用户在打字的那个地方"，不是 body。
+  void nextTick(() => { if (props.active) xtermRef.value?.terminal?.()?.focus() })
+}
+
+/**
+ * 发送并提交（REQ-TI-04）：全文作为一次粘贴，随后一次回车。
+ *
+ * 回车**单独一帧**、紧跟在粘贴结束标记之后：括号粘贴的 `ESC[201~` 已经把"这是粘贴"说完，程序才会
+ * 把这个 `\r` 当成"提交"而不是粘贴里的又一个换行。两帧走同一条 WS，顺序有保证；这里**不**加延迟——
+ * 延迟窗口里用户的下一个按键会插到回车前面。（Codex 对"粘贴后紧跟回车"的实际反应需要真机验证。）
+ */
+function submitComposedText(text: string): void {
+  sendComposedText(text)
+  sendBinary(encoder.encode('\r'), 'compose-submit')
+  promptTracker.reset()
 }
 function onDesktopComposeSend(text: string) {
-  sendComposedText(text)
-  desktopComposeOpen.value = false
+  submitComposedText(text)
+  closeDesktopCompose()
 }
+
+/** 空框直通（REQ-TI-05）和误拦截撤回（REQ-TI-03）：这些字节原样发给终端，框收起。 */
+function returnKeyToTerminal(data: string): void {
+  closeDesktopCompose()
+  sendTerminalData(encoder.encode(data))
+}
+
+// ── 打字即成框（REQ-TI-01 / REQ-TI-02）─────────────────────────────────────────────────────
+// 判定在 composeIntercept.ts（纯函数，带测试），事件怎么吃在 typeToCompose.ts；这里只把事实喂进去。
+const currentPane = computed(() => (tmuxAttached.value ? (findPane(currentPaneKey.value)?.pane ?? null) : null))
+const currentAgentFacts = computed(() => agentInputFacts({
+  session: agentState.value,
+  tmuxAttached: tmuxAttached.value,
+  pane: currentPane.value,
+}))
+// 换了一个 agent（或 agent 退出 / 新启动）：新的提示一定是空的，旧账作废。
+watch(() => currentAgentFacts.value?.tool ?? '', () => promptTracker.reset())
+
+const typeCompose = createTypeToCompose({
+  facts: () => ({
+    enabled: typeToComposeSetting.enabled.value,
+    surfaceActive: props.active,
+    desktop: !isMobile.value,
+    composerOpen: desktopComposeOpen.value,
+    connected: wsStatus.value === 'connected',
+    agent: currentAgentFacts.value,
+    altScreen: xtermRef.value?.terminal?.()?.buffer.active.type === 'alternate',
+    copyMode: copyModeOpen.value,
+    searchOpen: terminalSearchOpen.value,
+    overlayOpen: overviewOpen.value,
+    scrolledBack: !terminalAtBottom.value,
+  }),
+  promptEmpty: () => promptTracker.isEmpty(),
+  // 分屏时每个 surface 都在 document 上收到事件；只认"本 surface 终端的 helper textarea"。
+  isTerminalInput: (target) =>
+    target instanceof HTMLTextAreaElement
+    && target.classList.contains('xterm-helper-textarea')
+    && !!surfaceRootRef.value?.contains(target),
+  openWithText: (text) => { void openDesktopCompose({ typed: text }) },
+  openForIme: () => { void openDesktopCompose({ ime: true }) },
+  adoptCommittedText: (text) => composeDesktopRef.value?.adoptCommitted(text),
+  clearTerminalInput: () => {
+    const ta = xtermRef.value?.$el?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null
+    clearXtermHelperTextareaValue(ta, 'type-to-compose.transfer')
+  },
+  report: (event, detail) => reportCliInputDiagnostic(event, { surface: 'workbench', ...detail }),
+})
+
+/** XtermTerminal 的 keyIntercept：xterm 处理每个 keydown 之前先问这里。true = 我们吃了。 */
+function onTerminalKeyIntercept(e: KeyboardEvent): boolean {
+  return !isMobile.value && typeCompose.onKeydown(e)
+}
+// 移动端整条链路不进入：它有自己的软键盘流程（ComposeBar），不在这个功能的范围内。
+function onTypeComposeCompositionStart(e: CompositionEvent): void { if (!isMobile.value) typeCompose.onCompositionStart(e) }
+function onTypeComposeCompositionUpdate(e: CompositionEvent): void { if (!isMobile.value) typeCompose.onCompositionUpdate(e) }
+function onTypeComposeCompositionEnd(e: CompositionEvent): void { if (!isMobile.value) typeCompose.onCompositionEnd(e) }
+
 /** Mirrors onFindShortcutKeydown just below it — same shape, same registration, different
  *  binding/action. Desktop-only: mobile has no keyboard to bind, it opens compose from its own
  *  bottom-bar button instead. */
@@ -2456,6 +2663,7 @@ function onDrawerComposeDraft(text: string) {
     desktopComposeDraft.value = undefined
     nextTick(() => {
       desktopComposeDraft.value = text
+      if (!desktopComposeOpen.value) desktopComposeAnchor.value = measureComposerAnchor()
       desktopComposeOpen.value = true
     })
   }
@@ -2744,7 +2952,7 @@ function focusTerminal(): void {
   xtermRef.value?.terminal?.()?.focus()
 }
 
-defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, copyModeOpen })
+defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, copyModeOpen })
 </script>
 
 <style scoped>
@@ -2775,7 +2983,7 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   background: #0e0b16;
 }
 
-/* Resync overlay — see hasSyncedSinceConnect. Below the overview overlay (z-index 15); not
+/* Resync overlay — see restoreGate.ts. Below the overview overlay (z-index 15); not
    fighting it, since the two are never true at once (overview only opens against a live, already
    synced surface). No background of its own: xterm's own canvas is already the (visually black)
    backdrop, this only adds the label so that backdrop reads as "loading" instead of "empty". */
@@ -2954,6 +3162,9 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
   align-items: center;
   padding: 0 8px;
 }
+/* REQ-TS-17：端到端 p95 > 1s。选择器比 chip 自己的 .is-connected / .rtt-* 多一层，稳赢。 */
+.ssr-health.ssr-health--slow { background: rgba(244, 67, 54, 0.14); }
+.ssr-health--slow :deep(.conn-rtt) { color: #f44336; }
 
 /* Floating compose toggle — bottom-right of the terminal itself, NOT the top status row (see
    its template comment for why). `bottom`/`right` picked to clear TerminalSearchBar (bottom:0,
@@ -2983,7 +3194,6 @@ defineExpose({ wsStatus, agentState, notifications, netStats, onSendKey, openIns
 }
 .compose-fab:hover { opacity: 1; color: #e8e8f8; background: rgba(42, 43, 62, 0.95); }
 .compose-fab:focus-visible { opacity: 1; }
-.compose-fab.is-active { opacity: 1; color: #4a80d8; border-color: #4a80d8; background: rgba(26, 58, 90, 0.92); }
 .compose-fab.is-raised { bottom: 56px; }
 
 /* WS7 primary entries — float top-right above xterm; small and unobtrusive so they
