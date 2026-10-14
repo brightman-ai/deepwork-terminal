@@ -540,6 +540,13 @@ func TestXtermInput_ColonSubParametersBelongToTheirParameter(t *testing.T) {
 		// (its slot list is full), 6 means nothing to xterm, and 7 is inverse.
 		{"38;1;2;3;4;5;6;7", AttrInverse, ColorDefault, ColorDefault, "an unknown colour mode takes what follows with it"},
 		{"6", 0, ColorDefault, ColorDefault, "rapid blink is not one of xterm's"},
+		// SGR 21 is a double underline in xterm.js 6.0.0, which the model draws as its one underline; 22 is the bold/dim reset.
+		{"21", AttrUnderline, ColorDefault, ColorDefault, "not bold off"},
+		{"1;21", AttrBold | AttrUnderline, ColorDefault, ColorDefault, ""},
+		{"1;4;21;24", AttrBold, ColorDefault, ColorDefault, "24 ends either underline"},
+		{"1;22", 0, ColorDefault, ColorDefault, ""},
+		{"2;22", 0, ColorDefault, ColorDefault, ""},
+		{"5", AttrBlink, ColorDefault, ColorDefault, ""},
 	} {
 		v := newVT(2, 10, newStyleTable())
 		v.Write([]byte("\x1b[" + tc.seq + "ma"))
@@ -547,5 +554,51 @@ func TestXtermInput_ColonSubParametersBelongToTheirParameter(t *testing.T) {
 		if st.Attrs != tc.attrs || st.FG != tc.fg || st.BG != tc.bg {
 			t.Errorf("ESC [ %s m: attrs %v fg %v bg %v; want attrs %v fg %v bg %v (%s)", tc.seq, st.Attrs, st.FG, st.BG, tc.attrs, tc.fg, tc.bg, tc.wantNote)
 		}
+	}
+}
+
+// An explicit `CSI 20 l` survives a snapshot: the daemon's archive model starts with LNM off, and a
+// terminal model seeded from its state must tell the stream's word from a default. (xterm's answer for
+// convertEol: true after `CSI 20 l`: "ab" / "  cd".)
+func TestRestore_AnExplicitLNMSurvivesTheSnapshot(t *testing.T) {
+	rows := func(h *History) []string {
+		st, _, _ := h.State(0)
+		var out []string
+		for _, l := range modelLines(st.Lines) {
+			out = append(out, l.T)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		stream string
+		want   []string
+		set    bool
+	}{
+		{"reset by the stream", "\x1b[20l", []string{"ab", "  cd"}, true},
+		{"set by the stream", "\x1b[20h", []string{"ab", "cd"}, true},
+		{"set, then reset", "\x1b[20h\x1b[20l", []string{"ab", "  cd"}, true},
+		{"never touched: the receiver's default", "", []string{"ab", "cd"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			archive := NewHistory(Grid{Cols: 20, Rows: 4}, 100)
+			archive.Write([]byte(tc.stream + "x\r\n"))
+			st, scroll, _ := archive.State(100)
+			if st.NewlineModeSet != tc.set {
+				t.Fatalf("NewlineModeSet = %v, want %v", st.NewlineModeSet, tc.set)
+			}
+			term := NewTerminalModel(Grid{Cols: 20, Rows: 4}, 100)
+			term.Restore(st, scroll)
+			term.Write([]byte("\x1b[2J\x1b[Hab\ncd"))
+			if got := rows(term)[:2]; fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("after the restore and a line feed between ab and cd: %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// RIS leaves the option alone, as xterm does.
+	h := NewHistory(Grid{Cols: 20, Rows: 4}, 100)
+	h.Write([]byte("\x1b[20l\x1bc"))
+	if st, _, _ := h.State(0); !st.NewlineModeSet || st.NewlineMode {
+		t.Fatalf("after CSI 20 l and RIS: set=%v mode=%v, want the stream's choice kept", st.NewlineModeSet, st.NewlineMode)
 	}
 }

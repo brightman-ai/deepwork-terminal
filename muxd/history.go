@@ -909,6 +909,11 @@ type TermState struct {
 	// carry them.
 	InsertMode  bool `json:"insert_mode,omitempty"`
 	NewlineMode bool `json:"newline_mode,omitempty"`
+	// NewlineModeSet says the stream itself chose NewlineMode (`CSI 20 h` or `l`), so that it is not
+	// just the default of the model the state came from — the daemon's archive model starts with LNM
+	// off, the browser's terminal (and NewTerminalModel) with it on. A restore into a terminal model
+	// takes NewlineMode when this is set and keeps its own default when it is not.
+	NewlineModeSet bool `json:"newline_mode_set,omitempty"`
 
 	// Pending is the unconsumed tail of the input: a partial escape sequence or UTF-8 rune that the
 	// next bytes complete. A restore that drops it turns the first byte after the cut into text.
@@ -979,11 +984,12 @@ func (h *History) State(scrollback int) (st TermState, lines []Line, ok bool) {
 		ScrollTop: v.top, ScrollBot: v.bot,
 		Pen:      v.cur,
 		SavedRow: max(v.savedRow, 0), SavedCol: v.savedCol, SavedPen: v.savedStyle, // DECRC clamps it the same way
-		CursorShape: v.cursorShape,
-		InsertMode:  v.insertMode,
-		NewlineMode: v.lnm,
-		Pending:     append([]byte(nil), v.pending...),
-		JoinWidth:   v.repWidth,
+		CursorShape:    v.cursorShape,
+		InsertMode:     v.insertMode,
+		NewlineMode:    v.lnm,
+		NewlineModeSet: v.lnmSet,
+		Pending:        append([]byte(nil), v.pending...),
+		JoinWidth:      v.repWidth,
 	}
 	if cs := v.charset.export(v.savedCharset); !cs.IsZero() {
 		st.Charset = &cs
@@ -1156,12 +1162,12 @@ func (h *History) Restore(st TermState, scrollback []Line) {
 		v.noteMode(m.Mode, m.On)
 	}
 	v.cursorShape = st.CursorShape
-	v.insertMode, v.lnm = st.InsertMode, st.NewlineMode
-	if h.vt.reflow && h.vt.lnm {
+	v.insertMode, v.lnm, v.lnmSet = st.InsertMode, st.NewlineMode, st.NewlineModeSet
+	if h.vt.reflow && h.vt.lnm && !st.NewlineModeSet {
 		// A terminal model runs with convertEol (see NewTerminalModel), which a state taken from the
-		// daemon's archive model cannot say: that model's LNM is its own default, off. Keep the
-		// receiver's, or a model seeded from a snapshot lays out every later line feed differently from
-		// the browser's terminal.
+		// daemon's archive model cannot say: that model's LNM is its own default, off. Unless the stream
+		// chose it (NewlineModeSet), keep the receiver's, or a model seeded from a snapshot lays out
+		// every later line feed differently from the browser's terminal.
 		v.lnm = true
 	}
 	if st.Alt && st.Parked != nil {
