@@ -875,6 +875,9 @@ func pristine(st muxd.TermState, scrollback []muxd.Line) bool {
 	if st.ScrollTop != 0 || st.ScrollBot != st.Rows-1 {
 		return false
 	}
+	if st.Charset != nil && *st.Charset != (muxd.CharsetState{}) {
+		return false // a designation the window's SO or SS2 will reach for (`ESC ) 0` then `SO qq` is ──)
+	}
 	for _, ln := range st.Lines {
 		if ln.Text != "" || len(ln.Spans) > 0 {
 			return false
