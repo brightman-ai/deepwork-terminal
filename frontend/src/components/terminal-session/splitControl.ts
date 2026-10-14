@@ -113,3 +113,18 @@ export function closePaneTip(
 
 /** × 第一次点下后等确认的时长。过时自动复原 —— 不让一个"上膛"的按钮一直挂着等误触。 */
 export const CLOSE_CONFIRM_MS = 3000
+
+/** 挂在状态行里的分屏控件根节点（SplitControlBar / 折叠时的 SplitPaneSwitcher）。 */
+const PANE_CONTROL_SELECTOR = '.split-ctl, .split-switch'
+
+/**
+ * 在某一格里按下 / 聚焦，要不要把"当前格"让给它。
+ *
+ * 分屏控件自己的按钮不算：点"切换焦点"那一下会先让按钮拿到焦点（或先触发 pointerdown），若也算，
+ * 当前格就先被改成"按钮所在的这一格"，随后的 click 再往"另一格"切，永远切不走。
+ * focusin（键盘/鼠标）和 pointerdown（触屏——点击落在触控球层上，终端的 helper textarea 随即被
+ * blur，根本不产生 focusin）共用这一条判定。
+ */
+export function claimsPaneFocus(target: { closest?: (selector: string) => unknown } | null | undefined): boolean {
+  return !target?.closest?.(PANE_CONTROL_SELECTOR)
+}
