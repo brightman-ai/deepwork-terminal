@@ -91,6 +91,8 @@ export interface KeyFacts {
   altKey: boolean
   isComposing?: boolean
   keyCode?: number
+  /** 物理键位（KeyboardEvent.code）。key 被输入法改写成 'Process' 时靠它认出修饰键。 */
+  code?: string
 }
 
 /**
@@ -103,8 +105,25 @@ export interface KeyFacts {
  */
 export type KeyClass = 'text' | 'whitespace' | 'ime-start' | 'ime-ongoing' | 'modified' | 'non-text'
 
+/**
+ * 单独按下的修饰键 / 锁定键。它们既不是文字，也永远不会开始一段拼写——但输入法激活时，macOS
+ * Chrome 会把输入法接手过的按键（包括"Shift 切中英"那一下）报成 keyCode 229。若按 229 判成
+ * ime-start，按一下 Shift 就会被拦下、弹出输入框、焦点在按键中途换走：输入法在 Shift 上切了一次，
+ * 换输入上下文又切一次，中→英→中，看起来"按了没反应"（2026-10-14 Human 实报，终端区更常见——
+ * 只有焦点在终端里、且满足拦截条件时才拦，所以"有时会有时不会"）。
+ */
+const LONE_MODIFIER_KEYS = new Set([
+  'Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'OS', 'Hyper', 'Super',
+  'CapsLock', 'Fn', 'FnLock', 'NumLock', 'ScrollLock', 'Symbol', 'SymbolLock',
+])
+/** Windows 上输入法接手的键 key 会变成 'Process'，看不出是不是 Shift——再看物理键位。 */
+const LONE_MODIFIER_CODE = /^(Shift|Control|Alt|Meta|OS|CapsLock|Fn|NumLock|ScrollLock)/
+
 export function classifyKey(k: KeyFacts): KeyClass {
   if (k.ctrlKey || k.metaKey || k.altKey) return 'modified'
+  if (LONE_MODIFIER_KEYS.has(k.key) || (k.code !== undefined && LONE_MODIFIER_CODE.test(k.code))) {
+    return 'non-text'
+  }
   if (k.isComposing) return 'ime-ongoing'
   // keyCode 229 先于"可见字符"判：macOS Chrome 在输入法激活时，keydown.key 是真实字母（'n'）、
   // keyCode 却是 229——只看 key 会把"拼音第一键"当成直打的英文字母，字就绕过输入法直接拦下来了。
