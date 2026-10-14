@@ -188,8 +188,12 @@ func (s *Server) startReportWarmer(ctx context.Context) {
 			s.agentUsage.UsageReport(ctx, w, reportWarmTimezone)
 		}
 	}
-	warm()
 	go func() {
+		// The first warm runs here too, never on the caller's path: this is called while the
+		// server is being built, before it listens, and a cold scan is minutes on a machine
+		// with a large transcript history and no index yet (a fresh data dir: observed
+		// 2026-10-14, the page unreachable for 4+ minutes while every Codex rollout was parsed).
+		warm()
 		ticker := time.NewTicker(reportWarmInterval)
 		defer ticker.Stop()
 		for {

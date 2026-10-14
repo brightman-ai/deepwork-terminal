@@ -311,7 +311,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.listener = ln
 	s.mu.Unlock()
 
-	srv := &http.Server{Handler: secured}
+	srv := &http.Server{Handler: newHTTPInflight().middleware(secured)}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
