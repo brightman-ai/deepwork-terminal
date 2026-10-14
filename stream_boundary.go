@@ -24,6 +24,7 @@ const (
 
 type parserBoundary struct {
 	state boundaryState
+	osc   bool // in bString: the string is an OSC, the one kind BEL also ends
 	need  int  // continuation bytes still owed in bUTF8
 	cp    rune // the code point being assembled in bUTF8
 	from  boundaryState
@@ -82,7 +83,7 @@ func (p *parserBoundary) step(r rune) {
 		p.state = bCSI
 		return
 	case r == 0x90 || r == 0x98 || r == 0x9d || r == 0x9e || r == 0x9f:
-		p.state = bString // DCS, SOS, OSC, PM, APC
+		p.state, p.osc = bString, r == 0x9d // DCS, SOS, OSC, PM, APC
 		return
 	case r >= 0x80 && r <= 0x9f:
 		p.state = bGround // ST and the single-character C1 controls
@@ -90,11 +91,14 @@ func (p *parserBoundary) step(r rune) {
 	}
 	switch p.state {
 	case bEscape:
+		if r < 0x20 || r == 0x7f {
+			return // a C0 control inside an escape sequence is executed, and the sequence goes on (xterm)
+		}
 		switch r {
 		case '[':
 			p.state = bCSI
 		case ']', 'P', 'X', '^', '_':
-			p.state = bString
+			p.state, p.osc = bString, r == ']'
 		default:
 			if r >= 0x20 && r <= 0x2f {
 				return // intermediate (ESC ( B …): the final byte follows
@@ -106,7 +110,7 @@ func (p *parserBoundary) step(r rune) {
 			p.state = bGround
 		}
 	case bString:
-		if r == 0x07 {
+		if r == 0x07 && p.osc { // BEL ends an OSC; DCS, SOS, PM and APC end only at ST
 			p.state = bGround
 		}
 	case bStringEsc:
@@ -124,7 +128,9 @@ func (p *parserBoundary) atGround() bool { return p.state == bGround }
 
 // restorePrelude puts a terminal of unknown state into the one every restore is drawn on: no
 // sequence in progress (CAN), the normal screen, the whole screen as the scrolling region, absolute
-// addressing, autowrap on, insert off, default pen and character set, and nothing on the screen or
+// addressing, autowrap on, insert off, line feed returning the carriage (the frontend's convertEol),
+// default pen, every character set designation US ASCII with G0 shifted in (1049l's cursor
+// restore can bring back a DEC set and an SO), and nothing on the screen or
 // in its history. A freshly loaded page is already there; a page that kept its terminal across a
 // reconnect, or a viewer being re-synced after it fell behind, can be anywhere — inside a TUI's
 // alternate screen, under a TUI's scrolling region — and drawing a keyframe into that is drawing it
@@ -134,4 +140,4 @@ func (p *parserBoundary) atGround() bool { return p.state == bGround }
 // mode this server never observed is unknown, and resetting it would assert "off" for it — the
 // alternate screen's wheel scrolling depends on mouse reporting, and the frontend learned the hard
 // way not to reset it (see REPLAY_RESET_SEQUENCE). The keyframe restates every mode it did observe.
-const restorePrelude = "\x18\x1b[?1049l\x1b[r\x1b[?6l\x1b[?7h\x1b[4l\x1b[0m\x1b(B\x1b[H\x1b[2J\x1b[3J"
+const restorePrelude = "\x18\x1b[?1049l\x1b[r\x1b[?6l\x1b[?7h\x1b[4l\x1b[20h\x1b[0m\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[H\x1b[2J\x1b[3J"

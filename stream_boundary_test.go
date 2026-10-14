@@ -1,6 +1,13 @@
 package terminal
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/brightman-ai/deepwork-terminal/muxd"
+)
 
 func TestParserBoundary_KnowsWhenTheStreamIsMidSequence(t *testing.T) {
 	for _, tc := range []struct {
@@ -67,4 +74,55 @@ func TestParserBoundary_UTF8EncodedC1ActsAsItsSevenBitSpelling(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Codex final review, 2026-10-14: two more places where the tracker said "ground" and xterm did not.
+// A C0 control inside an escape sequence is executed and the sequence goes on; BEL ends an OSC but
+// not a DCS (or SOS, PM, APC), which end only at ST.
+func TestParserBoundary_C0InEscapeAndBELInDCS(t *testing.T) {
+	cases := []struct {
+		name   string
+		frames [][]byte
+		ground []bool
+	}{
+		{"ESC, then LF, then the rest of the CSI", [][]byte{{0x1b, '\n'}, []byte("[31mRED")}, []bool{false, true}},
+		{"BEL inside a DCS is data", [][]byte{[]byte("\x1bPqabc\x07"), []byte("more\x1b\\")}, []bool{false, true}},
+		{"BEL still ends an OSC", [][]byte{[]byte("\x1b]0;title\x07")}, []bool{true}},
+		{"BEL inside an APC is data", [][]byte{[]byte("\x1b_x\x07"), []byte("\x1b\\")}, []bool{false, true}},
+	}
+	for _, tc := range cases {
+		var p parserBoundary
+		for i, f := range tc.frames {
+			p.feed(f)
+			if p.atGround() != tc.ground[i] {
+				t.Errorf("%s: after frame %d atGround=%v, want %v", tc.name, i, p.atGround(), tc.ground[i])
+			}
+		}
+	}
+}
+
+// A reused browser terminal can come back from 1049l with a DEC set designated and shifted in (the
+// cursor restore brings both back). The prelude must leave every designation US and G0 in GL, or
+// the restore's plain text is drawn as line-drawing glyphs.
+func TestRestorePrelude_ResetsCharsetsAReusedTerminalLeftShiftedIn(t *testing.T) {
+	g := muxd.Grid{Cols: 20, Rows: 3}
+	term := muxd.NewTerminalModel(g, 100)
+	term.Write([]byte("\x1b)0\x0e\x1b7\x1b[?1049h")) // G1 = DEC, SO, saved, then a TUI's alternate screen
+	term.Write([]byte(restorePrelude + "hello"))
+	st, _, ok := term.State(0)
+	require.True(t, ok)
+	require.Equal(t, "hello", strings.TrimRight(st.Lines[0].Text, " "))
+}
+
+// A keyframe whose only news is a designation is not pristine: the window's `SO qq` needs it.
+func TestPristine_SeesADesignatedCharset(t *testing.T) {
+	g := muxd.Grid{Cols: 20, Rows: 3}
+	m := muxd.NewTerminalModel(g, 100)
+	m.Write([]byte("\x1b)0"))
+	st, sb, ok := m.State(0)
+	require.True(t, ok)
+	require.False(t, pristine(st, sb), "a designated G1 must be restated by the keyframe")
+	fresh := muxd.NewTerminalModel(g, 100)
+	st, sb, _ = fresh.State(0)
+	require.True(t, pristine(st, sb), "a power-on terminal is still pristine")
 }
