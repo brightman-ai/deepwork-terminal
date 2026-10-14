@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"math/rand/v2"
 	"time"
 
 	"github.com/brightman-ai/deepwork-terminal/muxd"
@@ -12,20 +11,20 @@ import (
 // A server that has just (re)started rebuilds each session from the daemon's ring replay, which
 // holds the last megabyte of output and nothing older. The daemon's own screen model holds the
 // rest — it has been fed every byte since the session began — and the keyframe is seeded from it
-// once the replay has been taken in. Two daemon generations, two ways:
+// once the replay has been taken in. Only the newer daemon generation can be used:
 //
 //   - FeatureScreenSnap: the daemon hands over its complete terminal state together with the ring
 //     offset it is true at. The seed is exact — the keyframe becomes that state at that offset,
 //     and the ring after it is the window.
 //
-//   - FeatureScrollback only (a daemon that predates the snapshot, and therefore every daemon
-//     that was already running when this was built — restarting one ends all its sessions): the
-//     daemon can describe its normal screen and its scrollback, but not the cursor, the modes, or
-//     the offset they are true at. The keyframe keeps everything it learned from the replay
-//     (cursor, pen, modes, the alternate screen if one is up — all recent, all in the replay) and
-//     takes the daemon's CONTENT for what the replay cannot reach. The offset is proven, not
-//     assumed: the daemon's ring position is read before and after the content, and only an
-//     unchanged position is accepted (see seedByGraft).
+//   - A daemon that predates the snapshot (and therefore every daemon that was already running when
+//     this was built — restarting one ends all its sessions) is NOT seeded. It can describe its
+//     screen and scrollback but not where its cursor is, and a screen taken from it joined to a
+//     cursor rebuilt from the replay is two different terminals stitched together: a program that
+//     moves only relatively (an inline TUI redrawing "N lines up") then erases and redraws the
+//     wrong rows, and the rows it meant to erase stay on screen — observed on 18074, 2026-10-14,
+//     as Claude Code's old status lines left under its new output, surviving F5. The keyframe keeps
+//     what the replay alone says: content and cursor from one stream, consistent with each other.
 //
 // Either way, every viewer is then re-synced, because the restore point it was drawn from has
 // just gained the history it was missing.
@@ -73,11 +72,8 @@ func (m *SessionManager) seedKeyframe(sess *Session, stream *muxd.Stream) {
 	case daemonSnapshots(client):
 		how = "snapshot"
 		err = seedFromSnapshot(sess, stream, client)
-	case client.Peer().Has(muxd.FeatureScrollback):
-		how = "graft"
-		err = seedByGraft(sess, stream, client)
 	default:
-		return
+		err = seedError("the daemon cannot say where its cursor is (it predates ScreenSnap)")
 	}
 	if err != nil {
 		logger.Info("keyframe not seeded from the daemon; restores reach back only as far as the replay",
@@ -210,107 +206,4 @@ func seedFromSnapshot(sess *Session, stream *muxd.Stream, client *muxd.Client) e
 		}
 	}
 	return seedError("the session kept moving; no consistent snapshot")
-}
-
-// daemonOffset reads the daemon's ring position for a session: the offset an Attach acknowledges,
-// which the daemon reads under the same lock its output loop holds while writing the ring AND its
-// screen model. A throwaway observer attachment — it declares no size, and resumes from where our
-// own stream already is, so the replay it carries is at most a few bytes.
-func daemonOffset(client *muxd.Client, id string, since int64) (int64, error) {
-	st, err := client.Attach(id, muxd.AttachOptions{Since: &since})
-	if err != nil {
-		return 0, err
-	}
-	off := st.Offset
-	_ = st.Close()
-	return off, nil
-}
-
-// seedByGraft: the older daemon's seed. It has no snapshot message, so the offset the content is
-// true at has to be PROVEN rather than assumed: the daemon's ring position is read before and
-// after reading its screen and scrollback, and only an unchanged position is accepted. The daemon
-// writes its ring and its screen model under one lock, and the position is read under that lock;
-// if no byte was written between the two reads, nothing was drawn either, so the content describes
-// exactly that offset. (A quiet period on THIS side proves nothing: bytes the daemon already drew
-// can still be in flight to us.)
-func seedByGraft(sess *Session, stream *muxd.Stream, client *muxd.Client) error {
-	for attempt := 0; attempt < seedAttempts; attempt++ {
-		gen := sess.kfGen()
-		before, err := daemonOffset(client, sess.ID, stream.Consumed())
-		if err != nil {
-			return err
-		}
-		screen, err := sess.History(muxd.HistoryReq{Screen: true})
-		if err != nil || !screen.Enabled || screen.Broken {
-			return seedError("the daemon keeps no usable history for this session")
-		}
-		lines, styles, ok := fetchScrollback(sess, screen.Total, screen.Styles)
-		after, err := daemonOffset(client, sess.ID, stream.Consumed())
-		if err != nil {
-			return err
-		}
-		if ok && before == after {
-			err := installAt(sess, stream, gen, before, func(pos uint64) error {
-				return graftLocked(sess, pos, screen.Lines, lines, styles)
-			})
-			if err != errSeedMoved {
-				return err
-			}
-		}
-		// Output landed between the reads: the content may describe any point between them.
-		// Ask again; a session that ticks a few times a second is idle for most of each second.
-		time.Sleep(time.Duration(20+rand.IntN(120)) * time.Millisecond)
-	}
-	return seedError("the session never held still long enough to read a consistent screen")
-}
-
-// graftLocked puts the daemon's normal screen and scrollback into the keyframe at ring position
-// pos, keeping everything else the keyframe learned from the replay (cursor, pen, modes, the
-// alternate screen). Caller holds subMu (write). The model must be exactly at pos — it cannot be
-// rewound — so it is advanced there first, and an already-later model voids the graft.
-func graftLocked(sess *Session, pos uint64, screen, scrollback []muxd.Line, styles []muxd.Style) error {
-	kf := &sess.kf
-	if kf.model == nil {
-		return seedError("no keyframe to graft onto")
-	}
-	if kf.at > pos {
-		return errSeedMoved
-	}
-	sess.kfAdvanceLocked(pos, nil)
-	if kf.model == nil || kf.at != pos {
-		return errSeedMoved
-	}
-	st, _, ok := kf.model.State(0)
-	if !ok {
-		return seedError("the keyframe's model has broken")
-	}
-	if len(screen) > st.Rows {
-		return errSeedMoved
-	}
-	// Move the daemon's lines into the keyframe's style space: its table is appended after ours
-	// and every span id shifted by our table's length.
-	shift := muxd.StyleID(len(st.Styles))
-	rebase := func(in []muxd.Line) []muxd.Line {
-		out := make([]muxd.Line, len(in))
-		for i, ln := range in {
-			out[i] = ln
-			if len(ln.Spans) > 0 {
-				out[i].Spans = make([]muxd.Span, len(ln.Spans))
-				for j, sp := range ln.Spans {
-					out[i].Spans[j] = muxd.Span{Start: sp.Start, Style: sp.Style + shift}
-				}
-			}
-		}
-		return out
-	}
-	st.Styles = append(st.Styles, styles...)
-	// History(Screen) is the NORMAL screen — parked, if a full-screen program is up — which is
-	// exactly the one the replay may have reached only partly.
-	if st.Alt && st.Parked != nil {
-		st.Parked.Lines = rebase(screen)
-	} else {
-		st.Lines = rebase(screen)
-	}
-	kf.model.Restore(st, rebase(scrollback))
-	return nil
 }
