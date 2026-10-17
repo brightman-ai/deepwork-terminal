@@ -89,9 +89,9 @@ func (m *PaneAgentMonitor) DecideSurface(p SurfaceProbe) (SurfaceUnit, StatusDec
 	decision := m.decideStatus(p, screen)
 
 	unit := SurfaceUnit{
-		AgentTool:      p.Tool,
-		AgentStatus:    decision.Status,
-		StatusRule:     string(decision.Rule),
+		AgentTool:   p.Tool,
+		AgentStatus: decision.Status,
+		StatusRule:  string(decision.Rule),
 	}
 	// EVIDENCE only on the decisions that ask something of the user. It is a live screen line —
 	// it churns on every poll (spinner frames, token counters) and would defeat both frames' diff
@@ -140,8 +140,13 @@ func (m *PaneAgentMonitor) decideStatus(p SurfaceProbe, screen screenFunc) Statu
 				// terminal UI — it never reaches the transcript — so the screen is the only place
 				// it exists, and only this direction is checked: a screen can prove "blocked", it
 				// cannot prove "not blocked".
-				if v, ok := analyzeScreen(screen); ok && v.State == PromptNeedsPermission {
-					return StatusDecision{Status: StatusWaiting, Rule: v.Rule, Evidence: v.Line}
+				if v, ok := analyzeScreen(screen); ok {
+					if v.Rule == RuleScreenInterrupted {
+						return StatusDecision{Status: StatusIdle, Rule: v.Rule, Evidence: v.Line}
+					}
+					if v.State == PromptNeedsPermission {
+						return StatusDecision{Status: StatusWaiting, Rule: v.Rule, Evidence: v.Line}
+					}
 				}
 				return StatusDecision{Status: StatusRunning, Rule: RuleTranscriptRunning}
 			case StatusWaiting:

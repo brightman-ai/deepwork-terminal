@@ -8,7 +8,10 @@ export interface TerminalFileLink {
 
 // Keep this deliberately narrower than a shell lexer. It recognizes the paths
 // agents print, while leaving punctuation and prose outside the link.
-const FILE_PATH_RE = /(?:~\/|\/|\.\.?\/)?(?:[A-Za-z0-9_@%+~,=-]+\/)*[A-Za-z0-9_@%+~,=-]+\.[A-Za-z0-9]{1,16}/g
+// Dots are valid inside directory names (`.tg`, `.config`, `v1.0`). Omitting
+// them makes the regex restart after the dot and silently drops that character
+// from the activated path.
+const FILE_PATH_RE = /(?:~\/|\/|\.\.?\/)?(?:[A-Za-z0-9._@%+~,=-]+\/)*[A-Za-z0-9._@%+~,=-]+\.[A-Za-z0-9]{1,16}/g
 const URL_RE = /\bhttps?:\/\/[^\s<>'"`]+/gi
 
 /** Extract supported file paths from one rendered terminal line. */

@@ -89,6 +89,10 @@ var interactivePromptPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)shift\+tab to approve`),
 }
 
+// Codex can leave the rollout without a task_complete row after Esc or an
+// interrupted conversation. This terminal message retracts stale running state.
+var interruptedScreenPattern = regexp.MustCompile(`(?i)(conversation|request) interrupted`)
+
 // modelPattern matches strings that look like a model name (word + digits + dots,
 // e.g. "claude-4.6", "gpt-5.5", "gemini-2.0").
 var modelPattern = regexp.MustCompile(`\b[a-zA-Z][\w-]*\d+[\w.-]*\d[\w.]*\b`)
@@ -171,6 +175,11 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 	}
 	if choiceCount >= 2 && cursorSeen {
 		return OutputVerdict{PromptNeedsPermission, RuleScreenChoiceList, truncEvidence(choiceLine)}
+	}
+	for _, line := range tailLines(lines, promptTailLines) {
+		if interruptedScreenPattern.MatchString(line) {
+			return OutputVerdict{PromptIdle, RuleScreenInterrupted, truncEvidence(line)}
+		}
 	}
 
 	// 2. Check last line for spinner characters → running.

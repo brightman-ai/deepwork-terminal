@@ -42,6 +42,16 @@ func TestAnalyzeOutput_Running(t *testing.T) {
 	}
 }
 
+func TestAnalyzeOutput_InterruptedConversationIsIdle(t *testing.T) {
+	got := AnalyzeOutputDetail([]string{
+		"Conversation interrupted — use /feedback if something went wrong",
+		"❯ ",
+	})
+	if got.State != PromptIdle || got.Rule != RuleScreenInterrupted {
+		t.Fatalf("got state=%v rule=%q, want idle/screen.interrupted", got.State, got.Rule)
+	}
+}
+
 func TestAnalyzeOutput_LikelyIdle(t *testing.T) {
 	// Prompt char at end of output, no model name in previous line.
 	cases := []struct {
