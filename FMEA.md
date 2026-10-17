@@ -24,6 +24,8 @@
 | F8 | 远程访问 / CORS / 鉴权；旋转 auth code 后旧页面继续请求 | 旧 token 仍可用，或私网请求被浏览器静默拦截 | 9/2/5 → **90** | auth throttle、rotate、CORS/PNA 与跨 Origin 多轮 API 测试；本机没有可控浏览器 surface | **PARTIAL / P1 by severity gate**：preflight→旧 token→rotate→旧 token 拒绝→新 token 成功已通过；真实远端 browser reconnect 保持 OPEN |
 | F9 | daemon socket 初始化、升级后旧 daemon 占用、短时文件路径 | AF_UNIX 路径过长返回含糊错误；普通文件被误当活 socket 拒绝恢复 | 7/4/6 → **168** | 测试 fixture 使用短私有 socket；ENOTSOCK 归为无 listener；Darwin peer PID 回归；按 OS sun_path 限制 bind 前校验 | **MITIGATED**：Darwin/Linux 长路径诊断、ENOTSOCK 回收和 peer PID 测试通过 |
 | F10 | 通知等待→通知→用户回复→下一轮完成；多个 pane 并行 | 重复通知、必要权限与返工混为一类，或用户回复后 cooldown 吞掉下一轮 | 8/4/7 → **224** | transition/cooldown/显式 signal 共用测试；phase 和 evidence 分层；关闭后立即重开串行等待旧 poller 完成持久化 | **MITIGATED / PARTIAL**：双 tab 同批完成与独立 cooldown、关闭→快速重开有 race 回归；coordinator 多启用渠道并行发送及单渠道 panic 隔离已验证；真实外部渠道投递仍待验 |
+| F12 | agent running 时打字、按 Shift 切中英（macOS + Edge/Chrome + 中文输入法） | 按一下 Shift 切两次，打出来的字中英颠倒；按键被挡 1.5–1.9s 后成批到达。根因：隐藏的 `aria-live` 输出镜像持续刷新，拖住浏览器主进程；DOM 渲染器、整屏强制重绘、大块回放写入又让页面主线程整块卡住。详见 [guide/troubleshooting/ime-shift-double-toggle.md](guide/troubleshooting/ime-shift-double-toggle.md) | 6/8/9 → **432** | 桌面默认 WebGL；整屏强制重绘默认关；写入 ≤16KB 切片；镜像默认关；常驻上报 `cli.main.thread`（按键等待 + 长帧归因）把 D 从“只有用户现场才知道”降到“日志可读” | **MITIGATED / P2 residual**：真机被卡按键比例 38.4% → 6.5%，最长等待 1921ms → 932ms，使用者确认总体修好；仍有偶发窗口（54/193），嫌疑是 running 时光标跳动引发输入法反复查询坐标 |
+| F13 | 另一台机器重建并提交内嵌前端（`internal/spa/dist`）后部署 18074 | 裸 build 默认是 pro 版，18074 左栏冒出 10 个 pro 导航；本轮出现 3 次（`d22b84c`、`c4bc8bc`、`42ce144`） | 5/6/7 → **210** | `frontend/vite.config.ts` 默认 `VITE_PORTALS=cli,settings`（环境变量仍可覆盖）；判别法：dist 的 js 里能 grep 到 `cli,settings` 才是 standalone 版 | **MITIGATED**：`env -u VITE_PORTALS vite build` 与 build.sh 的产物逐字节一致 |
 
 ## 分阶段验收与提交
 
@@ -58,6 +60,9 @@
 | Phase C5 | F6 Codex provider default 热切换，旧 rollout 每次按最新配置归属 | `go test . -run '^TestReconcileCodexAttributionTracksRepeatedDefaultProviderSwitches$' -count=10 -race -timeout=2m` | `e4b2ac4` |
 | Phase B3 | F5 两个 Server 实例并发完成同目录同名、不同内容的分块上传 | `go test . -run '^TestChunkUploadConcurrentServersKeepSameNameDifferentContents$' -count=5 -race -timeout=2m` | `3425e55` |
 | Phase B4 | F5 独立进程并发完成同目录同名、不同内容上传，验证无共享锁时不覆盖 | `go test . -run '^TestChunkUploadCompleteConcurrentAcrossProcessesDoesNotOverwrite$' -count=3 -race -timeout=2m` | `9881a12` |
+| Phase G | F12 第 1 层：桌面默认 WebGL、整屏强制重绘默认关、写入 16KB 切片、常驻上报 `cli.main.thread` | `cd frontend && bun test`（1156 pass）、`bun run type-check`；测试实例对照（DOM 钉死、约 560KB 回放）：最长帧 63ms → 无 ≥50ms，强制重绘 9 → 0 | `197fdb6` |
+| Phase G2 | F12 第 2 层：屏幕阅读器输出镜像默认关（`?a11y_mirror=1` 可恢复） | `bun test`（1159 pass）、`bun run type-check`；真机 `cli.main.thread`：被卡按键 103/268（38.4%）→ 58/898（6.5%）；使用者真机确认 | `94eecac` |
+| Phase G3 | F13 裸 build 默认 standalone 版 | `env -u VITE_PORTALS vite build` 产物与 `8934fb4` 的内嵌产物逐字节一致 | `134374e` |
 
 ### 本轮最终验收快照
 

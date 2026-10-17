@@ -1,6 +1,8 @@
 /**
  * terminalA11yMirror — does each terminal keep an aria-live text mirror of its output?
  *
+ * [Ref: guide/troubleshooting/ime-shift-double-toggle.md] — 输入法 Shift 切中英连切两次（2026-10-18，FMEA F12）
+ *
  * The mirror was a `<pre aria-live="polite">` holding the last 24 000 characters of output, replaced
  * wholesale every 120ms while anything was printing. Nothing reads it: no test, no script, and a
  * screen reader fed raw TUI repaints (spinners, status lines, cursor dances) gets noise, not a

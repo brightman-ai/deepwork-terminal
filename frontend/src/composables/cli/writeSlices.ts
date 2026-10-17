@@ -1,6 +1,8 @@
 /**
  * writeSlices — hand xterm big frames in pieces it can yield between.
  *
+ * [Ref: guide/troubleshooting/ime-shift-double-toggle.md] — 输入法 Shift 切中英连切两次（2026-10-18，FMEA F12）
+ *
  * xterm's WriteBuffer gives the parser a 12ms budget and yields to the event loop when it runs out
  * (WRITE_TIMEOUT_MS in @xterm/xterm src/common/input/WriteBuffer.ts) — but it only checks the clock
  * BETWEEN chunks. One write() is one chunk, parsed to the end in a single task. A reconnect or

@@ -111,6 +111,9 @@ export type KeyClass = 'text' | 'whitespace' | 'ime-start' | 'ime-ongoing' | 'mo
  * ime-start，按一下 Shift 就会被拦下、弹出输入框、焦点在按键中途换走：输入法在 Shift 上切了一次，
  * 换输入上下文又切一次，中→英→中，看起来"按了没反应"（2026-10-14 Human 实报，终端区更常见——
  * 只有焦点在终端里、且满足拦截条件时才拦，所以"有时会有时不会"）。
+ *
+ * 这只是第一层。修完它症状仍在，2026-10-18 查到的主因在别处（浏览器进程被拖住、按键成批到达），
+ * 见 [Ref: guide/troubleshooting/ime-shift-double-toggle.md]。
  */
 const LONE_MODIFIER_KEYS = new Set([
   'Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'OS', 'Hyper', 'Super',
