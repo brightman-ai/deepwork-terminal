@@ -23,6 +23,16 @@
  * it. An escape hatch stays for the case this reasoning is wrong on some GPU/driver: `?render_sync=1`
  * forces it back on, `?render_sync=0` forces it off, either sticky for the tab. If residue ever
  * appears under WebGL, that URL turns it back on immediately — no rebuild, no waiting for a fix.
+ *
+ * ── 2026-10-18: off for the DOM renderer too ─────────────────────────────────────────────────
+ * The premise was never confirmed. The residue it was added for (01112fd, 2026-07-05) was diagnosed
+ * on 2026-07-24 by comparing `tmux capture-pane` with a screenshot: the stale cells were in xterm's
+ * BUFFER, which had drifted from tmux's model — `term.refresh()` repainted the same wrong buffer and
+ * cleared nothing, while `tmux refresh-client` (a full resend) cleared it. That is the remedy that
+ * shipped (CliTerminalSurface's scheduleGhostRefresh). So the repaint fixed nothing, and it was not
+ * free: on a real desktop session (290×81 grid, DOM renderer) it ran up to 170 times per 15s window,
+ * on top of a renderer whose frames already reached P95 76ms — and the main thread being held that
+ * long is what made the IME's Shift toggle fire twice. The override still turns it back on.
  */
 
 const QUERY_KEY = 'render_sync'
@@ -45,11 +55,10 @@ export function renderSyncOverride(): string | null {
 }
 
 /**
- * The rule, pure so it is testable and so the reasoning lives in one place:
- * the forced repaint exists for the DOM renderer, an explicit override wins over both.
+ * The rule, pure so it is testable and so the reasoning lives in one place: off unless explicitly
+ * asked for (see the 2026-10-18 note above). `renderer` stays in the signature because the override
+ * is the experiment for a renderer-specific suspicion, and the report carries both side by side.
  */
-export function renderSyncEnabled(renderer: string, override: string | null): boolean {
-  if (override === '1') return true
-  if (override === '0') return false
-  return renderer !== 'webgl'
+export function renderSyncEnabled(_renderer: string, override: string | null): boolean {
+  return override === '1'
 }

@@ -50,6 +50,8 @@ import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection
 import { createLogger } from '@ce/utils/obs'
 import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
 import { renderSyncEnabled, renderSyncOverride } from '@terminal/composables/cli/terminalRenderSync'
+import { sliceForWrite } from '@terminal/composables/cli/writeSlices'
+import { startMainThreadMetrics } from '@terminal/composables/cli/mainThreadMetrics'
 import {
   rendererPin,
   rendererPreference,
@@ -185,7 +187,11 @@ function flushTranscript() {
 }
 
 function appendTranscript(data: string | Uint8Array) {
-  const raw = typeof data === 'string' ? data : decoder.decode(data, { stream: true })
+  const decoded = typeof data === 'string' ? data : decoder.decode(data, { stream: true })
+  // Only the tail can survive the cap, so only the tail is scanned: running three regexes over a
+  // 520KB replay to keep its last 24 000 chars was a main-thread cost with nothing to show for it.
+  // (The decode above still sees every byte — the decoder is stateful across frames.)
+  const raw = decoded.length > transcriptLimit * 4 ? decoded.slice(-transcriptLimit * 4) : decoded
   const clean = raw
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
     .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
@@ -484,8 +490,8 @@ function reacquireWebglRenderer(): void {
 //
 // Named for the QUESTION, not for one of the answers: it used to be `enableWebglRenderer`, from the
 // era when WebGL was unconditional and the DOM renderer was only ever reached by WebGL failing. It
-// now picks between two, and DOM is the default (see terminalRenderer.ts) — a name that presumes the
-// answer is how a function quietly stops matching what it does.
+// now picks between two, and the default depends on the device (see terminalRenderer.ts) — a name
+// that presumes the answer is how a function quietly stops matching what it does.
 function chooseRenderer(term: Terminal): RendererChoice {
   // Ask the policy FIRST. This function used to be called unconditionally and the only way to end
   // up on the DOM renderer was for WebGL to fail — so when the GPU path rendered WRONG rather than
@@ -572,6 +578,8 @@ function initTerminal() {
   })
 
   terminal.open(terminalContainer.value)
+  // Page-level, idempotent: the main thread is shared by every terminal (mainThreadMetrics.ts).
+  startMainThreadMetrics()
   const rendererChoice: RendererChoice = chooseRenderer(terminal)
   renderSyncOn = renderSyncEnabled(rendererChoice.renderer, renderSyncOverride())
   renderMetrics = createRenderMetrics((summary) => {
@@ -790,22 +798,29 @@ function write(data: string | Uint8Array, onParsed?: () => void) {
     hiddenNow: typeof document !== 'undefined' && document.hidden,
     laidOutAtWrite,
   })
-  let renderSub: { dispose(): void } | null = null
-  if (terminal && renderMetrics) {
-    renderSub = terminal.onRender(() => {
-      renderSub?.dispose()
-      renderSub = null
-      if (sampleTrustworthy()) renderMetrics?.noteRender(performance.now() - started)
+  const target = terminal
+  // Big frames go in as slices so xterm's WriteBuffer can yield between them (writeSlices.ts); the
+  // frame's own bookkeeping hangs off the LAST slice, so "parsed" still means the whole frame.
+  const slices = sliceForWrite(data)
+  slices.forEach((slice, i) => {
+    if (i < slices.length - 1) { target?.write(slice); return }
+    target?.write(slice, () => {
+      // 帧数与字节数**永远**记录（那是真实流量，与可见性无关）；只有耗时样本受闸门约束。
+      renderMetrics?.noteFrame(
+        dataLength(data),
+        sampleTrustworthy() ? performance.now() - started : undefined,
+      )
+      // The render sample waits for the first paint AFTER the whole frame is parsed: a sliced frame
+      // paints in between slices, and an earlier paint would time a screen that is not this frame yet.
+      if (target && renderMetrics && terminal === target) {
+        const renderSub = target.onRender(() => {
+          renderSub.dispose()
+          if (sampleTrustworthy()) renderMetrics?.noteRender(performance.now() - started)
+        })
+      }
+      if (shouldRefresh) scheduleRenderSyncRefresh()
+      onParsed?.()
     })
-  }
-  terminal?.write(data, () => {
-    // 帧数与字节数**永远**记录（那是真实流量，与可见性无关）；只有耗时样本受闸门约束。
-    renderMetrics?.noteFrame(
-      dataLength(data),
-      sampleTrustworthy() ? performance.now() - started : undefined,
-    )
-    if (shouldRefresh) scheduleRenderSyncRefresh()
-    onParsed?.()
   })
   appendTranscript(data)
 }

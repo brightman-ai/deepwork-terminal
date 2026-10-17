@@ -12,7 +12,7 @@
  * 的字形图集，此后这一行的拉丁字母查表全部落到错误的图集坐标，画出别人字形的碎片。这是**图集索引
  * 失效**，不是字体缺失 —— 字体缺失画的是豆腐块，不是别人的字。
  *
- * ── 现在的规则 ────────────────────────────────────────────────────────────────────────────────
+ * ── 2026-08 的规则（桌面部分已被下面 2026-10-18 一节改写）────────────────────────────────────
  * **DOM 是默认**，WebGL 由使用者显式选择。
  *
  * 这不是"WebGL 不好"的结论，是**默认该站在哪一边**的结论：默认要服务的是那个从没打开过设置面板的
@@ -23,6 +23,17 @@
  * 所以取舍在**可发现性**上补回来：面板里那一行现在带一个切换按钮（renderHealth.rendererLine），
  * 想要 GPU 的人一次点击就能拿到，而且**记得住**。
  *
+ * ── 2026-10-18：默认按设备分开 ─────────────────────────────────────────────────────────────────
+ * 上面那笔账算的是"DOM 慢一点，可忍受"。桌面真机推翻了它：290×81 的网格上跑真实的 agent 输出，
+ * DOM 单帧渲染 P95 76ms、最慢 4.6s，主线程整块被占住，按键成批到达（6 个字母 12ms 内全到）。
+ * 被挡住的不只是画面：Edge/macOS 上输入法的 Shift 切中英在这时**切两次**，用一个每秒故意卡 0.7s
+ * 的空白页就能复现，所以这是主线程卡顿造成的，不是哪段代码在改焦点。DOM 慢的代价落在打字上，不是
+ * "看得见、可忍受"的那种慢。
+ *
+ * 而串字的那一边已经查清并另行处理：它出在 iOS 上，根因是隐藏画布的纹理被系统回收、上下文却还活着
+ * （见 XtermTerminal 的 releaseWebglWhileHidden，隐藏即交还上下文）。所以默认现在跟着设备走：
+ * **桌面 WebGL，iOS / iPadOS 与以触屏为主的设备仍是 DOM**。钉和偏好照旧压过默认。
+ *
  * ── 三个输入，一个优先级 ──────────────────────────────────────────────────────────────────────
  * 「用哪个渲染器」以前只有"URL 参数 or 默认"两档，于是面板上的按钮无处安放。现在分三层，因为它们
  * 是三件不同的事，混在一个存储里必然互相吞掉：
@@ -31,7 +42,7 @@
  *      同一个终端两种渲染器各开一个标签页，直接比。所以它必须压过偏好，也必须不污染别的标签页。
  *   2. **使用者偏好**（面板按钮）—— localStorage，**跨标签页、跨刷新存活**。它是一句"我就要这个"，
  *      如果每开一个新标签页都要重说一遍，那它就不是偏好，只是一次性的挣扎。
- *   3. **默认** —— DOM。
+ *   3. **默认** —— 按设备：桌面 WebGL，iOS / 触屏设备 DOM（defaultRendererFor）。
  *
  * 按钮写偏好时会**清掉本标签页的诊断钉**。否则一个几天前用过 `?renderer=webgl` 的标签页里，按钮
  * 点下去、页面刷新、渲染器纹丝不动 —— 一个看得见却无声失效的开关，比没有开关更糟。
@@ -48,8 +59,41 @@ export type RendererKind = 'webgl' | 'dom'
 /** 谁定的。面板据此说人话，而不是让使用者猜。 */
 export type RendererSource = 'pinned' | 'chosen' | 'default'
 
-/** 没人发话时用哪个。见文件头：默认站在"画错了也看不出来"的对立面。 */
-export const DEFAULT_RENDERER: RendererKind = 'dom'
+/** 判断设备用的几个事实。单独成型，好让规则本身是纯函数、能被测试钉住。 */
+export interface RendererDeviceFacts {
+  userAgent: string
+  maxTouchPoints: number
+  /** 主指针是粗的（手指）且不能悬停 —— `(pointer: coarse) and (hover: none)`。 */
+  touchFirst: boolean
+}
+
+/**
+ * 没人发话时用哪个。见文件头 2026-10-18 一节：串字出在 iOS 上，DOM 的卡顿落在桌面打字上。
+ *
+ * iPadOS 默认以桌面 UA 访问（`Macintosh`），只能靠触点数认出来；带触屏的 Windows 笔记本主指针仍是
+ * 鼠标，不是 touchFirst，按桌面算。
+ */
+export function defaultRendererFor(d: RendererDeviceFacts): RendererKind {
+  const ios = /iPad|iPhone|iPod/.test(d.userAgent) || (/Macintosh/.test(d.userAgent) && d.maxTouchPoints > 1)
+  return ios || d.touchFirst ? 'dom' : 'webgl'
+}
+
+function currentDeviceFacts(): RendererDeviceFacts {
+  if (typeof navigator === 'undefined') return { userAgent: '', maxTouchPoints: 0, touchFirst: false }
+  let touchFirst = false
+  try {
+    touchFirst = typeof window !== 'undefined'
+      && window.matchMedia?.('(pointer: coarse) and (hover: none)').matches === true
+  } catch {
+    // 拿不到媒体查询就按 UA 判，不比没有更差。
+  }
+  return { userAgent: navigator.userAgent ?? '', maxTouchPoints: navigator.maxTouchPoints ?? 0, touchFirst }
+}
+
+/** 这台设备的默认渲染器。 */
+export function defaultRenderer(): RendererKind {
+  return defaultRendererFor(currentDeviceFacts())
+}
 
 export interface RendererDecision {
   renderer: RendererKind
@@ -145,8 +189,10 @@ function clearRendererQuery(): void {
 export function resolveRenderer(opts: {
   pin: RendererKind | null
   preference: RendererKind | null
+  /** 这台设备的默认。省略时现读设备（见 defaultRenderer）。 */
+  fallback?: RendererKind
 }): RendererDecision {
   if (opts.pin) return { renderer: opts.pin, source: 'pinned' }
   if (opts.preference) return { renderer: opts.preference, source: 'chosen' }
-  return { renderer: DEFAULT_RENDERER, source: 'default' }
+  return { renderer: opts.fallback ?? defaultRenderer(), source: 'default' }
 }

@@ -2,25 +2,22 @@ import { describe, it, expect } from 'bun:test'
 import { renderSyncEnabled } from '../terminalRenderSync'
 
 /**
- * The forced full-grid repaint is a DOM-renderer remedy that used to run unconditionally, because
- * when it was written there was only one renderer. These pin the rule to its reason.
+ * The forced full-grid repaint was a remedy for residue that turned out to live in xterm's buffer,
+ * not in its renderer (see the file header). These pin the rule to that finding.
  */
 describe('renderSyncEnabled', () => {
-  it('is off under WebGL — the damage-tracking gap it compensates for is not there', () => {
+  it('is off under WebGL', () => {
     expect(renderSyncEnabled('webgl', null)).toBe(false)
   })
 
-  it('stays on for the DOM renderer, including the WebGL-unavailable fallback', () => {
-    expect(renderSyncEnabled('dom', null)).toBe(true)
-  })
-
-  it('an unknown renderer keeps the safe behaviour', () => {
-    // A future renderer is guilty until measured: residue is worse than a repaint.
-    expect(renderSyncEnabled('canvas', null)).toBe(true)
+  // The 2026-07-24 diagnosis: term.refresh() repainted the same drifted buffer and cleared nothing.
+  it('is off for the DOM renderer too, including the WebGL-unavailable fallback', () => {
+    expect(renderSyncEnabled('dom', null)).toBe(false)
   })
 
   it('explicit override wins in both directions — the escape hatch when the rule is wrong', () => {
     expect(renderSyncEnabled('webgl', '1')).toBe(true)
+    expect(renderSyncEnabled('dom', '1')).toBe(true)
     expect(renderSyncEnabled('dom', '0')).toBe(false)
   })
 })
