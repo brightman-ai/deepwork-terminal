@@ -93,6 +93,9 @@ const (
 	// RuleScreenInterrupted — the CLI explicitly reports that the conversation was
 	// interrupted and has returned to its input prompt.
 	RuleScreenInterrupted StatusRule = "screen.interrupted"
+	// RuleScreenRecap — Codex is showing its post-turn recap view, not executing
+	// a live turn.
+	RuleScreenRecap StatusRule = "screen.recap"
 	// RuleScreenQuiet — the screen said nothing recognisable either way.
 	RuleScreenQuiet StatusRule = "screen.quiet"
 	// RuleScreenUnreadable — the screen could not be READ at all (a capture that failed, a

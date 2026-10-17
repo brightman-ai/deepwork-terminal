@@ -52,6 +52,23 @@ func TestAnalyzeOutput_InterruptedConversationIsIdle(t *testing.T) {
 	}
 }
 
+func TestAnalyzeOutput_InterruptedMarkerSurvivesStaleBottomOutput(t *testing.T) {
+	lines := make([]string, paneScanLines)
+	lines[2] = "Conversation interrupted — use /feedback if something went wrong"
+	lines[len(lines)-1] = "104   } > \"$out/$cmd/SKILL.md\""
+	got := AnalyzeOutputDetail(lines)
+	if got.State != PromptIdle || got.Rule != RuleScreenInterrupted {
+		t.Fatalf("got state=%v rule=%q, want idle/screen.interrupted", got.State, got.Rule)
+	}
+}
+
+func TestAnalyzeOutput_RecapIsIdle(t *testing.T) {
+	got := AnalyzeOutputDetail([]string{"output", "Recap", "old command output"})
+	if got.State != PromptIdle || got.Rule != RuleScreenRecap {
+		t.Fatalf("got state=%v rule=%q, want idle/screen.recap", got.State, got.Rule)
+	}
+}
+
 func TestAnalyzeOutput_LikelyIdle(t *testing.T) {
 	// Prompt char at end of output, no model name in previous line.
 	cases := []struct {

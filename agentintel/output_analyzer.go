@@ -92,6 +92,7 @@ var interactivePromptPatterns = []*regexp.Regexp{
 // Codex can leave the rollout without a task_complete row after Esc or an
 // interrupted conversation. This terminal message retracts stale running state.
 var interruptedScreenPattern = regexp.MustCompile(`(?i)(conversation|request) interrupted`)
+var recapScreenPattern = regexp.MustCompile(`(?im)^\s*Recap\s*$`)
 
 // modelPattern matches strings that look like a model name (word + digits + dots,
 // e.g. "claude-4.6", "gpt-5.5", "gemini-2.0").
@@ -176,9 +177,14 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 	if choiceCount >= 2 && cursorSeen {
 		return OutputVerdict{PromptNeedsPermission, RuleScreenChoiceList, truncEvidence(choiceLine)}
 	}
-	for _, line := range tailLines(lines, promptTailLines) {
+	// These are explicit terminal states. They may sit above stale command output
+	// and therefore must use the whole visible capture, not the last five lines.
+	for _, line := range tailLines(lines, paneScanLines) {
 		if interruptedScreenPattern.MatchString(line) {
 			return OutputVerdict{PromptIdle, RuleScreenInterrupted, truncEvidence(line)}
+		}
+		if recapScreenPattern.MatchString(line) {
+			return OutputVerdict{PromptIdle, RuleScreenRecap, truncEvidence(line)}
 		}
 	}
 

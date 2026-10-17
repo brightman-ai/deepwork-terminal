@@ -141,7 +141,7 @@ func (m *PaneAgentMonitor) decideStatus(p SurfaceProbe, screen screenFunc) Statu
 				// it exists, and only this direction is checked: a screen can prove "blocked", it
 				// cannot prove "not blocked".
 				if v, ok := analyzeScreen(screen); ok {
-					if v.Rule == RuleScreenInterrupted {
+					if v.Rule == RuleScreenInterrupted || v.Rule == RuleScreenRecap {
 						return StatusDecision{Status: StatusIdle, Rule: v.Rule, Evidence: v.Line}
 					}
 					if v.State == PromptNeedsPermission {
