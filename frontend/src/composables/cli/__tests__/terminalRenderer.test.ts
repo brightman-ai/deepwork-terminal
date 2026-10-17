@@ -1,12 +1,44 @@
 import { describe, it, expect, afterEach } from 'bun:test'
 import {
-  resolveRenderer, DEFAULT_RENDERER, setRendererPreference, rendererPin, rendererPreference,
+  resolveRenderer, defaultRendererFor, setRendererPreference, rendererPin, rendererPreference,
 } from '../terminalRenderer'
 
+const MAC_EDGE = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0'
+const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+const IPAD_DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15'
+const ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36'
+
+describe('defaultRendererFor — 桌面 WebGL，iOS / 触屏 DOM', () => {
+  // 桌面那一半是这次改动的理由：DOM 的整块卡顿让 Edge/macOS 的 Shift 切中英切两次（见文件头）。
+  it('桌面（含 macOS 上的 Edge/Chrome）→ WebGL', () => {
+    expect(defaultRendererFor({ userAgent: MAC_EDGE, maxTouchPoints: 0, touchFirst: false })).toBe('webgl')
+  })
+
+  // 带触屏的 Windows 笔记本：有触点，但主指针是鼠标，按桌面算。
+  it('有触点但主指针是鼠标 → 仍是桌面', () => {
+    expect(defaultRendererFor({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141', maxTouchPoints: 10, touchFirst: false }))
+      .toBe('webgl')
+  })
+
+  // 串字只在 iOS 上实测过，那一侧的默认不动。
+  it('iPhone → DOM', () => {
+    expect(defaultRendererFor({ userAgent: IPHONE, maxTouchPoints: 5, touchFirst: true })).toBe('dom')
+  })
+
+  // iPadOS 默认用桌面 UA（Macintosh）访问，UA 认不出，只能靠触点数。
+  it('桌面 UA 的 iPad（触点数 > 1）→ DOM', () => {
+    expect(defaultRendererFor({ userAgent: IPAD_DESKTOP_UA, maxTouchPoints: 5, touchFirst: false })).toBe('dom')
+  })
+
+  it('以触屏为主的其它设备 → DOM', () => {
+    expect(defaultRendererFor({ userAgent: ANDROID, maxTouchPoints: 5, touchFirst: true })).toBe('dom')
+  })
+})
+
 describe('resolveRenderer — 钉 > 偏好 > 默认', () => {
-  it('谁也没发话 → DOM。默认站在"画错了也看不出来"的对立面（见文件头）', () => {
-    expect(resolveRenderer({ pin: null, preference: null }).renderer).toBe('dom')
-    expect(DEFAULT_RENDERER).toBe('dom')
+  it('谁也没发话 → 用这台设备的默认，并标为 default', () => {
+    expect(resolveRenderer({ pin: null, preference: null, fallback: 'webgl' })).toEqual({ renderer: 'webgl', source: 'default' })
+    expect(resolveRenderer({ pin: null, preference: null, fallback: 'dom' })).toEqual({ renderer: 'dom', source: 'default' })
   })
 
   it('使用者偏好压过默认，并被标为 chosen —— 面板据此说"记住了"', () => {
