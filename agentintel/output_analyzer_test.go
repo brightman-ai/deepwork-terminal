@@ -69,6 +69,13 @@ func TestAnalyzeOutput_RecapIsIdle(t *testing.T) {
 	}
 }
 
+func TestAnalyzeOutput_CodexInputPromptIsIdle(t *testing.T) {
+	got := AnalyzeOutputDetail([]string{"old command output", "Ask Codex to do anything"})
+	if got.State != PromptIdle || got.Rule != RuleScreenRecap {
+		t.Fatalf("got state=%v rule=%q, want idle/screen.recap", got.State, got.Rule)
+	}
+}
+
 func TestAnalyzeOutput_LikelyIdle(t *testing.T) {
 	// Prompt char at end of output, no model name in previous line.
 	cases := []struct {

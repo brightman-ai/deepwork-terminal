@@ -93,6 +93,7 @@ var interactivePromptPatterns = []*regexp.Regexp{
 // interrupted conversation. This terminal message retracts stale running state.
 var interruptedScreenPattern = regexp.MustCompile(`(?i)(conversation|request) interrupted`)
 var recapScreenPattern = regexp.MustCompile(`(?im)^\s*Recap\s*$`)
+var codexInputPromptPattern = regexp.MustCompile(`(?i)Ask Codex to do anything`)
 
 // modelPattern matches strings that look like a model name (word + digits + dots,
 // e.g. "claude-4.6", "gpt-5.5", "gemini-2.0").
@@ -184,6 +185,9 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 			return OutputVerdict{PromptIdle, RuleScreenInterrupted, truncEvidence(line)}
 		}
 		if recapScreenPattern.MatchString(line) {
+			return OutputVerdict{PromptIdle, RuleScreenRecap, truncEvidence(line)}
+		}
+		if codexInputPromptPattern.MatchString(line) {
 			return OutputVerdict{PromptIdle, RuleScreenRecap, truncEvidence(line)}
 		}
 	}
