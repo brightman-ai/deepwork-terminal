@@ -10,6 +10,11 @@ describe('findTerminalFileLinks', () => {
     ])
   })
 
+  it('keeps dot-prefixed directory names intact', () => {
+    const path = 'docs/.tg/work/20261014-091418-five-feature-ui-redesign/implementation/FIVE-NEXT/SC-REVIEW/HANDOFF-20261017.md'
+    expect(findTerminalFileLinks(`(${path})`).map((link) => link.path)).toEqual([path])
+  })
+
   it('ignores unsupported extensions and URLs', () => {
     expect(findTerminalFileLinks('https://example.com/report.html backup.bin')).toEqual([])
   })

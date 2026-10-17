@@ -90,6 +90,9 @@ const (
 	RuleScreenPromptIdle StatusRule = "screen.prompt_idle"
 	// RuleScreenPromptLikely — a prompt character with no confirming context.
 	RuleScreenPromptLikely StatusRule = "screen.prompt_likely"
+	// RuleScreenInterrupted — the CLI explicitly reports that the conversation was
+	// interrupted and has returned to its input prompt.
+	RuleScreenInterrupted StatusRule = "screen.interrupted"
 	// RuleScreenQuiet — the screen said nothing recognisable either way.
 	RuleScreenQuiet StatusRule = "screen.quiet"
 	// RuleScreenUnreadable — the screen could not be READ at all (a capture that failed, a

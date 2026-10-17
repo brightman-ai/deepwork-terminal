@@ -260,23 +260,21 @@ func codexDriverFor(t *testing.T, rows []map[string]any, fileAge time.Duration) 
 	return cd
 }
 
-// TestCodexDriver_StaleRunGoesIdle: Codex asserts Running on task_started and retracts it only
-// when task_complete is WRITTEN. Anything that stops the CLI first — Esc, a crash, a killed
-// pane, a closed laptop — leaves "running" as the last word, with nobody left to correct it.
-// Same defect as the claude driver's, reached through a different rule, so it gets the same
-// bound rather than a second theory of what "stale" means.
-func TestCodexDriver_StaleRunGoesIdle(t *testing.T) {
+// TestCodexDriver_NoCompletionKeepsTranscriptRunning: a missing task_complete is
+// ambiguous in JSONL. It can mean a long tool call or an interrupted UI turn;
+// screen evidence resolves the latter, so the driver must not guess from age.
+func TestCodexDriver_NoCompletionKeepsTranscriptRunning(t *testing.T) {
 	now := time.Now()
 	cd := codexDriverFor(t, []map[string]any{
 		codexRow("task_started", now.Add(-2*time.Hour)),
 	}, time.Hour) // nothing appended for an hour either
 
 	as := cd.AgentState()
-	if as.Status != StatusIdle {
-		t.Fatalf("status = %s, want idle — a turn with no completion and no writes is not in progress", as.Status)
+	if as.Status != StatusRunning {
+		t.Fatalf("status = %s, want running until explicit screen/process evidence", as.Status)
 	}
 	if as.AwaitingUser {
-		t.Fatal("a turn that died without finishing has no result waiting to be read")
+		t.Fatal("a turn without completion has no result waiting to be read")
 	}
 }
 
