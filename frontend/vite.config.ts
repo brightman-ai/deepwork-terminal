@@ -9,6 +9,14 @@ import { fileURLToPath, URL } from 'node:url'
 
 const devApiTarget = process.env.VITE_DEV_API_TARGET
 
+// This tree builds the standalone terminal, so its bundle must never come out as the pro edition.
+// The portal set is a build-time constant (CE features.ts reads VITE_PORTALS, else VITE_EDITION,
+// which defaults to pro), and a bare `vite build` inherited that pro default: d22b84c, c4bc8bc and
+// 42ce144 each embedded the full pro nav on :18074. Defaulted here so build.sh, `bun run build` and
+// CI all agree; an explicit VITE_PORTALS in the environment still wins. (Vite reads VITE_* from
+// process.env after this file runs; pro builds through its own config and is unaffected.)
+process.env.VITE_PORTALS ??= 'cli,settings'
+
 // The pinned CE tree's bare imports must resolve to THIS install: Rollup
 // walks up from the importing file and never reaches our node_modules from
 // ../../deepwork (same physics that broke the type check — see the matching
