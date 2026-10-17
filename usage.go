@@ -290,7 +290,11 @@ func (s *Server) startReportWarmer(ctx context.Context) {
 				return
 			default:
 			}
-			s.agentUsage.UsageReport(ctx, w, reportWarmTimezone)
+			// Warm through the same publication path as HTTP. Calling the legacy
+			// synchronous method here would hold the reporter mutex for the full
+			// filesystem scan every minute and recreate the CPU spike this cache
+			// is meant to remove.
+			_, _, _ = s.agentUsage.fastUsageReport(ctx, w, reportWarmTimezone)
 		}
 	}
 	go func() {
