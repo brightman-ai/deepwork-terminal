@@ -179,7 +179,7 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 	}
 	// These are explicit terminal states. They may sit above stale command output
 	// and therefore must use the whole visible capture, not the last five lines.
-	for _, line := range tailLines(lines, paneScanLines) {
+	for _, line := range lines {
 		if interruptedScreenPattern.MatchString(line) {
 			return OutputVerdict{PromptIdle, RuleScreenInterrupted, truncEvidence(line)}
 		}
