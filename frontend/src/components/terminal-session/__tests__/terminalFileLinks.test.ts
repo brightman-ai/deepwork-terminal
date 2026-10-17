@@ -15,6 +15,11 @@ describe('findTerminalFileLinks', () => {
     expect(findTerminalFileLinks(`(${path})`).map((link) => link.path)).toEqual([path])
   })
 
+  it('keeps Unicode directory and filename segments intact', () => {
+    const path = 'collab/work/whiteboard-ng自举-2026001/交接-2026017-交流转换重构/reviews/wbng_fable_review_prompt_20261018.md'
+    expect(findTerminalFileLinks(`< '${path}' >`).map((link) => link.path)).toEqual([path])
+  })
+
   it('ignores unsupported extensions and URLs', () => {
     expect(findTerminalFileLinks('https://example.com/report.html backup.bin')).toEqual([])
   })

@@ -11,7 +11,7 @@ export interface TerminalFileLink {
 // Dots are valid inside directory names (`.tg`, `.config`, `v1.0`). Omitting
 // them makes the regex restart after the dot and silently drops that character
 // from the activated path.
-const FILE_PATH_RE = /(?:~\/|\/|\.\.?\/)?(?:[A-Za-z0-9._@%+~,=-]+\/)*[A-Za-z0-9._@%+~,=-]+\.[A-Za-z0-9]{1,16}/g
+const FILE_PATH_RE = /(?:~\/|\/|\.\.?\/)?(?:[\p{L}\p{N}._@%+~,=-]+\/)*[\p{L}\p{N}._@%+~,=-]+\.[\p{L}\p{N}]{1,16}/gu
 const URL_RE = /\bhttps?:\/\/[^\s<>'"`]+/gi
 
 /** Extract supported file paths from one rendered terminal line. */

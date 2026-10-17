@@ -729,21 +729,24 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, f) // stream the remainder past the sniffed head
 }
 
-// resolvePreviewPath resolves a /files/raw preview path. In-cwd paths (tree navigation,
-// search results, recent files under cwd) use the traversal-safe safeResolve. An ABSOLUTE
-// path OUTSIDE cwd is allowed ONLY when it is a file the agent actually touched — i.e. a
-// member of the transcript-derived recent-edited set. Recent files legitimately live
-// outside the workbench root (/tmp scratch, sibling repos), and without this an absolute
-// outside-cwd path is collapsed INTO cwd by safeResolve → a 404. Arbitrary path traversal
-// stays blocked: only the bounded, agent-touched allowlist escapes the root.
+// resolvePreviewPath resolves a user-clicked /files/raw preview path. The endpoint is already
+// behind X-CLI-Auth; an explicit terminal path is an operator request to read that path, even
+// when it is outside the current workbench cwd. Keep safeResolve strict for the tree/CRUD APIs,
+// but let preview follow absolute paths, ~/ paths, and ../ paths so a generated link can open the
+// file it names. The raw handler still rejects directories, missing files, and unsupported bytes.
 func resolvePreviewPath(cwd, rel string) (string, error) {
-	if filepath.IsAbs(rel) && !pathUnder(cwd, rel) {
-		if isRecentFile(cwd, rel) {
-			return filepath.Clean(rel), nil
+	path := strings.TrimSpace(rel)
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
 		}
-		return "", errors.New("path not allowed")
+		path = filepath.Join(home, path[2:])
 	}
-	return safeResolve(cwd, rel)
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	return filepath.Clean(filepath.Join(cwd, path)), nil
 }
 
 // previewableInRecent reports whether path would pass resolvePreviewPath's gate, so

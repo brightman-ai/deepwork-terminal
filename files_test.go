@@ -539,12 +539,13 @@ func TestResolvePreviewPath_SecurityBranches(t *testing.T) {
 	if _, err := resolvePreviewPath(cwd, "a.txt"); err != nil {
 		t.Fatalf("in-cwd path should resolve, got %v", err)
 	}
-	// Absolute path OUTSIDE cwd that is NOT in any recent-edited set → blocked.
-	if _, err := resolvePreviewPath(cwd, "/etc/passwd"); err == nil {
-		t.Fatal("outside-cwd non-recent path must be blocked")
+	// Explicit absolute preview paths are allowed; tree/CRUD still use safeResolve.
+	if got, err := resolvePreviewPath(cwd, "/etc/passwd"); err != nil || got != "/etc/passwd" {
+		t.Fatalf("absolute preview path should pass through, got %q err=%v", got, err)
 	}
-	// (The recent-edited allowlist ESCAPE is covered end-to-end by the API harness:
-	// a transcript-referenced file outside cwd previews 200.)
+	if got, err := resolvePreviewPath(cwd, "../outside.md"); err != nil || got != filepath.Join(filepath.Dir(cwd), "outside.md") {
+		t.Fatalf("relative outside preview path should resolve, got %q err=%v", got, err)
+	}
 }
 
 // TC-FS-…: previewableInRecent keeps the 最近文件 list in lock-step with the preview
