@@ -255,67 +255,6 @@ type usageReportHTTPResponse struct {
 	CalculationState string    `json:"calculation_state"`
 }
 
-// reportWarmWindows is exactly the set the UI prefetches on every popover open; warming
-// these keeps the answer at click distance instead of one cold scan behind whichever
-// window the user happened to click first.
-var reportWarmWindows = []string{"24h", "7d", "14d", "30d"}
-
-// reportWarmTimezone is the operator's own calendar. Reports are memoized per timezone, so
-// a click from another tz still pays its first scan — warming the primary one is the 95%
-// case, not a promise about all of them.
-const reportWarmTimezone = "Asia/Shanghai"
-
-const reportWarmInterval = time.Minute
-
-// startReportWarmer recomputes the report windows on a ticker. The report cache is
-// revision-keyed — invalidated by exactly the sessions an active machine keeps writing —
-// so on a working machine every popover open used to pay the full scans again (observed
-// 2026-10-06: 7d alone 4-8s cold, four windows prefetching into one reporter mutex; the
-// fee section read as permanently empty because the user closes it before the wait ends).
-// Warm on the clock instead: a click then waits at most one scan, usually a memo hit, and
-// the 拉取于 timestamp on screen keeps an honestly-stale answer honest.
-func (s *Server) startReportWarmer(ctx context.Context) {
-	if s.agentUsage == nil || testRunWithoutIsolatedDeepworkHome() {
-		return // no authoritative path, or a go test that must not touch the developer's home
-	}
-	if _, err := time.LoadLocation(reportWarmTimezone); err != nil {
-		return // same validation as the handler; without a usable tz there is nothing to warm
-	}
-	warm := func() {
-		usageCredentialSourceMu.RLock()
-		defer usageCredentialSourceMu.RUnlock()
-		for _, w := range reportWarmWindows {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			// Warm through the same publication path as HTTP. Calling the legacy
-			// synchronous method here would hold the reporter mutex for the full
-			// filesystem scan every minute and recreate the CPU spike this cache
-			// is meant to remove.
-			_, _, _ = s.agentUsage.fastUsageReport(ctx, w, reportWarmTimezone)
-		}
-	}
-	go func() {
-		// The first warm runs here too, never on the caller's path: this is called while the
-		// server is being built, before it listens, and a cold scan is minutes on a machine
-		// with a large transcript history and no index yet (a fresh data dir: observed
-		// 2026-10-14, the page unreachable for 4+ minutes while every Codex rollout was parsed).
-		warm()
-		ticker := time.NewTicker(reportWarmInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				warm()
-			}
-		}
-	}()
-}
-
 // parseUsageWindow maps the query value to a WindowKind, defaulting to 7d.
 func parseUsageWindow(v string) usage.WindowKind {
 	switch v {
