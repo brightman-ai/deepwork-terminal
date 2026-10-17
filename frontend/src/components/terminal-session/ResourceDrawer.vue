@@ -161,6 +161,7 @@
           <!-- ════ TOP TAB · 目录树 (anchored working tree — the primary workspace entry) ════ -->
           <div v-show="topTab === 'tree'" class="rd-toppane">
             <FilesPanel
+              ref="treeFilesPanelRef"
               mode="tree"
               :active="open && isActive && topTab === 'tree'"
               :session-id="sessionId"
@@ -374,7 +375,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Lock, LockOpen, PanelLeft, PanelRight } from 'lucide-vue-next'
 import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
@@ -630,7 +631,15 @@ const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : pa
 // only ONE global window.getSelection() — the host clones the range into a per-pane map on the way
 // out and re-applies it on the way back in; see CliTerminalSurface's saveSelectionFor/restore).
 const panelRootEl = ref<HTMLElement>()
-defineExpose({ effectivePanelWidthPx, panelRootEl })
+const treeFilesPanelRef = ref<InstanceType<typeof FilesPanel>>()
+
+function openFilePreview(path: string): void {
+  topTab.value = 'tree'
+  emit('update:open', true)
+  void nextTick(() => treeFilesPanelRef.value?.previewPath(path))
+}
+
+defineExpose({ effectivePanelWidthPx, panelRootEl, openFilePreview })
 
 let resizing = false
 let resizeStartX = 0

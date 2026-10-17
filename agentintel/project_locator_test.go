@@ -106,6 +106,113 @@ func TestCodexLatestSessionFiltersCWDAndSubagents(t *testing.T) {
 	}
 }
 
+func TestCodexLatestSessionNoMatchIsUnknown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "14")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-other.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"other","cwd":"/other","source":"cli"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewProjectLocator().CodexLatestSession("/wanted")
+	if err != nil || got != "" {
+		t.Fatalf("got (%q,%v), want empty unknown", got, err)
+	}
+}
+
+func TestCodexLatestSessionCanonicalizesSymlinkCWD(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "project")
+	link := filepath.Join(home, "project-link")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "14")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-root.jsonl")
+	body := `{"type":"session_meta","payload":{"id":"root","cwd":"` + link + `","source":"cli"}}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewProjectLocator().CodexLatestSession(root)
+	if err != nil || got != path {
+		t.Fatalf("got (%q,%v), want %q", got, err, path)
+	}
+}
+
+func TestCodexLatestSessionRefreshesHeadAfterAppendAndCaches(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "14")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-root.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"root","cwd":"/wanted","source":"cli"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pl := NewProjectLocator()
+	reads := 0
+	pl.openRollout = func(name string) (*os.File, error) {
+		reads++
+		return os.Open(name)
+	}
+	if got, err := pl.CodexLatestSession("/wanted"); err != nil || got != path {
+		t.Fatalf("first lookup got (%q,%v)", got, err)
+	}
+	if got, err := pl.CodexLatestSession("/wanted"); err != nil || got != path {
+		t.Fatalf("second lookup got (%q,%v)", got, err)
+	}
+	if reads != 1 {
+		t.Fatalf("head opens after cached lookup = %d, want 1", reads)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{}\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if got, err := pl.CodexLatestSession("/wanted"); err != nil || got != path {
+		t.Fatalf("lookup after append got (%q,%v)", got, err)
+	}
+	if reads != 2 {
+		t.Fatalf("head opens after append = %d, want 2", reads)
+	}
+}
+
+func TestCodexSessionFilesSeesNewRolloutWithoutRecreatingLocator(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "07", "14")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pl := NewProjectLocator()
+	if got := pl.CodexSessionFiles(); len(got) != 0 {
+		t.Fatalf("initial files = %v, want empty", got)
+	}
+	path := filepath.Join(dir, "rollout-new.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"id":"new","cwd":"/wanted","source":"cli"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := pl.CodexSessionFiles()
+	if len(got) != 1 || got[0] != path {
+		t.Fatalf("new files = %v, want [%s]", got, path)
+	}
+}
+
 func TestClaudeProjectDir_noDoubleSlash(t *testing.T) {
 	pl := NewProjectLocator()
 	dir := pl.ClaudeProjectDir("/Users/foo/bar")

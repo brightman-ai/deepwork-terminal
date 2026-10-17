@@ -130,6 +130,17 @@ export function formatFor(name: string): FormatSpec {
   return FORMATS[extOf(name)] ?? { cat: 'other', kind: 'text', fetch: 'text' }
 }
 
+/**
+ * True only for extensions explicitly supported by the file preview table.
+ * `formatFor` intentionally falls back to text for unknown names; terminal path
+ * links need the stricter answer so prose such as `notes.bak` does not become a
+ * link whose preview support is only a best-effort content sniff.
+ */
+export function isSupportedPreviewName(name: string): boolean {
+  const extension = extOf(name)
+  return !!extension && Object.prototype.hasOwnProperty.call(FORMATS, extension)
+}
+
 /** 类别（角标 / 筛选 chip / 图标着色的唯一来源）。 */
 export function catOf(name: string): string {
   return formatFor(name).cat

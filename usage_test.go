@@ -1,10 +1,15 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/brightman-ai/kit/usage"
 )
 
 // newUsageTestServer builds a Server with only the usage reporter wired — enough
@@ -77,6 +82,38 @@ func TestHandleUsageReportCached(t *testing.T) {
 	s.handleUsageReport(w1, req)
 	if _, ok := s.usage.cached(parseUsageWindow("7d")); !ok {
 		t.Fatal("expected 7d report to be cached after first request")
+	}
+}
+
+func TestUsageFastReportSlowBuildIsSingleFlightAndEventuallyReplaces(t *testing.T) {
+	u := newUsageReporter()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var builds atomic.Int32
+	u.build = func(window usage.WindowKind, _ usage.TokenSource) usage.UsageReport {
+		builds.Add(1)
+		started <- struct{}{}
+		<-release
+		return usage.UsageReport{Window: window, Available: true}
+	}
+	done := u.scheduleRefresh(usage.Window7d)
+	<-started
+	begin := time.Now()
+	_, _, state := u.fastReport(context.Background(), usage.Window7d)
+	if elapsed := time.Since(begin); elapsed > 150*time.Millisecond {
+		t.Fatalf("slow build blocked HTTP fast path for %s", elapsed)
+	}
+	if state != "calculating" {
+		t.Fatalf("state=%q, want calculating", state)
+	}
+	_, _, _ = u.fastReport(context.Background(), usage.Window7d)
+	if got := builds.Load(); got != 1 {
+		t.Fatalf("same window started %d builds, want one", got)
+	}
+	close(release)
+	<-done
+	if _, ok := u.cached(usage.Window7d); !ok {
+		t.Fatal("completed background build did not replace the cache")
 	}
 }
 

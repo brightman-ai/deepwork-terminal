@@ -93,7 +93,7 @@ export interface AgentActivityReport {
   coverage: Record<string, ReportCoverage>
   observability: {
     projection: {
-      state: 'complete' | 'partial' | 'missing'; mode: 'full_rebuild' | 'incremental' | 'cached' | 'in_memory'
+      state: 'complete' | 'partial' | 'missing' | 'calculating'; mode: 'full_rebuild' | 'incremental' | 'cached' | 'in_memory' | 'background'
       refreshed_at: string; source_high_watermark?: string; source_files: number; changed_files: number
       index_schema?: string; diagnostics?: string[]
     }

@@ -109,8 +109,9 @@ type Server struct {
 	// cancelled by Close so the watcher stops with the server rather than outliving it —
 	// an embedding host builds and tears down this subsystem repeatedly, and a watcher
 	// left running would keep re-subscribing on behalf of a server that no longer exists.
-	watchCtx    context.Context
-	watchCancel context.CancelFunc
+	watchCtx     context.Context
+	watchCancel  context.CancelFunc
+	runtimeWatch *runtimeWatch
 }
 
 // NewServer creates a terminal session server.
@@ -153,6 +154,8 @@ func NewServer(opts ...Option) (*Server, error) {
 	agentintel.SetAgentIndexCacheDir(s.config.DataDir)
 	s.agentUsage = newAgentReporter(s.config.DataDir)
 	s.watchCtx, s.watchCancel = context.WithCancel(context.Background())
+	s.runtimeWatch = newRuntimeWatch(time.Now())
+	s.runtimeWatch.start(s.watchCtx)
 	// Subscription quota: install this host's key store and keep every account's reading warm.
 	// Asking is a plain read now, so the freshness the user sees no longer depends on them
 	// having pressed a button (usage_credentials.go).
@@ -436,6 +439,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /uploads", wrap(s.handleUploadsList))
 	s.mux.HandleFunc("GET /uploads/raw", wrap(s.handleUploadsRaw))
 	s.mux.HandleFunc("GET /inputs", wrap(s.handleInputs))
+	// Authenticated, read-only process health snapshot. Keep this route narrow: diagnostics
+	// are useful to operators, but the endpoint must not become a second control surface.
+	s.mux.HandleFunc("GET /debug/runtime", wrap(s.handleRuntimeDebug))
 	s.mux.HandleFunc("POST /debug/logs", wrap(s.handleHudLog))
 	// The shared frontend's structured log sink. pro serves the same path; without it here the
 	// standalone terminal silently 404s every frontend log line — see handleTelemetryLog.

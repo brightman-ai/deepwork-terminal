@@ -95,6 +95,24 @@ type agentReporter struct {
 	deepworkRoot string
 	outcomePath  string
 	drivers      map[string]reportAgentTreeDriver
+	// Published reports are immutable snapshots. HTTP handlers read these maps
+	// independently of mu while a worker performs a filesystem scan.
+	latestMu           sync.RWMutex
+	latestReports      map[string]agentReportCacheEntry
+	latestUsageReports map[string]usageReportMemo
+	refreshMu          sync.Mutex
+	refreshing         bool
+	pending            map[string]agentRefreshJob
+	done               map[string]chan struct{}
+	// beforeRefresh is a test seam for a deliberately slow source; production
+	// leaves it nil. It runs while the worker owns mu, never on the HTTP path.
+	beforeRefresh func()
+}
+
+type agentRefreshJob struct {
+	window   string
+	timezone string
+	usage    bool
 }
 
 type datasetMemo struct {
@@ -103,8 +121,9 @@ type datasetMemo struct {
 }
 
 type usageReportMemo struct {
-	revision uint64
-	report   kitusage.UsageReport
+	revision          uint64
+	report            kitusage.UsageReport
+	reportGeneratedAt time.Time
 }
 
 type reportAgentTreeDriver interface {
@@ -119,7 +138,8 @@ type agentReportCacheEntry struct {
 }
 
 func newAgentReporter(dataDir ...string) *agentReporter {
-	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), datasets: make(map[string]datasetMemo), usageReports: make(map[string]usageReportMemo), drivers: make(map[string]reportAgentTreeDriver), now: time.Now}
+	a := &agentReporter{files: make(map[string]agentFileProjection), reports: make(map[string]agentReportCacheEntry), datasets: make(map[string]datasetMemo), usageReports: make(map[string]usageReportMemo), drivers: make(map[string]reportAgentTreeDriver), now: time.Now,
+		latestReports: make(map[string]agentReportCacheEntry), latestUsageReports: make(map[string]usageReportMemo), pending: make(map[string]agentRefreshJob), done: make(map[string]chan struct{})}
 	if len(dataDir) > 0 && strings.TrimSpace(dataDir[0]) != "" {
 		a.index = newAgentIndexStore(dataDir[0], agentReportIndexVersion)
 		a.deepworkRoot = filepath.Join(dataDir[0], "transcripts", "sessions")
@@ -129,10 +149,155 @@ func newAgentReporter(dataDir ...string) *agentReporter {
 	return a
 }
 
+const agentReportColdWait = 40 * time.Millisecond
+
+func (a *agentReporter) publishReport(key string, entry agentReportCacheEntry) {
+	a.latestMu.Lock()
+	a.latestReports[key] = entry
+	a.latestMu.Unlock()
+}
+
+func (a *agentReporter) publishUsageReport(key string, entry usageReportMemo) {
+	a.latestMu.Lock()
+	a.latestUsageReports[key] = entry
+	a.latestMu.Unlock()
+}
+
+// fastReport is the HTTP-facing read path. It returns a published snapshot and
+// asks the single background worker to refresh stale/missing data. No caller can
+// queue behind the projection mutex.
+func (a *agentReporter) fastReport(ctx context.Context, window, timezone string, force bool) (agentanalytics.ActivityReport, time.Time, string) {
+	key := window + "|" + timezone
+	a.latestMu.RLock()
+	entry, ok := a.latestReports[key]
+	a.latestMu.RUnlock()
+	if ok {
+		state := "stale"
+		if !force && a.now().Sub(entry.builtAt) < agentReportCacheTTL {
+			state = "fresh"
+		} else {
+			a.scheduleRefresh(agentRefreshJob{window: window, timezone: timezone})
+		}
+		if force {
+			a.scheduleRefresh(agentRefreshJob{window: window, timezone: timezone})
+		}
+		return entry.report, entry.builtAt, state
+	}
+	done := a.scheduleRefresh(agentRefreshJob{window: window, timezone: timezone})
+	select {
+	case <-done:
+	case <-time.After(agentReportColdWait):
+	case <-ctx.Done():
+	}
+	a.latestMu.RLock()
+	entry, ok = a.latestReports[key]
+	a.latestMu.RUnlock()
+	if ok {
+		return entry.report, entry.builtAt, "fresh"
+	}
+	return calculatingAgentReport(window, timezone, a.now()), time.Time{}, "calculating"
+}
+
+func calculatingAgentReport(window, timezone string, now time.Time) agentanalytics.ActivityReport {
+	// Keep the transport shape complete even while the expensive projection is
+	// running. The drawer renders health/summary fields without nil guards; a
+	// partial object would turn a short "calculating" response into a frontend
+	// exception. Empty facts are clearly marked by the projection state.
+	report := agentanalytics.BuildActivityReport(agentanalytics.ActivityDataset{}, window, timezone, now)
+	report.Observability.Projection.State = "calculating"
+	report.Observability.Projection.Mode = "background"
+	report.Observability.Projection.RefreshedAt = now
+	return report
+}
+
+func (a *agentReporter) scheduleRefresh(job agentRefreshJob) <-chan struct{} {
+	key := "report|" + job.window + "|" + job.timezone
+	if job.usage {
+		key = "usage|" + job.window + "|" + job.timezone
+	}
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if done, ok := a.done[key]; ok {
+		return done
+	}
+	done := make(chan struct{})
+	a.done[key] = done
+	a.pending[key] = job
+	if !a.refreshing {
+		a.refreshing = true
+		go a.runRefreshes()
+	}
+	return done
+}
+
+func (a *agentReporter) runRefreshes() {
+	for {
+		a.refreshMu.Lock()
+		var key string
+		var job agentRefreshJob
+		found := false
+		for candidate, candidateJob := range a.pending {
+			key, job, found = candidate, candidateJob, true
+			delete(a.pending, candidate)
+			break
+		}
+		if !found {
+			a.refreshing = false
+			a.refreshMu.Unlock()
+			return
+		}
+		done := a.done[key]
+		a.refreshMu.Unlock()
+
+		if job.usage {
+			a.UsageReport(context.Background(), job.window, job.timezone)
+		} else {
+			a.Report(context.Background(), job.window, job.timezone, true)
+		}
+
+		a.refreshMu.Lock()
+		delete(a.done, key)
+		close(done)
+		a.refreshMu.Unlock()
+	}
+}
+
+func (a *agentReporter) fastUsageReport(ctx context.Context, window, timezone string) (kitusage.UsageReport, time.Time, string) {
+	key := window + "|" + timezone
+	a.latestMu.RLock()
+	entry, ok := a.latestUsageReports[key]
+	a.latestMu.RUnlock()
+	if ok {
+		state := "stale"
+		if a.now().Sub(entry.reportGeneratedAt) < agentReportCacheTTL {
+			state = "fresh"
+		} else {
+			a.scheduleRefresh(agentRefreshJob{window: window, timezone: timezone, usage: true})
+		}
+		return entry.report, entry.reportGeneratedAt, state
+	}
+	done := a.scheduleRefresh(agentRefreshJob{window: window, timezone: timezone, usage: true})
+	select {
+	case <-done:
+	case <-time.After(agentReportColdWait):
+	case <-ctx.Done():
+	}
+	a.latestMu.RLock()
+	entry, ok = a.latestUsageReports[key]
+	a.latestMu.RUnlock()
+	if ok {
+		return entry.report, entry.reportGeneratedAt, "fresh"
+	}
+	return kitusage.UsageReport{Window: kitusage.WindowKind(window), Available: false, Reason: "calculating"}, time.Time{}, "calculating"
+}
+
 func (a *agentReporter) Report(ctx context.Context, window, timezone string, force ...bool) agentanalytics.ActivityReport {
 	key := window + "|" + timezone
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.beforeRefresh != nil {
+		a.beforeRefresh()
+	}
 	outcomeStamp := a.outcomeEvidenceStamp()
 	forced := len(force) > 0 && force[0]
 	if cached, ok := a.reports[key]; !forced && ok && cached.outcomeStamp == outcomeStamp && a.now().Sub(cached.builtAt) < agentReportCacheTTL {
@@ -144,6 +309,7 @@ func (a *agentReporter) Report(ctx context.Context, window, timezone string, for
 	// appends while this report is being built, the next request sees the newer file stamp
 	// and rebuilds instead of caching a report under evidence it never consumed.
 	a.reports[key] = agentReportCacheEntry{report: report, builtAt: a.now(), outcomeStamp: outcomeStamp}
+	a.publishReport(key, a.reports[key])
 	return report
 }
 
@@ -287,9 +453,17 @@ func (a *agentReporter) refreshLocked(ctx context.Context, window string) agenta
 func (a *agentReporter) UsageReport(ctx context.Context, window, timezone string) kitusage.UsageReport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.beforeRefresh != nil {
+		a.beforeRefresh()
+	}
 	scan := a.scanLocked(ctx, window)
 	key := window + "|" + timezone
 	if memo, ok := a.usageReports[key]; ok && memo.revision == a.revision {
+		if memo.reportGeneratedAt.IsZero() {
+			memo.reportGeneratedAt = a.now()
+			a.usageReports[key] = memo
+		}
+		a.publishUsageReport(key, memo)
 		return memo.report
 	}
 	sources := make([]map[string]kitusage.DailyUsage, 0, len(scan.live))
@@ -302,7 +476,8 @@ func (a *agentReporter) UsageReport(ctx context.Context, window, timezone string
 		a.files[path] = cached // dailyUsage memoizes onto the projection
 	}
 	report := kitusage.BuildRequestReportFromDaily(kitusage.WindowKind(window), timezone, a.now(), sources)
-	a.usageReports[key] = usageReportMemo{revision: a.revision, report: report}
+	a.usageReports[key] = usageReportMemo{revision: a.revision, report: report, reportGeneratedAt: a.now()}
+	a.publishUsageReport(key, a.usageReports[key])
 	return report
 }
 
@@ -1449,7 +1624,14 @@ func (s *Server) handleAgentReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timezone"})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.agentUsage.Report(r.Context(), window, timezone, r.URL.Query().Get("refresh") == "1"))
+	report, calculatedAt, state := s.agentUsage.fastReport(r.Context(), window, timezone, r.URL.Query().Get("refresh") == "1")
+	writeJSON(w, http.StatusOK, agentReportHTTPResponse{ActivityReport: report, CalculatedAt: calculatedAt, CalculationState: state})
+}
+
+type agentReportHTTPResponse struct {
+	agentanalytics.ActivityReport
+	CalculatedAt     time.Time `json:"calculated_at,omitempty"`
+	CalculationState string    `json:"calculation_state"`
 }
 
 func (s *Server) handleAgentReportDetail(w http.ResponseWriter, r *http.Request) {

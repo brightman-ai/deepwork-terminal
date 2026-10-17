@@ -1015,6 +1015,16 @@ function closePreview(): void {
   revokePreviewUrl()
   preview.value = null
 }
+
+/** Open a path supplied by the terminal link provider. */
+function previewPath(path: string): void {
+  const normalized = path.trim()
+  if (!normalized) return
+  const slash = normalized.lastIndexOf('/')
+  const name = slash >= 0 ? normalized.slice(slash + 1) : normalized
+  if (!name) return
+  void previewRel(name, normalized, normalized)
+}
 onUnmounted(closePreview)
 
 // An .html/.htm preview also gets a 渲染 URL, so FilePreview can offer the 源码/渲染 toggle.
@@ -1217,7 +1227,7 @@ watch(() => props.active, (active) => {
 onMounted(activate)
 onBeforeUnmount(() => { viewSeq++; viewRequest?.abort(); cancelSearch() })
 
-defineExpose({ loadRecent, refreshRoot: () => refreshDir(null) })
+defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 </script>
 
 <template>

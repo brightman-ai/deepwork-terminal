@@ -1115,6 +1115,9 @@ onUnmounted(() => {
             <span /><span /><span />
           </div>
           <div v-else-if="agentError && !agentReport" class="uchip-agent-empty">{{ agentError }}</div>
+          <div v-else-if="agentReport?.observability?.projection?.state === 'calculating'" class="uchip-dim uchip-loading">
+            正在计算，稍后刷新
+          </div>
           <template v-else-if="agentReport">
             <div class="uchip-health" :class="`is-${agentReport.health.state}`">
               <strong>{{ agentReport.health.label }}</strong>

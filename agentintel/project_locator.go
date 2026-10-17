@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brightman-ai/kit/transcript"
@@ -23,11 +24,21 @@ import (
 // resolver every layer shares. Resolving them independently here is how a CLAUDE_CONFIG_DIR
 // user ends up with agent detection reading one ~/.claude while usage reads another.
 type ProjectLocator struct {
-	processEnv func(int) ([]string, error)
+	processEnv  func(int) ([]string, error)
+	openRollout func(string) (*os.File, error)
+
+	// Codex rollouts are immutable JSONL files as far as their head metadata is
+	// concerned, but the body is appended to while a session is alive. Keep the
+	// cheap directory/file stat work separate from the expensive head read, and
+	// invalidate a head only when its path, size or mtime changes.
+	codexMu   sync.Mutex
+	codexRoot string
+	codexDirs map[string]*codexDirCache
+	codexMeta map[string]codexMetaCache
 }
 
 func NewProjectLocator() *ProjectLocator {
-	return &ProjectLocator{processEnv: processEnvironment}
+	return &ProjectLocator{processEnv: processEnvironment, openRollout: os.Open}
 }
 
 // ClaudeProjectDir returns the Claude JSONL directory for a project path.
@@ -190,29 +201,171 @@ func (pl *ProjectLocator) CodexSessionDir() string {
 // Codex nests rollouts by date (sessions/YYYY/MM/DD/rollout-*.jsonl), so this MUST be a
 // recursive walk — a flat read of the base dir finds only the year directories.
 func (pl *ProjectLocator) CodexSessionFiles() []string {
-	return transcript.NewestFiles(pl.CodexSessionDir(), "", transcript.JSONLSuffix, 0)
+	// Preserve the path spelling returned by the filesystem (callers and tests use
+	// it as the transcript identity); canonicalization belongs to cwd comparisons.
+	root := filepath.Clean(pl.CodexSessionDir())
+	pl.codexMu.Lock()
+	defer pl.codexMu.Unlock()
+	if root == "" {
+		return nil
+	}
+	if pl.codexRoot != root {
+		pl.codexRoot = root
+		pl.codexDirs = make(map[string]*codexDirCache)
+		pl.codexMeta = make(map[string]codexMetaCache)
+	}
+	if pl.codexDirs == nil {
+		pl.codexDirs = make(map[string]*codexDirCache)
+	}
+	pl.refreshCodexDirLocked(root)
+	fileCapacity := 0
+	for _, dir := range pl.codexDirs {
+		fileCapacity += len(dir.files)
+	}
+	files := make([]codexFile, 0, fileCapacity)
+	seenDirs := make(map[string]struct{})
+	seenFiles := make(map[string]struct{})
+	var collect func(string)
+	collect = func(dir string) {
+		d := pl.codexDirs[dir]
+		if d == nil {
+			return
+		}
+		seenDirs[dir] = struct{}{}
+		files = append(files, d.files...)
+		for _, file := range d.files {
+			seenFiles[file.path] = struct{}{}
+		}
+		for _, child := range d.children {
+			collect(child)
+		}
+	}
+	collect(root)
+	// Rollouts are normally retained, but cleanup/rotation can remove dated
+	// directories. Drop cache entries that are no longer reachable so this
+	// long-lived locator cannot grow with every historical file ever seen.
+	for dir := range pl.codexDirs {
+		if _, ok := seenDirs[dir]; !ok {
+			delete(pl.codexDirs, dir)
+		}
+	}
+	for path := range pl.codexMeta {
+		if _, ok := seenFiles[path]; !ok {
+			delete(pl.codexMeta, path)
+		}
+	}
+	// Only today's (and the newest observed) dated directory can contain an
+	// actively appended rollout. Older days are immutable; statting every
+	// historical file on every notifier poll recreates the original syscall
+	// storm. Directory mtime still discovers new dated files below.
+	hotDirs := map[string]struct{}{
+		filepath.Join(root, time.Now().Format("2006/01/02")):                    {},
+		filepath.Join(root, time.Now().Add(-24*time.Hour).Format("2006/01/02")): {},
+	}
+	if len(files) > 0 {
+		latest := files[0]
+		for _, file := range files[1:] {
+			if file.mod.After(latest.mod) {
+				latest = file
+			}
+		}
+		hotDirs[filepath.Dir(latest.path)] = struct{}{}
+	}
+	for i := range files {
+		if _, hot := hotDirs[filepath.Dir(files[i].path)]; !hot {
+			continue
+		}
+		if info, err := os.Stat(files[i].path); err == nil {
+			files[i].mod = info.ModTime()
+			files[i].size = info.Size()
+		}
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		if files[i].mod.Equal(files[j].mod) {
+			return files[i].path < files[j].path
+		}
+		return files[i].mod.After(files[j].mod)
+	})
+	out := make([]string, len(files))
+	for i := range files {
+		out[i] = files[i].path
+	}
+	return out
+}
+
+type codexFile struct {
+	path string
+	mod  time.Time
+	size int64
+}
+
+type codexDirCache struct {
+	mod      time.Time
+	files    []codexFile
+	children []string
+}
+
+// refreshCodexDirLocked refreshes only directories whose mtime changed. We still
+// stat known descendants: appending a rollout changes the dated leaf directory,
+// while adding a new date changes its parent. This catches both without walking
+// unchanged subtrees on every polling tick.
+func (pl *ProjectLocator) refreshCodexDirLocked(dir string) {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		delete(pl.codexDirs, dir)
+		return
+	}
+	entry := pl.codexDirs[dir]
+	if entry == nil {
+		entry = &codexDirCache{}
+		pl.codexDirs[dir] = entry
+	}
+	if !entry.mod.Equal(info.ModTime()) {
+		entry.mod = info.ModTime()
+		entry.files = nil
+		entry.children = nil
+		if entries, readErr := os.ReadDir(dir); readErr == nil {
+			for _, e := range entries {
+				path := filepath.Join(dir, e.Name())
+				if e.IsDir() {
+					entry.children = append(entry.children, path)
+					continue
+				}
+				if filepath.Ext(e.Name()) != transcript.JSONLSuffix {
+					continue
+				}
+				if fi, statErr := e.Info(); statErr == nil {
+					entry.files = append(entry.files, codexFile{path: path, mod: fi.ModTime(), size: fi.Size()})
+				}
+			}
+		}
+	}
+	for _, child := range entry.children {
+		pl.refreshCodexDirLocked(child)
+	}
 }
 
 // CodexLatestSession finds the most recent ROOT Codex rollout for projectPath.
+// A missing or non-matching rollout is returned as ("", nil), since unknown
+// transcript identity is a normal state while a pane is starting or has exited.
 //
-// It MUST use the recursive walk (CodexSessionFiles): a flat os.ReadDir of the base dir
-// finds only the year DIRECTORIES and zero .jsonl files — which made this always return
-// ErrNotExist. That in turn left every Codex pane's transcript unlocatable, so
-// PaneAgentMonitor.Active fell back to "assume busy" and the pane read as perpetually
-// Running → the running→waiting transition that fires the turn-end push never happened →
-// Codex sessions never notified.
+// It uses CodexSessionFiles' recursive dated-directory index; a flat os.ReadDir of
+// the base dir finds only year directories and zero .jsonl files.
 func (pl *ProjectLocator) CodexLatestSession(projectPath string) (string, error) {
 	wantCWD := canonicalPath(projectPath)
 	for _, path := range pl.CodexSessionFiles() {
-		meta, ok := readCodexRootSessionMeta(path)
+		meta, ok := pl.readCodexRootSessionMeta(path)
 		if !ok {
 			continue
 		}
-		if wantCWD == "" || canonicalPath(meta.CWD) == wantCWD {
+		if wantCWD == "" || meta.CanonicalCWD == wantCWD {
 			return path, nil
 		}
 	}
-	return "", os.ErrNotExist
+	// An empty path is a normal unknown state. Callers use it to clear a stale
+	// transcript; turning it into ErrNotExist made routine misses look like I/O
+	// failures and incremented watcher error counters.
+	return "", nil
 }
 
 // CodexSessionForProcess resolves the pane's hard runtime identity. Codex keeps
@@ -226,17 +379,59 @@ func (pl *ProjectLocator) CodexSessionForProcess(processPID int, projectPath str
 }
 
 type codexRootMeta struct {
-	ID  string
-	CWD string
+	ID           string
+	CWD          string
+	CanonicalCWD string
+}
+
+type codexMetaCache struct {
+	size int64
+	mod  time.Time
+	meta codexRootMeta
+	ok   bool
+}
+
+// session_meta lines can carry a large base_instructions payload. Reusing the
+// scanner's 64 KiB head buffer avoids allocating that buffer once per rollout
+// while the locator builds its first metadata index.
+var codexHeadBufferPool = sync.Pool{New: func() any { return make([]byte, 64*1024) }}
+
+func (pl *ProjectLocator) readCodexRootSessionMeta(path string) (codexRootMeta, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return codexRootMeta{}, false
+	}
+	pl.codexMu.Lock()
+	defer pl.codexMu.Unlock()
+	if pl.codexMeta == nil {
+		pl.codexMeta = make(map[string]codexMetaCache)
+	}
+	if cached, ok := pl.codexMeta[path]; ok && cached.size == info.Size() && cached.mod.Equal(info.ModTime()) {
+		return cached.meta, cached.ok
+	}
+	open := pl.openRollout
+	if open == nil {
+		open = os.Open
+	}
+	meta, ok := readCodexRootSessionMetaWithOpen(path, open)
+	pl.codexMeta[path] = codexMetaCache{size: info.Size(), mod: info.ModTime(), meta: meta, ok: ok}
+	return meta, ok
 }
 
 func readCodexRootSessionMeta(path string) (codexRootMeta, bool) {
-	f, err := os.Open(path)
+	return readCodexRootSessionMetaWithOpen(path, os.Open)
+}
+
+func readCodexRootSessionMetaWithOpen(path string, open func(string) (*os.File, error)) (codexRootMeta, bool) {
+	f, err := open(path)
 	if err != nil {
 		return codexRootMeta{}, false
 	}
 	defer f.Close()
+	buffer := codexHeadBufferPool.Get().([]byte)
+	defer codexHeadBufferPool.Put(buffer)
 	sc := bufio.NewScanner(f)
+	sc.Buffer(buffer[:0], 4*1024*1024)
 	if !sc.Scan() {
 		return codexRootMeta{}, false
 	}
@@ -257,7 +452,7 @@ func readCodexRootSessionMeta(path string) (codexRootMeta, bool) {
 	if strings.HasPrefix(source, "{") {
 		return codexRootMeta{}, false
 	}
-	return codexRootMeta{ID: row.Payload.ID, CWD: row.Payload.CWD}, true
+	return codexRootMeta{ID: row.Payload.ID, CWD: row.Payload.CWD, CanonicalCWD: canonicalPath(row.Payload.CWD)}, true
 }
 
 func selectCodexRootRollout(paths []string, projectPath string) (string, error) {
@@ -274,7 +469,7 @@ func selectCodexRootRollout(paths []string, projectPath string) (string, error) 
 			continue
 		}
 		meta, ok := readCodexRootSessionMeta(clean)
-		if !ok || (wantCWD != "" && canonicalPath(meta.CWD) != wantCWD) {
+		if !ok || (wantCWD != "" && meta.CanonicalCWD != wantCWD) {
 			continue
 		}
 		info, _ := os.Stat(clean)

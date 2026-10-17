@@ -12,6 +12,24 @@ import (
 	"github.com/brightman-ai/deepwork-terminal/muxd"
 )
 
+func TestOutputLossIncidentCoalescesGapFrames(t *testing.T) {
+	sess := &Session{ID: "loss-test"}
+	var incident outputLossIncident
+	incident.gap(sess)
+	started := incident.started
+	incident.gap(sess)
+	if incident.frames != 2 {
+		t.Fatalf("frames = %d, want 2", incident.frames)
+	}
+	if !incident.started.Equal(started) {
+		t.Fatal("a second gap must remain in the same incident")
+	}
+	incident.end(sess, "test")
+	if incident.frames != 0 || !incident.started.IsZero() {
+		t.Fatalf("incident was not reset after end: %+v", incident)
+	}
+}
+
 // shortMuxdSocket keeps the AF_UNIX path below macOS's sockaddr_un limit. t.TempDir()
 // embeds the long test name and can make an otherwise valid isolated daemon fail bind with
 // EINVAL before the behavior under test is reached.

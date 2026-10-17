@@ -28,6 +28,15 @@ type usageReporter struct {
 
 	mu    sync.Mutex
 	cache map[usage.WindowKind]usageReportEntry
+	// latest is a publication-only cache. HTTP reads it without contending with a
+	// report build; cache remains the legacy synchronous path used by embedders.
+	latestMu   sync.RWMutex
+	latest     map[usage.WindowKind]usageReportEntry
+	refreshMu  sync.Mutex
+	refreshing bool
+	pending    map[usage.WindowKind]struct{}
+	done       map[usage.WindowKind]chan struct{}
+	build      func(usage.WindowKind, usage.TokenSource) usage.UsageReport
 }
 
 type usageReportEntry struct {
@@ -46,8 +55,12 @@ func newUsageReporter() *usageReporter {
 				usage.NewCodexModelScanSource(),
 			},
 		}),
-		ttl:   60 * time.Second,
-		cache: map[usage.WindowKind]usageReportEntry{},
+		ttl:     60 * time.Second,
+		cache:   map[usage.WindowKind]usageReportEntry{},
+		latest:  map[usage.WindowKind]usageReportEntry{},
+		pending: map[usage.WindowKind]struct{}{},
+		done:    map[usage.WindowKind]chan struct{}{},
+		build:   usage.BuildReport,
 	}
 }
 
@@ -64,9 +77,99 @@ func (u *usageReporter) cached(window usage.WindowKind) (usage.UsageReport, bool
 
 // store caches report for window with the current build time.
 func (u *usageReporter) store(window usage.WindowKind, report usage.UsageReport) {
+	entry := usageReportEntry{report: report, builtAt: time.Now()}
 	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.cache[window] = usageReportEntry{report: report, builtAt: time.Now()}
+	u.cache[window] = entry
+	u.mu.Unlock()
+	u.latestMu.Lock()
+	u.latest[window] = entry
+	u.latestMu.Unlock()
+}
+
+const usageReportColdWait = 40 * time.Millisecond
+
+// fastReport returns the newest published report and schedules at most one
+// background build per window. It never waits for the scan mutex. A tiny wait is
+// reserved for cold starts so the common empty/small-data case remains
+// synchronous while a slow filesystem walk is still bounded.
+func (u *usageReporter) fastReport(ctx context.Context, window usage.WindowKind) (usage.UsageReport, time.Time, string) {
+	u.latestMu.RLock()
+	entry, ok := u.latest[window]
+	u.latestMu.RUnlock()
+	state := "stale"
+	if ok && time.Since(entry.builtAt) <= u.ttl {
+		state = "fresh"
+	}
+	if !ok {
+		done := u.scheduleRefresh(window)
+		select {
+		case <-done:
+		case <-time.After(usageReportColdWait):
+		case <-ctx.Done():
+		}
+		u.latestMu.RLock()
+		entry, ok = u.latest[window]
+		u.latestMu.RUnlock()
+		if ok {
+			state = "fresh"
+		} else {
+			return usage.UsageReport{Window: window, Available: false, Reason: "calculating"}, time.Time{}, "calculating"
+		}
+	} else if state != "fresh" {
+		u.scheduleRefresh(window)
+	}
+	return entry.report, entry.builtAt, state
+}
+
+func (u *usageReporter) scheduleRefresh(window usage.WindowKind) <-chan struct{} {
+	u.refreshMu.Lock()
+	defer u.refreshMu.Unlock()
+	if done, ok := u.done[window]; ok {
+		return done
+	}
+	done := make(chan struct{})
+	u.done[window] = done
+	u.pending[window] = struct{}{}
+	if !u.refreshing {
+		u.refreshing = true
+		go u.runRefreshes()
+	}
+	return done
+}
+
+func (u *usageReporter) runRefreshes() {
+	for {
+		u.refreshMu.Lock()
+		var window usage.WindowKind
+		found := false
+		for candidate := range u.pending {
+			window, found = candidate, true
+			delete(u.pending, candidate)
+			break
+		}
+		if !found {
+			u.refreshing = false
+			u.refreshMu.Unlock()
+			return
+		}
+		done := u.done[window]
+		u.refreshMu.Unlock()
+
+		build := u.build
+		if build == nil {
+			build = usage.BuildReport
+		}
+		report := build(window, u.source)
+		if report.Available {
+			report.DataSource = "claude_jsonl+codex_rollout"
+		}
+		u.store(window, report)
+
+		u.refreshMu.Lock()
+		delete(u.done, window)
+		close(done)
+		u.refreshMu.Unlock()
+	}
 }
 
 // handleUsageQuota → GET /api/usage/quota. Per-runtime account presence, billing mode,
@@ -135,19 +238,21 @@ func (s *Server) handleUsageReport(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timezone"})
 			return
 		}
-		writeJSON(w, http.StatusOK, s.agentUsage.UsageReport(r.Context(), string(window), timezone))
+		report, calculatedAt, state := s.agentUsage.fastUsageReport(r.Context(), string(window), timezone)
+		writeJSON(w, http.StatusOK, usageReportHTTPResponse{UsageReport: report, CalculatedAt: calculatedAt, CalculationState: state})
 		return
 	}
 
-	report, ok := s.usage.cached(window)
-	if !ok {
-		report = usage.BuildReport(window, s.usage.source)
-		if report.Available {
-			report.DataSource = "claude_jsonl+codex_rollout"
-		}
-		s.usage.store(window, report)
-	}
-	writeJSON(w, http.StatusOK, report)
+	report, calculatedAt, state := s.usage.fastReport(r.Context(), window)
+	writeJSON(w, http.StatusOK, usageReportHTTPResponse{UsageReport: report, CalculatedAt: calculatedAt, CalculationState: state})
+}
+
+// usageReportHTTPResponse adds freshness metadata without changing kit/usage's
+// domain type. Existing clients can continue decoding the embedded report fields.
+type usageReportHTTPResponse struct {
+	usage.UsageReport
+	CalculatedAt     time.Time `json:"calculated_at,omitempty"`
+	CalculationState string    `json:"calculation_state"`
 }
 
 // reportWarmWindows is exactly the set the UI prefetches on every popover open; warming
