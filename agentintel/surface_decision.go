@@ -174,7 +174,15 @@ func (m *PaneAgentMonitor) decideStatus(p SurfaceProbe, screen screenFunc) Statu
 		}
 	}
 
-	// No transcript opinion available. Active() answers true for two DIFFERENT reasons and only
+	// No transcript opinion available. Explicit terminal stop markers still outrank the
+	// conservative fallback below. This matters for Codex rollouts that cannot be
+	// bound to the pane process: the screen has a real `Ask Codex to do anything`
+	// prompt even when JSONL identity is unavailable.
+	if v, ok := analyzeScreen(screen); ok && (v.Rule == RuleScreenInterrupted || v.Rule == RuleScreenRecap) {
+		return StatusDecision{Status: StatusIdle, Rule: v.Rule, Evidence: v.Line}
+	}
+
+	// Active() answers true for two DIFFERENT reasons and only
 	// one of them is evidence: the transcript was written recently, OR it could not be located at
 	// all (in which case it assumes busy rather than misreading a starting agent's screen as an
 	// idle prompt). Reporting both as「transcript.writing」claims a file is being written when
