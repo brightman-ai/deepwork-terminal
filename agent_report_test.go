@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,6 +261,61 @@ func TestAgentReporterUnchangedFileUsesMaterializedProjection(t *testing.T) {
 	r2 := a.Report(context.Background(), "24h", "Asia/Shanghai")
 	if !r1.GeneratedAt.Equal(r2.GeneratedAt) {
 		t.Fatal("hot report bypassed cache")
+	}
+}
+
+func TestAgentReporterFastPathDoesNotQueueBehindSlowRefreshAndPublishesReplacement(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DW_CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(home, ".claude", "projects"))
+	reporter := newAgentReporter()
+	reporter.Report(context.Background(), "24h", "UTC", true)
+	reporter.latestMu.RLock()
+	oldBuiltAt := reporter.latestReports["24h|UTC"].builtAt
+	reporter.latestMu.RUnlock()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var scans atomic.Int32
+	reporter.beforeRefresh = func() {
+		if scans.Add(1) == 1 {
+			started <- struct{}{}
+			<-release
+		}
+	}
+	begin := time.Now()
+	old, _, state := reporter.fastReport(context.Background(), "24h", "UTC", true)
+	if elapsed := time.Since(begin); elapsed > 150*time.Millisecond {
+		t.Fatalf("HTTP fast path queued behind slow refresh for %s", elapsed)
+	}
+	if state != "stale" || old.Window != "24h" {
+		t.Fatalf("stale response=%+v state=%q", old, state)
+	}
+	<-started
+	_, _, _ = reporter.fastReport(context.Background(), "24h", "UTC", true)
+	if got := scans.Load(); got != 1 {
+		t.Fatalf("same report started %d refreshes, want one", got)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reporter.latestMu.RLock()
+		newBuiltAt := reporter.latestReports["24h|UTC"].builtAt
+		reporter.latestMu.RUnlock()
+		if newBuiltAt.After(oldBuiltAt) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("background refresh did not replace the published report")
+}
+
+func TestCalculatingAgentReportKeepsCompleteTransportShape(t *testing.T) {
+	report := calculatingAgentReport("24h", "UTC", time.Now())
+	if report.Summary.WorkItems != 0 || report.Health.Label == "" {
+		t.Fatalf("calculating report is not a complete empty shape: %+v", report)
+	}
+	if report.Observability.Projection.State != "calculating" {
+		t.Fatalf("projection state = %q, want calculating", report.Observability.Projection.State)
 	}
 }
 

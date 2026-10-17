@@ -431,6 +431,42 @@ func (m *SessionManager) attach(sess *Session, since *int64) error {
 // size, and an exit taken out of band could be handled while the program's final line was
 // still queued.
 //
+// outputLossIncident coalesces a run of stream gap markers into two logs. A marker is a
+// control frame, not a useful unit for an operator to read one line at a time: the incident
+// starts on the first loss and ends when output resumes (or the stream closes). The count is
+// the number of dropped output frames reported by the stream during that incident.
+type outputLossIncident struct {
+	started time.Time
+	frames  int
+}
+
+func (i *outputLossIncident) gap(sess *Session) {
+	if i.started.IsZero() {
+		i.started = time.Now()
+		i.frames = 1
+		logger.Warn("session output loss started",
+			"session", sess.ID,
+			"session_id", sess.ID,
+			"frames", i.frames,
+			"duration_ms", 0)
+		return
+	}
+	i.frames++
+}
+
+func (i *outputLossIncident) end(sess *Session, reason string) {
+	if i.started.IsZero() {
+		return
+	}
+	logger.Warn("session output loss ended",
+		"session", sess.ID,
+		"session_id", sess.ID,
+		"frames", i.frames,
+		"duration_ms", time.Since(i.started).Milliseconds(),
+		"reason", reason)
+	*i = outputLossIncident{}
+}
+
 // fresh says this stream's replay STARTS the server's copy (first attach, or one that could not
 // resume): once that replay has been taken in, the keyframe is seeded with what the daemon saw
 // before it, if the replay did not reach back to the beginning — see seedKeyframe.
@@ -447,6 +483,7 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream, fresh bo
 	replayLeft := stream.Offset - stream.ReplayFrom
 	exited := false
 	code := 0
+	var outputLoss outputLossIncident
 	// Seeding is needed only when the replay does not reach back to the session's first byte:
 	// a replay from offset 0 IS the whole session, and the keyframe built from it is complete.
 	seed := fresh && stream.ReplayFrom > 0
@@ -472,14 +509,15 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream, fresh bo
 			sess.applyGrid(*ev.Resize)
 
 		case ev.Gap:
-			// Nothing to do here — Stream.Holed already records it, and the re-attach path
-			// is where it is acted on. Logged because a silent gap is how a wrong screen
-			// gets blamed on the program inside.
-			logger.Warn("lost session output; the local scrollback copy will be rebuilt",
-				"id", sess.ID)
+			// Stream.Holed records the unsafe resume point; the re-attach path acts on it.
+			// Keep the diagnostic as one incident rather than one log line per dropped frame.
+			outputLoss.gap(sess)
 
 		default:
 			data := ev.Data
+			if len(data) > 0 {
+				outputLoss.end(sess, "output_resumed")
+			}
 			observeTerminalOutput(outputLogCtx, sess.ID, data)
 
 			live := data
@@ -532,6 +570,7 @@ func (m *SessionManager) pumpStream(sess *Session, stream *muxd.Stream, fresh bo
 			}
 		}
 	}
+	outputLoss.end(sess, "stream_closed")
 
 	if !exited {
 		// The connection dropped but the session did not end. Re-attach, resuming from what

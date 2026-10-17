@@ -12,9 +12,8 @@ import (
 //
 // Rollout selection: Codex nests rollouts by date and does NOT encode the project path
 // into the directory name (unlike Claude). So we walk every rollout newest-first and pick
-// the newest whose session_meta.cwd (or any turn_context.cwd) matches cwd. If none match
-// (cwd unknown / older format), we fall back to the newest rollout overall — the live
-// pane is almost always the most recently written file.
+// the newest whose session_meta.cwd matches cwd. If none match (cwd unknown / older
+// format), no rollout is selected: an unrelated newest rollout belongs to another pane.
 //
 // Robustness contract (mirrors SessionMetricsForCWD): a missing ~/.codex/sessions, no
 // rollout, malformed rows — none are errors. They yield a valid-but-empty SessionMetrics
@@ -47,21 +46,21 @@ func CodexNewestRolloutForCWD(pl *ProjectLocator, cwd string) string {
 	return newestCodexRolloutForCWD(pl, cwd)
 }
 
-// newestCodexRolloutForCWD returns the path of the rollout to read for cwd, or "".
-// Preference: the newest rollout whose recorded cwd matches; else the newest rollout.
+// newestCodexRolloutForCWD returns the path of the newest rollout whose recorded
+// cwd matches, or "" when no match is known. Returning an unrelated newest file
+// cross-wired concurrent panes that happen to have different projects.
 func newestCodexRolloutForCWD(pl *ProjectLocator, cwd string) string {
 	files := pl.CodexSessionFiles() // newest-mtime first
 	if len(files) == 0 {
 		return ""
 	}
-	if cwd != "" {
-		for _, f := range files {
-			if rolloutCWD(f) == cwd {
-				return f
-			}
+	want := canonicalPath(cwd)
+	for _, f := range files {
+		if meta, ok := pl.readCodexRootSessionMeta(f); ok && meta.CanonicalCWD == want {
+			return f
 		}
 	}
-	return files[0]
+	return ""
 }
 
 // rolloutCWD cheaply extracts the cwd a rollout was recorded under. It scans only the
@@ -78,7 +77,7 @@ func rolloutCWD(path string) string {
 		}
 		return scanned < 50 // cwd appears in the first rows; bound the scan
 	})
-	return found
+	return canonicalPath(found)
 }
 
 // codexRowCWD returns the cwd carried by a session_meta or turn_context row, else "".
@@ -122,11 +121,13 @@ type codexCostState struct {
 //   - input_tokens INCLUDES cached_input_tokens (cached is a subset)
 //   - output_tokens already includes reasoning_output_tokens
 //   - non-cached input = input_tokens - cached_input_tokens
+//
 // Summary mapping:
 //   - InputTokens       += non-cached input   (Σ)
 //   - CacheReadTokens   += cached_input_tokens (Σ)
 //   - OutputTokens      += output_tokens       (Σ)
 //   - CacheCreateTokens  = 0 (OpenAI has no cache-write tier)
+//
 // Cost per event: pricing.Usage{Input: non-cached, Output: output, CacheRead: cached},
 // pricing.Cost(model, u) → context = Input+CacheRead = input_tokens, so the >272k tier
 // applies per request. Σ over events.

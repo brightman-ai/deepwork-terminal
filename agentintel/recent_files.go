@@ -34,13 +34,13 @@ const (
 // and Exists are stat'd by the caller — a vanished file is still listed with
 // Exists=false (它可能已被删除，仍是有用的历史信号).
 type RecentFile struct {
-	Path  string `json:"path"`
-	Name  string `json:"name"`
-	Dir   string `json:"dir"`
-	Tool  string `json:"tool"`
-	TsMs  int64  `json:"tsMs"`
-	Size  int64  `json:"size"`
-	Exists bool  `json:"exists"`
+	Path   string `json:"path"`
+	Name   string `json:"name"`
+	Dir    string `json:"dir"`
+	Tool   string `json:"tool"`
+	TsMs   int64  `json:"tsMs"`
+	Size   int64  `json:"size"`
+	Exists bool   `json:"exists"`
 }
 
 // RecentEditedFiles scans every Claude transcript whose cwd matches projectCWD and
@@ -91,7 +91,7 @@ func recentCodexRolloutsForCWD(pl *ProjectLocator, cwd string, n int) []string {
 			break
 		}
 		checked++
-		if want == "" || canonicalCWD(rolloutCWD(p)) == want {
+		if meta, ok := pl.readCodexRootSessionMeta(p); ok && (want == "" || meta.CanonicalCWD == want) {
 			out = append(out, p)
 			if len(out) >= n {
 				break

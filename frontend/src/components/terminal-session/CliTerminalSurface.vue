@@ -242,6 +242,7 @@
         @data="onTerminalData"
         @resize="onTerminalResize"
         @ready="onTerminalReady"
+        @file-path="onTerminalFilePath"
       />
       <!-- Desktop compose box — FLOATS over the terminal (absolute inside .terminal-body), so opening,
            closing or dragging it never changes the terminal's cols×rows (terminal-input REQ-TI-06).
@@ -1158,10 +1159,14 @@ watch(validPaneKeys, (valid) => {
 // Per-instance component refs (drag-resized panel width + panel DOM root for selection
 // containment checks below) — a plain (non-reactive) map is fine: each property READ inside a
 // computed/watch still tracks the underlying exposed refs reactively regardless of the map itself.
-const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement } | null> = {}
+const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string) => void } | null> = {}
 function setDrawerRef(key: string, el: unknown): void {
-  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement }
+  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string) => void }
   else delete drawerInstanceRefs[key]
+}
+
+function onTerminalFilePath(path: string): void {
+  drawerInstanceRefs[currentPaneKey.value]?.openFilePreview?.(path)
 }
 
 // ── Selection keep-alive across pane switches ───────────────────────────────────────────────

@@ -28,7 +28,7 @@
  * [Ref: CAP-terminal-io S2-3]
  */
 import { nextTick, ref, onMounted, onUnmounted, watch } from 'vue'
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ILinkProvider, type IDisposable } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon, type ISearchOptions } from '@xterm/addon-search'
@@ -57,6 +57,7 @@ import {
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
 import type { RendererCause } from '@terminal/composables/cli/renderHealth'
+import { findTerminalFileLinks } from './terminalFileLinks'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -83,6 +84,7 @@ const emit = defineEmits<{
   (e: 'data', data: Uint8Array): void
   (e: 'resize', cols: number, rows: number): void
   (e: 'ready', terminal: Terminal): void
+  (e: 'file-path', path: string): void
 }>()
 
 // Mobile uses a smaller cell so the narrow phone screen fits MORE columns. Programs that draw
@@ -102,6 +104,7 @@ const transcript = ref('')
 const searchResultIndex = ref(-1)
 const searchResultCount = ref(0)
 let terminal: Terminal | null = null
+let fileLinkProvider: IDisposable | null = null
 let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
 // Held so teardown can release the GPU context explicitly, and so a context loss can null it out.
@@ -542,6 +545,21 @@ function initTerminal() {
   fitAddon = new FitAddon()
   terminal.loadAddon(fitAddon)
   terminal.loadAddon(new WebLinksAddon())
+  const provider: ILinkProvider = {
+    provideLinks: (bufferLineNumber, callback) => {
+      const line = terminal?.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true) ?? ''
+      const links = findTerminalFileLinks(line)
+      callback(links.length ? links.map((link) => ({
+        text: link.path,
+        range: {
+          start: { x: link.start + 1, y: bufferLineNumber },
+          end: { x: link.end + 1, y: bufferLineNumber },
+        },
+        activate: () => emit('file-path', link.path),
+      })) : undefined)
+    },
+  }
+  fileLinkProvider = terminal.registerLinkProvider(provider)
   // emoji 按 2 格算，和 Claude Code / Codex 排版时的假设一致；必须早于 open() 和第一次 write()。
   // 见 terminalUnicode.ts（含它管不到的符号）。
   enableUnicode11(terminal)
@@ -726,6 +744,8 @@ onUnmounted(() => {
   if (renderSyncTrailing) clearTimeout(renderSyncTrailing)
   if (renderSyncBurstReset) clearTimeout(renderSyncBurstReset)
   if (resizeObserver) resizeObserver.disconnect()
+  fileLinkProvider?.dispose()
+  fileLinkProvider = null
   // Before terminal.dispose(): release the GPU context explicitly. A workbench opens and closes
   // terminals freely and browsers cap live WebGL contexts (~16); silently losing them past that cap
   // is how a long session ends up with every terminal back on the DOM renderer.
