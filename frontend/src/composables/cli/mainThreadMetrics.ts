@@ -1,6 +1,8 @@
 /**
  * mainThreadMetrics — when the user types, is the page's main thread free to take the key?
  *
+ * [Ref: guide/troubleshooting/ime-shift-double-toggle.md] — 那份记录里有这条上报的判读方法（FMEA F12）
+ *
  * ── Why this exists ──────────────────────────────────────────────────────────────────────────
  * On 2026-10-18 the IME's Shift toggle fired twice on Edge/macOS, on this page only. The cause was
  * not any handler of ours: keys were reaching the page in bursts (six letters inside 12ms) because

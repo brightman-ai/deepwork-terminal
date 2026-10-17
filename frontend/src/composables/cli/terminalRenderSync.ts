@@ -25,6 +25,7 @@
  * appears under WebGL, that URL turns it back on immediately — no rebuild, no waiting for a fix.
  *
  * ── 2026-10-18: off for the DOM renderer too ─────────────────────────────────────────────────
+ * [Ref: guide/troubleshooting/ime-shift-double-toggle.md] (FMEA F12)
  * The premise was never confirmed. The residue it was added for (01112fd, 2026-07-05) was diagnosed
  * on 2026-07-24 by comparing `tmux capture-pane` with a screenshot: the stale cells were in xterm's
  * BUFFER, which had drifted from tmux's model — `term.refresh()` repainted the same wrong buffer and

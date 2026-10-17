@@ -181,6 +181,7 @@ let transcriptPending = ''
 let transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null
 // Off unless ?a11y_mirror=1 (terminalA11yMirror.ts): a constantly replaced live region kept the
 // browser's accessibility tree busy on the thread that delivers keys. Decided once per page.
+// [Ref: guide/troubleshooting/ime-shift-double-toggle.md]
 const a11yMirrorOn = a11yMirrorEnabled(a11yMirrorOverride())
 
 function flushTranscript() {
@@ -584,6 +585,7 @@ function initTerminal() {
 
   terminal.open(terminalContainer.value)
   // Page-level, idempotent: the main thread is shared by every terminal (mainThreadMetrics.ts).
+  // How to read its report: [Ref: guide/troubleshooting/ime-shift-double-toggle.md]
   startMainThreadMetrics()
   const rendererChoice: RendererChoice = chooseRenderer(terminal)
   renderSyncOn = renderSyncEnabled(rendererChoice.renderer, renderSyncOverride())
@@ -806,6 +808,7 @@ function write(data: string | Uint8Array, onParsed?: () => void) {
   const target = terminal
   // Big frames go in as slices so xterm's WriteBuffer can yield between them (writeSlices.ts); the
   // frame's own bookkeeping hangs off the LAST slice, so "parsed" still means the whole frame.
+  // [Ref: guide/troubleshooting/ime-shift-double-toggle.md]
   const slices = sliceForWrite(data)
   slices.forEach((slice, i) => {
     if (i < slices.length - 1) { target?.write(slice); return }

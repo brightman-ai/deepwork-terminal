@@ -15,6 +15,7 @@ const devApiTarget = process.env.VITE_DEV_API_TARGET
 // 42ce144 each embedded the full pro nav on :18074. Defaulted here so build.sh, `bun run build` and
 // CI all agree; an explicit VITE_PORTALS in the environment still wins. (Vite reads VITE_* from
 // process.env after this file runs; pro builds through its own config and is unaffected.)
+// [Ref: FMEA.md F13]
 process.env.VITE_PORTALS ??= 'cli,settings'
 
 // The pinned CE tree's bare imports must resolve to THIS install: Rollup
