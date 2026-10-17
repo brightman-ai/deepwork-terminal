@@ -76,6 +76,26 @@ func TestAnalyzeOutput_CodexInputPromptIsIdle(t *testing.T) {
 	}
 }
 
+func TestAnalyzeOutput_CodexWorkingBeatsInputPrompt(t *testing.T) {
+	got := AnalyzeOutputDetail([]string{
+		"Working (35m 53s • esc to interrupt) · 1 background terminal running",
+		"Ask Codex to do anything",
+	})
+	if got.State != PromptRunning || got.Rule != RuleScreenCodexWorking {
+		t.Fatalf("got state=%v rule=%q, want running/screen.codex_working", got.State, got.Rule)
+	}
+}
+
+func TestAnalyzeOutput_CodexCapacityErrorIsIdle(t *testing.T) {
+	got := AnalyzeOutputDetail([]string{
+		"■ Selected model is at capacity. Please try a different model.",
+		"Ask Codex to do anything",
+	})
+	if got.State != PromptIdle || got.Rule != RuleScreenError {
+		t.Fatalf("got state=%v rule=%q, want idle/screen.error", got.State, got.Rule)
+	}
+}
+
 func TestAnalyzeOutput_LikelyIdle(t *testing.T) {
 	// Prompt char at end of output, no model name in previous line.
 	cases := []struct {

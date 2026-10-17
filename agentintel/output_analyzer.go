@@ -94,6 +94,8 @@ var interactivePromptPatterns = []*regexp.Regexp{
 var interruptedScreenPattern = regexp.MustCompile(`(?i)(conversation|request) interrupted`)
 var recapScreenPattern = regexp.MustCompile(`(?im)^\s*Recap\s*$`)
 var codexInputPromptPattern = regexp.MustCompile(`(?i)Ask Codex to do anything`)
+var codexWorkingScreenPattern = regexp.MustCompile(`(?i)(Working\s*\([^\n]*esc to interrupt|Waiting for agents|background (?:terminal|agent)s? running|Pursuing goal)`)
+var codexErrorScreenPattern = regexp.MustCompile(`(?i)Selected model is at capacity\. Please try a different model\.`)
 
 // modelPattern matches strings that look like a model name (word + digits + dots,
 // e.g. "claude-4.6", "gpt-5.5", "gemini-2.0").
@@ -178,9 +180,20 @@ func AnalyzeOutputDetail(lines []string) OutputVerdict {
 	if choiceCount >= 2 && cursorSeen {
 		return OutputVerdict{PromptNeedsPermission, RuleScreenChoiceList, truncEvidence(choiceLine)}
 	}
-	// These are explicit terminal states. They may sit above stale command output
+	// Active-turn evidence outranks the input placeholder. Codex keeps the prompt
+	// rendered while a background agent or goal is still running.
+	for _, line := range lines {
+		if codexWorkingScreenPattern.MatchString(line) {
+			return OutputVerdict{PromptRunning, RuleScreenCodexWorking, truncEvidence(line)}
+		}
+	}
+
+	// These are explicit terminal stop states. They may sit above stale command output
 	// and therefore must use the whole visible capture, not the last five lines.
 	for _, line := range lines {
+		if codexErrorScreenPattern.MatchString(line) {
+			return OutputVerdict{PromptIdle, RuleScreenError, truncEvidence(line)}
+		}
 		if interruptedScreenPattern.MatchString(line) {
 			return OutputVerdict{PromptIdle, RuleScreenInterrupted, truncEvidence(line)}
 		}

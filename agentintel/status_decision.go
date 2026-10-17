@@ -96,6 +96,10 @@ const (
 	// RuleScreenRecap — Codex is showing its post-turn recap view, not executing
 	// a live turn.
 	RuleScreenRecap StatusRule = "screen.recap"
+	// RuleScreenCodexWorking — Codex shows an active turn or background agent.
+	RuleScreenCodexWorking StatusRule = "screen.codex_working"
+	// RuleScreenError — the CLI reports a terminal error and is back at input.
+	RuleScreenError StatusRule = "screen.error"
 	// RuleScreenQuiet — the screen said nothing recognisable either way.
 	RuleScreenQuiet StatusRule = "screen.quiet"
 	// RuleScreenUnreadable — the screen could not be READ at all (a capture that failed, a

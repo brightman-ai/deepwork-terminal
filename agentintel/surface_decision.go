@@ -178,7 +178,7 @@ func (m *PaneAgentMonitor) decideStatus(p SurfaceProbe, screen screenFunc) Statu
 	// conservative fallback below. This matters for Codex rollouts that cannot be
 	// bound to the pane process: the screen has a real `Ask Codex to do anything`
 	// prompt even when JSONL identity is unavailable.
-	if v, ok := analyzeScreen(screen); ok && (v.Rule == RuleScreenInterrupted || v.Rule == RuleScreenRecap) {
+	if v, ok := analyzeScreen(screen); ok && (v.Rule == RuleScreenInterrupted || v.Rule == RuleScreenRecap || v.Rule == RuleScreenError) {
 		return StatusDecision{Status: StatusIdle, Rule: v.Rule, Evidence: v.Line}
 	}
 
