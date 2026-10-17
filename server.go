@@ -160,7 +160,6 @@ func NewServer(opts ...Option) (*Server, error) {
 	// Asking is a plain read now, so the freshness the user sees no longer depends on them
 	// having pressed a button (usage_credentials.go).
 	s.startQuotaWarmer(s.watchCtx)
-	s.startReportWarmer(s.watchCtx)
 	// The WS connect path bounds paste-mode inference at 250ms; a cold ps outruns that.
 	// Prime the shared snapshot so the first connections after this restart don't all miss
 	// and fall back on the late push (paste_infer.go).
