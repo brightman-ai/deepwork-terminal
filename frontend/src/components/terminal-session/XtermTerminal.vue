@@ -17,7 +17,7 @@
       @input="onProxyInput"
       @keydown="onProxyKeydown"
     />
-    <pre class="terminal-transcript" data-testid="terminal-transcript" aria-live="polite">{{ transcript }}</pre>
+    <pre v-if="a11yMirrorOn" class="terminal-transcript" data-testid="terminal-transcript" aria-live="polite">{{ transcript }}</pre>
   </div>
 </template>
 
@@ -51,6 +51,7 @@ import { createLogger } from '@ce/utils/obs'
 import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
 import { renderSyncEnabled, renderSyncOverride } from '@terminal/composables/cli/terminalRenderSync'
 import { sliceForWrite } from '@terminal/composables/cli/writeSlices'
+import { a11yMirrorEnabled, a11yMirrorOverride } from '@terminal/composables/cli/terminalA11yMirror'
 import { startMainThreadMetrics } from '@terminal/composables/cli/mainThreadMetrics'
 import {
   rendererPin,
@@ -178,6 +179,9 @@ function focusTerminal() {
 const transcriptFlushMs = 120
 let transcriptPending = ''
 let transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null
+// Off unless ?a11y_mirror=1 (terminalA11yMirror.ts): a constantly replaced live region kept the
+// browser's accessibility tree busy on the thread that delivers keys. Decided once per page.
+const a11yMirrorOn = a11yMirrorEnabled(a11yMirrorOverride())
 
 function flushTranscript() {
   transcriptFlushTimer = null
@@ -187,6 +191,7 @@ function flushTranscript() {
 }
 
 function appendTranscript(data: string | Uint8Array) {
+  if (!a11yMirrorOn) return
   const decoded = typeof data === 'string' ? data : decoder.decode(data, { stream: true })
   // Only the tail can survive the cap, so only the tail is scanned: running three regexes over a
   // 520KB replay to keep its last 24 000 chars was a main-thread cost with nothing to show for it.
