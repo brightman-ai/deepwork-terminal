@@ -17,7 +17,6 @@
       @input="onProxyInput"
       @keydown="onProxyKeydown"
     />
-    <pre v-if="a11yMirrorOn" class="terminal-transcript" data-testid="terminal-transcript" aria-live="polite">{{ transcript }}</pre>
   </div>
 </template>
 
@@ -51,7 +50,6 @@ import { createLogger } from '@ce/utils/obs'
 import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
 import { renderSyncEnabled, renderSyncOverride } from '@terminal/composables/cli/terminalRenderSync'
 import { sliceForWrite } from '@terminal/composables/cli/writeSlices'
-import { a11yMirrorEnabled, a11yMirrorOverride } from '@terminal/composables/cli/terminalA11yMirror'
 import { startMainThreadMetrics } from '@terminal/composables/cli/mainThreadMetrics'
 import {
   rendererPin,
@@ -100,7 +98,6 @@ const { isMobile } = useDeviceDetection()
 
 const terminalContainer = ref<HTMLDivElement>()
 const terminalInputProxy = ref<HTMLTextAreaElement>()
-const transcript = ref('')
 // Search (in-terminal find, [Ref: TerminalSearchBar]). resultIndex is 0-based, -1 = no active
 // match (empty query, or the addon hasn't computed results for this term/options yet — see
 // buildSearchOptions: results are only tracked when `decorations` is passed).
@@ -130,9 +127,7 @@ let renderSyncBurstTotal = 0
 let renderSyncLastRefreshAt = 0
 const diagnosticCleanups: Array<() => void> = []
 const encoder = new TextEncoder()
-const decoder = new TextDecoder()
 const renderSyncDecoder = new TextDecoder()
-const transcriptLimit = 24000
 const renderSyncLargeWriteBytes = 4096
 const renderSyncBurstBytes = 8192
 const renderSyncBurstWindowMs = 120
@@ -161,50 +156,6 @@ function configureInputAnchor(): HTMLTextAreaElement | null {
 
 function focusTerminal() {
   terminal?.focus()
-}
-
-// The transcript is the screen-reader/e2e mirror of the terminal (sr-only, aria-live="polite").
-// Decoding must stay per-frame — `decoder` is stateful, so a multi-byte glyph split across two PTY
-// reads only survives if every frame passes through it in order — but the reactive WRITE is
-// batched, because that write is what costs:
-//
-//   every frame → new 24 000-char string → Vue patch → the browser re-lays-out a `white-space:
-//   pre-wrap` node inside a 1px-wide sr-only box, where 24 000 chars wrap into ~24 000 line boxes.
-//
-// At an agent TUI's frame rate that is the most expensive thing on the main thread per byte, and
-// none of it is visible to anyone. Coalescing to ~120ms keeps the mirror's CONTENT identical (same
-// bytes, same order, same cap) while collapsing many layouts into one — and a polite live region
-// is supposed to be announced in settled chunks anyway, so batching is also the correct a11y
-// behaviour, not a compromise of it.
-const transcriptFlushMs = 120
-let transcriptPending = ''
-let transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null
-// Off unless ?a11y_mirror=1 (terminalA11yMirror.ts): a constantly replaced live region kept the
-// browser's accessibility tree busy on the thread that delivers keys. Decided once per page.
-// [Ref: guide/troubleshooting/ime-shift-double-toggle.md]
-const a11yMirrorOn = a11yMirrorEnabled(a11yMirrorOverride())
-
-function flushTranscript() {
-  transcriptFlushTimer = null
-  if (!transcriptPending) return
-  transcript.value = (transcript.value + transcriptPending).slice(-transcriptLimit)
-  transcriptPending = ''
-}
-
-function appendTranscript(data: string | Uint8Array) {
-  if (!a11yMirrorOn) return
-  const decoded = typeof data === 'string' ? data : decoder.decode(data, { stream: true })
-  // Only the tail can survive the cap, so only the tail is scanned: running three regexes over a
-  // 520KB replay to keep its last 24 000 chars was a main-thread cost with nothing to show for it.
-  // (The decode above still sees every byte — the decoder is stateful across frames.)
-  const raw = decoded.length > transcriptLimit * 4 ? decoded.slice(-transcriptLimit * 4) : decoded
-  const clean = raw
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '')
-    .replace(/\r/g, '\n')
-  if (!clean) return
-  transcriptPending = (transcriptPending + clean).slice(-transcriptLimit)
-  if (!transcriptFlushTimer) transcriptFlushTimer = setTimeout(flushTranscript, transcriptFlushMs)
 }
 
 function dataLength(data: string | Uint8Array): number {
@@ -773,11 +724,6 @@ onUnmounted(() => {
   renderMetrics = null
   webglAddon?.dispose()
   webglAddon = null
-  // Land whatever was still buffered so the mirror ends the session complete, not one batch short.
-  if (transcriptFlushTimer) {
-    clearTimeout(transcriptFlushTimer)
-    flushTranscript()
-  }
   if (terminal) terminal.dispose()
 })
 
@@ -835,7 +781,6 @@ function write(data: string | Uint8Array, onParsed?: () => void) {
       onParsed?.()
     })
   })
-  appendTranscript(data)
 }
 
 /**
@@ -961,18 +906,6 @@ defineExpose({
   width: 100%;
   height: 100%;
   overflow: hidden;
-}
-
-.terminal-transcript {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: pre-wrap;
-  border: 0;
 }
 
 .terminal-input-proxy {

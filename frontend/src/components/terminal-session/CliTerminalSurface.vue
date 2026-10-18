@@ -1223,10 +1223,10 @@ watch(currentPaneKey, (newKey, oldKey) => {
 // squeezed with no visible panel.
 const DRAWER_SPLIT_BREAKPOINT = 900
 const LAYOUT_MODE_KEY = 'dw.drawerLayoutMode'
-type DrawerLayoutMode = 'auto' | 'split' | 'overlay'
+type DrawerLayoutMode = 'auto' | 'split' | 'overlay' | 'floating'
 function loadLayoutMode(): DrawerLayoutMode {
   const v = localStorage.getItem(LAYOUT_MODE_KEY)
-  return v === 'split' || v === 'overlay' ? v : 'auto'
+  return v === 'split' || v === 'overlay' || v === 'floating' ? v : 'floating'
 }
 const drawerLayoutMode = ref<DrawerLayoutMode>(loadLayoutMode())
 watch(drawerLayoutMode, (v) => localStorage.setItem(LAYOUT_MODE_KEY, v))
@@ -1236,12 +1236,13 @@ function onSurfaceViewportResize(): void { viewportWidth.value = window.innerWid
 // Handed to the drawer header so it can grey out 双栏 with a "需更宽窗口" title instead of
 // letting the user pick a mode that would immediately degrade back to overlay.
 const splitDisabled = computed(() => viewportWidth.value < DRAWER_SPLIT_BREAKPOINT)
-const drawerLayout = computed<'split' | 'overlay'>(() => {
+const drawerLayout = computed<'split' | 'overlay' | 'floating'>(() => {
   if (!currentPaneOpen.value) return 'overlay'
   const canSplit = viewportWidth.value >= DRAWER_SPLIT_BREAKPOINT
   if (drawerLayoutMode.value === 'overlay') return 'overlay'
   if (drawerLayoutMode.value === 'split') return canSplit ? 'split' : 'overlay'
-  return canSplit ? 'split' : 'overlay' // 'auto'
+  if (drawerLayoutMode.value === 'floating') return 'floating'
+  return canSplit ? 'split' : 'floating' // 'auto'
 })
 
 // How many px the OPEN drawer currently occupies (its own drag-resized/fullscreen width — owned
@@ -1330,7 +1331,7 @@ watch(bottomBarRef, (el) => {
   }
 }, { immediate: true })
 const composeReserve = computed(() =>
-  isMobile.value && drawerLayout.value === 'overlay' ? bottomBarHeight.value : 0
+  isMobile.value && (drawerLayout.value === 'overlay' || drawerLayout.value === 'floating') ? bottomBarHeight.value : 0
 )
 
 // headerBottom: the measured (never guessed) bottom edge of this surface's OWN header stack —
