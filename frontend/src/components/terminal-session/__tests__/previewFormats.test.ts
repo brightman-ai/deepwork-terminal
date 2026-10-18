@@ -52,6 +52,12 @@ describe('格式表是唯一真相（REQ-fmt-ssot）', () => {
     expect(spec.fetch).toBe('text')
   })
 
+  it('常见日志/字幕文本格式有明确的文本预览契约', () => {
+    for (const ext of ['log', 'text', 'srt', 'vtt']) {
+      expect(formatFor(`run.${ext}`)).toEqual({ cat: 'doc', kind: 'text', fetch: 'text' })
+    }
+  })
+
   it('筛选 chip 的每个类别都有文案，顺序表里也在', () => {
     for (const ext of ['md', 'xlsx', 'go', 'json', 'css', 'png', 'm4a', 'zip']) {
       const cat = catOf(`x.${ext}`)

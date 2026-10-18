@@ -19,7 +19,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
 import { useVirtualList } from '@vueuse/core'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive } from 'lucide-vue-next'
 import { useUploadLimit } from '@terminal/composables/cli/uploadLimits'
 import {
   filesRecent,
@@ -590,7 +590,8 @@ async function confirmDelete(): Promise<void> {
     const r = await filesDelete(props.sessionId, node.rel, props.cwd)
     if (r.ok) {
       await refreshAfter(node.rel)
-      if (preview.value?.rel === node.rel) closePreview()
+      const deletedPreview = previews.value.find((p) => p.rel === node.rel)
+      if (deletedPreview) closePreviewTab(deletedPreview.key)
       toast('已删除'); deleting.value = null
     } else toast(`删除失败（${r.status || '网络'}）`)
   } finally {
@@ -934,31 +935,73 @@ function onSearchHit(entry: SearchEntry): void {
 
 // ── Preview (shared by both sub-tabs) ──
 interface Preview {
+  key: string
   name: string
   absPath: string
   /** The exact rel/path handed to filesRaw — reused verbatim by download so path
    *  resolution is identical to what the preview already opened. */
   rel: string
   result: RawResult
+  loading: boolean
+  lastUsedAt: number
 }
-const preview = ref<Preview | null>(null)
-const previewLoading = ref(false)
-let previewSeq = 0
+const MAX_OPEN_PREVIEWS = 8
+const previews = ref<Preview[]>([])
+const activePreviewKey = ref('')
+const preview = computed(() => previews.value.find((p) => p.key === activePreviewKey.value) ?? null)
+const previewLoading = computed(() => preview.value?.loading ?? false)
 
-// Free a previous image preview's object URL (created in filesRaw) before it's replaced,
-// so blob bytes don't leak for the session's lifetime.
-function revokePreviewUrl(): void {
-  if (preview.value?.result.kind === 'image') URL.revokeObjectURL(preview.value.result.url)
+function previewKey(absPath: string, rel: string): string {
+  // Include the anchor in the identity: the same relative name in two panes is two different
+  // documents, while repeated clicks in one pane should activate the existing tab.
+  return `${props.sessionId}\u0000${props.cwd}\u0000${absPath || rel}`
+}
+
+// Free image object URLs when a tab is closed or evicted. Text and converted document bytes stay
+// bounded by the tab cap; images are the only browser-owned resource that needs explicit release.
+function revokePreviewUrl(p: Preview): void {
+  if (p.result.kind === 'image') URL.revokeObjectURL(p.result.url)
+}
+
+function activatePreview(key: string): void {
+  const p = previews.value.find((item) => item.key === key)
+  if (!p) return
+  p.lastUsedAt = Date.now()
+  activePreviewKey.value = key
+}
+function previewDomKey(key: string): string {
+  return encodeURIComponent(key)
+}
+
+function evictPreviewOverflow(): void {
+  while (previews.value.length > MAX_OPEN_PREVIEWS) {
+    const candidate = [...previews.value]
+      .filter((p) => p.key !== activePreviewKey.value && !p.loading)
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0]
+    if (!candidate) return // all remaining tabs are loading; keep them until a result arrives.
+    revokePreviewUrl(candidate)
+    const i = previews.value.findIndex((p) => p.key === candidate.key)
+    if (i >= 0) previews.value.splice(i, 1)
+  }
 }
 
 async function previewRel(name: string, absPath: string, rel: string): Promise<void> {
-  const seq = ++previewSeq
+  const key = previewKey(absPath, rel)
+  const existing = previews.value.find((p) => p.key === key)
+  if (existing) {
+    activatePreview(key)
+    return
+  }
+
   // Every stage of multi-step archive/conversion reads belongs to this same location.
   const sessionId = props.sessionId
   const cwd = props.cwd
-  revokePreviewUrl()
-  previewLoading.value = true
-  preview.value = { name, absPath, rel, result: { kind: 'text', text: '' } }
+  const entry: Preview = {
+    key, name, absPath, rel, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
+  }
+  previews.value.push(entry)
+  activePreviewKey.value = key
+  evictPreviewOverflow()
   const read = async (): Promise<RawResult> => {
     const spec = formatFor(name)
     if (spec.fetch === 'bytes' || spec.fetch.startsWith('convert:')) {
@@ -972,7 +1015,6 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
     if (spec.fetch === 'zipList') {
       const r = await filesZipList(sessionId, rel, cwd)
       if (!r.ok) return { kind: 'error', status: r.status, reason: r.reason }
-      if (seq !== previewSeq) return { kind: 'error' }
       if (spec.kind === 'xmind') {
         const hasThumb = r.entries.some(e => e.name === 'Thumbnails/thumbnail.png')
         const json = await filesZipEntryText(sessionId, rel, 'content.json', cwd)
@@ -986,15 +1028,24 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   }
   try {
     const result = await read()
-    if (seq !== previewSeq) {
+    const current = previews.value.find((p) => p.key === key)
+    if (!current) {
       if (result.kind === 'image') URL.revokeObjectURL(result.url)
       return
     }
-    preview.value = { name, absPath, rel, result }
+    current.result = result
+    current.loading = false
+    current.lastUsedAt = Date.now()
+    evictPreviewOverflow()
   } catch {
-    if (seq === previewSeq) preview.value = { name, absPath, rel, result: { kind: 'error', reason: '文件读取失败，请重试' } }
+    const current = previews.value.find((p) => p.key === key)
+    if (current) {
+      current.result = { kind: 'error', reason: '文件读取失败，请重试' }
+      current.loading = false
+    }
   } finally {
-    if (seq === previewSeq) previewLoading.value = false
+    const current = previews.value.find((p) => p.key === key)
+    if (current) current.loading = false
   }
 }
 
@@ -1010,10 +1061,22 @@ async function previewTreeFile(node: TreeNode): Promise<void> {
   await previewRel(node.entry.name, nodeAbsPath(node), node.rel)
 }
 function closePreview(): void {
-  previewSeq++
-  previewLoading.value = false
-  revokePreviewUrl()
-  preview.value = null
+  closePreviewTab(activePreviewKey.value)
+}
+function closePreviewTab(key: string): void {
+  const index = previews.value.findIndex((p) => p.key === key)
+  if (index < 0) return
+  const wasActive = activePreviewKey.value === key
+  revokePreviewUrl(previews.value[index])
+  previews.value.splice(index, 1)
+  if (!wasActive) return
+  const next = previews.value[index] ?? previews.value[index - 1]
+  activePreviewKey.value = next?.key ?? ''
+}
+function clearPreviews(): void {
+  for (const p of previews.value) revokePreviewUrl(p)
+  previews.value = []
+  activePreviewKey.value = ''
 }
 
 /** Open a path supplied by the terminal link provider. */
@@ -1025,7 +1088,7 @@ function previewPath(path: string): void {
   if (!name) return
   void previewRel(name, normalized, normalized)
 }
-onUnmounted(closePreview)
+onUnmounted(clearPreviews)
 
 // An .html/.htm preview also gets a 渲染 URL, so FilePreview can offer the 源码/渲染 toggle.
 // Built from the SAME rel the preview fetched, so both views resolve to one file.
@@ -1201,7 +1264,7 @@ function reanchor(): void {
   treeQuery.value = ''
   searchResults.value = []
   searching.value = false
-  closePreview()
+  clearPreviews()
   needsLoad = true
   activate()
 }
@@ -1658,7 +1721,36 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
     <!-- ── Preview overlay (slides over the panel; readonly text / placeholder) ── -->
     <Transition name="fp-fade">
       <div v-if="preview" class="fp-preview absolute inset-0 flex flex-col bg-background z-10" data-testid="fp-preview">
+        <div v-if="previews.length > 1" class="fp-preview-tabs shrink-0 flex items-center gap-1 overflow-x-auto border-b border-border/60 px-2 py-1 no-scrollbar" data-testid="fp-preview-tabs">
+          <button
+            v-for="tab in previews"
+            :key="tab.key"
+            type="button"
+            class="fp-preview-tab inline-flex min-w-0 max-w-[12rem] items-center gap-1 rounded px-2 py-1 text-[0.62rem]"
+            :class="tab.key === activePreviewKey ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-muted/60'"
+            :title="tab.absPath"
+            :data-testid="`fp-preview-tab-${previewDomKey(tab.key)}`"
+            @click="activatePreview(tab.key)"
+          >
+            <span class="min-w-0 truncate">{{ tab.name }}</span>
+            <span v-if="tab.loading" class="shrink-0 opacity-70">…</span>
+            <span
+              class="shrink-0 rounded px-0.5 text-[0.7rem] leading-none opacity-70 hover:opacity-100"
+              :aria-label="`关闭 ${tab.name}`"
+              :data-testid="`fp-preview-tab-close-${previewDomKey(tab.key)}`"
+              @click.stop="closePreviewTab(tab.key)"
+            >×</span>
+          </button>
+        </div>
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
+          <button
+            class="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            type="button"
+            title="返回文件列表"
+            aria-label="返回文件列表"
+            data-testid="fp-preview-browse"
+            @click="activePreviewKey = ''"
+          ><ChevronLeft class="size-3.5" /></button>
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title"><MidTruncatedName :name="preview.name" tooltip="" /></span>
