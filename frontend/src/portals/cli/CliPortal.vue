@@ -180,7 +180,9 @@ const sessionHud = useSessionHud(() => {
   // The workbench tab's engine can remain `shell` while a Codex/Claude process starts inside it.
   // The live agent_state frame is the authority for the current runtime; using the stale tab
   // creation engine here is how a Codex session previously picked up Claude's model transcript.
-  return { sessionId: tab.sessionId, cwd: tab.cwd, tool: activeAgentState.value?.tool || tab.engine, remote: false }
+  const tool = activeAgentState.value?.tool
+  if (!tool) return null
+  return { sessionId: tab.sessionId, cwd: tab.cwd, tool, remote: false }
 })
 
 // ── tab 深链：/portal/cli?t=<tabId>（机制与取舍见 tabDeepLink.ts 头注）──────────────────

@@ -1,5 +1,6 @@
 import { ref, watch, onBeforeUnmount } from 'vue'
 import { sessionOverview } from '@terminal/api/overview'
+import { sessionTokenAndSpeedMetrics } from '@ce/components/overview/sessionMetricsMath'
 
 export interface SessionHudTarget {
   sessionId: string
@@ -25,29 +26,6 @@ export interface SessionHudSnapshot {
 }
 
 const REFRESH_MS = 15_000
-const MODEL_TPS_MAX = 600
-function sumTurns(turns: Array<{ input_tokens?: number | null; output_tokens?: number | null }>, key: 'input_tokens' | 'output_tokens'): number | null {
-  let total = 0; let seen = false
-  for (const turn of turns) {
-    const value = turn[key]
-    if (typeof value === 'number') { total += value; seen = true }
-  }
-  return seen ? total : null
-}
-function deriveTps(bag: Awaited<ReturnType<typeof sessionOverview>>): { outputTps: number | null; modelTps: number | null } {
-  let genMs = 0; let outTok = 0
-  for (const turn of bag.turns ?? []) {
-    if (typeof turn.duration_ms === 'number' && typeof turn.ttft_ms === 'number' && typeof turn.output_tokens === 'number' && turn.output_tokens > 0 && turn.duration_ms > turn.ttft_ms) {
-      genMs += turn.duration_ms - turn.ttft_ms; outTok += turn.output_tokens
-    }
-  }
-  const outputTps = genMs > 0 && outTok > 0 ? outTok / (genMs / 1000) : null
-  const summary = bag.summary
-  const modelTps = summary?.output_window_ms && summary.output_tokens && summary.output_window_ms > 0
-    ? summary.output_tokens / (summary.output_window_ms / 1000)
-    : null
-  return { outputTps, modelTps: modelTps && modelTps > 0 && modelTps <= MODEL_TPS_MAX ? modelTps : null }
-}
 
 /**
  * One short-lived snapshot owner for the active terminal session.
@@ -98,18 +76,16 @@ export function useSessionHud(target: () => SessionHudTarget | null) {
       const model = bag.detail?.model_id || ''
       const cost = bag.summary?.total_cost
       const currency = bag.summary?.currency || ''
-      const inputTokens = bag.summary?.input_tokens ?? sumTurns(bag.turns ?? [], 'input_tokens')
-      const outputTokens = bag.summary?.output_tokens ?? sumTurns(bag.turns ?? [], 'output_tokens')
-      const tps = deriveTps(bag)
+      const metrics = sessionTokenAndSpeedMetrics(bag)
       snapshot.value = {
         sessionId: current.sessionId,
         model,
         totalCost: typeof cost === 'number' && Number.isFinite(cost) ? cost : null,
         currency,
-        inputTokens: typeof inputTokens === 'number' ? inputTokens : null,
-        outputTokens: typeof outputTokens === 'number' ? outputTokens : null,
-        outputTps: tps.outputTps,
-        modelTps: tps.modelTps,
+        inputTokens: metrics.inputTokens,
+        outputTokens: metrics.outputTokens,
+        outputTps: metrics.outputTps,
+        modelTps: metrics.modelTps,
         costCoverage: cost != null ? 'known' : model ? 'unpriced' : 'empty',
         loading: false,
         updatedAt: Date.now(),

@@ -990,18 +990,13 @@ function moneyLabel(amount: number, currency: string): string {
 const sessionMetricText = computed(() => {
   const parts: string[] = []
   const state = agentState.value
-  const started = Date.parse(state?.startedAt || '')
-  const updated = Date.parse(state?.updatedAt || '')
-  const seconds = started > 0 && updated > started ? (updated - started) / 1000 : 0
   const hud = props.sessionHud
   if (hud?.inputTokens != null || hud?.outputTokens != null) {
     const fmt = (value: number | null) => value == null ? '—' : value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value)
     parts.push(`↑${fmt(hud.inputTokens)} / ↓${fmt(hud.outputTokens)}`)
   }
-  const speed = hud?.modelTps ?? hud?.outputTps ?? (seconds > 0 && (state?.outputTokens ?? 0) > 0 ? state!.outputTokens / seconds : null)
-  if (speed != null && Number.isFinite(speed) && speed > 0) {
-    parts.push(`输出 TPS ${speed.toFixed(1)}`)
-  }
+  if (hud?.modelTps != null) parts.push(`Model TPS ${hud.modelTps.toFixed(1)}`)
+  else if (hud?.outputTps != null) parts.push(`输出阶段 TPS ${hud.outputTps.toFixed(1)}`)
   const model = state?.model || props.sessionHud?.model || ''
   if (model && !parts.some((part) => part.includes(model))) {
     parts.push(model)
