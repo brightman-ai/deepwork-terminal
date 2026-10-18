@@ -38,6 +38,9 @@ const props = defineProps<{
   sessionId?: string
   /** Session cwd — anchors the raw URL exactly like the preview's own fetch. */
   cwd?: string
+  /** Optional 1-based source location supplied by a terminal file link. */
+  lineStart?: number
+  lineEnd?: number
 }>()
 const emit = defineEmits<{
   (e: 'navigate', absPath: string): void
@@ -134,6 +137,13 @@ const contentEl = ref<HTMLElement>()
 // opens the LEFT terminal's search instead of this document's own (2026-10-12 user-reported).
 watch(() => props.name, () => void nextTick(() => scrollEl.value?.focus()), { immediate: true })
 const wrap = ref(true)
+const LINE_NUMBERS_KEY = 'dw.filepreview.lineNumbers'
+const showLineNumbers = ref(localStorage.getItem(LINE_NUMBERS_KEY) !== '0')
+const codeLines = computed(() => props.text.split('\n'))
+function toggleLineNumbers(): void {
+  showLineNumbers.value = !showLineNumbers.value
+  localStorage.setItem(LINE_NUMBERS_KEY, showLineNumbers.value ? '1' : '0')
+}
 // 1.2，非 1：Human 截图实测——默认 1 的 0.78rem/0.72rem 偏小，点两下 `+`（每下 +0.1）才到舒适阅读
 // 大小；直接把起点设在那两下落点上，省掉"每次打开都先点两下"这个重复动作。
 const fontScale = ref(1.2)
@@ -182,6 +192,71 @@ function onScroll(): void {
   progress.value = max > 0 ? el.scrollTop / max : 0
   showTop.value = el.scrollTop > 400
 }
+
+/**
+ * Move the reader to a source line without adding line-number markup to the
+ * highlighted HTML. highlight.js nests spans across tokens, so a Range over the
+ * rendered text is both cheaper and more accurate than splitting its HTML by
+ * newline (which would produce invalid nested spans). The same best-effort
+ * mapping also gives markdown previews a useful landing point when the source
+ * line's text survives the markdown renderer.
+ */
+function scrollToSourceLine(line?: number): void {
+  if (!line || !Number.isSafeInteger(line) || line < 1) return
+  const scroller = scrollEl.value
+  const root = contentEl.value
+  if (!scroller || !root) return
+  const source = props.text
+  const sourceLines = source.split('\n')
+  let target = Math.min(source.length, sourceLines.slice(0, line - 1).reduce((n, part) => n + part.length + 1, 0))
+  // Markdown is rendered into headings/lists/paragraphs, so source offsets do
+  // not equal DOM text offsets (the `# ` and list markers disappear). Prefer
+  // the rendered form of the requested line when it has a stable text token;
+  // source offsets remain the fallback for empty/structural lines.
+  if (kind.value === 'markdown') {
+    const query = sourceLines[line - 1]
+      ?.trim()
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/^[-*+]\s+/, '')
+      .replace(/^\d+[.)]\s+/, '')
+      .replace(/^\[[ xX]\]\s+/, '')
+      .replace(/[`*_>#]/g, '')
+      .trim()
+    if (query && query.length >= 2) {
+      const renderedOffset = (root.textContent || '').indexOf(query)
+      if (renderedOffset >= 0) target = renderedOffset
+    }
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let remaining = target
+  let node: Text | null = null
+  let offset = 0
+  let lastText: Text | null = null
+  while (walker.nextNode()) {
+    const current = walker.currentNode as Text
+    lastText = current
+    if (remaining <= current.data.length) {
+      node = current
+      offset = remaining
+      break
+    }
+    remaining -= current.data.length
+  }
+  if (!node && lastText) { node = lastText; offset = lastText.data.length }
+  if (!node) return
+  const range = document.createRange()
+  range.setStart(node, Math.min(offset, node.data.length))
+  range.collapse(true)
+  const marker = range.getBoundingClientRect()
+  const viewport = scroller.getBoundingClientRect()
+  if (!marker.height && !marker.width) return
+  const top = scroller.scrollTop + marker.top - viewport.top - Math.max(20, viewport.height * 0.18)
+  scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+}
+
+watch([() => props.lineStart, () => props.text, codeHtml], () => {
+  if (props.lineStart) void nextTick(() => scrollToSourceLine(props.lineStart))
+})
 function scrollToTop(): void {
   scrollEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -519,6 +594,7 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
       <button class="fp-tb-btn" :class="{ 'is-on': findOpen }" type="button" title="文档内查找" data-testid="file-preview-find" @click="toggleFind"><Search class="size-3.5" /></button>
       <button class="fp-tb-btn" type="button" title="缩小字号" @click="bumpFont(-0.1)"><Minus class="size-3.5" /></button>
       <button class="fp-tb-btn" type="button" title="放大字号" @click="bumpFont(0.1)"><Plus class="size-3.5" /></button>
+      <button v-if="kind !== 'markdown'" class="fp-tb-btn" :class="{ 'is-on': showLineNumbers }" type="button" :title="showLineNumbers ? '关闭行号' : '显示行号'" data-testid="file-preview-line-numbers" @click="toggleLineNumbers"><span class="fp-ln-icon">#</span></button>
       <button class="fp-tb-btn" :class="{ 'is-on': wrap }" type="button" :title="wrap ? '关闭自动换行' : '自动换行'" data-testid="file-preview-wrap" @click="wrap = !wrap"><WrapText class="size-3.5" /></button>
       <!-- Theme lives in the toolbar that already exists: no new row, no rearranged controls. -->
       <button
@@ -571,7 +647,10 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
       data-testid="file-preview-html-frame"
     />
     <div v-else-if="kind === 'markdown'" ref="contentEl" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" :style="{ fontSize: `${0.78 * fontScale}rem` }" v-html="mdHtml" />
-    <pre v-else ref="contentEl" class="fp-code hljs" :class="wrap ? 'fp-wrap' : 'fp-nowrap'" :style="{ fontSize: `${0.72 * fontScale}rem` }"><code v-html="codeHtml" /></pre>
+    <div v-else class="fp-code-stage">
+      <ol v-if="showLineNumbers" class="fp-line-numbers" aria-hidden="true"><li v-for="(_, i) in codeLines" :key="i">{{ i + 1 }}</li></ol>
+      <pre ref="contentEl" class="fp-code hljs" :class="wrap ? 'fp-wrap' : 'fp-nowrap'" :style="{ fontSize: `${0.72 * fontScale}rem` }"><code v-html="codeHtml" /></pre>
+    </div>
 
     <!-- back-to-top -->
     <Transition name="fp-fade">
@@ -709,6 +788,29 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
   -webkit-user-select: text;
   user-select: text;
 }
+.fp-code-stage {
+  display: flex;
+  align-items: flex-start;
+  min-width: max-content;
+}
+.fp-line-numbers {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  min-width: 3.2em;
+  margin: 0;
+  padding: 14px 10px 14px 8px;
+  border-right: 1px solid var(--fp-border-soft);
+  background: var(--fp-bg);
+  color: var(--fp-muted);
+  font: inherit;
+  line-height: 1.6;
+  text-align: right;
+  user-select: none;
+}
+.fp-line-numbers li { list-style: none; height: 1.6em; }
+.fp-ln-icon { font-size: 0.72rem; font-weight: 700; line-height: 1; }
 
 /* ── reading-progress bar (pinned to the scroll viewport top) ── */
 .fp-progress {

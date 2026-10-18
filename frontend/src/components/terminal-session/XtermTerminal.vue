@@ -58,7 +58,7 @@ import {
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
 import type { RendererCause } from '@terminal/composables/cli/renderHealth'
-import { findTerminalFileLinks, terminalCellRange } from './terminalFileLinks'
+import { editedDiffLineLink, findTerminalFileLinks, terminalCellRange } from './terminalFileLinks'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -85,7 +85,7 @@ const emit = defineEmits<{
   (e: 'data', data: Uint8Array): void
   (e: 'resize', cols: number, rows: number): void
   (e: 'ready', terminal: Terminal): void
-  (e: 'file-path', path: string): void
+  (e: 'file-path', path: string, lineStart?: number, lineEnd?: number): void
 }>()
 
 // Mobile uses a smaller cell so the narrow phone screen fits MORE columns. Programs that draw
@@ -109,6 +109,12 @@ let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
 // Held so teardown can release the GPU context explicitly, and so a context loss can null it out.
 let webglAddon: WebglAddon | null = null
+// Rapid tab switching should preserve the live atlas. Releasing WebGL immediately on every
+// v-show hide makes a normal tab click look like black → repaint → black while the addon is
+// disposed and reacquired. Keep the context through a short switch window; genuinely idle tabs
+// still release it after the grace period so the long-lived tab set remains GPU-bounded.
+let hiddenWebglReleaseTimer: ReturnType<typeof setTimeout> | null = null
+const HIDDEN_WEBGL_RELEASE_GRACE_MS = 1500
 // Client-side cost of the bytes this terminal receives. Created with the terminal so a summary is
 // always attributable to one surface, one renderer, one grid size.
 let renderMetrics: RenderMetrics | null = null
@@ -512,7 +518,21 @@ function initTerminal() {
     provideLinks: (bufferLineNumber, callback) => {
       const line = terminal?.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true) ?? ''
       const bufferLine = terminal?.buffer.active.getLine(bufferLineNumber - 1)
-      const links = findTerminalFileLinks(line)
+      let links = findTerminalFileLinks(line)
+      // Claude/Codex edit previews put the file path in a header (`Edited
+      // file.ts (+2 -2)`) and render the changed source lines below it as a
+      // numbered gutter. Make each gutter number a link to the same file at
+      // that source line. This keeps the gesture local to the terminal and
+      // avoids guessing from the aggregate +N/-M counts.
+      if (terminal) {
+        const priorLines: string[] = []
+        const first = Math.max(1, bufferLineNumber - 24)
+        for (let row = bufferLineNumber - 1; row >= first; row--) {
+          priorLines.push(terminal.buffer.active.getLine(row - 1)?.translateToString(true) ?? '')
+        }
+        const gutterLink = editedDiffLineLink(line, priorLines)
+        if (gutterLink) links = [...links, gutterLink]
+      }
       callback(links.length ? links.map((link) => ({
         text: link.path,
         range: (() => {
@@ -520,10 +540,10 @@ function initTerminal() {
             const cell = bufferLine.getCell(x)
             return { chars: cell?.getChars() ?? '', width: cell?.getWidth() ?? 1 }
           }) : []
-          const span = terminalCellRange(cells, link.start, link.path.length)
+          const span = terminalCellRange(cells, link.start, link.displayLength ?? link.path.length)
           return { start: { x: span.start, y: bufferLineNumber }, end: { x: span.end, y: bufferLineNumber } }
         })(),
-        activate: () => emit('file-path', link.path),
+        activate: () => emit('file-path', link.path, link.lineStart, link.lineEnd),
       })) : undefined)
     },
   }
@@ -714,6 +734,7 @@ onUnmounted(() => {
   if (renderSyncRaf) window.cancelAnimationFrame(renderSyncRaf)
   if (renderSyncTrailing) clearTimeout(renderSyncTrailing)
   if (renderSyncBurstReset) clearTimeout(renderSyncBurstReset)
+  if (hiddenWebglReleaseTimer) clearTimeout(hiddenWebglReleaseTimer)
   if (resizeObserver) resizeObserver.disconnect()
   fileLinkProvider?.dispose()
   fileLinkProvider = null
@@ -863,7 +884,15 @@ function clearSearch(): void {
 watch(() => props.active, (active) => {
   const revision = ++revealRevision
   if (revealTimer) { clearTimeout(revealTimer); revealTimer = null }
-  if (!active) { releaseWebglWhileHidden(); return }
+  if (!active) {
+    if (hiddenWebglReleaseTimer) clearTimeout(hiddenWebglReleaseTimer)
+    hiddenWebglReleaseTimer = setTimeout(() => {
+      hiddenWebglReleaseTimer = null
+      if (!props.active) releaseWebglWhileHidden()
+    }, HIDDEN_WEBGL_RELEASE_GRACE_MS)
+    return
+  }
+  if (hiddenWebglReleaseTimer) { clearTimeout(hiddenWebglReleaseTimer); hiddenWebglReleaseTimer = null }
   // Let v-show restore layout before acquiring a renderer or measuring. Crucially,
   // repaint even in serverSized mode, where fit intentionally does not resize.
   void nextTick(() => {

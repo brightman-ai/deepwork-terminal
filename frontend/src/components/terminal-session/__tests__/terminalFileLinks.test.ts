@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { findTerminalFileLinks, terminalCellRange } from '../terminalFileLinks'
+import { diffLineNumber, editedDiffLineLink, editedFileHeader, findTerminalFileLinks, parseFileLocationSuffix, terminalCellRange } from '../terminalFileLinks'
 
 describe('findTerminalFileLinks', () => {
   it('finds supported relative paths in prose and parentheses', () => {
@@ -20,8 +20,10 @@ describe('findTerminalFileLinks', () => {
     expect(findTerminalFileLinks(`< '${path}' >`).map((link) => link.path)).toEqual([path])
   })
 
-  it('leaves Codex @./ references for the Codex input handler', () => {
-    expect(findTerminalFileLinks('@./tmp/clip/10-18-02/0237001-12631d7e0ff8d571.png')).toEqual([])
+  it('makes rendered Codex @./ references clickable while preserving the real relative path', () => {
+    expect(findTerminalFileLinks('@./tmp/clip/10-18-02/0237001-12631d7e0ff8d571.png')).toEqual([{
+      path: './tmp/clip/10-18-02/0237001-12631d7e0ff8d571.png', start: 0, end: 48, displayLength: 49,
+    }])
   })
 
   it('maps a path after wide CJK cells to the visual xterm columns', () => {
@@ -36,5 +38,39 @@ describe('findTerminalFileLinks', () => {
   it('keeps range indexes aligned with the source line', () => {
     const line = 'open docs/readme.md now'
     expect(findTerminalFileLinks(line)).toEqual([{ path: 'docs/readme.md', start: 5, end: 18 }])
+  })
+
+  it('extracts a one-based source line from a colon suffix without changing the path', () => {
+    expect(findTerminalFileLinks('open workflow_tg/WF-TG-GUARDRAILS.md:48 now')).toEqual([
+      { path: 'workflow_tg/WF-TG-GUARDRAILS.md', start: 5, end: 35, displayLength: 34, lineStart: 48, lineEnd: 48 },
+    ])
+  })
+
+  it('extracts an inclusive line range from a colon suffix', () => {
+    expect(findTerminalFileLinks('open src/app.ts:20:22')).toEqual([
+      { path: 'src/app.ts', start: 5, end: 14, displayLength: 16, lineStart: 20, lineEnd: 22 },
+    ])
+  })
+
+  it('rejects malformed or zero line locations', () => {
+    expect(parseFileLocationSuffix(':0')).toEqual({})
+    expect(parseFileLocationSuffix(':20:19')).toEqual({})
+    expect(findTerminalFileLinks('src/app.ts:20x')).toEqual([
+      { path: 'src/app.ts', start: 0, end: 9 },
+    ])
+  })
+
+  it('recognizes edited-file headers and their following diff line gutter', () => {
+    const header = '• Edited docs/.tg/work/implementation-notes.md (+2 −2)'
+    expect(editedFileHeader(header)).toBe('docs/.tg/work/implementation-notes.md')
+    expect(diffLineNumber('20  −')).toBe(20)
+    expect(diffLineNumber('22  −─ changed')).toBe(22)
+    expect(diffLineNumber('21  +')).toBe(21)
+    expect(diffLineNumber('not a diff row')).toBeUndefined()
+    expect(editedDiffLineLink('22  −─ changed', [
+      '21  +─ changed',
+      header,
+    ])).toMatchObject({ path: 'docs/.tg/work/implementation-notes.md', lineStart: 22, lineEnd: 22, displayLength: 2 })
+    expect(editedDiffLineLink('22  −─ changed', ['', header])).toBeUndefined()
   })
 })

@@ -170,41 +170,6 @@ const apiVendors = computed<UsageVendorGroup[]>(() => groupByVendor(rowsInTab(pr
 const costHeading = computed(() => (tab.value === 'sub' ? '用量 / ≈等价' : '用量 / 估算'))
 const tabHasRows = computed(() => (tab.value === 'sub' ? subProviders.value.length > 0 : apiVendors.value.length > 0))
 
-// The closed topbar chip carries a compact reading of the SAME selected window as the Agent
-// report below. It is deliberately an observed speed and a usage cost, never a provider TTFT or
-// a fabricated bill; missing coverage stays visible as an honest omission.
-const activeAgentSpeed = computed<number | null>(() => {
-  const profiles = (agentReport.value?.runtime_profiles ?? [])
-    .filter((p) => typeof p.observed_response_tokens_per_second === 'number' && p.observed_response_tokens_per_second > 0)
-  if (!profiles.length) return null
-  const weighted = profiles.reduce((sum, p) => sum + (p.observed_response_tokens_per_second as number) * Math.max(1, p.output_tokens || 0), 0)
-  const weight = profiles.reduce((sum, p) => sum + Math.max(1, p.output_tokens || 0), 0)
-  return weight > 0 ? weighted / weight : null
-})
-const activeUsageCost = computed<{ amount: number | null; currency: string; incomplete: boolean }>(() => {
-  const rows = providersFor(activeWindow.value)
-  let amount = 0
-  let currency = ''
-  let seen = false
-  let incomplete = false
-  for (const row of rows) {
-    if (typeof row.cost !== 'number' || !row.currency) continue
-    if (currency && currency !== row.currency) return { amount: null, currency: '', incomplete: true }
-    currency = row.currency
-    amount += row.cost
-    seen = true
-    incomplete ||= rowIncomplete(row)
-  }
-  return { amount: seen ? amount : null, currency, incomplete }
-})
-const agentMetricText = computed(() => {
-  const parts: string[] = []
-  if (activeAgentSpeed.value !== null) parts.push(`${activeAgentSpeed.value.toFixed(1)} tok/s`)
-  const cost = activeUsageCost.value
-  if (cost.amount !== null) parts.push(`${fmtCost(cost.amount, cost.currency, cost.incomplete)}`)
-  return parts.length ? `${WINDOWS.find((w) => w.key === activeWindow.value)?.label ?? activeWindow.value} · ${parts.join(' · ')}` : ''
-})
-
 // Approximation is a property of what you are LOOKING AT, not of the window. Reading it off the
 // window summary meant an unpriced model in the API tab put a「≈」on the subscription tab's number,
 // which is a confession about the wrong number.
@@ -401,8 +366,7 @@ const pillText = computed(() => {
   return '—' // present, but no reading we can stand behind — the popover explains why
 })
 const pillTitle = computed(() => {
-  const metric = agentMetricText.value ? ` · ${agentMetricText.value}` : ''
-  if (pct.value === null) return (hasApi.value ? 'API 计费 · 今日实付' : '用量') + metric + ' · 点开明细'
+  if (pct.value === null) return hasApi.value ? 'API 计费 · 今日实付 · 点开明细' : '用量 · 点开明细'
   const h = headline.value
   if (!h) return '订阅额度剩余 · 点开明细'
   // Say whose window this is and which window, so the number can be checked rather than trusted.
@@ -415,7 +379,7 @@ const pillTitle = computed(() => {
     text += ` · 另有 ${other.display} ${kindLabel(other.window.kind)}仅剩 `
       + `${Math.round(other.window.remaining_percent)}%，但近 24h 没有走它的用量`
   }
-  return `${text}${metric} · 点开明细`
+  return `${text} · 点开明细`
 })
 
 // ── formatting ───────────────────────────────────────────────────────────────────────────
@@ -883,7 +847,6 @@ onUnmounted(() => {
     >
       <Gauge :size="12" class="uchip-ic" />
       <span class="uchip-pct">{{ pillText }}</span>
-      <span v-if="agentMetricText" class="uchip-live-metric">· {{ agentMetricText }}</span>
     </button>
   </div>
 
@@ -1303,15 +1266,6 @@ onUnmounted(() => {
 .uchip.lvl-crit { color: #f4b0b0; border-color: #5a2a2a; }
 .uchip.lvl-none .uchip-ic { color: #8b909a; }
 .uchip-pct { font-weight: 600; }
-.uchip-live-metric {
-  max-width: 150px;
-  overflow: hidden;
-  color: #9fb2d8;
-  font-size: 9.5px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .uchip-backdrop { position: fixed; inset: 0; z-index: 3000; }
 .uchip-pop {
@@ -1577,6 +1531,5 @@ onUnmounted(() => {
   .uchip-tabs { top: -9px; }
   .uchip-agent-time { gap: 3px; }
   .uchip-agent-time > div { padding-inline: 4px; }
-  .uchip-live-metric { max-width: 92px; }
 }
 </style>

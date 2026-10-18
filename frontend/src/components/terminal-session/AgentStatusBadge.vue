@@ -23,7 +23,7 @@
         <div v-if="activePopover.waitReason" class="popover-status">{{ activePopover.waitReason }}</div>
         <div v-if="activePopover.model" class="popover-model">{{ activePopover.model }}</div>
         <div v-if="activePopover.totalTokens" class="popover-tokens">{{ formatTokens(activePopover.totalTokens) }} tokens</div>
-        <div v-if="activePopover.tokensPerSecond" class="popover-tokens">观察吞吐 {{ activePopover.tokensPerSecond.toFixed(1) }} tok/s</div>
+        <div v-if="activePopover.tokensPerSecond" class="popover-tokens">输出速度 {{ activePopover.tokensPerSecond.toFixed(1) }} tok/s</div>
       </div>
     </Teleport>
   </div>
@@ -113,7 +113,7 @@ function chipTooltip(c: ChipItem): string {
   if (c.waitReason) parts.push(c.waitReason)
   if (c.model) parts.push(c.model)
   if (c.totalTokens) parts.push(formatTokens(c.totalTokens) + ' tokens')
-  if (c.tokensPerSecond) parts.push(`观察吞吐 ${c.tokensPerSecond.toFixed(1)} tok/s`)
+  if (c.tokensPerSecond) parts.push(`输出速度 ${c.tokensPerSecond.toFixed(1)} tok/s`)
   return parts.join(' · ')
 }
 

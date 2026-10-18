@@ -44,6 +44,7 @@
             :diagnose="tab.diagnose"
             :dw-rollup="dwRollup"
             :dw-overview-open="dwOverviewOpen"
+            :session-hud="tab.sessionId === sessionHud?.sessionId ? sessionHud : null"
             :ref="(el) => onSurfaceRef(tab.id, el)"
             :data-testid="`cli-portal-surface-${tab.id}`"
             @agent-state="(s) => emit('agent-state', tab.id, s)"
@@ -96,6 +97,7 @@
               :diagnose="tab.diagnose"
               :dw-rollup="dwRollup"
               :dw-overview-open="dwOverviewOpen"
+              :session-hud="tab.sessionId === sessionHud?.sessionId ? sessionHud : null"
               :ref="(el) => onSurfaceRef(tab.id, el)"
               :data-testid="`cli-portal-surface-${tab.id}`"
               :class="{ 'is-focused-pane': isFocusedPane(tab.id, 'first') }"
@@ -166,6 +168,7 @@
                 :diagnose="tab.diagnose"
                 :dw-rollup="dwRollup"
                 :dw-overview-open="dwOverviewOpen"
+                :session-hud="tab.sessionId === sessionHud?.sessionId ? sessionHud : null"
                 :ref="(el) => onSurfaceRef(`${tab.id}__split2`, el)"
                 :data-testid="`cli-portal-surface-${tab.id}__split2`"
                 class="is-second-pane"
@@ -236,6 +239,7 @@ import {
 import type { EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
+import type { SessionHudSnapshot } from '@terminal/composables/cli/useSessionHud'
 import type { TabSplit } from '@terminal/types/workbench'
 
 interface TabWithSession {
@@ -267,6 +271,8 @@ const props = defineProps<{
    *  自己就有 vsplit/hsplit/zoom，物理键盘也通常在场）。宿主算（useCliState.activeTabSplitAllowed），
    *  这里只转发，不重新判断。 */
   splitAllowed?: boolean
+  /** Snapshot for the currently visible local session; hidden tabs do not poll. */
+  sessionHud?: SessionHudSnapshot | null
 }>()
 
 const emit = defineEmits<{
