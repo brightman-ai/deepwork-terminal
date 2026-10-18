@@ -6,6 +6,29 @@ export interface TerminalFileLink {
   end: number
 }
 
+export interface TerminalCellLike {
+  chars: string
+  width: number
+}
+
+/** Convert a JS text range to xterm cell columns (1-based, inclusive end). */
+export function terminalCellRange(cells: readonly TerminalCellLike[], start: number, length: number): { start: number; end: number } {
+  const cellAt = (offset: number): TerminalCellLike & { x: number } => {
+    let text = 0
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i]
+      const consumed = cell.chars.length || (cell.width > 0 ? 1 : 0)
+      if (offset < text + consumed || (consumed === 0 && offset === text)) return { ...cell, x: i + 1 }
+      text += consumed
+    }
+    const last = cells[cells.length - 1]
+    return { ...(last || { chars: '', width: 1 }), x: cells.length + 1 }
+  }
+  const first = cellAt(start)
+  const last = cellAt(start + Math.max(0, length - 1))
+  return { start: first.x, end: last.x + Math.max(1, last.width) - 1 }
+}
+
 // Keep this deliberately narrower than a shell lexer. It recognizes the paths
 // agents print, while leaving punctuation and prose outside the link.
 // Dots are valid inside directory names (`.tg`, `.config`, `v1.0`). Omitting
@@ -25,6 +48,10 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
   for (let match = FILE_PATH_RE.exec(line); match; match = FILE_PATH_RE.exec(line)) {
     const path = match[0]
     const start = match.index
+    // `@./path` is Codex's own file-reference syntax. Let the CLI consume it;
+    // turning the `./path` suffix into an xterm link steals the input gesture
+    // and makes the Codex composer fail before it can resolve the attachment.
+    if (path.startsWith('@./') || path.startsWith('@/') || (start > 0 && line[start - 1] === '@')) continue
     // A URL provider already owns http(s) links. Do not turn the path portion
     // of `https://host/report.md` into a second, conflicting link.
     const end = start + path.length - 1

@@ -46,6 +46,9 @@ const (
 	// (XtermTerminal.vue). More would be evicted on arrival; fewer would make a refreshed page
 	// shallower than one that never refreshed (REQ-TS-13).
 	keyframeLines = 5000
+	// observerRestoreLines is enough to retain a useful recent tail when a hidden tab returns,
+	// while avoiding a multi-thousand-line replay before the current screen becomes interactive.
+	observerRestoreLines = 500
 )
 
 // keyframe is this server's restore point for one session. Protected as described above.
@@ -169,12 +172,16 @@ type restorePoint struct {
 
 // restorePointLocked reads the keyframe and the window. ok=false means there is no usable model
 // (never created, or broken — see muxd.History.guard) and the caller must fall back to a replay.
-func (s *Session) restorePointLocked() (rp restorePoint, ok bool) {
+func (s *Session) restorePointLocked(lines ...int) (rp restorePoint, ok bool) {
 	kf := &s.kf
 	if kf.model == nil {
 		return rp, false
 	}
-	st, lines, ok := kf.model.State(keyframeLines)
+	requestedLines := keyframeLines
+	if len(lines) > 0 && lines[0] >= 0 {
+		requestedLines = lines[0]
+	}
+	st, scrollback, ok := kf.model.State(requestedLines)
 	if !ok {
 		return rp, false
 	}
@@ -182,7 +189,7 @@ func (s *Session) restorePointLocked() (rp restorePoint, ok bool) {
 	if !ok {
 		return rp, false
 	}
-	return restorePoint{state: st, scrollback: lines, window: window}, true
+	return restorePoint{state: st, scrollback: scrollback, window: window}, true
 }
 
 // ptyGrid is the session's current grid, or the spawn size before one is known.
@@ -214,7 +221,7 @@ type viewerSync struct {
 // This is the ONLY way a viewer is brought up to date: on connect, and again whenever it has fallen
 // behind far enough to lose output (see markStaleLocked). One mechanism, so the "joined late" and
 // "fell behind" cases cannot drift apart.
-func (s *Session) syncViewer(subID string) (vs viewerSync, ok bool) {
+func (s *Session) syncViewer(subID string, lines ...int) (vs viewerSync, ok bool) {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
 	v, ok := s.viewers[subID]
@@ -230,7 +237,7 @@ func (s *Session) syncViewer(subID string) (vs viewerSync, ok bool) {
 	}
 	v.stale.Store(false)
 	vs.grid = s.ptyGrid()
-	if rp, ok := s.restorePointLocked(); ok {
+	if rp, ok := s.restorePointLocked(lines...); ok {
 		vs.rp = &rp
 		vs.grid = muxd.Grid{Cols: rp.state.Cols, Rows: rp.state.Rows}
 		return vs, true

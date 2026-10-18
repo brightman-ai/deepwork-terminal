@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { findTerminalFileLinks } from '../terminalFileLinks'
+import { findTerminalFileLinks, terminalCellRange } from '../terminalFileLinks'
 
 describe('findTerminalFileLinks', () => {
   it('finds supported relative paths in prose and parentheses', () => {
@@ -18,6 +18,15 @@ describe('findTerminalFileLinks', () => {
   it('keeps Unicode directory and filename segments intact', () => {
     const path = 'collab/work/whiteboard-ng自举-2026001/交接-2026017-交流转换重构/reviews/wbng_fable_review_prompt_20261018.md'
     expect(findTerminalFileLinks(`< '${path}' >`).map((link) => link.path)).toEqual([path])
+  })
+
+  it('leaves Codex @./ references for the Codex input handler', () => {
+    expect(findTerminalFileLinks('@./tmp/clip/10-18-02/0237001-12631d7e0ff8d571.png')).toEqual([])
+  })
+
+  it('maps a path after wide CJK cells to the visual xterm columns', () => {
+    const cells = [{ chars: '中', width: 2 }, { chars: ' ', width: 1 }, { chars: 'a', width: 1 }, { chars: '.', width: 1 }, { chars: 'm', width: 1 }, { chars: 'd', width: 1 }]
+    expect(terminalCellRange(cells, 2, 4)).toEqual({ start: 3, end: 6 })
   })
 
   it('ignores unsupported extensions and URLs', () => {

@@ -925,7 +925,17 @@ func restoreBytes(vs viewerSync, pasteEnabled, pasteKnown bool) (body []byte, ke
 // advanced past the restore here, so the writer knows when a server-originated insertion is safe.
 func (s *Server) restoreViewer(ctx, logCtx context.Context, conn *websocket.Conn, sess *Session, subID, reason string, boundary *parserBoundary) (pasteKnown bool, err error) {
 	started := time.Now()
-	vs, ok := sess.syncViewer(subID)
+	// An observer tab already has an xterm instance and only needs the authoritative current
+	// screen. Replaying the full 5000-line history on every tab return was the other half of the
+	// reported black-screen/"正在恢复终端内容" delay. Initial connects and ordinary stale viewers
+	// retain the full history contract; observer returns use a bounded recent tail.
+	var vs viewerSync
+	var ok bool
+	if reason == "resync-fast" {
+		vs, ok = sess.syncViewer(subID, observerRestoreLines)
+	} else {
+		vs, ok = sess.syncViewer(subID)
+	}
 	if !ok {
 		return false, errViewerGone
 	}
