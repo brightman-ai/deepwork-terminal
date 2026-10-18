@@ -49,7 +49,6 @@ const wrapRef = ref<HTMLElement | null>(null)
 const popRef = ref<HTMLElement | null>(null)
 const popPos = ref({ top: 0, left: 0, maxHeight: 560 })
 let timer: ReturnType<typeof setInterval> | undefined
-let aggregateTimer: ReturnType<typeof setInterval> | undefined
 let placementFrame = 0
 let placementObserver: ResizeObserver | null = null
 
@@ -125,8 +124,8 @@ const agentError = computed(() => agentByWindow[activeWindow.value].error.value)
 const agentDetailOpen = ref(false)
 const providersFor = (w: ReportWindow = activeWindow.value) => reportByWindow[w].report.value?.providers ?? []
 
-// Whole-machine speed is shown beside the matching official account. It is deliberately separate
-// from the active tab's session metric and is refreshed only while this popover is open.
+// Runtime-level whole-machine speed is kept separate from account rows and from the active tab's
+// session metric; the top pill and aggregate summary can show Claude/Codex independently.
 const aggregateSpeedByRuntime = computed(() => {
   const out = new Map<string, number>()
   for (const profile of agentReport.value?.runtime_profiles ?? []) {
@@ -135,9 +134,6 @@ const aggregateSpeedByRuntime = computed(() => {
   }
   return out
 })
-function aggregateSpeedFor(runtime: string): number | null {
-  return aggregateSpeedByRuntime.value.get(runtime) ?? null
-}
 
 // ── tabs ─────────────────────────────────────────────────────────────────────────────────
 type Tab = 'sub' | 'api' | 'agent'
@@ -647,8 +643,8 @@ const showsHealth = (q: RuntimeQuota) => healthOwner.value.get(q.runtime) === ac
 const sortedSubscriptions = computed(() =>
   [...subscriptions.value].sort((a, b) => accountTightestRemaining(a) - accountTightestRemaining(b)),
 )
-const topAggregateRuntime = computed(() => sortedSubscriptions.value.find((q) => aggregateSpeedFor(q.runtime) != null)?.runtime ?? '')
-const topAggregateSpeed = computed(() => topAggregateRuntime.value ? aggregateSpeedFor(topAggregateRuntime.value) : null)
+const aggregateSpeedText = computed(() => [...aggregateSpeedByRuntime.value.entries()]
+  .map(([runtime, speed]) => `${runtimeLabel(runtime)} ${speed.toFixed(1)} tok/s`).join(' · '))
 
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
@@ -802,24 +798,13 @@ function removePlacementWatchers(): void {
 
 function toggle() {
   open.value = !open.value
-  if (!open.value) {
-    if (aggregateTimer) { clearInterval(aggregateTimer); aggregateTimer = undefined }
-    return
-  }
+  if (!open.value) return
   reload()
-  // Whole-machine speed is expensive to compute, so it becomes live only after the user opens
-  // this surface. The timer is scoped to the visible popover and stops on close.
-  aggregateTimer = setInterval(() => {
-    void agentByWindow[activeWindow.value].load(activeWindow.value, true)
-  }, 1000)
 }
 
 watch(open, async (isOpen) => {
   removePlacementWatchers()
-  if (!isOpen) {
-    if (aggregateTimer) { clearInterval(aggregateTimer); aggregateTimer = undefined }
-    return
-  }
+  if (!isOpen) return
   await nextTick()
   installPlacementWatchers()
   schedulePlacement()
@@ -851,7 +836,6 @@ onMounted(() => {
 })
 onUnmounted(() => {
   clearInterval(timer)
-  if (aggregateTimer) clearInterval(aggregateTimer)
   document.removeEventListener('visibilitychange', onVisible)
   window.removeEventListener('focus', onVisible)
   removePlacementWatchers()
@@ -872,7 +856,7 @@ onUnmounted(() => {
     >
       <Gauge :size="12" class="uchip-ic" />
       <span class="uchip-pct">{{ pillText }}</span>
-      <span v-if="topAggregateSpeed != null" class="uchip-top-speed" :title="`${runtimeLabel(topAggregateRuntime)} 整机输出速度；打开官方订阅查看实时刷新`">整机 {{ topAggregateSpeed.toFixed(1) }} tok/s</span>
+      <span v-if="aggregateSpeedText" class="uchip-top-speed" :title="`整机观察响应吞吐 · ${activeWindow} 窗口`">整机 {{ aggregateSpeedText }}</span>
     </button>
   </div>
 
@@ -902,12 +886,6 @@ onUnmounted(() => {
             <div class="uchip-rt-head">
               <span class="uchip-rt-name">{{ accountLabel(q) }}</span>
               <span v-if="q.plan" class="uchip-plan">{{ q.plan }}</span>
-              <span
-                v-if="aggregateSpeedFor(q.runtime)"
-                class="uchip-speed"
-                :title="`${runtimeLabel(q.runtime)} 整机输出速度 · 当前 ${WINDOWS.find(w => w.key === activeWindow)?.label} 窗口 · 点击打开后每秒刷新`"
-                :data-testid="`uchip-speed-${q.runtime}`"
-              >整机输出 {{ aggregateSpeedFor(q.runtime)!.toFixed(1) }} tok/s</span>
               <!-- 一眼看出这笔钱现在记在谁头上。这是整页最贵的一个事实：截图里官方那行挂着
                    一周前的读数，而本周每一次调用其实都记在另一个账号上，页面从来没说过。 -->
               <span
@@ -1391,14 +1369,6 @@ onUnmounted(() => {
 .uchip-stale-go { font-size: 10px; line-height: 1; }
 .uchip-group-head { display: flex; align-items: center; gap: 6px; min-height: 17px; margin-bottom: 1px; }
 .uchip-plan { font-size: 10px; color: #8b909a; font-weight: 400; }
-.uchip-speed {
-  margin-left: auto;
-  color: #bca5df;
-  font-size: 9.5px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
 .uchip-badge { font-size: 9.5px; font-weight: 500; border-radius: 4px; padding: 1px 5px; margin-left: auto; }
 .uchip-badge + .uchip-badge { margin-left: 4px; }
 /* Amber, never red: red reads as "quota exhausted", which is a different (and false) claim. */
