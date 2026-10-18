@@ -968,7 +968,10 @@ const surfaceActions = computed(() =>
  */
 const surfaceSlotContent = computed(() =>
   surfaceSlot({
-    agent: sessionSignalText(props.sessionId),
+    agent: (() => {
+      const tool = surfaceEntry.value?.agentTool
+      return tool === 'codex' ? 'Codex' : tool === 'claude' ? 'Claude' : tool === 'gemini' ? 'Gemini' : ''
+    })(),
     title: terminalTitle.value,
     cwd: surfaceEntry.value?.cwd ?? '',
   }),
@@ -990,11 +993,18 @@ const sessionMetricText = computed(() => {
   const started = Date.parse(state?.startedAt || '')
   const updated = Date.parse(state?.updatedAt || '')
   const seconds = started > 0 && updated > started ? (updated - started) / 1000 : 0
-  if (seconds > 0 && (state?.outputTokens ?? 0) > 0) {
-    parts.push(`输出 ${(state!.outputTokens / seconds).toFixed(1)} tok/s`)
+  const hud = props.sessionHud
+  if (hud?.inputTokens != null || hud?.outputTokens != null) {
+    const fmt = (value: number | null) => value == null ? '—' : value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value)
+    parts.push(`↑${fmt(hud.inputTokens)} / ↓${fmt(hud.outputTokens)}`)
   }
-  if (props.sessionHud?.model && !parts.some((part) => part.includes(props.sessionHud!.model))) {
-    parts.push(props.sessionHud.model)
+  const speed = hud?.modelTps ?? hud?.outputTps ?? (seconds > 0 && (state?.outputTokens ?? 0) > 0 ? state!.outputTokens / seconds : null)
+  if (speed != null && Number.isFinite(speed) && speed > 0) {
+    parts.push(`输出 TPS ${speed.toFixed(1)}`)
+  }
+  const model = state?.model || props.sessionHud?.model || ''
+  if (model && !parts.some((part) => part.includes(model))) {
+    parts.push(model)
   }
   if (props.sessionHud?.totalCost != null) {
     parts.push(`≈${moneyLabel(props.sessionHud.totalCost, props.sessionHud.currency)}`)

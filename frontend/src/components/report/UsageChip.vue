@@ -647,6 +647,8 @@ const showsHealth = (q: RuntimeQuota) => healthOwner.value.get(q.runtime) === ac
 const sortedSubscriptions = computed(() =>
   [...subscriptions.value].sort((a, b) => accountTightestRemaining(a) - accountTightestRemaining(b)),
 )
+const topAggregateRuntime = computed(() => sortedSubscriptions.value.find((q) => aggregateSpeedFor(q.runtime) != null)?.runtime ?? '')
+const topAggregateSpeed = computed(() => topAggregateRuntime.value ? aggregateSpeedFor(topAggregateRuntime.value) : null)
 
 // What the card says when it has no numbers — the honest alternative to disappearing.
 function healthLabel(q: RuntimeQuota): string {
@@ -870,6 +872,7 @@ onUnmounted(() => {
     >
       <Gauge :size="12" class="uchip-ic" />
       <span class="uchip-pct">{{ pillText }}</span>
+      <span v-if="topAggregateSpeed != null" class="uchip-top-speed" :title="`${runtimeLabel(topAggregateRuntime)} 整机输出速度；打开官方订阅查看实时刷新`">整机 {{ topAggregateSpeed.toFixed(1) }} tok/s</span>
     </button>
   </div>
 
@@ -1295,6 +1298,13 @@ onUnmounted(() => {
 .uchip.lvl-crit { color: #f4b0b0; border-color: #5a2a2a; }
 .uchip.lvl-none .uchip-ic { color: #8b909a; }
 .uchip-pct { font-weight: 600; }
+.uchip-top-speed {
+  color: #bca5df;
+  font-size: 9px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 .uchip-backdrop { position: fixed; inset: 0; z-index: 3000; }
 .uchip-pop {
