@@ -54,8 +54,8 @@
         class="rd-scrim"
         :class="{
           'is-split': layout === 'split',
-          'is-floating': layout === 'floating',
-          'is-mobile': isMobile && layout !== 'split' && layout !== 'floating',
+          'is-floating': layout === 'floating' && !isMobile,
+          'is-mobile': isMobile && layout !== 'split',
           'is-desktop': !isMobile && layout !== 'split' && layout !== 'floating',
           'rd-dock-left': dockLeft,
         }"
@@ -684,6 +684,13 @@ function loadFloatRect(): FloatRect {
 }
 const floatRect = ref<FloatRect>(loadFloatRect())
 const panelStyle = computed<Record<string, string>>(() => {
+  // A desktop "floating" preference must not become a 300px card on a phone. Mobile always
+  // gets a full-height sheet bounded by the live compose reserve; the user's floating preference
+  // remains intact for the next desktop viewport.
+  if (isMobile.value && props.layout !== 'split') {
+    const h = Math.max(280, window.innerHeight - props.composeReserve)
+    return { width: '100vw', height: `${h}px` } as Record<string, string>
+  }
   if (props.layout === 'floating') {
     if (isFull.value) {
       const fullH = Math.max(280, window.innerHeight - (isMobile.value ? props.composeReserve : 0) - 24)
@@ -1325,7 +1332,10 @@ function glyphClass(name: string): string {
   justify-content: flex-end;
   align-items: stretch;
 }
-.rd-scrim.is-mobile { background: rgba(8, 6, 14, 0.55); }
+.rd-scrim.is-mobile {
+  z-index: 3200; /* a first-run guide must yield once the user opens the workbench */
+  background: rgba(8, 6, 14, 0.55);
+}
 /* Desktop: a collapsible column; the scrim is click-through except the panel itself. */
 .rd-scrim.is-desktop { background: transparent; pointer-events: none; }
 .rd-scrim.is-desktop .rd-panel { pointer-events: auto; }
@@ -1365,6 +1375,7 @@ function glyphClass(name: string): string {
   height: 100%;
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+.is-mobile .rd-resize { display: none; }
 
 /* Left-edge horizontal resize handle — a slim grab strip; widens on hover. */
 .rd-resize {
