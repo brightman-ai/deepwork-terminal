@@ -3,7 +3,7 @@ import { searchPollDelay } from '../searchPollDelay'
 
 describe('file search refresh polling', () => {
   it('checks quickly while an index is building', () => {
-    expect(searchPollDelay('building', false)).toBe(500)
+    expect(searchPollDelay('building', false)).toBe(1500)
   })
 
   it('backs off when the index scan failed but leaves manual retry available', () => {

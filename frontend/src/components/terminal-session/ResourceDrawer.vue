@@ -736,6 +736,7 @@ defineExpose({ effectivePanelWidthPx, panelRootEl, openFilePreview })
 let resizing = false
 let resizeStartX = 0
 let resizeStartW = 0
+let floatingLeftResizing = false
 let floating = false
 let floatResizing = false
 let floatStartX = 0
@@ -779,11 +780,42 @@ function onFloatResizeEnd(): void {
   floatResizing = false; document.documentElement.classList.remove('dw-resizing'); persistFloatRect()
   window.removeEventListener('pointermove', onFloatResizeMove); window.removeEventListener('pointerup', onFloatResizeEnd); window.removeEventListener('pointercancel', onFloatResizeEnd)
 }
+function onFloatingLeftResizeStart(e: PointerEvent): void {
+  if (props.layout !== 'floating' || isFull.value) return
+  floatingLeftResizing = true
+  floatStartX = e.clientX; floatStartY = e.clientY; floatStartRect = { ...floatRect.value }
+  document.documentElement.classList.add('dw-resizing')
+  window.addEventListener('pointermove', onFloatingLeftResizeMove, { passive: false })
+  window.addEventListener('pointerup', onFloatingLeftResizeEnd)
+  window.addEventListener('pointercancel', onFloatingLeftResizeEnd)
+  e.preventDefault(); e.stopPropagation()
+}
+function onFloatingLeftResizeMove(e: PointerEvent): void {
+  if (!floatingLeftResizing) return
+  e.preventDefault()
+  const dx = e.clientX - floatStartX
+  floatRect.value = clampFloatRect({
+    ...floatStartRect,
+    x: floatStartRect.x + dx,
+    w: floatStartRect.w - dx,
+  })
+}
+function onFloatingLeftResizeEnd(): void {
+  if (!floatingLeftResizing) return
+  floatingLeftResizing = false; document.documentElement.classList.remove('dw-resizing'); persistFloatRect()
+  window.removeEventListener('pointermove', onFloatingLeftResizeMove)
+  window.removeEventListener('pointerup', onFloatingLeftResizeEnd)
+  window.removeEventListener('pointercancel', onFloatingLeftResizeEnd)
+}
 // Pointer Events unify mouse + touch + pen, and setPointerCapture routes every
 // pointermove/up to the handle even as the pointer crosses the terminal / the
 // pointer-events:none desktop scrim — the old split mouse/touch + window listeners
 // dropped on iOS WKWebView, which read as "can't drag". Capture is the robust path.
 function onResizeStart(e: PointerEvent): void {
+  if (props.layout === 'floating' && !isFull.value) {
+    onFloatingLeftResizeStart(e)
+    return
+  }
   resizing = true
   resizeStartX = e.clientX
   resizeStartW = panelWidth.value
@@ -1070,6 +1102,7 @@ onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer)
   if (handlePeekTimer) clearTimeout(handlePeekTimer)
   onResizeEnd() // detach any in-flight resize listeners
+  onFloatingLeftResizeEnd()
 })
 
 function openLightbox(img: UploadItem): void { lightbox.value = img; resetZoom() }

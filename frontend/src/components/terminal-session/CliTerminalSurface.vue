@@ -577,7 +577,6 @@ import { useTmuxState, paneStateKey } from '@terminal/composables/cli/useTmuxSta
 import {
   applySessionsOverviewFrame,
   sessionEntry,
-  sessionNoteText,
   sessionRawStatus,
   sessionSignalText,
 } from '@terminal/composables/cli/useSessionsOverview'
@@ -964,14 +963,12 @@ const surfaceActions = computed(() =>
 /**
  * 中区那句话 —— 「这个终端此刻在发生什么」，逐级回落，永不空着。
  *
- * 第一档（agent 那一句）来自 `sessionNoteText`，也就是**顶部标签那枚状态点读的同一帧**。改动前这里
- * 读的是 useAgentIntel(sessionId) 的另一条推送，于是同一个 session 在同一时刻，这里写着红色
- * 「Codex 等待输入」、顶上标签点却是绿色「运行中」（Human 实测截图）。两条判定路径就是两个真相；
- * 现在只剩一条，逐字相等由 useSessionsOverview.test.ts 钉死。
+ * 第一档使用 `sessionSignalText` 的短状态句（Codex/Claude 运行中、等待输入等），不把 agent
+ * 原话或长任务说明塞进这条常驻 chrome；任务正文仍留在终端输出里。
  */
 const surfaceSlotContent = computed(() =>
   surfaceSlot({
-    agent: sessionNoteText(props.sessionId),
+    agent: sessionSignalText(props.sessionId),
     title: terminalTitle.value,
     cwd: surfaceEntry.value?.cwd ?? '',
   }),
