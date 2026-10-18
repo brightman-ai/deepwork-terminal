@@ -1249,7 +1249,16 @@ const drawerLayout = computed<'split' | 'overlay'>(() => {
 // pane's instance specifically — that's the only one ever visible/squeezing. 0 whenever we're not
 // actually squeezing (closed, or narrow/overlay) — no separate "is it squeezing" boolean needed.
 const drawerPanelWidthPx = computed(() => drawerInstanceRefs[currentPaneKey.value]?.effectivePanelWidthPx ?? 0)
-const drawerSqueezePx = computed(() => (drawerLayout.value === 'split' ? drawerPanelWidthPx.value : 0))
+// Never let a persisted/fullscreen drawer consume the entire split surface. A transient zero
+// measurement during refresh used to turn `calc(100% - drawerWidth)` into a one-column xterm
+// strip; the terminal keeps a readable floor and the drawer remains usable. Overlay mode is
+// unchanged because it does not participate in layout width.
+const TERMINAL_MIN_WIDTH_PX = 320
+const drawerSqueezePx = computed(() => {
+  if (drawerLayout.value !== 'split') return 0
+  const maxSqueeze = Math.max(0, viewportWidth.value - TERMINAL_MIN_WIDTH_PX)
+  return Math.min(drawerPanelWidthPx.value, maxSqueeze)
+})
 
 // ─── FIX 1: publish the drawer's live docked width as ONE global CSS var so viewport-fixed chrome
 // living OUTSIDE this surface (currently just HelpCenter's "?" fab) can shift clear of the panel
@@ -2965,6 +2974,7 @@ defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, o
   display: flex;
   flex-direction: column;
   width: 100%;
+  min-width: 0;
   height: 100%;
   background: #1e1e1e;
   overflow: hidden;
