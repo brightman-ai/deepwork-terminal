@@ -49,6 +49,8 @@ const wrapRef = ref<HTMLElement | null>(null)
 const popRef = ref<HTMLElement | null>(null)
 const popPos = ref({ top: 0, left: 0, maxHeight: 560 })
 let timer: ReturnType<typeof setInterval> | undefined
+let aggregateTimer: ReturnType<typeof setInterval> | undefined
+let aggregateRefreshBusy = false
 let placementFrame = 0
 let placementObserver: ResizeObserver | null = null
 
@@ -712,8 +714,16 @@ async function loadAgentWindow(window: ReportWindow, force = false): Promise<voi
   // Reset both before and after replacement. The second reset defeats browser
   // scroll anchoring when a short loading body is replaced by a tall cached body.
   resetPopoverScroll()
-  await agentByWindow[window].load(window, force)
+  await refreshAggregate(force, window)
   if (tab.value === 'agent' && activeWindow.value === window) resetPopoverScroll()
+}
+
+/** One visible aggregate refresh owner. 30s is the freshness/CPU compromise; no overlapping force
+ * rebuilds, and hidden pages are left to revalidate when they become visible again. */
+async function refreshAggregate(force = true, window: ReportWindow = activeWindow.value): Promise<void> {
+  if (aggregateRefreshBusy) return
+  aggregateRefreshBusy = true
+  try { await agentByWindow[window].load(window, force) } finally { aggregateRefreshBusy = false }
 }
 
 function prefetchAll(): void {
@@ -816,6 +826,7 @@ watch(open, async (isOpen) => {
 function onVisible(): void {
   if (document.visibilityState !== 'visible') return
   void load()
+  void refreshAggregate(true)
   if (open.value) prefetchAll()
 }
 
@@ -825,17 +836,21 @@ onMounted(() => {
   void load()
   // Independent prefetch: Agent activity must remain discoverable even when no
   // provider quota account is present, and cannot delay either money tab.
-  void agentByWindow[activeWindow.value].load(activeWindow.value)
+  void refreshAggregate(false)
   // The pill can show today's API spend, so an API-only user needs the report before opening.
   void reportByWindow[activeWindow.value].load(activeWindow.value)
   // The ONLY periodic work left. Every rendered time is an absolute instant, so nothing decays
   // between polls and no second timer is needed to keep the text honest.
   timer = setInterval(() => void load(), 60000)
+  aggregateTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') void refreshAggregate(true)
+  }, 30000)
   document.addEventListener('visibilitychange', onVisible)
   window.addEventListener('focus', onVisible)
 })
 onUnmounted(() => {
   clearInterval(timer)
+  if (aggregateTimer) clearInterval(aggregateTimer)
   document.removeEventListener('visibilitychange', onVisible)
   window.removeEventListener('focus', onVisible)
   removePlacementWatchers()
@@ -856,7 +871,7 @@ onUnmounted(() => {
     >
       <Gauge :size="12" class="uchip-ic" />
       <span class="uchip-pct">{{ pillText }}</span>
-      <span v-if="aggregateSpeedText" class="uchip-top-speed" :title="`整机观察响应吞吐 · ${activeWindow} 窗口`">整机 {{ aggregateSpeedText }}</span>
+      <span v-if="aggregateSpeedText" class="uchip-top-speed" :title="`整机观察响应吞吐 · ${activeWindow} 窗口 · 可见时约 30 秒刷新`">整机 {{ aggregateSpeedText }}</span>
     </button>
   </div>
 
