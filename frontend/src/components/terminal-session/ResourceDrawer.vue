@@ -15,7 +15,7 @@
       ref="handleEl"
       class="rd-handle"
       :class="{ 'is-mobile': isMobile, 'is-peek': handlePeek, 'rd-dock-left': dockLeft }"
-      :style="handleStyle"
+      :style="handleStyleForRender"
       type="button"
       :title="clipboard?.unread.value ? `工作台 · 剪贴板有 ${clipboard.unread.value} 条待取内容（Ctrl+Alt+Shift+C）` : '工作台 · 点击展开，可上下拖动；剪贴板 Ctrl+Alt+Shift+C'"
       data-testid="resource-drawer-handle"
@@ -28,6 +28,21 @@
       <ChevronRight v-if="dockLeft" class="rd-handle-chevron" :size="14" />
       <ChevronLeft v-else class="rd-handle-chevron" :size="14" />
       <span class="rd-handle-label" :class="{ 'is-visible': handlePeek || handleHovering }">工作台</span>
+    </button>
+    <!-- Closed-state mobile recovery affordance. The open panel's Dock button is necessarily
+         hidden with the panel; this sibling survives the collapse and stays above the mobile
+         toolbar so the user never has to rediscover the edge handle. -->
+    <button
+      v-if="!open && isActive && isMobile"
+      class="rd-closed-dock"
+      type="button"
+      title="打开工作台"
+      aria-label="打开工作台"
+      data-testid="resource-drawer-closed-dock"
+      @click="onHandleClick"
+    >
+      <PanelRight :size="14" aria-hidden="true" />
+      <span>工作台</span>
     </button>
 
     <!-- v-show (not v-if): minimizing the drawer keeps the whole panel — FilesPanel + its
@@ -489,7 +504,28 @@ const dockLeft = computed(() => dock.value === 'left')
 
 // The summon handle is vertically draggable along the right edge so it can be moved
 // off whatever terminal text it overlaps; offset persists per-handle.
-const { el: handleEl, style: handleStyle } = useEdgeDrag({ storageKey: 'dw.rdHandle.top' })
+// Keep a separate mobile position memory. Desktop users may have dragged the edge handle to a
+// mid-screen offset that is hidden behind the phone's bottom toolbar; a fresh mobile key starts
+// above that toolbar and can still be dragged afterwards.
+const { el: handleEl, style: rawHandleStyle } = useEdgeDrag({
+  storageKey: isMobile.value ? 'dw.rdHandle.top.mobile' : 'dw.rdHandle.top',
+})
+const handleViewportEpoch = ref(0)
+const handleStyleForRender = computed(() => {
+  handleViewportEpoch.value
+  const base = { ...rawHandleStyle.value }
+  if (!isMobile.value || !base.top) return base
+  const top = Number.parseFloat(base.top)
+  if (!Number.isFinite(top)) return base
+  const vv = window.visualViewport
+  const viewportTop = vv?.offsetTop ?? 0
+  const viewportHeight = vv?.height ?? window.innerHeight
+  const handleHeight = 62
+  const margin = 8
+  const minTop = viewportTop + margin
+  const maxTop = Math.max(minTop, viewportTop + viewportHeight - props.composeReserve - handleHeight - margin)
+  return { ...base, top: `${Math.min(maxTop, Math.max(minTop, top))}px`, transform: 'none' }
+})
 
 // ── Handle signifier (FIX 3, design doc §7 signifier notes) ────────────────────────────
 // The closed handle used to be an unlabeled square ("神秘小方块"): a chevron (‹, "pull to
@@ -680,6 +716,7 @@ const scrimStyle = computed(() => {
 // here (incl. its localStorage persistence); the host never duplicates or guesses it.
 const winWidth = ref(window.innerWidth)
 function onWinResize(): void { winWidth.value = window.innerWidth; floatRect.value = clampFloatRect(floatRect.value) }
+function onHandleViewportChange(): void { handleViewportEpoch.value++ }
 const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : panelWidth.value))
 // panelRootEl (drawer-per-pane, 20260710-124400): the host needs THIS instance's panel root DOM
 // node to tell whether a live text Selection sits inside it before switching panes away (there is
@@ -688,10 +725,10 @@ const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : pa
 const panelRootEl = ref<HTMLElement>()
 const treeFilesPanelRef = ref<InstanceType<typeof FilesPanel>>()
 
-function openFilePreview(path: string): void {
+function openFilePreview(path: string, lineStart?: number, lineEnd?: number): void {
   topTab.value = 'tree'
   emit('update:open', true)
-  void nextTick(() => treeFilesPanelRef.value?.previewPath(path))
+  void nextTick(() => treeFilesPanelRef.value?.previewPath(path, lineStart, lineEnd))
 }
 
 defineExpose({ effectivePanelWidthPx, panelRootEl, openFilePreview })
@@ -1017,6 +1054,8 @@ onMounted(() => {
   window.addEventListener('keydown', onClipboardShortcut, true)
   window.addEventListener('dw:upload-success', onUploadSuccess)
   window.addEventListener('resize', onWinResize)
+  window.visualViewport?.addEventListener('resize', onHandleViewportChange)
+  window.visualViewport?.addEventListener('scroll', onHandleViewportChange)
   // First-ever mount with the handle never opened: auto-peek the "工作台" label briefly,
   // then fall back to hover-only (see dismissHandlePeek / HANDLE_SEEN_KEY above).
   if (handlePeek.value) handlePeekTimer = setTimeout(dismissHandlePeek, 2600)
@@ -1026,6 +1065,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onClipboardShortcut, true)
   window.removeEventListener('dw:upload-success', onUploadSuccess)
   window.removeEventListener('resize', onWinResize)
+  window.visualViewport?.removeEventListener('resize', onHandleViewportChange)
+  window.visualViewport?.removeEventListener('scroll', onHandleViewportChange)
   if (toastTimer) clearTimeout(toastTimer)
   if (handlePeekTimer) clearTimeout(handlePeekTimer)
   onResizeEnd() // detach any in-flight resize listeners
@@ -1169,7 +1210,14 @@ function glyphClass(name: string): string {
   touch-action: none; /* own the vertical drag (useEdgeDrag); no page scroll hijack */
 }
 .rd-handle:active { background: #1f1533; }
-.rd-handle.is-mobile { width: 30px; height: 62px; }
+.rd-handle.is-mobile {
+  width: 30px;
+  height: 62px;
+  top: auto;
+  bottom: calc(94px + env(safe-area-inset-bottom, 0px));
+  transform: none;
+  z-index: 290;
+}
 
 /* Faint vertical grip (draggable affordance) — deliberately quiet (low opacity dashes),
    sits above the chevron so the two signifiers don't compete for attention. */
@@ -1211,6 +1259,29 @@ function glyphClass(name: string): string {
   opacity: 1;
   transform: translateY(-50%) translateX(0);
 }
+
+.rd-closed-dock {
+  position: fixed;
+  right: 50%;
+  bottom: calc(94px + env(safe-area-inset-bottom, 0px));
+  z-index: 290;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 0 12px;
+  transform: translateX(50%);
+  border: 1px solid #4a2a7a;
+  border-radius: 999px;
+  background: rgba(22, 15, 34, 0.94);
+  color: #d8c4f0;
+  font-size: 0.66rem;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.rd-closed-dock:hover, .rd-closed-dock:focus-visible { border-color: #8c5bc4; color: #fff; }
+.rd-closed-dock:active { transform: translateX(50%) scale(0.97); }
 
 /* Scrim + panel — mirrors TmuxStatusSheet's overlay idiom, anchored to the right. */
 .rd-scrim {

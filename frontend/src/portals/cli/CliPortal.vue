@@ -57,6 +57,7 @@
       :dw-rollup="overviewRollup"
       :dw-overview-open="overviewOpen"
       :split-allowed="activeTabSplitAllowed"
+      :session-hud="sessionHud"
       @register-surface="registerSurface"
       @agent-state="onTabAgentState"
       @agent-notifications="onTabAgentNotifications"
@@ -136,6 +137,7 @@ import AgentOverview from '@terminal/components/terminal-session/AgentOverview.v
 import LeaderHintBar from '@terminal/components/terminal-session/LeaderHintBar.vue'
 import CliTabContextMenu from '@terminal/components/cli/CliTabContextMenu.vue'
 import DetachedTerminalCard from '@terminal/components/cli/DetachedTerminalCard.vue'
+import { useSessionHud } from '@terminal/composables/cli/useSessionHud'
 
 const runtime = usePortalRuntime({
   portalId: 'cli',
@@ -167,6 +169,15 @@ const {
   activeTmuxWindowIndex, selectActiveTabWindow,
   setSplitRatio, setSplitOrientation, toggleZoom, closeSplitPane, activeTabSplitAllowed,
 } = useCliState(runtime)
+
+// One visible-session snapshot only. The old top-bar number came from the UsageChip's selected
+// fleet window and could silently combine several Codex sessions. This HUD follows the active tab
+// and is passed to its surface status row; UsageChip remains the separate account/usage view.
+const sessionHud = useSessionHud(() => {
+  const tab = activeTab.value
+  if (!tab?.sessionId || tab.remotePeerId) return null
+  return { sessionId: tab.sessionId, cwd: tab.cwd, tool: tab.engine, remote: false }
+})
 
 // ── tab 深链：/portal/cli?t=<tabId>（机制与取舍见 tabDeepLink.ts 头注）──────────────────
 // 读：首次 tabs 就绪时命中 ?t= 则切一次（无效/已关 → 静默落服务端兜底）；写：activeTab 变化即

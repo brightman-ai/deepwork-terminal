@@ -941,6 +941,9 @@ interface Preview {
   /** The exact rel/path handed to filesRaw — reused verbatim by download so path
    *  resolution is identical to what the preview already opened. */
   rel: string
+  /** Optional source location supplied by a terminal link (`path:line[:end]`). */
+  lineStart?: number
+  lineEnd?: number
   result: RawResult
   loading: boolean
   lastUsedAt: number
@@ -985,10 +988,12 @@ function evictPreviewOverflow(): void {
   }
 }
 
-async function previewRel(name: string, absPath: string, rel: string): Promise<void> {
+async function previewRel(name: string, absPath: string, rel: string, lineStart?: number, lineEnd?: number): Promise<void> {
   const key = previewKey(absPath, rel)
   const existing = previews.value.find((p) => p.key === key)
   if (existing) {
+    existing.lineStart = lineStart
+    existing.lineEnd = lineEnd
     activatePreview(key)
     return
   }
@@ -997,7 +1002,7 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   const sessionId = props.sessionId
   const cwd = props.cwd
   const entry: Preview = {
-    key, name, absPath, rel, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
+    key, name, absPath, rel, lineStart, lineEnd, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
   }
   previews.value.push(entry)
   activePreviewKey.value = key
@@ -1046,6 +1051,10 @@ async function previewRel(name: string, absPath: string, rel: string): Promise<v
   } finally {
     const current = previews.value.find((p) => p.key === key)
     if (current) current.loading = false
+    // Loading tabs are retained while their request is in flight so a user can switch among
+    // them. Once any request settles, run the same LRU invariant for success and failure paths;
+    // a burst of slow/404 previews must not leave the tab cache above its eight-document cap.
+    evictPreviewOverflow()
   }
 }
 
@@ -1080,13 +1089,13 @@ function clearPreviews(): void {
 }
 
 /** Open a path supplied by the terminal link provider. */
-function previewPath(path: string): void {
+function previewPath(path: string, lineStart?: number, lineEnd?: number): void {
   const normalized = path.trim()
   if (!normalized) return
   const slash = normalized.lastIndexOf('/')
   const name = slash >= 0 ? normalized.slice(slash + 1) : normalized
   if (!name) return
-  void previewRel(name, normalized, normalized)
+  void previewRel(name, normalized, normalized, lineStart, lineEnd)
 }
 onUnmounted(clearPreviews)
 
@@ -1106,11 +1115,27 @@ function previewErrorText(r: RawResult): string {
   if (r.kind !== 'error') return '预览失败'
   switch (r.status) {
     case 403: return '此文件在工作台锚定目录之外，无法预览（切到该文件所在项目，或在目录树中打开）'
-    case 404: return '文件不存在或已被移动'
+    case 404: {
+      const p = preview.value
+      // A bare terminal link is resolved against the current workbench cwd. A 404 therefore
+      // cannot distinguish “deleted” from “the agent printed a basename from another directory”;
+      // say both possibilities and name the recovery path instead of asserting deletion.
+      if (p && !p.rel.includes('/') && !p.rel.startsWith('/')) {
+        return `当前工作目录找不到 ${p.name}（可能已删除，也可能不在当前目录；请在目录树/搜索中定位）`
+      }
+      return '文件不存在或已被移动'
+    }
     case 400: return '这是一个目录，无法作为文件预览'
   }
   if (r.reason) return `预览失败：${r.reason}`
   return r.status ? `预览失败（HTTP ${r.status}）` : '预览失败（网络错误，请重试）'
+}
+function isBarePreview(p: Preview | null): boolean {
+  return !!p && !p.rel.includes('/') && !p.rel.startsWith('/')
+}
+function searchPreviewFile(name: string): void {
+  activePreviewKey.value = ''
+  treeQuery.value = name
 }
 
 // onDocNavigate — the reader followed an in-doc link ([[wikilink]] or a relative .md path,
@@ -1360,8 +1385,12 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
       </div>
     </div>
 
-    <!-- ── 目录树 ── -->
-    <div v-else class="flex flex-col flex-1 overflow-hidden">
+    <!-- ── 目录树 + 阅读区 ──
+         The tree remains the source surface while a document is open. Desktop uses a stable
+         two-column workspace; narrow/mobile drawers keep the reader as a sheet and expose the
+         same browse button, so the navigation model does not change with the viewport. -->
+    <div v-else class="fp-workspace flex flex-1 min-h-0 overflow-hidden">
+    <div class="fp-browser-pane flex flex-col min-h-0 overflow-hidden">
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
       <DrawerSearchBox
         v-model="treeQuery"
@@ -1718,12 +1747,12 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
       </div>
     </div>
 
-    <!-- ── Preview overlay (slides over the panel; readonly text / placeholder) ── -->
+    <!-- ── Preview reader ── -->
     <Transition name="fp-fade">
-      <div v-if="preview" class="fp-preview absolute inset-0 flex flex-col bg-background z-10" data-testid="fp-preview">
-        <div v-if="previews.length > 1" class="fp-preview-tabs shrink-0 flex items-center gap-1 overflow-x-auto border-b border-border/60 px-2 py-1 no-scrollbar" data-testid="fp-preview-tabs">
+      <div v-if="preview" class="fp-preview fp-preview-pane flex min-h-0 flex-1 flex-col bg-background z-10" data-testid="fp-preview">
+        <div v-if="previews.length" class="fp-preview-tabs shrink-0 flex items-center gap-1 overflow-x-auto border-b border-border/60 px-2 py-1 no-scrollbar" data-testid="fp-preview-tabs">
           <button
-            v-for="tab in previews"
+            v-for="(tab, tabIndex) in previews"
             :key="tab.key"
             type="button"
             class="fp-preview-tab inline-flex min-w-0 max-w-[12rem] items-center gap-1 rounded px-2 py-1 text-[0.62rem]"
@@ -1732,6 +1761,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             :data-testid="`fp-preview-tab-${previewDomKey(tab.key)}`"
             @click="activatePreview(tab.key)"
           >
+            <span class="fp-preview-tab-index" :aria-label="`标签 ${tabIndex === 9 ? 0 : tabIndex + 1}`">{{ tabIndex === 9 ? 0 : tabIndex + 1 }}</span>
             <span class="min-w-0 truncate">{{ tab.name }}</span>
             <span v-if="tab.loading" class="shrink-0 opacity-70">…</span>
             <span
@@ -1794,7 +1824,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <div class="shrink-0 max-h-24 overflow-auto border-b border-border/50 px-3 py-2 text-[0.68rem] leading-relaxed text-muted-foreground break-all select-text" data-testid="fp-preview-location" :title="preview.absPath">{{ locationLabel(preview.absPath) }}</div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
@@ -1838,10 +1868,19 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             >
               <Check v-if="copiedKey === 'perr'" class="inline size-3 text-green-500" /> 复制路径
             </button>
+            <button
+              v-if="isBarePreview(preview)"
+              class="mt-1 px-2 py-1 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50"
+              type="button"
+              data-testid="fp-preview-search-bare"
+              @click="searchPreviewFile(preview.name)"
+            >在当前目录搜索</button>
           </div>
         </div>
       </div>
     </Transition>
+
+    </div>
 
     <div v-if="toastMsg" class="fp-toast">{{ toastMsg }}</div>
 
@@ -1924,6 +1963,22 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 
 <style scoped>
 .fp { position: relative; }
+.fp-workspace { position: relative; }
+.fp-browser-pane { flex: 0 0 min(38%, 320px); min-width: 220px; border-right: 1px solid hsl(var(--border) / 0.7); }
+.fp-preview-pane { min-width: 0; }
+.fp-preview-tab-index {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.05rem; height: 1.05rem; flex: 0 0 auto;
+  border: 1px solid hsl(var(--border)); border-radius: 999px;
+  color: hsl(var(--muted-foreground)); font-size: 0.55rem; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.fp-preview-tab.bg-accent .fp-preview-tab-index { border-color: hsl(var(--primary) / 0.7); color: hsl(var(--foreground)); }
+@media (max-width: 768px) {
+  .fp-workspace { display: block; overflow: hidden; }
+  .fp-browser-pane { width: 100%; height: 100%; border-right: 0; }
+  .fp-preview-pane { position: absolute; inset: 0; }
+}
 /* Horizontal chip row: scrollable but without a visible scrollbar (mobile). */
 .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }

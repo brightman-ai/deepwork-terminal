@@ -89,10 +89,10 @@
           <!-- 窄屏降级：这一格只占剩余宽度（flex:1 + min-width:0），文字超出就省略号，永远不换行、
                不把动作或右侧心跳挤走；再窄先砍 cwd 档（价值最低），最后整格收起，按钮一个不砍。 -->
           <div
-            v-if="surfaceSlotContent.text"
+            v-if="surfaceSlotContent.text || sessionMetricText"
             class="ssr-note"
             :class="`ssr-note--${surfaceSlotContent.tier}`"
-            :title="surfaceSlotContent.text"
+            :title="[surfaceSlotContent.text, sessionMetricText].filter(Boolean).join(' · ')"
             :data-tier="surfaceSlotContent.tier"
             data-testid="surface-note"
           ><span
@@ -103,7 +103,7 @@
             :title="surfaceDotLabel"
             :data-status="surfaceDotStatus"
             data-testid="surface-status-dot"
-          /><span class="ssr-note-text">{{ surfaceSlotContent.text }}</span></div>
+          /><span v-if="surfaceSlotContent.text" class="ssr-note-text">{{ surfaceSlotContent.text }}</span><span v-if="sessionMetricText" class="ssr-session-metric">{{ sessionMetricText }}</span></div>
         </template>
       </div>
       <!-- 数字 = 体验延迟（按键/发送 → 回显画到屏幕上，近 20 次中位），不是心跳往返；悬停给分段与纯
@@ -602,6 +602,7 @@ import { createLatencyTracker, expectsEcho, latencyView, sameSummary, type Laten
 import { currentVisibilityEpoch } from '@terminal/composables/cli/renderSampleGate'
 import type { WSControlMessage, CellCoord, AnchorState, WSConnectionStatus } from '@terminal/types/terminal'
 import type { AgentState, AgentTool, TmuxWindowState, TmuxPaneState } from '@terminal/types/terminal'
+import type { SessionHudSnapshot } from '@terminal/composables/cli/useSessionHud'
 import { REPLAY_RESET_SEQUENCE, parseServerGrid } from '@terminal/types/terminal'
 
 // ─── Props & Emits ────────────────────────────────────────────────────────────
@@ -643,6 +644,8 @@ const props = defineProps<{
    * 落在某个表面**之内**的粘贴永远只归那个表面，与本开关无关。不传 = true。
    */
   pasteFallback?: boolean
+  /** Active local-session snapshot; the host leaves this null for hidden/remote tabs. */
+  sessionHud?: SessionHudSnapshot | null
 }>()
 
 const emit = defineEmits<{
@@ -974,6 +977,36 @@ const surfaceSlotContent = computed(() =>
   }),
 )
 
+function moneyLabel(amount: number, currency: string): string {
+  const symbol = currency === 'USD' ? '$' : currency === 'CNY' ? '¥' : currency ? `${currency} ` : ''
+  return `${symbol}${amount < 0.01 ? amount.toFixed(4) : amount.toFixed(2)}`
+}
+
+/**
+ * The status row is session-scoped: output tokens / elapsed response time for THIS surface,
+ * followed by the model-equivalent cost from the same session snapshot. It deliberately says
+ * “输出” so an aggregate/window value can never be mistaken for input speed or fleet speed.
+ */
+const sessionMetricText = computed(() => {
+  const parts: string[] = []
+  const state = agentState.value
+  const started = Date.parse(state?.startedAt || '')
+  const updated = Date.parse(state?.updatedAt || '')
+  const seconds = started > 0 && updated > started ? (updated - started) / 1000 : 0
+  if (seconds > 0 && (state?.outputTokens ?? 0) > 0) {
+    parts.push(`输出 ${(state!.outputTokens / seconds).toFixed(1)} tok/s`)
+  }
+  if (props.sessionHud?.model && !parts.some((part) => part.includes(props.sessionHud!.model))) {
+    parts.push(props.sessionHud.model)
+  }
+  if (props.sessionHud?.totalCost != null) {
+    parts.push(`≈${moneyLabel(props.sessionHud.totalCost, props.sessionHud.currency)}`)
+  } else if (props.sessionHud?.costCoverage === 'unpriced') {
+    parts.push('费用待定')
+  }
+  return parts.join(' · ')
+})
+
 /**
  * 状态色点。走 STATUS_COLOR / STATUS_MOTION 这一套 SSOT（和标签点、总览卡片同一套颜色与动效），
  * 状态则来自上面那同一帧 —— 于是"状态"和"内容"合成一行，不再单独渲染一枚复述标签栏的徽标。
@@ -1159,14 +1192,14 @@ watch(validPaneKeys, (valid) => {
 // Per-instance component refs (drag-resized panel width + panel DOM root for selection
 // containment checks below) — a plain (non-reactive) map is fine: each property READ inside a
 // computed/watch still tracks the underlying exposed refs reactively regardless of the map itself.
-const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string) => void } | null> = {}
+const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string, lineStart?: number, lineEnd?: number) => void } | null> = {}
 function setDrawerRef(key: string, el: unknown): void {
-  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string) => void }
+  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string, lineStart?: number, lineEnd?: number) => void }
   else delete drawerInstanceRefs[key]
 }
 
-function onTerminalFilePath(path: string): void {
-  drawerInstanceRefs[currentPaneKey.value]?.openFilePreview?.(path)
+function onTerminalFilePath(path: string, lineStart?: number, lineEnd?: number): void {
+  drawerInstanceRefs[currentPaneKey.value]?.openFilePreview?.(path, lineStart, lineEnd)
 }
 
 // ── Selection keep-alive across pane switches ───────────────────────────────────────────────
@@ -3136,6 +3169,13 @@ defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, o
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.ssr-session-metric {
+  flex-shrink: 0;
+  color: hsl(var(--foreground, 0 0% 92%) / 0.78);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 /* cwd 档是这行里价值最低的一句（它只回答"我在哪"），所以它也是窄屏第一个被砍的。 */
 .ssr-note--cwd { opacity: 0.85; }
