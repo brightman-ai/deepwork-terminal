@@ -638,6 +638,47 @@ func TestTheOnlyViewerCanStillWithdraw(t *testing.T) {
 	}
 }
 
+func TestObserverDoesNotAccumulateOutputAndReactivationRequestsOneResync(t *testing.T) {
+	sess := &Session{ID: "observer-output", viewers: map[string]*viewer{}}
+	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+2)}
+	sess.viewers["tab"] = v
+	if err := sess.SetViewerSize("tab", 120, 40); err != nil {
+		t.Fatalf("initial display: %v", err)
+	}
+	// The initial visible declaration queues a resize control frame. Drain it before
+	// checking the observer contract: hidden PTY data must be dropped.
+	for {
+		select {
+		case <-v.ch:
+		default:
+			goto drained
+		}
+	}
+	// label for the non-blocking drain above
+drained:
+	if err := sess.SetViewerSize("tab", 0, 0); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	sess.subMu.RLock()
+	sess.fanOutLocked([]byte("hidden output"))
+	sess.subMu.RUnlock()
+	select {
+	case frame := <-v.ch:
+		t.Fatalf("observer accumulated hidden frame: %+v", frame)
+	default:
+	}
+	if err := sess.SetViewerSize("tab", 120, 40); err != nil {
+		t.Fatalf("reactivate: %v", err)
+	}
+	if !v.stale.Load() {
+		t.Fatal("reactivation did not mark the viewer for one restore")
+	}
+	f := <-v.ch
+	if !f.Resync {
+		t.Fatalf("reactivation queued %+v, want resync", f)
+	}
+}
+
 // TestAPreemptedConnectionCannotTakeTheGridBack is the race codex found by reading, not by
 // running: preemption, subscribing and claiming the grid are three separate steps, so two
 // browsers arriving together interleave across them.

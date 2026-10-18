@@ -57,7 +57,8 @@ type viewer struct {
 	// stale is set when this viewer lost output — its queue was full when a frame arrived —
 	// and cleared by syncViewer. While set, the viewer is sent no output at all. See
 	// markStaleLocked.
-	stale atomic.Bool
+	stale       atomic.Bool
+	visibleOnce bool
 }
 
 // viewerFrame is one thing that happened on this session, carried to a viewer in the order
@@ -74,6 +75,9 @@ type viewerFrame struct {
 	// Resync says the viewer must be brought to the present again (syncViewer) before anything
 	// else is written to it: it lost output, or the restore point changed under it.
 	Resync bool
+	// Fast is set when an observer tab returns. Its visible screen is authoritative, but replaying
+	// thousands of scrollback lines before showing it recreates the reported slow restore.
+	Fast bool
 }
 
 // Viewport returns the size this server declares on its attachment: the window of the
@@ -104,6 +108,13 @@ func (s *Session) Viewport() muxd.Grid {
 	s.subMu.RLock()
 	defer s.subMu.RUnlock()
 	return s.viewportLocked()
+}
+
+func (s *Session) viewerIsObserver(subID string) bool {
+	s.subMu.RLock()
+	defer s.subMu.RUnlock()
+	v, ok := s.viewers[subID]
+	return !ok || v.size.Zero()
 }
 
 // viewportLocked requires subMu (read or write) to be held.
@@ -215,8 +226,17 @@ func (s *Session) SetViewerSize(subID string, cols, rows int) error {
 	}
 	s.subMu.Lock()
 	v, ok := s.viewers[subID]
+	wasObserver := ok && v.size.Zero()
+	wasDisplayed := ok && v.visibleOnce
 	if ok {
 		v.size = muxd.Grid{Cols: cols, Rows: rows}
+		if cols > 0 && rows > 0 {
+			v.visibleOnce = true
+		}
+		if wasObserver && wasDisplayed && cols > 0 && rows > 0 {
+			v.stale.Store(true)
+			pushViewerControl(v.ch, viewerFrame{Resync: true, Fast: true})
+		}
 	}
 	s.subMu.Unlock()
 	if !ok {
@@ -326,6 +346,9 @@ func (s *Session) noteDeclared(g muxd.Grid) {
 // see viewerControlReserve.
 func (s *Session) fanOutLocked(data []byte) {
 	for _, v := range s.viewers {
+		if v.size.Zero() {
+			continue // observer: keep the socket, drop hidden PTY output
+		}
 		if v.stale.Load() {
 			continue
 		}

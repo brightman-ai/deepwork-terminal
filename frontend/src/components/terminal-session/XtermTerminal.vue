@@ -60,7 +60,7 @@ import {
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
 import type { RendererCause } from '@terminal/composables/cli/renderHealth'
-import { findTerminalFileLinks } from './terminalFileLinks'
+import { findTerminalFileLinks, terminalCellRange } from './terminalFileLinks'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -560,13 +560,18 @@ function initTerminal() {
   const provider: ILinkProvider = {
     provideLinks: (bufferLineNumber, callback) => {
       const line = terminal?.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true) ?? ''
+      const bufferLine = terminal?.buffer.active.getLine(bufferLineNumber - 1)
       const links = findTerminalFileLinks(line)
       callback(links.length ? links.map((link) => ({
         text: link.path,
-        range: {
-          start: { x: link.start + 1, y: bufferLineNumber },
-          end: { x: link.end + 1, y: bufferLineNumber },
-        },
+        range: (() => {
+          const cells = bufferLine ? Array.from({ length: bufferLine.length }, (_, x) => {
+            const cell = bufferLine.getCell(x)
+            return { chars: cell?.getChars() ?? '', width: cell?.getWidth() ?? 1 }
+          }) : []
+          const span = terminalCellRange(cells, link.start, link.path.length)
+          return { start: { x: span.start, y: bufferLineNumber }, end: { x: span.end, y: bufferLineNumber } }
+        })(),
         activate: () => emit('file-path', link.path),
       })) : undefined)
     },

@@ -290,6 +290,11 @@ git pull
 ./build.sh
 ```
 
+When a local source commit and `origin/main` both changed the embedded frontend,
+use `scripts/rebase-main-generated.sh`. It treats `internal/spa/dist/` as generated,
+finishes the source rebase, and rebuilds the embedded files instead of resolving
+hash-named Vite files by hand.
+
 Requires: Go 1.26+, Node.js 18+, npm.
 
 > **Headless servers**: `npm install` browser-download hooks (Playwright/Puppeteer) are

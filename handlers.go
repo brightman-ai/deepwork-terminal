@@ -732,11 +732,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return
 				}
+				// Hidden tabs keep their socket but do not consume stale PTY output.
+				// Reactivation queues one Resync frame and restores the current screen.
+				if sess.viewerIsObserver(subID) && !frame.Resync {
+					continue
+				}
 				// This viewer lost output, or its restore point changed under it: everything it
 				// shows is suspect, so it is brought to the present again — by the same routine as
 				// a connect, and nothing queued before this point is written (syncViewer drops it).
 				if frame.Resync {
-					if _, err := s.restoreViewer(ctx, attachLogCtx, conn, sess, subID, "resync", &boundary); err != nil {
+					reason := "resync"
+					if frame.Fast {
+						reason = "resync-fast"
+					}
+					if _, err := s.restoreViewer(ctx, attachLogCtx, conn, sess, subID, reason, &boundary); err != nil {
 						logger.Debug("ws resync failed", "id", id, "error", err)
 						return
 					}
