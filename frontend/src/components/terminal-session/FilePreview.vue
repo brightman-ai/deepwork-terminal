@@ -20,7 +20,7 @@
  *   · in-app doc-to-doc navigation: [[wikilinks]] + relative .md links open the target in-place.
  */
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
-import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus, Sun, Moon, Eye, Code2 } from 'lucide-vue-next'
+import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus, Sun, Moon, Eye, Code2, ExternalLink } from 'lucide-vue-next'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { renderMarkdown } from '@terminal/utils/markdown'
 import { highlightCode, addCopyButtons, renderDiagrams, renderMath, loadHljs } from '@terminal/utils/markdownEnhance'
@@ -76,6 +76,11 @@ const canRenderHtml = computed(() => ['html', 'htm'].includes(ext.value) && !!pr
 const htmlRendered = ref(false)
 watch(() => [props.name, props.renderSrc], () => { htmlRendered.value = false })
 const showHtmlFrame = computed(() => canRenderHtml.value && htmlRendered.value)
+function openHtmlInBrowser(): void {
+  if (!props.renderSrc) return
+  const win = window.open(props.renderSrc, '_blank', 'noopener,noreferrer')
+  if (!win) emit('toast', '浏览器阻止了新窗口，请允许后重试')
+}
 
 // ── markdown pipeline ──────────────────────────────────────────────────────────────
 // Doc-relative images (`fig.png`, `../a/fig.png`) resolve against the doc's dir — the same
@@ -502,6 +507,14 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
         <Code2 v-if="htmlRendered" class="size-3.5" />
         <Eye v-else class="size-3.5" />
       </button>
+      <button
+        v-if="canRenderHtml"
+        class="fp-tb-btn"
+        type="button"
+        title="用浏览器打开（独立页面）"
+        data-testid="file-preview-html-browser"
+        @click="openHtmlInBrowser"
+      ><ExternalLink class="size-3.5" /></button>
       <button v-if="toc.length" class="fp-tb-btn" :class="{ 'is-on': tocOpen }" type="button" title="目录" data-testid="file-preview-toc" @click="tocOpen = !tocOpen"><List class="size-3.5" /></button>
       <button class="fp-tb-btn" :class="{ 'is-on': findOpen }" type="button" title="文档内查找" data-testid="file-preview-find" @click="toggleFind"><Search class="size-3.5" /></button>
       <button class="fp-tb-btn" type="button" title="缩小字号" @click="bumpFont(-0.1)"><Minus class="size-3.5" /></button>

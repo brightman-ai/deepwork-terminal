@@ -39,8 +39,9 @@
         class="rd-scrim"
         :class="{
           'is-split': layout === 'split',
-          'is-mobile': isMobile && layout !== 'split',
-          'is-desktop': !isMobile && layout !== 'split',
+          'is-floating': layout === 'floating',
+          'is-mobile': isMobile && layout !== 'split' && layout !== 'floating',
+          'is-desktop': !isMobile && layout !== 'split' && layout !== 'floating',
           'rd-dock-left': dockLeft,
         }"
         :style="scrimStyle"
@@ -58,7 +59,7 @@
             @pointerdown="onResizeStart"
           ></div>
 
-          <div class="rd-header">
+          <div class="rd-header" data-testid="resource-drawer-drag-handle" @pointerdown="onFloatDragStart">
             <span class="rd-title">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#c080ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" />
@@ -76,7 +77,7 @@
               class="rd-layout-toggle"
               role="group"
               aria-label="布局模式"
-              :title="`当前：${layoutMode === 'auto' ? '自动' : layoutMode === 'split' ? '双栏' : '浮层'}`"
+              :title="`当前：${layoutMode === 'auto' ? '自动' : layoutMode === 'split' ? '双栏' : layoutMode === 'floating' ? '浮窗' : '浮层'}`"
               data-testid="rd-layout-toggle"
             >
               <button
@@ -96,6 +97,14 @@
                 data-testid="rd-layout-overlay"
                 @click="$emit('update:layout-mode', 'overlay')"
               >浮层</button>
+              <button
+                type="button"
+                class="rd-layout-btn"
+                :class="{ 'is-active': layout === 'floating' }"
+                title="浮窗：可在终端中自由拖动和调整大小"
+                data-testid="rd-layout-floating"
+                @click="$emit('update:layout-mode', 'floating')"
+              >浮窗</button>
             </div>
             <!-- Dock side: low-frequency, so it lives among the other chrome toggles (not a
                  prominent control). The icon shows the side it will MOVE TO (affordance, not state). -->
@@ -142,6 +151,8 @@
             </button>
           </div>
 
+
+            <div v-if="layout === 'floating'" class="rd-float-resize" data-testid="resource-drawer-float-resize" title="拖拽调整大小" @pointerdown="onFloatResizeStart"></div>
 
             <div class="rd-tabs">
               <button
@@ -408,7 +419,7 @@ import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchB
 // a drawer mounted without this prop (e.g. a future non-tabbed host) still works standalone.
 //
 // layout / composeReserve (right-drawer dual-mode, design doc §7): the HOST (CliTerminalSurface)
-// owns the single `drawerLayout` SSOT computed(viewport, open) → 'split' | 'overlay' — this
+// owns the single `drawerLayout` SSOT computed(viewport, open) → 'split' | 'overlay' | 'floating' — this
 // component just RENDERS whichever mode it's told. 'split' (≥900px, host has already reserved a
 // matching-width gutter in the terminal column): the scrim goes fully transparent/click-through
 // and the panel is a plain docked column — no bottom reservation needed, the squeeze already keeps
@@ -437,8 +448,8 @@ const props = withDefaults(defineProps<{
   isActive?: boolean
   cwd?: string
   tool?: AgentTool
-  layout?: 'split' | 'overlay'
-  layoutMode?: 'auto' | 'split' | 'overlay'
+  layout?: 'split' | 'overlay' | 'floating'
+  layoutMode?: 'auto' | 'split' | 'overlay' | 'floating'
   splitDisabled?: boolean
   composeReserve?: number
 }>(), {
@@ -456,7 +467,7 @@ const emit = defineEmits<{
   // compose-draft: open the ComposeBar with this text inserted for editing (重发).
   (e: 'compose-draft', text: string): void
   // update:layout-mode: user toggled 双栏/浮层 in the header — host persists + re-derives `layout`.
-  (e: 'update:layout-mode', mode: 'auto' | 'split' | 'overlay'): void
+  (e: 'update:layout-mode', mode: 'auto' | 'split' | 'overlay' | 'floating'): void
 }>()
 
 const { isMobile } = useDeviceDetection()
@@ -602,7 +613,31 @@ watch(topTab, (nv, ov) => {
 // Fullscreen toggle: expand the panel to the whole viewport (for reading long files /
 // the overview), independent of the persisted drag-width which it restores on exit.
 const isFull = ref(false)
-const panelStyle = computed(() => ({ width: isFull.value ? '100vw' : `${panelWidth.value}px` }))
+interface FloatRect { x: number; y: number; w: number; h: number }
+const FLOAT_KEY = 'dw.rd.floatRect'
+function defaultFloatRect(): FloatRect {
+  const w = Math.min(720, Math.max(420, Math.round(window.innerWidth * 0.42)))
+  const h = Math.min(720, Math.max(360, Math.round(window.innerHeight * 0.72)))
+  return { x: Math.max(12, window.innerWidth - w - 24), y: Math.max(12, Math.round((window.innerHeight - h) / 2)), w, h }
+}
+function clampFloatRect(r: FloatRect): FloatRect {
+  const w = Math.max(360, Math.min(Math.max(360, window.innerWidth - 24), r.w))
+  const h = Math.max(280, Math.min(Math.max(280, window.innerHeight - 24), r.h))
+  return { x: Math.max(12, Math.min(window.innerWidth - w - 12, r.x)), y: Math.max(12, Math.min(window.innerHeight - h - 12, r.y)), w, h }
+}
+function loadFloatRect(): FloatRect {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FLOAT_KEY) || '') as Partial<FloatRect>
+    if ([parsed.x, parsed.y, parsed.w, parsed.h].every((v) => typeof v === 'number' && Number.isFinite(v))) {
+      return clampFloatRect(parsed as FloatRect)
+    }
+  } catch { /* first run */ }
+  return defaultFloatRect()
+}
+const floatRect = ref<FloatRect>(loadFloatRect())
+const panelStyle = computed(() => props.layout === 'floating'
+  ? { position: 'fixed', left: `${floatRect.value.x}px`, top: `${floatRect.value.y}px`, width: `${floatRect.value.w}px`, height: `${floatRect.value.h}px` }
+  : { width: isFull.value ? '100vw' : `${panelWidth.value}px` })
 function toggleFull(): void { isFull.value = !isFull.value }
 
 // ── Dual-mode layout geometry (design doc §7) ───────────────────────────────────────
@@ -624,7 +659,7 @@ const scrimStyle = computed(() => {
 // squeeze gutter — one number, one direction of truth: the panel's own width state stays owned
 // here (incl. its localStorage persistence); the host never duplicates or guesses it.
 const winWidth = ref(window.innerWidth)
-function onWinResize(): void { winWidth.value = window.innerWidth }
+function onWinResize(): void { winWidth.value = window.innerWidth; floatRect.value = clampFloatRect(floatRect.value) }
 const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : panelWidth.value))
 // panelRootEl (drawer-per-pane, 20260710-124400): the host needs THIS instance's panel root DOM
 // node to tell whether a live text Selection sits inside it before switching panes away (there is
@@ -644,6 +679,49 @@ defineExpose({ effectivePanelWidthPx, panelRootEl, openFilePreview })
 let resizing = false
 let resizeStartX = 0
 let resizeStartW = 0
+let floating = false
+let floatResizing = false
+let floatStartX = 0
+let floatStartY = 0
+let floatStartRect: FloatRect = floatRect.value
+function persistFloatRect(): void { localStorage.setItem(FLOAT_KEY, JSON.stringify(floatRect.value)) }
+function onFloatDragStart(e: PointerEvent): void {
+  if (props.layout !== 'floating' || (e.target as HTMLElement).closest('button, input, a')) return
+  floating = true
+  floatStartX = e.clientX; floatStartY = e.clientY; floatStartRect = { ...floatRect.value }
+  document.documentElement.classList.add('dw-resizing')
+  window.addEventListener('pointermove', onFloatDragMove, { passive: false })
+  window.addEventListener('pointerup', onFloatDragEnd)
+  window.addEventListener('pointercancel', onFloatDragEnd)
+  e.preventDefault()
+}
+function onFloatDragMove(e: PointerEvent): void {
+  if (!floating) return
+  e.preventDefault()
+  floatRect.value = clampFloatRect({ ...floatStartRect, x: floatStartRect.x + e.clientX - floatStartX, y: floatStartRect.y + e.clientY - floatStartY })
+}
+function onFloatDragEnd(): void {
+  if (!floating) return
+  floating = false; document.documentElement.classList.remove('dw-resizing'); persistFloatRect()
+  window.removeEventListener('pointermove', onFloatDragMove); window.removeEventListener('pointerup', onFloatDragEnd); window.removeEventListener('pointercancel', onFloatDragEnd)
+}
+function onFloatResizeStart(e: PointerEvent): void {
+  if (props.layout !== 'floating') return
+  floatResizing = true; floatStartX = e.clientX; floatStartY = e.clientY; floatStartRect = { ...floatRect.value }
+  document.documentElement.classList.add('dw-resizing')
+  window.addEventListener('pointermove', onFloatResizeMove, { passive: false }); window.addEventListener('pointerup', onFloatResizeEnd); window.addEventListener('pointercancel', onFloatResizeEnd)
+  e.preventDefault(); e.stopPropagation()
+}
+function onFloatResizeMove(e: PointerEvent): void {
+  if (!floatResizing) return
+  e.preventDefault()
+  floatRect.value = clampFloatRect({ ...floatStartRect, w: floatStartRect.w + e.clientX - floatStartX, h: floatStartRect.h + e.clientY - floatStartY })
+}
+function onFloatResizeEnd(): void {
+  if (!floatResizing) return
+  floatResizing = false; document.documentElement.classList.remove('dw-resizing'); persistFloatRect()
+  window.removeEventListener('pointermove', onFloatResizeMove); window.removeEventListener('pointerup', onFloatResizeEnd); window.removeEventListener('pointercancel', onFloatResizeEnd)
+}
 // Pointer Events unify mouse + touch + pen, and setPointerCapture routes every
 // pointermove/up to the handle even as the pointer crosses the terminal / the
 // pointer-events:none desktop scrim — the old split mouse/touch + window listeners
@@ -1133,6 +1211,8 @@ function glyphClass(name: string): string {
    the compose band non-overlapped on a DIFFERENT axis (width, not height). */
 .rd-scrim.is-split { background: transparent; pointer-events: none; }
 .rd-scrim.is-split .rd-panel { pointer-events: auto; }
+.rd-scrim.is-floating { background: transparent; pointer-events: none; }
+.rd-scrim.is-floating .rd-panel { pointer-events: auto; }
 
 .rd-panel {
   position: relative; /* anchors the left-edge resize handle */
@@ -1150,10 +1230,12 @@ function glyphClass(name: string): string {
      this the 工作台 title + tabs sit UNDER the Dynamic Island and are unreadable. */
   padding-top: env(safe-area-inset-top, 0px);
 }
+.is-floating .rd-header { cursor: move; }
 /* Width comes from the inline :style (panelStyle, persisted + drag-resized). The
    desktop/mobile/split rules below only set height + the mobile viewport guard. */
 .is-desktop .rd-panel { height: 100%; }
 .is-split .rd-panel { height: 100%; }
+.is-floating .rd-panel { max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); border: 1px solid #3a2860; border-radius: 10px; box-shadow: 0 18px 60px rgba(0,0,0,.62); }
 .is-mobile .rd-panel {
   max-width: calc(100vw - 24px);
   height: 100%;
@@ -1185,6 +1267,26 @@ function glyphClass(name: string): string {
   border-radius: 3px;
   background: rgba(192, 128, 255, 0.32);
   transition: background 0.15s ease, height 0.15s ease;
+}
+
+.rd-float-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  z-index: 45;
+}
+.rd-float-resize::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid rgba(192,128,255,.6);
+  border-bottom: 2px solid rgba(192,128,255,.6);
 }
 .rd-resize:hover::before,
 .rd-resize:active::before {
