@@ -132,15 +132,12 @@
             <button
               class="rd-full"
               :title="isFull ? '退出全屏' : '全屏'"
+              :aria-label="isFull ? '退出全屏' : '全屏'"
               data-testid="resource-drawer-fullscreen"
               @click="toggleFull"
             >
-              <svg v-if="!isFull" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" />
-              </svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" /><line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" />
-              </svg>
+              <Maximize2 v-if="!isFull" :size="15" aria-hidden="true" />
+              <Minimize2 v-else :size="15" aria-hidden="true" />
             </button>
             <!-- Collapse-to-right: this MINIMIZES (v-show) — it never destroys panel state. A
                  single › (not the old double-chevron ») mirrors the closed handle's single ‹,
@@ -152,7 +149,7 @@
           </div>
 
 
-            <div v-if="layout === 'floating'" class="rd-float-resize" data-testid="resource-drawer-float-resize" title="拖拽调整大小" @pointerdown="onFloatResizeStart"></div>
+            <div v-if="layout === 'floating' && !isFull" class="rd-float-resize" data-testid="resource-drawer-float-resize" title="拖拽调整大小" @pointerdown="onFloatResizeStart"></div>
 
             <div class="rd-tabs">
               <button
@@ -333,6 +330,19 @@
             <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open && isActive && topTab === 'overview'" />
           </div>
 
+          <button
+            class="rd-dock-fab"
+            type="button"
+            title="收起工作台"
+            aria-label="收起工作台"
+            data-testid="resource-drawer-dock"
+            @click="$emit('update:open', false)"
+          >
+            <ChevronLeft v-if="dockLeft" :size="15" aria-hidden="true" />
+            <ChevronRight v-else :size="15" aria-hidden="true" />
+            <span>收起工作台</span>
+          </button>
+
           <div v-if="toast" class="rd-toast">{{ toast }}</div>
         </div>
       </div>
@@ -387,7 +397,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, Lock, LockOpen, PanelLeft, PanelRight } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Lock, LockOpen, Maximize2, Minimize2, PanelLeft, PanelRight } from 'lucide-vue-next'
 import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { useDrawerDock } from '@terminal/composables/cli/useDrawerDock'
@@ -617,13 +627,15 @@ interface FloatRect { x: number; y: number; w: number; h: number }
 const FLOAT_KEY = 'dw.rd.floatRect'
 function defaultFloatRect(): FloatRect {
   const w = Math.min(720, Math.max(420, Math.round(window.innerWidth * 0.42)))
-  const h = Math.min(720, Math.max(360, Math.round(window.innerHeight * 0.72)))
-  return { x: Math.max(12, window.innerWidth - w - 24), y: Math.max(12, Math.round((window.innerHeight - h) / 2)), w, h }
+  const availableH = Math.max(280, window.innerHeight - (isMobile.value ? props.composeReserve : 0))
+  const h = Math.min(720, Math.max(360, Math.round(availableH * 0.72)))
+  return { x: Math.max(12, window.innerWidth - w - 24), y: Math.max(12, Math.round((availableH - h) / 2)), w, h }
 }
 function clampFloatRect(r: FloatRect): FloatRect {
   const w = Math.max(360, Math.min(Math.max(360, window.innerWidth - 24), r.w))
-  const h = Math.max(280, Math.min(Math.max(280, window.innerHeight - 24), r.h))
-  return { x: Math.max(12, Math.min(window.innerWidth - w - 12, r.x)), y: Math.max(12, Math.min(window.innerHeight - h - 12, r.y)), w, h }
+  const availableH = Math.max(280, window.innerHeight - (isMobile.value ? props.composeReserve : 0))
+  const h = Math.max(280, Math.min(Math.max(280, availableH - 24), r.h))
+  return { x: Math.max(12, Math.min(window.innerWidth - w - 12, r.x)), y: Math.max(12, Math.min(availableH - h - 12, r.y)), w, h }
 }
 function loadFloatRect(): FloatRect {
   try {
@@ -635,9 +647,17 @@ function loadFloatRect(): FloatRect {
   return defaultFloatRect()
 }
 const floatRect = ref<FloatRect>(loadFloatRect())
-const panelStyle = computed(() => props.layout === 'floating'
-  ? { position: 'fixed', left: `${floatRect.value.x}px`, top: `${floatRect.value.y}px`, width: `${floatRect.value.w}px`, height: `${floatRect.value.h}px` }
-  : { width: isFull.value ? '100vw' : `${panelWidth.value}px` })
+const panelStyle = computed<Record<string, string>>(() => {
+  if (props.layout === 'floating') {
+    if (isFull.value) {
+      const fullH = Math.max(280, window.innerHeight - (isMobile.value ? props.composeReserve : 0) - 24)
+      return { position: 'fixed', left: '12px', top: '12px', width: 'calc(100vw - 24px)', height: `${fullH}px` } as Record<string, string>
+    }
+    const r = clampFloatRect(floatRect.value)
+    return { position: 'fixed', left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` } as Record<string, string>
+  }
+  return { width: isFull.value ? '100vw' : `${panelWidth.value}px` } as Record<string, string>
+})
 function toggleFull(): void { isFull.value = !isFull.value }
 
 // ── Dual-mode layout geometry (design doc §7) ───────────────────────────────────────
@@ -686,7 +706,7 @@ let floatStartY = 0
 let floatStartRect: FloatRect = floatRect.value
 function persistFloatRect(): void { localStorage.setItem(FLOAT_KEY, JSON.stringify(floatRect.value)) }
 function onFloatDragStart(e: PointerEvent): void {
-  if (props.layout !== 'floating' || (e.target as HTMLElement).closest('button, input, a')) return
+  if (props.layout !== 'floating' || isFull.value || (e.target as HTMLElement).closest('button, input, a')) return
   floating = true
   floatStartX = e.clientX; floatStartY = e.clientY; floatStartRect = { ...floatRect.value }
   document.documentElement.classList.add('dw-resizing')
@@ -706,7 +726,7 @@ function onFloatDragEnd(): void {
   window.removeEventListener('pointermove', onFloatDragMove); window.removeEventListener('pointerup', onFloatDragEnd); window.removeEventListener('pointercancel', onFloatDragEnd)
 }
 function onFloatResizeStart(e: PointerEvent): void {
-  if (props.layout !== 'floating') return
+  if (props.layout !== 'floating' || isFull.value) return
   floatResizing = true; floatStartX = e.clientX; floatStartY = e.clientY; floatStartRect = { ...floatRect.value }
   document.documentElement.classList.add('dw-resizing')
   window.addEventListener('pointermove', onFloatResizeMove, { passive: false }); window.addEventListener('pointerup', onFloatResizeEnd); window.addEventListener('pointercancel', onFloatResizeEnd)
@@ -1230,7 +1250,7 @@ function glyphClass(name: string): string {
      this the 工作台 title + tabs sit UNDER the Dynamic Island and are unreadable. */
   padding-top: env(safe-area-inset-top, 0px);
 }
-.is-floating .rd-header { cursor: move; }
+.is-floating .rd-header { cursor: move; touch-action: none; }
 /* Width comes from the inline :style (panelStyle, persisted + drag-resized). The
    desktop/mobile/split rules below only set height + the mobile viewport guard. */
 .is-desktop .rd-panel { height: 100%; }
@@ -1391,16 +1411,43 @@ function glyphClass(name: string): string {
 .rd-full {
   display: inline-flex; align-items: center; justify-content: center;
   background: none; border: none; color: #6f5a90; cursor: pointer;
-  padding: 0 4px; flex-shrink: 0;
+  width: 30px; height: 30px; padding: 0; border-radius: 7px; flex-shrink: 0;
 }
+.rd-full:hover, .rd-full:focus-visible { color: #e0d4f0; background: rgba(192, 128, 255, 0.12); }
 .rd-full:active { color: #c080ff; }
 .rd-close {
   display: inline-flex; align-items: center; justify-content: center;
   background: none; border: none; color: #6f5a90; cursor: pointer;
-  line-height: 1; padding: 0 2px; flex-shrink: 0;
+  width: 30px; height: 30px; border-radius: 7px; line-height: 1; padding: 0; flex-shrink: 0;
 }
 .rd-close-ico { width: 17px; height: 17px; }
+.rd-close:hover, .rd-close:focus-visible { color: #e0d4f0; background: rgba(192, 128, 255, 0.12); }
 .rd-close:active { color: #c080ff; }
+
+/* A second, forgiving collapse affordance. The top icon remains for desktop muscle memory;
+   this bottom pill is the primary touch target on phones and stays above long readers. */
+.rd-dock-fab {
+  position: absolute;
+  left: 50%;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 0 12px;
+  transform: translateX(-50%);
+  border: 1px solid #4a2a7a;
+  border-radius: 999px;
+  background: rgba(22, 15, 34, 0.94);
+  color: #d8c4f0;
+  font-size: 0.66rem;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.rd-dock-fab:hover, .rd-dock-fab:focus-visible { border-color: #8c5bc4; color: #fff; }
+.rd-dock-fab:active { transform: translateX(-50%) scale(0.97); }
 
 /* ── Layout mode toggle (discoverability fix, design doc §7 signifier notes) ───────────
    A 2-segment pill next to the lock/full/close cluster: signifier (highlights whichever

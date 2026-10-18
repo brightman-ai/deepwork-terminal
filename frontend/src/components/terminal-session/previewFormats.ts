@@ -75,7 +75,8 @@ const FORMATS: Record<string, FormatSpec> = {
   md: { cat: 'doc', kind: 'markdown', fetch: 'text' },
   markdown: { cat: 'doc', kind: 'markdown', fetch: 'text' },
   mdx: { cat: 'doc', kind: 'markdown', fetch: 'text' },
-  txt: TXT('doc'), rst: TXT('doc'), adoc: TXT('doc'), org: TXT('doc'),
+  txt: TXT('doc'), log: TXT('doc'), text: TXT('doc'), rst: TXT('doc'), adoc: TXT('doc'), org: TXT('doc'),
+  srt: TXT('doc'), vtt: TXT('doc'),
   pdf: { cat: 'doc', kind: 'pdf', fetch: 'bytes' },
   docx: { cat: 'doc', kind: 'docx', fetch: 'bytes' },
   doc: { cat: 'doc', kind: 'docx', fetch: 'convert:docx' },
@@ -94,7 +95,7 @@ const FORMATS: Record<string, FormatSpec> = {
   ].map((e) => [e, TXT('code')])),
 
   // 配置
-  ...Object.fromEntries(['json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'env', 'xml', 'lock', 'dockerfile',
+  ...Object.fromEntries(['json', 'yaml', 'yml', 'toml', 'ini', 'conf', 'env', 'xml', 'lock', 'dockerfile', 'properties',
   ].map((e) => [e, TXT('config')])),
 
   // 样式 / 网页
