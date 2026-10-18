@@ -184,6 +184,7 @@ let findMarks: HTMLElement[] = []
 const progress = ref(0)
 const showTop = ref(false)
 const lightboxSrc = ref('')
+const lineJumpApproximate = ref(false)
 
 function onScroll(): void {
   const el = scrollEl.value
@@ -203,6 +204,7 @@ function onScroll(): void {
  */
 function scrollToSourceLine(line?: number): void {
   if (!line || !Number.isSafeInteger(line) || line < 1) return
+  lineJumpApproximate.value = kind.value === 'markdown'
   const scroller = scrollEl.value
   const root = contentEl.value
   if (!scroller || !root) return
@@ -257,6 +259,7 @@ function scrollToSourceLine(line?: number): void {
 watch([() => props.lineStart, () => props.text, codeHtml], () => {
   if (props.lineStart) void nextTick(() => scrollToSourceLine(props.lineStart))
 })
+watch([() => props.name, () => props.text, () => props.lineStart], () => { lineJumpApproximate.value = false })
 function scrollToTop(): void {
   scrollEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -562,6 +565,10 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
     <!-- reading-progress bar -->
     <div class="fp-progress"><span :style="{ transform: `scaleX(${progress})` }" /></div>
 
+    <div v-if="lineJumpApproximate" class="fp-line-note" data-testid="file-preview-line-approximate">
+      Markdown 行号按渲染文本近似定位；重复内容可能需要用文档内查找确认。
+    </div>
+
     <!-- sticky current-section (markdown only, once we know where we are) -->
     <div v-if="kind === 'markdown' && activeHeadingText" class="fp-crumb" data-testid="file-preview-crumb">
       <List class="size-3 shrink-0 opacity-70" />
@@ -703,6 +710,22 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
   /* tabindex="0" so Ctrl/Cmd+F lands here (see the watch(() => props.name, …) focus call above);
      it holds focus for as long as the reader is open, so a permanent ring would be noise, not signal. */
   outline: none;
+}
+.fp-line-note {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  margin: 6px auto 0;
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  padding: 4px 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--card) / 0.94);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.62rem;
+  line-height: 1.35;
+  pointer-events: none;
 }
 
 /* ── reading palette ──────────────────────────────────────────────────────────

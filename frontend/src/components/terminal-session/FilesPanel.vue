@@ -968,10 +968,13 @@ function onSearchHit(entry: SearchEntry): void {
 interface PathResolutionState {
   query: string
   requestedPath: string
+  previousPreviewKey: string
   lineStart?: number
   lineEnd?: number
   loading: boolean
   candidates: TerminalPathCandidate[]
+  totalCandidates: number
+  hasMore: boolean
   incomplete?: boolean
   truncated?: boolean
   indexState?: 'building' | 'ready' | 'error'
@@ -979,6 +982,7 @@ interface PathResolutionState {
 }
 const pathResolution = ref<PathResolutionState | null>(null)
 let pathSearchRequest: AbortController | null = null
+const MAX_PATH_CANDIDATES = 20
 
 interface Preview {
   key: string
@@ -1034,12 +1038,12 @@ function evictPreviewOverflow(): void {
   }
 }
 
-async function searchTerminalPath(query: string, requestedPath: string, lineStart?: number, lineEnd?: number): Promise<void> {
+async function searchTerminalPath(query: string, requestedPath: string, lineStart?: number, lineEnd?: number, restorePreviewKey = activePreviewKey.value): Promise<void> {
   if (!query) return
   pathSearchRequest?.abort()
   const request = new AbortController()
   pathSearchRequest = request
-  const state: PathResolutionState = { query, requestedPath, lineStart, lineEnd, loading: true, candidates: [] }
+  const state: PathResolutionState = { query, requestedPath, previousPreviewKey: restorePreviewKey, lineStart, lineEnd, loading: true, candidates: [], totalCandidates: 0, hasMore: false }
   pathResolution.value = state
   activePreviewKey.value = ''
   setTreeCollapsed(false)
@@ -1054,14 +1058,17 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
       return
     }
     const cwd = treeCwd.value || props.cwd || ''
-    state.candidates = filePathCandidates(result.entries, cwd, query)
+    const allCandidates = filePathCandidates(result.entries, cwd, query)
+    state.totalCandidates = result.totalMatches ?? allCandidates.length
+    state.hasMore = !!result.nextOffset || state.totalCandidates > allCandidates.length
+    state.candidates = allCandidates.slice(0, MAX_PATH_CANDIDATES)
     state.incomplete = !!result.incomplete
     state.truncated = !!result.truncated
     state.indexState = result.indexState
     state.loading = false
     // An incomplete index cannot prove uniqueness. Keep the chooser visible so
     // the user can see the evidence and retry after indexing settles.
-    if (state.candidates.length === 1 && state.candidates[0].exact && !result.incomplete && !result.truncated && result.indexState !== 'building') {
+    if (state.candidates.length === 1 && state.candidates[0].exact && !state.hasMore && !result.incomplete && !result.truncated && result.indexState !== 'building') {
       const candidate = state.candidates[0]
       pathResolution.value = null
       await previewRel(candidate.name, candidate.absPath, candidate.rel, lineStart, lineEnd)
@@ -1086,16 +1093,19 @@ function choosePathCandidate(candidate: TerminalPathCandidate): void {
 function retryPathResolution(): void {
   const state = pathResolution.value
   if (!state) return
-  void searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd)
+  void searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd, state.previousPreviewKey)
 }
 
 function cancelPathResolution(): void {
+  const state = pathResolution.value
   pathSearchRequest?.abort()
   pathSearchRequest = null
   pathResolution.value = null
+  if (state?.previousPreviewKey) activePreviewKey.value = state.previousPreviewKey
 }
 
-async function previewRel(name: string, absPath: string, rel: string, lineStart?: number, lineEnd?: number, fallbackQuery?: string): Promise<void> {
+async function previewRel(name: string, absPath: string, rel: string, lineStart?: number, lineEnd?: number, fallbackQuery?: string, restorePreviewKey?: string): Promise<void> {
+  const previousPreviewKey = restorePreviewKey ?? activePreviewKey.value
   const key = previewKey(absPath, rel)
   const existing = previews.value.find((p) => p.key === key)
   if (existing) {
@@ -1144,7 +1154,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
       const staleIndex = previews.value.findIndex((p) => p.key === key)
       if (staleIndex >= 0) previews.value.splice(staleIndex, 1)
       if (activePreviewKey.value === key) activePreviewKey.value = ''
-      await searchTerminalPath(fallbackQuery, rel, lineStart, lineEnd)
+      await searchTerminalPath(fallbackQuery, rel, lineStart, lineEnd, previousPreviewKey)
       return
     }
     const current = previews.value.find((p) => p.key === key)
@@ -1247,7 +1257,17 @@ async function revealPreviewInTree(): Promise<void> {
   await nextTick()
   const escaped = (globalThis.CSS?.escape ? globalThis.CSS.escape(rel) : rel.replace(/["\\]/g, '\\$&'))
   const row = treeScrollEl.value?.querySelector<HTMLElement>(`[data-testid="fp-tree-${escaped}"]`)
-  row?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  if (row) {
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  } else if (treeTruncated.value) {
+    // A capped directory cannot promise that the target row was materialized.
+    // Reuse the same scoped search surface instead of leaving a successful
+    // reveal click with no visible result.
+    treeQuery.value = baseName(rel)
+    toast('目录过大，已切到当前目录搜索定位')
+  } else {
+    toast('目录树当前未找到这个文件，请使用搜索定位')
+  }
 }
 onUnmounted(clearPreviews)
 
@@ -1290,6 +1310,16 @@ function searchPreviewFile(name: string): void {
   pathSearchRequest = null
   pathResolution.value = null
   activePreviewKey.value = ''
+  // Path resolution always searched the pane's anchored cwd root. Keep the
+  // recovery action on that same scope even if the reader was drilled into a
+  // deep directory before the terminal link was clicked.
+  if (treeRootRel.value) {
+    cancelNavigationRequests()
+    treeRootRel.value = ''
+    roots.value = []
+    focusedRel.value = null
+    if (treeScrollEl.value) treeScrollEl.value.scrollTop = 0
+  }
   treeQuery.value = name
 }
 
@@ -1550,36 +1580,39 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
       <div class="shrink-0 flex items-center gap-2 border-b border-border px-3 py-2">
         <FileText class="size-4 shrink-0 text-primary/80" />
         <span class="min-w-0 flex-1 text-xs font-medium truncate" :title="pathResolution.requestedPath">定位文件：{{ pathResolution.requestedPath }}</span>
-        <button type="button" class="shrink-0 p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50" title="返回目录" data-testid="fp-path-resolution-cancel" @click="cancelPathResolution"><X class="size-3.5" /></button>
+        <button type="button" class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation" title="返回目录" data-testid="fp-path-resolution-cancel" @click="cancelPathResolution"><X class="mx-auto size-3.5" /></button>
       </div>
       <div v-if="pathResolution.loading" class="flex-1 flex items-center justify-center text-xs text-muted-foreground animate-pulse">正在当前工作目录搜索 {{ pathResolution.query }}…</div>
       <div v-else-if="pathResolution.error" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
         <p class="text-xs text-muted-foreground leading-snug">{{ pathResolution.error }}</p>
         <p class="text-[0.65rem] text-muted-foreground/70">搜索没有改变当前目录或文件内容。</p>
         <div class="flex items-center gap-2">
-          <button type="button" class="px-2 py-1 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
-          <button type="button" class="px-2 py-1 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50" @click="searchPreviewFile(pathResolution.query)">打开目录搜索</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(pathResolution.query)">打开目录搜索</button>
         </div>
       </div>
       <div v-else-if="!pathResolution.candidates.length" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
-        <p class="text-xs text-muted-foreground leading-snug">当前工作目录及子目录找不到 {{ pathResolution.query }}。</p>
+        <p v-if="pathResolution.incomplete || pathResolution.truncated || pathResolution.indexState === 'building'" class="text-xs text-muted-foreground leading-snug">当前索引尚未完整，暂时不能确认 {{ pathResolution.query }} 不存在。</p>
+        <p v-else class="text-xs text-muted-foreground leading-snug">当前工作目录及子目录找不到 {{ pathResolution.query }}。</p>
         <p class="text-[0.65rem] text-muted-foreground/70">文件可能已移动、尚未写入，或当前 pane 的工作目录不同。</p>
         <div class="flex items-center gap-2">
-          <button type="button" class="px-2 py-1 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
-          <button type="button" class="px-2 py-1 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50" @click="searchPreviewFile(pathResolution.query)">打开目录搜索</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(pathResolution.query)">打开目录搜索</button>
         </div>
       </div>
       <div v-else class="flex-1 overflow-y-auto p-3">
         <div v-if="pathResolution.incomplete || pathResolution.truncated || pathResolution.indexState === 'building'" class="mb-2 rounded-md bg-amber-500/10 px-2 py-1.5 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400" data-testid="fp-path-resolution-incomplete">搜索结果可能不完整（索引仍在建立或达到扫描上限），请确认后再打开。</div>
-        <p class="mb-2 text-[0.68rem] text-muted-foreground">找到 {{ pathResolution.candidates.length }} 个{{ pathResolution.candidates.some((c) => !c.exact) ? '近似' : '' }}文件，请选择要打开的位置：</p>
+        <p class="mb-2 text-[0.68rem] text-muted-foreground">找到 {{ pathResolution.totalCandidates || pathResolution.candidates.length }} 个{{ pathResolution.candidates.some((c) => !c.exact) ? '近似' : '' }}文件，请选择要打开的位置：</p>
+        <p v-if="pathResolution.hasMore" class="mb-2 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400">结果较多，仅显示前 {{ pathResolution.candidates.length }} 个；可打开目录搜索继续筛选。</p>
         <ul class="flex flex-col gap-1.5">
           <li v-for="candidate in pathResolution.candidates" :key="candidate.rel">
-            <button type="button" class="w-full rounded-md border border-border bg-card px-3 py-2 text-left hover:bg-muted/50" :data-testid="`fp-path-candidate-${candidate.rel}`" @click="choosePathCandidate(candidate)">
+            <button type="button" class="min-h-11 w-full rounded-md border border-border bg-card px-3 py-2 text-left hover:bg-muted/50 touch-manipulation" :data-testid="`fp-path-candidate-${candidate.rel}`" @click="choosePathCandidate(candidate)">
               <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span>{{ candidate.name }}</span><span v-if="!candidate.exact" class="rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">近似</span></span>
               <span class="mt-0.5 block break-all text-[0.65rem] text-muted-foreground">{{ candidate.absPath }}</span>
             </button>
           </li>
         </ul>
+        <button v-if="pathResolution.hasMore" type="button" class="mt-3 min-h-11 w-full rounded-md border border-border px-3 py-2 text-left text-xs text-primary hover:bg-muted/50" data-testid="fp-path-resolution-open-search" @click="searchPreviewFile(pathResolution.query)">打开目录搜索继续筛选</button>
       </div>
     </div>
     <div v-if="treeCollapsed && !preview" class="fp-tree-collapsed-rail" data-testid="fp-tree-collapsed-rail">
@@ -1970,7 +2003,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         </div>
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
           <button
-            class="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground touch-manipulation"
             type="button"
             title="返回文件列表"
             aria-label="返回文件列表"
@@ -1978,7 +2011,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             @click="activePreviewKey = ''"
           ><ChevronLeft class="size-3.5" /></button>
           <button
-            class="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground touch-manipulation"
             type="button"
             :title="treeCollapsed ? '展开目录树' : '收起目录树'"
             aria-label="目录树"
@@ -2019,7 +2052,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             <Download class="size-3.5" />
           </button>
           <button
-            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation"
             type="button" title="在目录树中定位"
             aria-label="在目录树中定位"
             data-testid="fp-preview-reveal-tree"
@@ -2030,7 +2063,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             type="button" title="插入到对话"
             @click="injectPath(preview.absPath)"
           >插入</button>
-          <button class="p-1 rounded text-muted-foreground hover:text-foreground" type="button" title="关闭" data-testid="fp-preview-close" @click="closePreview">&times;</button>
+          <button class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground touch-manipulation" type="button" title="关闭" data-testid="fp-preview-close" @click="closePreview">&times;</button>
         </div>
         <div class="shrink-0 max-h-24 overflow-auto border-b border-border/50 px-3 py-2 text-[0.68rem] leading-relaxed text-muted-foreground break-all select-text" data-testid="fp-preview-location" :title="preview.absPath">{{ locationLabel(preview.absPath) }}</div>
         <div class="flex-1 overflow-auto">
