@@ -78,12 +78,14 @@ function createClient(endpoint: Endpoint, key: string) {
     timer: ReturnType<typeof setTimeout> | undefined
   let stopped = true,
     polling = false,
+    activeRequests = new Set<AbortController>(),
     initialized = false,
     writing = Promise.resolve(),
     saving = Promise.resolve()
   let localCopyRevision = 0
   async function request(path: string, init?: RequestInit, timeoutMs = 10000) {
     const controller = new AbortController()
+    activeRequests.add(controller)
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       let response: Response
@@ -108,6 +110,7 @@ function createClient(endpoint: Endpoint, key: string) {
       return data
     } finally {
       clearTimeout(timeout)
+      activeRequests.delete(controller)
     }
   }
   const ready = (async () => {
@@ -268,8 +271,8 @@ function createClient(endpoint: Endpoint, key: string) {
           !connected.value
             ? 2000
             : document.visibilityState === 'hidden'
-              ? 5000
-              : 100,
+              ? 30000
+              : 500,
         )
     }
   }
@@ -414,6 +417,8 @@ function createClient(endpoint: Endpoint, key: string) {
       if (!owners.size) {
         stopped = true
         clearTimeout(timer)
+        for (const request of activeRequests) request.abort()
+        activeRequests.clear()
       }
     }
   }

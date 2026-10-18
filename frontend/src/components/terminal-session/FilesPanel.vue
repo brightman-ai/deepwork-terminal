@@ -19,7 +19,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
 import { useVirtualList } from '@vueuse/core'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
-import { Copy, Check, Folder, FileText, ChevronLeft, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive } from 'lucide-vue-next'
+import { Copy, Check, Folder, FileText, ChevronLeft, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive, PanelLeft, PanelLeftClose } from 'lucide-vue-next'
 import { useUploadLimit } from '@terminal/composables/cli/uploadLimits'
 import {
   filesRecent,
@@ -79,15 +79,19 @@ const emit = defineEmits<{
 const recent = ref<RecentFileItem[]>([])
 const recentLoading = ref(false)
 let recentSeq = 0
+let recentRequest: AbortController | null = null
 
 async function loadRecent(): Promise<void> {
   const seq = ++recentSeq
+  recentRequest?.abort()
+  recentRequest = new AbortController()
   recentLoading.value = true
   try {
-    const result = await filesRecent(props.sessionId, props.cwd)
+    const result = await filesRecent(props.sessionId, props.cwd, recentRequest.signal)
     if (seq === recentSeq) recent.value = result
   } finally {
     if (seq === recentSeq) recentLoading.value = false
+    if (seq === recentSeq) recentRequest = null
   }
 }
 
@@ -136,6 +140,13 @@ watch(recentCats, (cats) => {
 const treeCwd = ref(props.cwd || '')
 const treeLoading = ref(false)
 const viewError = ref('')
+const treeTruncated = ref(false)
+const TREE_COLLAPSED_KEY = 'dw.fp.treeCollapsed'
+const treeCollapsed = ref(localStorage.getItem(TREE_COLLAPSED_KEY) === '1')
+function setTreeCollapsed(value: boolean): void {
+  treeCollapsed.value = value
+  localStorage.setItem(TREE_COLLAPSED_KEY, value ? '1' : '0')
+}
 
 // ── 钻入导航（drill-in）──
 // treeRootRel = 当前视图根（'' = 会话 cwd 全树）。钻入一个目录 = 把视图根重定位到它，来路压
@@ -301,6 +312,16 @@ const anchorError = ref(false)
 
 let viewSeq = 0
 let viewRequest: AbortController | null = null
+const treeRequests = new Map<string, AbortController>()
+function beginTreeRequest(key: string): AbortController {
+  treeRequests.get(key)?.abort()
+  const ctrl = new AbortController()
+  treeRequests.set(key, ctrl)
+  return ctrl
+}
+function endTreeRequest(key: string, ctrl: AbortController): void {
+  if (treeRequests.get(key) === ctrl) treeRequests.delete(key)
+}
 async function loadView(): Promise<void> {
   viewRequest?.abort()
   viewRequest = new AbortController()
@@ -313,6 +334,7 @@ async function loadView(): Promise<void> {
     if (seq !== viewSeq) return
     if (resp) {
       anchorError.value = false
+      treeTruncated.value = !!resp.truncated
       // cwd 锚只在【真根】查询时更新：子目录查询的 resp.cwd 是那个目录的路径，不是会话锚。
       if (!treeRootRel.value) treeCwd.value = resp.cwd
       roots.value = reconcile(roots.value, resp.entries, treeRootRel.value, 0)
@@ -335,25 +357,33 @@ async function loadView(): Promise<void> {
 // refreshDir：重拉某目录一层（null=当前视图根），reconcile 保留展开态。上传/建/删/改名后调用。
 async function refreshDir(node: TreeNode | null): Promise<void> {
   const rel = node ? node.rel : treeRootRel.value
-  const resp = await filesTree(props.sessionId, rel, treeCwd.value || props.cwd, undefined, true)
-  if (!resp) return
-  if (!node) {
+  const request = beginTreeRequest(`refresh:${rel}`)
+  try {
+    const resp = await filesTree(props.sessionId, rel, treeCwd.value || props.cwd, request.signal, true)
+    if (!resp || request.signal.aborted) return
+    if (!node) {
     if (!treeRootRel.value) treeCwd.value = resp.cwd
+      treeTruncated.value = !!resp.truncated
     roots.value = reconcile(roots.value, resp.entries, treeRootRel.value, 0)
   } else {
     node.children = reconcile(node.children, resp.entries, node.rel, node.depth + 1)
   }
   bumpTree()
+  } finally {
+    endTreeRequest(`refresh:${rel}`, request)
+  }
 }
 
 async function ensureChildren(node: TreeNode): Promise<void> {
   if (node.children !== null) return
   node.loading = true
   bumpTree() // spinner 出现
+  const request = beginTreeRequest(`children:${node.rel}`)
   try {
-    const resp = await filesTree(props.sessionId, node.rel, treeCwd.value || props.cwd)
-    node.children = resp ? reconcile(null, resp.entries, node.rel, node.depth + 1) : []
+    const resp = await filesTree(props.sessionId, node.rel, treeCwd.value || props.cwd, request.signal)
+    if (!request.signal.aborted) node.children = resp ? reconcile(null, resp.entries, node.rel, node.depth + 1) : []
   } finally {
+    endTreeRequest(`children:${node.rel}`, request)
     node.loading = false
     bumpTree() // 子项就位 / spinner 消失
   }
@@ -1097,6 +1127,37 @@ function previewPath(path: string, lineStart?: number, lineEnd?: number): void {
   if (!name) return
   void previewRel(name, normalized, normalized, lineStart, lineEnd)
 }
+
+/** Return a preview path in the tree's cwd-relative namespace when possible. */
+function previewTreeRel(p: Preview): string | null {
+  const base = (treeCwd.value || props.cwd || '').replace(/\/+$/, '')
+  const candidates = [p.rel, p.absPath]
+  for (const candidate of candidates) {
+    const value = candidate.trim().replace(/^@/, '')
+    if (!value) continue
+    if (base && value === base) return ''
+    if (base && value.startsWith(base + '/')) return value.slice(base.length + 1)
+    if (!value.startsWith('/')) return value.replace(/^\.\//, '')
+  }
+  return null
+}
+
+/** Jump from the reader back to the file's directory and center the file row. */
+async function revealPreviewInTree(): Promise<void> {
+  const p = preview.value
+  if (!p) return
+  const rel = previewTreeRel(p)
+  if (rel === null) { toast('这个文件不在当前工作目录树内'); return }
+  setTreeCollapsed(false)
+  const parent = parentRelOf(rel)
+  if (parent !== treeRootRel.value || treeQuery.value.trim()) await reRoot(parent, false)
+  focusedRel.value = rel
+  bumpTree()
+  await nextTick()
+  const escaped = (globalThis.CSS?.escape ? globalThis.CSS.escape(rel) : rel.replace(/["\\]/g, '\\$&'))
+  const row = treeScrollEl.value?.querySelector<HTMLElement>(`[data-testid="fp-tree-${escaped}"]`)
+  row?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
 onUnmounted(clearPreviews)
 
 // An .html/.htm preview also gets a 渲染 URL, so FilePreview can offer the 源码/渲染 toggle.
@@ -1281,6 +1342,7 @@ function reanchor(): void {
   viewRequest?.abort()
   cancelSearch()
   treeCwd.value = props.cwd || ''
+  treeTruncated.value = false
   treeRootRel.value = ''
   backStack.value = []
   recent.value = []
@@ -1313,7 +1375,7 @@ watch(() => props.active, (active) => {
   else { cancelSearch(); searching.value = false }
 })
 onMounted(activate)
-onBeforeUnmount(() => { viewSeq++; viewRequest?.abort(); cancelSearch() })
+onBeforeUnmount(() => { viewSeq++; viewRequest?.abort(); recentRequest?.abort(); for (const request of treeRequests.values()) request.abort(); treeRequests.clear(); cancelSearch() })
 
 defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 </script>
@@ -1389,8 +1451,11 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
          The tree remains the source surface while a document is open. Desktop uses a stable
          two-column workspace; narrow/mobile drawers keep the reader as a sheet and expose the
          same browse button, so the navigation model does not change with the viewport. -->
-    <div v-else class="fp-workspace flex flex-1 min-h-0 overflow-hidden">
-    <div class="fp-browser-pane flex flex-col min-h-0 overflow-hidden">
+    <div v-else class="fp-workspace flex flex-1 min-h-0 overflow-hidden" :class="{ 'is-tree-collapsed': treeCollapsed }">
+    <div v-if="treeCollapsed && !preview" class="fp-tree-collapsed-rail" data-testid="fp-tree-collapsed-rail">
+      <button type="button" class="fp-tree-expand" title="展开目录树" data-testid="fp-tree-expand" @click="setTreeCollapsed(false)"><PanelLeft :size="14" /><span>目录</span></button>
+    </div>
+    <div v-show="!treeCollapsed" class="fp-browser-pane flex flex-col min-h-0 overflow-hidden">
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
       <DrawerSearchBox
         v-model="treeQuery"
@@ -1652,6 +1717,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 
       <!-- ── browse（嵌套 lazy 展开树 — VSCode 式）；tabindex+keydown = vim 键盘导航 ── -->
       <div v-else ref="treeScrollEl" tabindex="0" class="flex-1 overflow-y-auto py-1 outline-none" data-testid="fp-tree" @scroll="treeContainer.onScroll" @keydown="onTreeKeydown" @click="focusTree">
+        <div v-if="treeTruncated" class="mx-2 mb-1 rounded bg-amber-500/10 px-2 py-1.5 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400" data-testid="fp-tree-truncated">目录很大，仅显示前 2000 项；可用上方搜索定位其余文件。</div>
         <div v-if="treeLoading && !roots.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">加载中…</div>
         <div v-else-if="viewError" class="px-2 py-6 text-center text-xs text-destructive" data-testid="fp-tree-error">{{ viewError }} <button class="ml-2 underline" @click="loadView">重试</button></div>
         <div v-else-if="!roots.length" class="px-2 py-6 text-center text-xs text-muted-foreground italic">空目录</div>
@@ -1781,6 +1847,14 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             data-testid="fp-preview-browse"
             @click="activePreviewKey = ''"
           ><ChevronLeft class="size-3.5" /></button>
+          <button
+            class="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            type="button"
+            :title="treeCollapsed ? '展开目录树' : '收起目录树'"
+            aria-label="目录树"
+            data-testid="fp-toggle-tree"
+            @click="setTreeCollapsed(!treeCollapsed)"
+          ><PanelLeftClose v-if="!treeCollapsed" class="size-3.5" /><PanelLeft v-else class="size-3.5" /></button>
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title"><MidTruncatedName :name="preview.name" tooltip="" /></span>
@@ -1814,6 +1888,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           >
             <Download class="size-3.5" />
           </button>
+          <button
+            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            type="button" title="在目录树中定位"
+            aria-label="在目录树中定位"
+            data-testid="fp-preview-reveal-tree"
+            @click="void revealPreviewInTree()"
+          ><Folder class="size-3.5" /></button>
           <button
             class="px-1.5 py-1 rounded text-[0.6rem] text-green-500 border border-border hover:bg-muted/50"
             type="button" title="插入到对话"
@@ -1966,6 +2047,16 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 .fp-workspace { position: relative; }
 .fp-browser-pane { flex: 0 0 min(38%, 320px); min-width: 220px; border-right: 1px solid hsl(var(--border) / 0.7); }
 .fp-preview-pane { min-width: 0; }
+.fp-tree-collapsed-rail {
+  flex: 0 0 30px; display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 8px; border-right: 1px solid hsl(var(--border) / 0.7); background: hsl(var(--muted) / 0.16);
+}
+.fp-tree-expand {
+  display: inline-flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 5px 3px; border: 0; border-radius: 5px; background: transparent;
+  color: hsl(var(--muted-foreground)); font-size: 0.5rem; cursor: pointer;
+}
+.fp-tree-expand:hover, .fp-tree-expand:focus-visible { background: hsl(var(--muted) / 0.55); color: hsl(var(--foreground)); }
 .fp-preview-tab-index {
   display: inline-flex; align-items: center; justify-content: center;
   width: 1.05rem; height: 1.05rem; flex: 0 0 auto;

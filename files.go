@@ -72,7 +72,13 @@ type treeResponse struct {
 	CWD     string      `json:"cwd"`
 	Rel     string      `json:"rel"`
 	Entries []treeEntry `json:"entries"`
+	Truncated bool      `json:"truncated,omitempty"`
 }
+
+// A directory row is a navigation surface, not a full stat dump. Bound the first
+// response so a pathological generated directory cannot monopolize the request; users can
+// still use recursive search for entries outside this visible page.
+const filesTreeMaxEntries = 2000
 
 // searchEntry is one hit in GET /files/search — a treeEntry plus the path RELATIVE
 // to the search root (forward slashes), so the client can preview/navigate it without
@@ -281,8 +287,23 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 		s.invalidateFileSearchIndexes(target)
 	}
 
+	// os.ReadDir(path) returns name order. Sort the bounded page with directories first so
+	// truncation never hides all folders behind a large file tail.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].IsDir() != entries[j].IsDir() {
+			return entries[i].IsDir()
+		}
+		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+	})
+	truncated := len(entries) > filesTreeMaxEntries
+	if truncated {
+		entries = entries[:filesTreeMaxEntries]
+	}
 	out := make([]treeEntry, 0, len(entries))
 	for _, e := range entries {
+		if err := r.Context().Err(); err != nil {
+			return
+		}
 		info, ierr := e.Info()
 		if ierr != nil {
 			continue
@@ -309,6 +330,7 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 		CWD:     cwd,
 		Rel:     cleanRel(rel),
 		Entries: out,
+		Truncated: truncated,
 	})
 }
 

@@ -42,6 +42,7 @@ export interface TreeResponse {
   /** Normalized cwd-relative path of the listed directory ('.' = root). */
   rel: string
   entries: TreeEntry[]
+  truncated?: boolean
 }
 
 /**
@@ -120,11 +121,11 @@ function withScope(path: string, sessionId: string, cwd?: string): string {
 }
 
 /** GET /files/recent — files agents recently wrote/edited, newest first (≤30). */
-export async function filesRecent(sessionId: string, cwd?: string): Promise<RecentFileItem[]> {
+export async function filesRecent(sessionId: string, cwd?: string, signal?: AbortSignal): Promise<RecentFileItem[]> {
   if (!sessionId) return []
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(cliApi(withScope('/files/recent', sessionId, cwd)))
+    const resp = await cliFetch(cliApi(withScope('/files/recent', sessionId, cwd)), { signal })
     if (!resp.ok) return []
     const data = (await resp.json()) as { items?: RecentFileItem[] }
     return data.items ?? []
