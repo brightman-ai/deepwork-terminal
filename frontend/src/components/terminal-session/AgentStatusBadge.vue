@@ -23,6 +23,7 @@
         <div v-if="activePopover.waitReason" class="popover-status">{{ activePopover.waitReason }}</div>
         <div v-if="activePopover.model" class="popover-model">{{ activePopover.model }}</div>
         <div v-if="activePopover.totalTokens" class="popover-tokens">{{ formatTokens(activePopover.totalTokens) }} tokens</div>
+        <div v-if="activePopover.tokensPerSecond" class="popover-tokens">观察吞吐 {{ activePopover.tokensPerSecond.toFixed(1) }} tok/s</div>
       </div>
     </Teleport>
   </div>
@@ -62,6 +63,7 @@ interface ChipItem {
   effective: EffectiveStatus
   model: string
   totalTokens: number
+  tokensPerSecond: number
   waitReason: string
 }
 
@@ -83,6 +85,9 @@ function effectiveOf(s: AgentState): EffectiveStatus {
 }
 
 function toChip(s: AgentState, id: string): ChipItem {
+  const started = Date.parse(s.startedAt || '')
+  const updated = Date.parse(s.updatedAt || '')
+  const seconds = started > 0 && updated > started ? (updated - started) / 1000 : 0
   return {
     id,
     topology: s.tmuxWindow != null ? `${s.tmuxWindow}${s.tmuxPane != null ? '.' + s.tmuxPane : ''}` : '',
@@ -90,6 +95,7 @@ function toChip(s: AgentState, id: string): ChipItem {
     effective: effectiveOf(s),
     model: s.model || '',
     totalTokens: s.totalTokens || 0,
+    tokensPerSecond: seconds > 0 && s.outputTokens > 0 ? s.outputTokens / seconds : 0,
     waitReason: s.waitReason || '',
   }
 }
@@ -107,6 +113,7 @@ function chipTooltip(c: ChipItem): string {
   if (c.waitReason) parts.push(c.waitReason)
   if (c.model) parts.push(c.model)
   if (c.totalTokens) parts.push(formatTokens(c.totalTokens) + ' tokens')
+  if (c.tokensPerSecond) parts.push(`观察吞吐 ${c.tokensPerSecond.toFixed(1)} tok/s`)
   return parts.join(' · ')
 }
 
