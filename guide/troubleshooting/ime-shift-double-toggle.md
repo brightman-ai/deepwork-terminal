@@ -56,7 +56,7 @@ type-to-compose 把单独按下的 Shift 当成“开始打字”，弹出输入
 | 整屏强制重绘对所有渲染器默认关闭 | `frontend/src/composables/cli/terminalRenderSync.ts` | `197fdb6` |
 | 单次交给 xterm 的写入不超过 16KB | `frontend/src/composables/cli/writeSlices.ts`，`XtermTerminal.vue` 的 `write()` | `197fdb6` |
 | 新增常驻上报 `cli.main.thread`（按键等待 + 长帧归因） | `frontend/src/composables/cli/mainThreadMetrics.ts` | `197fdb6` |
-| 屏幕阅读器输出镜像默认关闭 | `frontend/src/composables/cli/terminalA11yMirror.ts`，`XtermTerminal.vue` 模板 | `94eecac` |
+| 删除全量屏幕阅读器输出镜像 | `XtermTerminal.vue` 不再维护隐藏 `aria-live` 副本；使用 xterm 原生可访问树 | `6ac8d18` |
 | 内嵌前端 | `internal/spa/dist` | `f318500`、`8934fb4` |
 
 ## 开关（都只对当前标签页生效，刷新后保留）
@@ -65,7 +65,7 @@ type-to-compose 把单独按下的 Shift 当成“开始打字”，弹出输入
 |---|---|
 | `?renderer=dom` / `?renderer=webgl` | 钉死渲染器，做对照实验用；面板里的切换按钮是跨标签页的长期偏好 |
 | `?render_sync=1` | 恢复整屏强制重绘（`=0` 清除） |
-| `?a11y_mirror=1` | 恢复屏幕阅读器输出镜像（`=0` 清除），也可以用来对照验证第 2 层 |
+| `?a11y_mirror=1` | 已废弃。全量输出镜像已删除；不要重新启用 |
 | `?cli_diag=1` | 逐键诊断回传到服务端日志（`=0` 关闭）；诊断本身会加重页面负担，用完关掉 |
 
 ## 前后数据（使用者真机，Edge/macOS，`cli.main.thread`）
