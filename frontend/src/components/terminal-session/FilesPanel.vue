@@ -2111,16 +2111,16 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             <summary class="min-h-11 min-w-11 flex items-center justify-center rounded cursor-pointer text-muted-foreground hover:bg-muted/50" aria-label="文件操作" title="文件操作" data-testid="fp-preview-actions"><MoreVertical class="size-4" /></summary>
             <div class="fp-file-actions-panel absolute right-0 top-full z-40 min-w-48 rounded-md border border-border bg-card p-1 shadow-lg" @click="closeFileActions">
               <button v-if="preview.result.kind === 'text'" type="button" data-testid="fp-preview-copy-content" @click="copyContent"><Copy class="size-3.5" />复制内容</button>
-              <button type="button" data-testid="fp-preview-copy-path" @click="copyText(preview.absPath, 'p')"><Link2 class="size-3.5" />复制路径</button>
+              <button v-if="!preview.generatedDocx" type="button" data-testid="fp-preview-copy-path" @click="copyText(preview.absPath, 'p')"><Link2 class="size-3.5" />复制路径</button>
               <button type="button" data-testid="fp-preview-download" @click="doDownload"><Download class="size-3.5" />下载文件</button>
               <button v-if="preview.result.kind === 'text' && isMarkdownPreview(preview.name)" type="button" data-testid="fp-preview-convert-docx" :disabled="markdownConvertBusy" @click="void convertMarkdownToDocx()"><FileText class="size-3.5" />{{ markdownConvertBusy ? '转换中…' : '转 DOCX' }}</button>
-              <button type="button" data-testid="fp-preview-reveal-tree" @click="void revealPreviewInTree()"><Folder class="size-3.5" />在目录树中定位</button>
-              <button type="button" @click="injectPath(preview.absPath)"><Link2 class="size-3.5" />插入到对话</button>
+              <button v-if="!preview.generatedDocx" type="button" data-testid="fp-preview-reveal-tree" @click="void revealPreviewInTree()"><Folder class="size-3.5" />在目录树中定位</button>
+              <button v-if="!preview.generatedDocx" type="button" @click="injectPath(preview.absPath)"><Link2 class="size-3.5" />插入到对话</button>
             </div>
           </details>
           <button class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground touch-manipulation" type="button" title="关闭" data-testid="fp-preview-close" @click="closePreview">&times;</button>
         </div>
-        <div class="shrink-0 truncate border-b border-border/50 px-3 py-1 text-[0.68rem] leading-relaxed text-muted-foreground select-text" data-testid="fp-preview-location" :title="preview.absPath">{{ locationLabel(preview.absPath) }}</div>
+        <div class="shrink-0 truncate border-b border-border/50 px-3 py-1 text-[0.68rem] leading-relaxed text-muted-foreground select-text" data-testid="fp-preview-location" :title="preview.generatedDocx ? '转换预览，可下载保存' : preview.absPath">{{ preview.generatedDocx ? '转换预览 · 可下载保存为 ' + preview.name : locationLabel(preview.absPath) }}</div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
           <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
