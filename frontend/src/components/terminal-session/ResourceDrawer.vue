@@ -345,6 +345,7 @@
             <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open && isActive && topTab === 'overview'" />
           </div>
 
+          <div class="rd-dock-footer">
           <button
             class="rd-dock-fab"
             type="button"
@@ -357,6 +358,7 @@
             <ChevronRight v-else :size="15" aria-hidden="true" />
             <span>收起工作台</span>
           </button>
+          </div>
 
           <div v-if="toast" class="rd-toast">{{ toast }}</div>
         </div>
@@ -1539,19 +1541,21 @@ function glyphClass(name: string): string {
 .rd-close:hover, .rd-close:focus-visible { color: #e0d4f0; background: rgba(192, 128, 255, 0.12); }
 .rd-close:active { color: #c080ff; }
 
-/* A second, forgiving collapse affordance. The top icon remains for desktop muscle memory;
-   this bottom pill is the primary touch target on phones and stays above long readers. */
+/* Reserve the dock's space in the panel layout. An overlaid pill hid the last file row and
+   reader content on phones; scrolling must never put a target under the collapse control. */
+.rd-dock-footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid #2a1f3a;
+}
 .rd-dock-fab {
-  position: absolute;
-  left: 50%;
-  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-  z-index: 50;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 36px;
+  min-height: 44px;
   padding: 0 12px;
-  transform: translateX(-50%);
   border: 1px solid #4a2a7a;
   border-radius: 999px;
   background: rgba(22, 15, 34, 0.94);
@@ -1562,7 +1566,7 @@ function glyphClass(name: string): string {
   touch-action: manipulation;
 }
 .rd-dock-fab:hover, .rd-dock-fab:focus-visible { border-color: #8c5bc4; color: #fff; }
-.rd-dock-fab:active { transform: translateX(-50%) scale(0.97); }
+.rd-dock-fab:active { transform: scale(0.97); }
 
 /* ── Layout mode toggle (discoverability fix, design doc §7 signifier notes) ───────────
    A 2-segment pill next to the lock/full/close cluster: signifier (highlights whichever
