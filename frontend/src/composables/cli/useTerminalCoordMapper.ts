@@ -29,21 +29,25 @@ export interface TerminalCoordMapper {
   cellToScreen: (col: number, row: number) => { x: number; y: number }
 }
 
+function mapScreenPoint(dim: TerminalDimensions, screenX: number, screenY: number, clamp: boolean): CellCoord | undefined {
+  if (dim.cellWidth <= 0 || dim.cellHeight <= 0 || dim.cols <= 0 || dim.rows <= 0
+      || !Number.isFinite(screenX) || !Number.isFinite(screenY)) return undefined
+  let col = Math.floor((screenX - dim.offsetX) / dim.cellWidth)
+  let row = Math.floor((screenY - dim.offsetY) / dim.cellHeight)
+  if (!clamp && (col < 0 || row < 0 || col >= dim.cols || row >= dim.rows)) return undefined
+  col = Math.max(0, Math.min(col, dim.cols - 1))
+  row = Math.max(0, Math.min(row, dim.rows - 1))
+  return { col, row }
+}
+
+/** File hits reject chrome/outside points; selection drags intentionally clamp. */
+export function terminalCellAtPoint(dim: TerminalDimensions, screenX: number, screenY: number): CellCoord | undefined {
+  return mapScreenPoint(dim, screenX, screenY, false)
+}
+
 export function useTerminalCoordMapper(getDimensions: () => TerminalDimensions): TerminalCoordMapper {
   function screenToCell(screenX: number, screenY: number): CellCoord {
-    const dim = getDimensions()
-    if (dim.cellWidth <= 0 || dim.cellHeight <= 0) {
-      return { col: 0, row: 0 }
-    }
-
-    let col = Math.floor((screenX - dim.offsetX) / dim.cellWidth)
-    let row = Math.floor((screenY - dim.offsetY) / dim.cellHeight)
-
-    // Clamp to valid range.
-    col = Math.max(0, Math.min(col, dim.cols - 1))
-    row = Math.max(0, Math.min(row, dim.rows - 1))
-
-    return { col, row }
+    return mapScreenPoint(getDimensions(), screenX, screenY, true) ?? { col: 0, row: 0 }
   }
 
   function cellToScreen(col: number, row: number): { x: number; y: number } {

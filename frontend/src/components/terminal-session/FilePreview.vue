@@ -28,6 +28,7 @@ import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { filesRawImageUrl } from '@terminal/api/files'
 import { handleFindShortcut } from './terminalFindShortcut'
 import { sourceLineHtml } from './sourceLineHtml'
+import { resolveDocumentPath } from './terminalPathResolver'
 
 const props = defineProps<{
   name: string
@@ -42,6 +43,10 @@ const props = defineProps<{
   /** Optional 1-based source location supplied by a terminal file link. */
   lineStart?: number
   lineEnd?: number
+  /** Incremented for a new explicit navigation, including the same line again. */
+  jumpVersion?: number
+  /** The owning drawer/tab decides visibility, including exit transitions. */
+  active?: boolean
   /** Reading position owned by the document tab, including after canceling path lookup. */
   initialScrollTop?: number
 }>()
@@ -91,14 +96,14 @@ function openHtmlInBrowser(): void {
 
 // ── markdown pipeline ──────────────────────────────────────────────────────────────
 // Doc-relative images (`fig.png`, `../a/fig.png`) resolve against the doc's dir — the same
-// joinPath the wikilink nav uses — into an authed /files/raw URL the <img> can actually fetch.
+// resolver the wikilink nav uses — into an authed /files/raw URL the <img> can actually fetch.
 // Without a sessionId there is no URL to build: the href stands verbatim (legacy behaviour).
 const resolveImage = computed<((href: string) => string) | undefined>(() => {
   if (!props.sessionId) return undefined
   return (href: string): string => {
     const decoded = decodeURIComponent(href)
-    const abs = decoded.startsWith('/') ? decoded : joinPath(docDir(), decoded)
-    return filesRawImageUrl(props.sessionId as string, abs, props.cwd)
+    const target = resolveDocumentPath(props.path || '', decoded)
+    return target ? filesRawImageUrl(props.sessionId as string, target, props.cwd) : href
   }
 })
 const rendered = computed(() => (kind.value === 'markdown' ? renderMarkdown(props.text, { resolveImage: resolveImage.value }) : { html: '', toc: [] }))
@@ -192,7 +197,9 @@ const lineJumpApproximate = ref(false)
 
 function onScroll(): void {
   const el = scrollEl.value
-  if (!el) return
+  // display:none can clamp scrollTop to zero. That is a layout observation,
+  // never a user reading position to overwrite the document tab with.
+  if (props.active === false || !el || !el.clientHeight || !el.clientWidth) return
   const max = el.scrollHeight - el.clientHeight
   progress.value = max > 0 ? el.scrollTop / max : 0
   showTop.value = el.scrollTop > 400
@@ -221,7 +228,10 @@ function scrollToSourceLine(line?: number): void {
     const row = root.querySelector<HTMLElement>('[data-source-line="' + Math.min(line, sourceLines.length) + '"]')
     if (row) {
       const top = scroller.scrollTop + row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - Math.max(20, scroller.clientHeight * 0.18)
-      scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+      // A reference opens AT its source position. Animating through hundreds of
+      // unrelated lines delays the result and exposes intermediate positions to
+      // tab restoration, viewport changes and user input.
+      scroller.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
     }
     return
   }
@@ -268,17 +278,52 @@ function scrollToSourceLine(line?: number): void {
   const viewport = scroller.getBoundingClientRect()
   if (!marker.height && !marker.width) return
   const top = scroller.scrollTop + marker.top - viewport.top - Math.max(20, viewport.height * 0.18)
-  scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  scroller.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
 }
 
-watch([() => props.lineStart, () => props.text, codeHtml], () => {
-  void nextTick(() => {
-    if (props.initialScrollTop !== undefined) scrollEl.value?.scrollTo({ top: props.initialScrollTop })
-    else if (props.lineStart) scrollToSourceLine(props.lineStart)
-  })
-}, { immediate: true })
+// Keep the source request until the user takes over. A one-off pixel offset
+// computed before fonts/viewport/reader layout settles can land on another line.
+// Reading-position updates emitted during this jump are observations, not a new
+// restore request from the owner. Capture that restore only when mounting a tab.
+const initialReadingTop = props.initialScrollTop
+let restoreReadingTop = initialReadingTop !== undefined
+let sourceAnchorLine = initialReadingTop === undefined ? props.lineStart : undefined
+let sourceLayoutObserver: ResizeObserver | null = null
+let readerWasVisible = false
+function releaseSourceAnchor(): void { sourceAnchorLine = undefined }
+function applyReadingIntent(): void {
+  if (props.active === false || !scrollEl.value?.clientHeight || !scrollEl.value.clientWidth) {
+    readerWasVisible = false
+    return
+  }
+  const reappeared = !readerWasVisible
+  readerWasVisible = true
+  if (sourceAnchorLine) scrollToSourceLine(sourceAnchorLine)
+  else if (restoreReadingTop && initialReadingTop !== undefined) {
+    scrollEl.value.scrollTo({ top: initialReadingTop, behavior: 'auto' })
+    restoreReadingTop = false
+  } else if (reappeared && props.initialScrollTop !== undefined) {
+    // The owner retained this position while the drawer was hidden.
+    scrollEl.value.scrollTo({ top: props.initialScrollTop, behavior: 'auto' })
+  }
+}
+watch([() => props.lineStart, () => props.jumpVersion], () => {
+  sourceAnchorLine = props.lineStart
+  restoreReadingTop = false
+  void nextTick(applyReadingIntent)
+})
+watch([() => props.active, () => props.text, codeHtml], () => { void nextTick(applyReadingIntent) }, { immediate: true })
+watch([scrollEl, contentEl], ([scroller, content]) => {
+  sourceLayoutObserver?.disconnect()
+  if (!scroller || !content) return
+  sourceLayoutObserver = new ResizeObserver(applyReadingIntent)
+  sourceLayoutObserver.observe(scroller)
+  sourceLayoutObserver.observe(content)
+  applyReadingIntent()
+}, { flush: 'post' })
 watch([() => props.name, () => props.text, () => props.lineStart], () => { lineJumpApproximate.value = false })
 function scrollToTop(): void {
+  releaseSourceAnchor()
   scrollEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -317,35 +362,22 @@ function setupScrollSpy(root: HTMLElement): void {
   heads.forEach((h) => io!.observe(h))
 }
 function scrollToId(id: string): void {
+  releaseSourceAnchor()
   const el = contentEl.value?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
   if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); activeId.value = id }
   tocOpen.value = false
 }
 
 // ── in-app doc navigation (wiki / relative links) ────────────────────────────────────
-function docDir(): string {
-  return props.path ? props.path.replace(/\/[^/]*$/, '') : ''
-}
-function joinPath(dir: string, rel: string): string {
-  const out: string[] = []
-  for (const part of `${dir}/${rel}`.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') out.pop()
-    else out.push(part)
-  }
-  return '/' + out.join('/')
-}
 function resolveInternal(a: HTMLElement): string {
-  const dir = docDir()
   if (a.dataset.wikilink) {
     const name = a.dataset.wikilink
     const withExt = /\.[a-z0-9]+$/i.test(name) ? name : `${name}.md`
-    return dir ? joinPath(dir, withExt) : ''
+    return resolveDocumentPath(props.path || '', withExt) || ''
   }
   const href = a.dataset.href || ''
   if (!href) return ''
-  if (href.startsWith('/')) return href
-  return dir ? joinPath(dir, href) : ''
+  return resolveDocumentPath(props.path || '', href) || ''
 }
 function wireLinks(root: HTMLElement): void {
   root.querySelectorAll<HTMLElement>('a.dw-link').forEach((a) => {
@@ -518,6 +550,7 @@ function focusMatch(i: number): void {
   matchIdx.value = i + 1
 }
 function runFind(): void {
+  releaseSourceAnchor()
   clearMarks()
   matchCount.value = 0
   matchIdx.value = 0
@@ -555,6 +588,7 @@ function refocusFind(): void {
  *  so "open vs refocus vs ignore" behaves identically — just pointed at this reader's own find bar
  *  instead of the terminal's. */
 function onPreviewKeydown(e: KeyboardEvent): void {
+  if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) releaseSourceAnchor()
   handleFindShortcut(
     e,
     { active: true, matches: (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'f', open: findOpen.value },
@@ -567,7 +601,7 @@ async function copyText(text: string): Promise<void> {
   else emit('toast', '复制失败')
 }
 
-onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer) })
+onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if (findTimer) clearTimeout(findTimer) })
 </script>
 
 <template>
@@ -578,6 +612,9 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
     data-testid="file-preview"
     tabindex="0"
     @scroll="onScroll"
+    @wheel.passive="releaseSourceAnchor"
+    @touchstart.passive="releaseSourceAnchor"
+    @pointerdown="releaseSourceAnchor"
     @keydown="onPreviewKeydown"
   >
     <!-- reading-progress bar -->
@@ -723,7 +760,9 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
   color: var(--fp-text);
   -webkit-user-select: text;
   user-select: text;
-  scroll-behavior: smooth;
+  /* Reference/restore jumps must be immediate. Explicit user actions (TOC,
+     back-to-top, find) request smooth scrolling at their own call sites. */
+  scroll-behavior: auto;
   /* tabindex="0" so Ctrl/Cmd+F lands here (see the watch(() => props.name, …) focus call above);
      it holds focus for as long as the reader is open, so a permanent ring would be noise, not signal. */
   outline: none;

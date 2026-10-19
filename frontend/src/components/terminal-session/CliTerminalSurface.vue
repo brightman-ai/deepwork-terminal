@@ -401,8 +401,10 @@
       :hud-visible="hudVisible"
       :hud-events="hud.events.value"
       :hud-snapshot="hud.snapshot"
+      :bottom-inset="bottomBarHeight"
       @selection-copy="onSelectionCopy"
       @touchball-tap="onTouchballTap"
+      @touchball-move="onTouchballMove"
       @touchball-double-tap="onTouchballDoubleTap"
       @touchball-triple-tap="onTouchballTripleTap"
       @touchball-long-press="onTouchballLongPress"
@@ -2775,6 +2777,7 @@ function onTouchballTap(x: number, y: number) {
   const cell = coordMapper.screenToCell(x, y)
   const cellBuf: CellCoord = { ...cell, bufferRow: liveViewportY() + cell.row }
   if (anchorSM.state.value === 'IDLE') {
+    if (xtermRef.value?.activateFileLinkAt(x, y)) return
     hud.record('touch', `tap (idle) cell (${cell.col},${cell.row})`)
     return
   } else if (anchorSM.state.value === 'NO_ANCHOR') {
@@ -2788,12 +2791,26 @@ function onTouchballTap(x: number, y: number) {
   hud.record('touch', `tap anchor cell (${cell.col},${cell.row})`)
 }
 
+function onTouchballMove(x: number, y: number): void {
+  if (anchorSM.state.value === 'IDLE') xtermRef.value?.hoverFileLinkAt(x, y)
+  else xtermRef.value?.hoverFileLinkAt()
+}
+
 function onTouchballDoubleTap(x: number, y: number) {
   const term = xtermRef.value?.terminal?.()
   if (!term) return
   // Snapshot the live viewport top ONCE so getLine / select / anchors all agree on the same
   // buffer row even if a scroll fires mid-handler.
   const vY = term.buffer.active.viewportY
+  const file = xtermRef.value?.fileLinkSelectionAt(x, y)
+  if (file) {
+    xtermRef.value?.hoverFileLinkAt()
+    term.select(file.startCol, file.startRow, file.length)
+    anchorSM.enterSelection()
+    anchorSM.placeAnchor1({ col: file.startCol, row: file.startRow - vY, bufferRow: file.startRow })
+    anchorSM.placeAnchor2({ col: file.endCol, row: file.endRow - vY, bufferRow: file.endRow })
+    return
+  }
   const cell = coordMapper.screenToCell(x, y)
   const line = term.buffer.active.getLine(cell.row + vY)
   if (!line) return
@@ -2825,6 +2842,7 @@ function onTouchballTripleTap(_x: number, _y: number) {
 }
 
 function onTouchballLongPress(x: number, y: number) {
+  xtermRef.value?.hoverFileLinkAt()
   if (anchorSM.state.value === 'HAS_BOTH') {
     const term = xtermRef.value?.terminal?.()
     if (term) {

@@ -63,7 +63,7 @@
         data-testid="resource-drawer"
         @click.self="$emit('update:open', false)"
       >
-        <div ref="panelRootEl" class="rd-panel" :style="panelStyle" @mousedown="onPanelMousedown">
+        <div ref="panelRootEl" class="rd-panel" :style="panelStyle" @mousedown="onPanelMousedown" @click.capture="onPanelClickCapture">
           <!-- Left-edge resize handle (desktop primarily): drag left to widen the
                panel; width persists to localStorage. Mobile keeps the max-width guard. -->
           <div
@@ -874,13 +874,25 @@ function onResizeEnd(): void {
 function onPanelMousedown(e: MouseEvent): void {
   const t = e.target as HTMLElement | null
   if (t?.closest('input, textarea, select, button, a, [contenteditable], .filepreview')) return
-  // 放行的 SSOT = CSS 自己。面板整体 user-select:none，任何显式开 text 的区域（docx 正文、
+  // 放行的 SSOT = CSS 自己。内容默认可选，控件/拖动区禁选；显式开 text 的区域（docx 正文、
   // pdf 的失败文案、预览标题…）就是"我要能被选中"的声明；blanket preventDefault 会让它们
   // 光有 CSS 却拖不动 —— 2026-09-07「docx/标题不能复制」的真根因（CSS 改了没用，因为
   // mousedown 先被吞了）。按计算样式放行，新预览器不必回来改这串类名白名单。
   const us = t ? (getComputedStyle(t).userSelect || (getComputedStyle(t) as unknown as Record<string, string>).webkitUserSelect) : ''
   if (us && us !== 'none') return
   e.preventDefault()
+}
+
+function onPanelClickCapture(e: MouseEvent): void {
+  // Dragging a filename/path to copy it must not also open the file. Keyboard
+  // activation and ordinary clicks with a collapsed selection still work.
+  const region = (e.target as HTMLElement | null)?.closest('.select-text')
+  const selection = window.getSelection()
+  if (e.detail && region && selection && !selection.isCollapsed
+      && (region.contains(selection.anchorNode) || region.contains(selection.focusNode))) {
+    e.preventDefault()
+    e.stopPropagation()
+  }
 }
 
 // Bubble FilesPanel's inject / compose-draft to the host (same chokepoints as the
@@ -1360,11 +1372,19 @@ function glyphClass(name: string): string {
   font-size: 0.78rem;
   box-shadow: -8px 0 40px rgba(0, 0, 0, 0.6);
   overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
+  user-select: text;
+  -webkit-user-select: text;
   /* Keep the header clear of the status bar / notch (Safari + standalone PWA): without
      this the 工作台 title + tabs sit UNDER the Dynamic Island and are unreadable. */
   padding-top: env(safe-area-inset-top, 0px);
+}
+.rd-panel :deep(button), .rd-panel :deep(summary), .rd-header {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.rd-panel :deep(.select-text) {
+  user-select: text;
+  -webkit-user-select: text;
 }
 .is-floating .rd-header { cursor: move; touch-action: none; }
 /* Width comes from the inline :style (panelStyle, persisted + drag-resized). The

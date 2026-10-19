@@ -31,7 +31,7 @@ const labels = computed(() => new Map(props.tabs.map((tab): [string, string] => 
       @click="emit('select', tab.key)"
     >
       <span class="fp-preview-tab-index" :aria-label="`标签 ${tabIndex === 9 ? 0 : tabIndex + 1}`">{{ tabIndex === 9 ? 0 : tabIndex + 1 }}</span>
-      <span class="min-w-0 truncate">{{ labels.get(tab.key) }}</span>
+      <span class="min-w-0 truncate select-text cursor-text">{{ labels.get(tab.key) }}</span>
       <span v-if="tab.loading" class="shrink-0 opacity-70">…</span>
       <span
         class="shrink-0 rounded px-0.5 text-[0.7rem] leading-none opacity-70 hover:opacity-100"

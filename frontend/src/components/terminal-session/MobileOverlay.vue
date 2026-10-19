@@ -26,6 +26,7 @@
     <VirtualTouchball
       ref="touchballRef"
       :visible="true"
+      :bottom-inset="bottomInset"
       :cursor-position="cursorDisplayPos"
       @tap="onTouchballTap"
       @drag="onTouchballDrag"
@@ -68,11 +69,13 @@ const props = defineProps<{
   hudVisible: boolean
   hudEvents: readonly HudEvent[]
   hudSnapshot: Readonly<HudSnapshot>
+  bottomInset?: number
 }>()
 
 const emit = defineEmits<{
   (e: 'selectionCopy'): void
   (e: 'touchballTap', x: number, y: number): void
+  (e: 'touchballMove', x: number, y: number): void
   (e: 'touchballDoubleTap', x: number, y: number): void
   (e: 'touchballTripleTap', x: number, y: number): void
   (e: 'touchballLongPress', x: number, y: number): void
@@ -85,7 +88,11 @@ const emit = defineEmits<{
 const touchballRef = ref<InstanceType<typeof VirtualTouchball>>()
 const ballPos = ref({ x: 200, y: 300 })
 
-function onBallPositionChange(x: number, y: number) { ballPos.value = { x, y } }
+function onBallPositionChange(x: number, y: number) {
+  ballPos.value = { x, y }
+  const c = cursorDisplayPos.value
+  emit('touchballMove', c.x, c.y)
+}
 
 // Authoritative aim point = the ARROW TIP of the touchball's virtual cursor. This SAME
 // value is (a) handed to VirtualTouchball as `:cursor-position` (which renders its tip

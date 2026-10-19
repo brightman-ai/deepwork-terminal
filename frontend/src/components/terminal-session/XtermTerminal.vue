@@ -1,6 +1,7 @@
 <template>
   <div class="xterm-root" data-testid="terminal-surface" @click="focusTerminal">
     <div ref="terminalContainer" class="xterm-container" />
+    <div v-if="virtualFileHover" class="virtual-file-hover" :style="virtualFileHover" aria-hidden="true" data-testid="terminal-file-link-hover" />
     <!-- Proxy textarea: mobile fallback for xterm input. Disabled on desktop
          WKWebView where it competes with xterm's built-in textarea, causing
          keystroke loss. [Ref: TH-0501-m9j root cause] -->
@@ -58,7 +59,8 @@ import {
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
 import type { RendererCause } from '@terminal/composables/cli/renderHealth'
-import { editedDiffLineLink, findWrappedTerminalFileLinks, wrappedTerminalRows, terminalCellRange } from './terminalFileLinks'
+import { terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from './terminalFileLinks'
+import { terminalCellAtPoint } from '@terminal/composables/cli/useTerminalCoordMapper'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -98,6 +100,10 @@ const { isMobile } = useDeviceDetection()
 
 const terminalContainer = ref<HTMLDivElement>()
 const terminalInputProxy = ref<HTMLTextAreaElement>()
+const virtualFileHover = ref<Record<string, string> | null>(null)
+const fileHoverSubscriptions: IDisposable[] = []
+let virtualPointerPoint: { x: number; y: number } | undefined
+let virtualPointerRow = -1
 // Search (in-terminal find, [Ref: TerminalSearchBar]). resultIndex is 0-based, -1 = no active
 // match (empty query, or the addon hasn't computed results for this term/options yet — see
 // buildSearchOptions: results are only tracked when `decorations` is passed).
@@ -105,6 +111,55 @@ const searchResultIndex = ref(-1)
 const searchResultCount = ref(0)
 let terminal: Terminal | null = null
 let fileLinkProvider: IDisposable | null = null
+
+function filePoint(x: number, y: number) {
+  const target = terminal
+  const screen = target?.element?.querySelector('.xterm-screen')
+  if (!target || !screen || !props.active) return undefined
+  const rect = screen.getBoundingClientRect()
+  const cell = terminalCellAtPoint({ cols: target.cols, rows: target.rows,
+    cellWidth: rect.width / target.cols, cellHeight: rect.height / target.rows, offsetX: rect.left, offsetY: rect.top }, x, y)
+  if (!cell) return undefined
+  const front = document.elementFromPoint(x, y)
+  if (front && !target.element?.contains(front) && !front.closest('.cursor-indicator')) return undefined
+  return { target, rect, col: cell.col, viewportRow: cell.row, row: target.buffer.active.viewportY + cell.row }
+}
+
+function hoverFileLinkAt(x?: number, y?: number): void {
+  virtualFileHover.value = null
+  virtualPointerPoint = undefined
+  virtualPointerRow = -1
+  if (x === undefined || y === undefined) return
+  const point = filePoint(x, y)
+  if (!point) return
+  virtualPointerPoint = { x, y }
+  virtualPointerRow = point.viewportRow
+  const link = terminalFileLinkAtCell(point.target.buffer.active, point.row, point.col)
+  const root = terminalContainer.value?.parentElement?.getBoundingClientRect()
+  if (!link || !root) return
+  const cw = point.rect.width / point.target.cols, ch = point.rect.height / point.target.rows
+  virtualFileHover.value = {
+    left: `${point.rect.left - root.left + (link.cellStart - 1) * cw}px`,
+    top: `${point.rect.top - root.top + point.viewportRow * ch}px`,
+    width: `${(link.cellEnd - link.cellStart + 1) * cw}px`, height: `${ch}px`,
+  }
+}
+
+function activateFileLinkAt(x: number, y: number): boolean {
+  const point = filePoint(x, y)
+  const link = point && terminalFileLinkAtCell(point.target.buffer.active, point.row, point.col)
+  if (!link) return false
+  virtualFileHover.value = null
+  virtualPointerPoint = undefined
+  virtualPointerRow = -1
+  emit('file-path', link.path, link.lineStart, link.lineEnd)
+  return true
+}
+
+function fileLinkSelectionAt(x: number, y: number) {
+  const point = filePoint(x, y)
+  return point && terminalFileSelectionAtCell(point.target.buffer.active, point.row, point.col, point.target.cols)
+}
 let fitAddon: FitAddon | null = null
 let searchAddon: SearchAddon | null = null
 // Held so teardown can release the GPU context explicitly, and so a context loss can null it out.
@@ -516,40 +571,24 @@ function initTerminal() {
   terminal.loadAddon(new WebLinksAddon())
   const provider: ILinkProvider = {
     provideLinks: (bufferLineNumber, callback) => {
-      const line = terminal?.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true) ?? ''
-      const bufferLine = terminal?.buffer.active.getLine(bufferLineNumber - 1)
       const buffer = terminal?.buffer.active
-      const group = buffer ? wrappedTerminalRows(buffer, bufferLineNumber - 1) : { rows: [], currentRow: 0 }
-      let links = findWrappedTerminalFileLinks(group.rows, group.currentRow)
-      // Claude/Codex edit previews put the file path in a header (`Edited
-      // file.ts (+2 -2)`) and render the changed source lines below it as a
-      // numbered gutter. Make each gutter number a link to the same file at
-      // that source line. This keeps the gesture local to the terminal and
-      // avoids guessing from the aggregate +N/-M counts.
-      if (terminal) {
-        const priorLines: string[] = []
-        const first = Math.max(1, bufferLineNumber - 24)
-        for (let row = bufferLineNumber - 1; row >= first; row--) {
-          priorLines.push(terminal.buffer.active.getLine(row - 1)?.translateToString(true) ?? '')
-        }
-        const gutterLink = editedDiffLineLink(line, priorLines)
-        if (gutterLink) links = [...links, { ...gutterLink, row: group.currentRow, rawStart: gutterLink.start, rawLength: gutterLink.displayLength! }]
-      }
+      const links = buffer ? terminalFileLinksAtRow(buffer, bufferLineNumber - 1) : []
       callback(links.length ? links.map((link) => ({
         text: link.path,
-        range: (() => {
-          const cells = bufferLine ? Array.from({ length: bufferLine.length }, (_, x) => {
-            const cell = bufferLine.getCell(x)
-            return { chars: cell?.getChars() ?? '', width: cell?.getWidth() ?? 1 }
-          }) : []
-          const span = terminalCellRange(cells, link.start, link.displayLength ?? link.path.length)
-          return { start: { x: span.start, y: bufferLineNumber }, end: { x: span.end, y: bufferLineNumber } }
-        })(),
+        range: { start: { x: link.cellStart, y: bufferLineNumber }, end: { x: link.cellEnd, y: bufferLineNumber } },
         activate: () => emit('file-path', link.path, link.lineStart, link.lineEnd),
       })) : undefined)
     },
   }
   fileLinkProvider = terminal.registerLinkProvider(provider)
+  const clearFileHover = () => { virtualFileHover.value = null; virtualPointerRow = -1 }
+  // Recheck only when rendering touches the aimed row. Agent output elsewhere
+  // must not erase a stationary pointer's feedback or trigger whole-buffer work.
+  fileHoverSubscriptions.push(terminal.onScroll(clearFileHover), terminal.onResize(clearFileHover), terminal.onRender(({ start, end }) => {
+    if (virtualPointerPoint && (virtualPointerRow < 0 || virtualPointerRow >= start && virtualPointerRow <= end)) {
+      hoverFileLinkAt(virtualPointerPoint.x, virtualPointerPoint.y)
+    }
+  }))
   // emoji 按 2 格算，和 Claude Code / Codex 排版时的假设一致；必须早于 open() 和第一次 write()。
   // 见 terminalUnicode.ts（含它管不到的符号）。
   enableUnicode11(terminal)
@@ -739,6 +778,7 @@ onUnmounted(() => {
   if (hiddenWebglReleaseTimer) clearTimeout(hiddenWebglReleaseTimer)
   if (resizeObserver) resizeObserver.disconnect()
   fileLinkProvider?.dispose()
+  fileHoverSubscriptions.splice(0).forEach((subscription) => subscription.dispose())
   fileLinkProvider = null
   // Before terminal.dispose(): release the GPU context explicitly. A workbench opens and closes
   // terminals freely and browsers cap live WebGL contexts (~16); silently losing them past that cap
@@ -913,6 +953,9 @@ watch(() => props.active, (active) => {
 })
 
 defineExpose({
+  hoverFileLinkAt,
+  activateFileLinkAt,
+  fileLinkSelectionAt,
   measure,
   resizeGrid,
   write,
@@ -938,6 +981,8 @@ defineExpose({
   height: 100%;
   overflow: hidden;
 }
+
+.virtual-file-hover { position: absolute; pointer-events: none; z-index: 3; border-bottom: 2px solid #a78bfa; background: rgba(167,139,250,0.12); }
 
 .terminal-input-proxy {
   position: absolute;
