@@ -528,6 +528,9 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	if want := r.URL.Query().Get("convert"); want != "" || r.URL.Query().Get("pdf") == "1" {
 		srcExt := strings.ToLower(filepath.Ext(target))
 		target2 := convertTargetFor(srcExt)
+		if target2 == "" && want == "docx" && isMarkdownExt(srcExt) {
+			target2 = "docx"
+		}
 		if target2 == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this format is not converted server-side"})
 			return
@@ -540,13 +543,23 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "file too large to convert"})
 			return
 		}
-		dir, cerr := s.convertOffice(r.Context(), target, info, target2)
+		var dir string
+		var cerr error
+		if isMarkdownExt(srcExt) {
+			dir, cerr = s.convertMarkdownToDocx(r.Context(), target, info)
+		} else {
+			dir, cerr = s.convertOffice(r.Context(), target, info, target2)
+		}
 		if cerr != nil {
 			// 缺 libreoffice 与"这个文件转不动"是两件事，说清楚哪一件——泛泛的"转换失败"
 			// 会让人去查文件，而真因可能是这台机器上根本没装。
 			msg := "conversion failed: " + cerr.Error()
-			if _, lookErr := exec.LookPath(officeConvertBin); lookErr != nil {
-				msg = "libreoffice is not installed on this host, so " + srcExt + " cannot be previewed"
+			bin := officeConvertBin
+			if isMarkdownExt(srcExt) {
+				bin = markdownConvertBin
+			}
+			if _, lookErr := exec.LookPath(bin); lookErr != nil {
+				msg = bin + " is not installed on this host, so " + srcExt + " cannot be converted"
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 			return

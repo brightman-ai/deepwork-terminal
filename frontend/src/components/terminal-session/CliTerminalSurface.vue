@@ -1542,6 +1542,19 @@ const remoteClipboard = useRemoteClipboard({
   httpBase: () => props.httpBase,
   authToken: () => props.authToken,
 })
+let releaseClipboardControl: (() => void) | null = null
+watch(wsStatus, (status) => {
+  if (status === 'connected') {
+    if (!releaseClipboardControl) releaseClipboardControl = remoteClipboard.claimControlPlane()
+  } else if (releaseClipboardControl) {
+    releaseClipboardControl()
+    releaseClipboardControl = null
+  }
+}, { immediate: true })
+onUnmounted(() => {
+  releaseClipboardControl?.()
+  releaseClipboardControl = null
+})
 
 const pasteResolver = useCliPasteResolver({
   sessionId: () => props.sessionId,
@@ -2250,6 +2263,12 @@ function onTerminalReady(terminal: Terminal) {
         // (overview cards, tab strip) live in the portal, not under this component.
         case 'agent_signal':
           applyAgentSignalFrame(msg.payload)
+          break
+        case 'clipboard_delta':
+          remoteClipboard.applyClipboardDelta(msg.payload)
+          break
+        case 'clipboard_targets':
+          remoteClipboard.applyClipboardTargets(msg.payload)
           break
         case 'error':
           console.error('WS error:', msg.payload)

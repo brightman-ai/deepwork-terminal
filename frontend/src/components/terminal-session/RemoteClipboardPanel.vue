@@ -3,7 +3,6 @@ import {
   computed,
   getCurrentInstance,
   nextTick,
-  onBeforeUnmount,
   ref,
   watch,
 } from 'vue'
@@ -25,7 +24,6 @@ const inputId = 'clipboard-' + getCurrentInstance()!.uid
 const settingsOpen = ref(false),
   editor = ref<HTMLTextAreaElement>(),
   scroll = ref<HTMLElement>()
-let refreshTimer: ReturnType<typeof setInterval> | undefined
 const rows = computed(() =>
   c.entries.value.filter((e) => {
     const query = v.query.trim().toLowerCase()
@@ -119,21 +117,17 @@ watch(
     let cancelled = false
     onCleanup(() => {
       cancelled = true
-      clearInterval(refreshTimer)
     })
-    clearInterval(refreshTimer)
     if (!props.active) return
     viewed()
     await c.refreshTargets()
     c.selectDefault(props.sessionId, props.paneId)
     if (cancelled) return
-    refreshTimer = setInterval(() => void c.refreshTargets(), 10000)
     await nextTick()
     if (scroll.value) scroll.value.scrollTop = v.scroll
   },
   { immediate: true },
 )
-onBeforeUnmount(() => clearInterval(refreshTimer))
 </script>
 <template>
   <section class="rc-panel" data-testid="remote-clipboard">

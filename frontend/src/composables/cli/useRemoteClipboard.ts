@@ -26,6 +26,16 @@ interface HistoryResponse {
   cursor: number
   entries: ClipboardEntry[]
 }
+interface ClipboardDeltaPayload {
+  epoch?: string
+  cursor?: number
+  entries?: ClipboardEntry[]
+}
+interface ClipboardTargetsPayload {
+  revision?: number
+  host?: string
+  targets?: ClipboardTarget[]
+}
 const clients = new Map<string, ReturnType<typeof createClient>>()
 // Separate browser histories on auth rotation without using credentials as storage keys.
 function fingerprint(s: string): string {
@@ -49,6 +59,7 @@ function createClient(endpoint: Endpoint, key: string) {
     targets = ref<ClipboardTarget[]>([]),
     host = ref('远端')
   const targetsValid = ref(false)
+  const targetsRevision = ref(0)
   const connected = ref(false),
     error = ref(''),
     persistenceError = ref(''),
@@ -78,14 +89,20 @@ function createClient(endpoint: Endpoint, key: string) {
     timer: ReturnType<typeof setTimeout> | undefined
   let stopped = true,
     polling = false,
+    pollController: AbortController | null = null,
+    snapshotWanted = false,
+    controlPlaneOwners = 0,
     activeRequests = new Set<AbortController>(),
     initialized = false,
     writing = Promise.resolve(),
     saving = Promise.resolve()
   let localCopyRevision = 0
-  async function request(path: string, init?: RequestInit, timeoutMs = 10000) {
+  async function request(path: string, init: RequestInit = {}, timeoutMs = 10000) {
     const controller = new AbortController()
     activeRequests.add(controller)
+    const upstream = init.signal
+    const abort = () => controller.abort()
+    upstream?.addEventListener('abort', abort, { once: true })
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       let response: Response
@@ -110,6 +127,7 @@ function createClient(endpoint: Endpoint, key: string) {
       return data
     } finally {
       clearTimeout(timeout)
+      upstream?.removeEventListener('abort', abort)
       activeRequests.delete(controller)
     }
   }
@@ -230,9 +248,11 @@ function createClient(endpoint: Endpoint, key: string) {
     initialized = true
     persist()
   }
-  async function poll() {
+  async function poll(forceSnapshot = false) {
     if (stopped || polling) return
     polling = true
+    const controller = new AbortController()
+    pollController = controller
     try {
       await ready
       const data = (await request(
@@ -240,9 +260,9 @@ function createClient(endpoint: Endpoint, key: string) {
           new URLSearchParams({
             epoch,
             since: String(cursor),
-            wait: initialized ? '1' : '0',
+            wait: initialized && !forceSnapshot ? '1' : '0',
           }),
-        undefined,
+        { signal: controller.signal },
         25000,
       )) as HistoryResponse
       connected.value = true
@@ -261,31 +281,102 @@ function createClient(endpoint: Endpoint, key: string) {
         }
       }
     } catch {
+      if (controller.signal.aborted && controlPlaneOwners > 0) return
       connected.value = false
       error.value = '剪贴板连接暂不可用；历史和草稿已保留'
     } finally {
       polling = false
-      if (!stopped)
+      if (pollController === controller) pollController = null
+      if (!stopped && controlPlaneOwners > 0 && snapshotWanted && !polling) {
+        snapshotWanted = false
+        void poll(true)
+      } else if (!stopped && controlPlaneOwners === 0) {
+        const recoverSnapshot = snapshotWanted
+        snapshotWanted = false
         timer = setTimeout(
-          () => void poll(),
+          () => void poll(recoverSnapshot),
           !connected.value
             ? 2000
             : document.visibilityState === 'hidden'
               ? 30000
               : 500,
         )
+      }
     }
+  }
+
+  /**
+   * Claim the existing terminal WS as the live control plane for this endpoint.
+   * There is still one HTTP snapshot on first claim (or after a gap), but the
+   * 20-second history long poll is released as soon as a WS is available.
+   */
+  function claimControlPlane(): () => void {
+    controlPlaneOwners++
+    clearTimeout(timer)
+    if (!initialized) snapshotWanted = true
+    pollController?.abort()
+    if (!initialized && !polling) {
+      snapshotWanted = false
+      void poll(true)
+    }
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      controlPlaneOwners = Math.max(0, controlPlaneOwners - 1)
+      if (controlPlaneOwners === 0 && !stopped && !polling) void poll()
+    }
+  }
+
+  function applyClipboardDelta(payload: unknown): void {
+    const data = (payload || {}) as ClipboardDeltaPayload
+    const nextEpoch = typeof data.epoch === 'string' ? data.epoch : ''
+    const nextCursor = typeof data.cursor === 'number' ? data.cursor : 0
+    if (!nextEpoch || !Number.isFinite(nextCursor)) return
+    if (epoch && nextEpoch !== epoch) {
+      snapshotWanted = true
+      void poll(true)
+      return
+    }
+    // A dropped control frame is safe: ask for a bounded HTTP snapshot once rather
+    // than guessing which clipboard item was missed.
+    const firstSequence = data.entries?.find((entry) => Number.isFinite(entry.sequence))?.sequence
+    if (initialized && firstSequence !== undefined && firstSequence > cursor + 1) {
+      snapshotWanted = true
+      void poll(true)
+      return
+    }
+    const entries = Array.isArray(data.entries) ? data.entries : []
+    if (entries.length) accept({ epoch: nextEpoch, cursor: nextCursor, entries })
+    else {
+      epoch = nextEpoch
+      cursor = Math.max(cursor, nextCursor)
+      // The server intentionally sends metadata-only on WS attach. Do not mark
+      // the browser initialized before the one-shot HTTP snapshot fills history.
+      if (!initialized) snapshotWanted = true
+    }
+    connected.value = true
+    error.value = ''
+  }
+
+  function applyClipboardTargets(payload: unknown): void {
+    const data = (payload || {}) as ClipboardTargetsPayload
+    if (!Array.isArray(data.targets)) return
+    const revision = typeof data.revision === 'number' ? data.revision : targetsRevision.value + 1
+    if (revision < targetsRevision.value) return
+    targetsRevision.value = revision
+    targets.value = data.targets
+    targetsValid.value = true
+    host.value = data.host || host.value || '远端'
+    connected.value = true
+    error.value = ''
   }
   async function refreshTargets() {
     if (loadingTargets.value) return
     loadingTargets.value = true
     try {
       const data = await request('/clipboard/targets')
-      targets.value = data.targets
-      targetsValid.value = true
-      host.value = data.host || '远端'
-      connected.value = true
-      error.value = ''
+      applyClipboardTargets(data)
     } catch (e) {
       targetsValid.value = false
       error.value = e instanceof Error ? e.message : '目标列表不可用'
@@ -446,6 +537,9 @@ function createClient(endpoint: Endpoint, key: string) {
     sendDraft,
     writeLocal,
     attach,
+    claimControlPlane,
+    applyClipboardDelta,
+    applyClipboardTargets,
     poll,
   }
 }

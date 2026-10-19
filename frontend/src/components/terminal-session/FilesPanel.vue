@@ -983,6 +983,7 @@ interface PathResolutionState {
 const pathResolution = ref<PathResolutionState | null>(null)
 let pathSearchRequest: AbortController | null = null
 const MAX_PATH_CANDIDATES = 20
+const PATH_RESOLUTION_TIMEOUT_MS = 2500
 
 interface Preview {
   key: string
@@ -995,6 +996,9 @@ interface Preview {
   lineStart?: number
   lineEnd?: number
   result: RawResult
+  /** Bytes for an explicit Markdown→DOCX conversion; the artifact is preview/download only and
+   * is not silently written into the user's working tree. */
+  generatedDocx?: ArrayBuffer
   loading: boolean
   lastUsedAt: number
 }
@@ -1003,6 +1007,7 @@ const previews = ref<Preview[]>([])
 const activePreviewKey = ref('')
 const preview = computed(() => previews.value.find((p) => p.key === activePreviewKey.value) ?? null)
 const previewLoading = computed(() => preview.value?.loading ?? false)
+const markdownConvertBusy = ref(false)
 
 function previewKey(absPath: string, rel: string): string {
   // Include the anchor in the identity: the same relative name in two panes is two different
@@ -1043,6 +1048,11 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
   pathSearchRequest?.abort()
   const request = new AbortController()
   pathSearchRequest = request
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    request.abort()
+  }, PATH_RESOLUTION_TIMEOUT_MS)
   const state: PathResolutionState = { query, requestedPath, previousPreviewKey: restorePreviewKey, lineStart, lineEnd, loading: true, candidates: [], totalCandidates: 0, hasMore: false }
   pathResolution.value = state
   activePreviewKey.value = ''
@@ -1074,11 +1084,12 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
       await previewRel(candidate.name, candidate.absPath, candidate.rel, lineStart, lineEnd)
     }
   } catch {
-    if (!request.signal.aborted && pathResolution.value === state) {
+    if (pathResolution.value === state && (timedOut || !request.signal.aborted)) {
       state.loading = false
-      state.error = '定位请求失败，请重试'
+      state.error = timedOut ? '自动定位较慢，先打开目录下搜索继续查找' : '定位请求失败，请重试'
     }
   } finally {
+    clearTimeout(timeout)
     if (pathSearchRequest === request) pathSearchRequest = null
   }
 }
@@ -1357,7 +1368,59 @@ function triggerDownload(rel: string, name: string): void {
 }
 function doDownload(): void {
   const p = preview.value
-  if (p) triggerDownload(p.rel, p.name)
+  if (!p) return
+  if (p.generatedDocx) {
+    const url = URL.createObjectURL(new Blob([p.generatedDocx], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = p.name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+    return
+  }
+  triggerDownload(p.rel, p.name)
+}
+
+function isMarkdownPreview(name: string): boolean {
+  return formatFor(name).kind === 'markdown'
+}
+
+async function convertMarkdownToDocx(): Promise<void> {
+  const source = preview.value
+  if (!source || !isMarkdownPreview(source.name) || markdownConvertBusy.value) return
+  markdownConvertBusy.value = true
+  try {
+    const converted = await filesRawBytes(props.sessionId, source.rel, props.cwd, { convertTo: 'docx' })
+    if (!converted.ok) {
+      toast(converted.reason || 'Markdown 转 DOCX 失败，请重试')
+      return
+    }
+    const docxName = source.name.replace(/\.(?:md|markdown|mdx)$/i, '.docx')
+    const docxPath = source.absPath.replace(/\.(?:md|markdown|mdx)$/i, '.docx')
+    const key = `${source.key}\u0000generated-docx`
+    const existing = previews.value.find((p) => p.key === key)
+    if (existing) {
+      activatePreview(key)
+      return
+    }
+    previews.value.push({
+      key,
+      name: docxName,
+      absPath: docxPath,
+      rel: source.rel,
+      result: { kind: 'docx', data: converted.data, size: converted.size },
+      generatedDocx: converted.data,
+      loading: false,
+      lastUsedAt: Date.now(),
+    })
+    activePreviewKey.value = key
+    evictPreviewOverflow()
+    toast('已转换为同名 DOCX，可直接下载')
+  } finally {
+    markdownConvertBusy.value = false
+  }
 }
 // 树内文件行「下载」（右键/长按菜单）——不必先开预览即可取回，sftp get 对称。
 function downloadNode(node: TreeNode): void {
@@ -1582,7 +1645,11 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <span class="min-w-0 flex-1 text-xs font-medium truncate" :title="pathResolution.requestedPath">定位文件：{{ pathResolution.requestedPath }}</span>
         <button type="button" class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation" title="返回目录" data-testid="fp-path-resolution-cancel" @click="cancelPathResolution"><X class="mx-auto size-3.5" /></button>
       </div>
-      <div v-if="pathResolution.loading" class="flex-1 flex items-center justify-center text-xs text-muted-foreground animate-pulse">正在当前工作目录搜索 {{ pathResolution.query }}…</div>
+      <div v-if="pathResolution.loading" class="flex-1 flex flex-col items-center justify-center gap-3 px-5 text-center">
+        <p class="text-xs text-muted-foreground animate-pulse">正在当前工作目录尝试定位 {{ pathResolution.query }}…</p>
+        <p class="text-[0.65rem] text-muted-foreground/70">目录较大时自动定位可能较慢，你可以直接进入目录下搜索。</p>
+        <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-open-search-loading" @click="searchPreviewFile(pathResolution.query)">目录下搜索</button>
+      </div>
       <div v-else-if="pathResolution.error" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
         <p class="text-xs text-muted-foreground leading-snug">{{ pathResolution.error }}</p>
         <p class="text-[0.65rem] text-muted-foreground/70">搜索没有改变当前目录或文件内容。</p>
@@ -2051,6 +2118,15 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           >
             <Download class="size-3.5" />
           </button>
+          <button
+            v-if="preview.result.kind === 'text' && isMarkdownPreview(preview.name)"
+            class="min-h-7 rounded border border-border px-2 text-[0.6rem] text-primary hover:bg-muted/50 disabled:opacity-50"
+            type="button"
+            title="转换为同名 DOCX（不改写原 Markdown）"
+            data-testid="fp-preview-convert-docx"
+            :disabled="markdownConvertBusy"
+            @click="void convertMarkdownToDocx()"
+          >{{ markdownConvertBusy ? '转换中…' : '转 DOCX' }}</button>
           <button
             class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation"
             type="button" title="在目录树中定位"
