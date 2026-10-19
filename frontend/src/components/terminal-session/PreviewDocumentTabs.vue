@@ -1,10 +1,21 @@
 <script setup lang="ts">
 /** One tab strip shared by directory browsing and reading; document state stays in FilesPanel. */
-defineProps<{
+import { computed } from 'vue'
+const props = defineProps<{
   tabs: readonly { key: string; name: string; absPath: string; loading: boolean }[]
   activeKey: string
 }>()
 const emit = defineEmits<{ (e: 'select', key: string): void; (e: 'close', key: string): void }>()
+const labels = computed(() => new Map(props.tabs.map((tab): [string, string] => {
+  const peers = props.tabs.filter((other) => other.key !== tab.key && other.name === tab.name)
+  if (!peers.length) return [tab.key, tab.name]
+  const parts = tab.absPath.replace(/\\/g, '/').split('/').filter(Boolean)
+  for (let count = 2; count < parts.length; count++) {
+    const suffix = parts.slice(-count).join('/')
+    if (peers.every((other) => !other.absPath.replace(/\\/g, '/').endsWith('/' + suffix))) return [tab.key, suffix]
+  }
+  return [tab.key, parts.join('/')]
+})))
 </script>
 
 <template>
@@ -20,7 +31,7 @@ const emit = defineEmits<{ (e: 'select', key: string): void; (e: 'close', key: s
       @click="emit('select', tab.key)"
     >
       <span class="fp-preview-tab-index" :aria-label="`标签 ${tabIndex === 9 ? 0 : tabIndex + 1}`">{{ tabIndex === 9 ? 0 : tabIndex + 1 }}</span>
-      <span class="min-w-0 truncate">{{ tab.name }}</span>
+      <span class="min-w-0 truncate">{{ labels.get(tab.key) }}</span>
       <span v-if="tab.loading" class="shrink-0 opacity-70">…</span>
       <span
         class="shrink-0 rounded px-0.5 text-[0.7rem] leading-none opacity-70 hover:opacity-100"
