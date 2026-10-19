@@ -103,6 +103,7 @@ function createClient(endpoint: Endpoint, key: string) {
     const upstream = init.signal
     const abort = () => controller.abort()
     upstream?.addEventListener('abort', abort, { once: true })
+    if (upstream?.aborted) abort()
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       let response: Response
@@ -243,13 +244,18 @@ function createClient(endpoint: Endpoint, key: string) {
       settings.retentionDays,
     )
     known = new Set([...known].slice(-2000))
-    cursor = data.cursor
+    cursor = epoch === data.epoch ? Math.max(cursor, data.cursor) : data.cursor
     epoch = data.epoch
     initialized = true
     persist()
   }
   async function poll(forceSnapshot = false) {
-    if (stopped || polling) return
+    if (stopped) return
+    if (polling) {
+      if (forceSnapshot) snapshotWanted = true
+      return
+    }
+    if (forceSnapshot) snapshotWanted = false
     polling = true
     const controller = new AbortController()
     pollController = controller
@@ -332,12 +338,17 @@ function createClient(endpoint: Endpoint, key: string) {
     const data = (payload || {}) as ClipboardDeltaPayload
     const nextEpoch = typeof data.epoch === 'string' ? data.epoch : ''
     const nextCursor = typeof data.cursor === 'number' ? data.cursor : 0
-    if (!nextEpoch || !Number.isFinite(nextCursor)) return
+    if (!nextEpoch || !Number.isSafeInteger(nextCursor) || nextCursor < 0) return
     if (epoch && nextEpoch !== epoch) {
+      // Target revisions belong to one app lifetime too. Do not reject revision 1 from a new
+      // app just because the old app had reached revision 50 before an app-only restart.
+      targetsRevision.value = 0
+      targetsValid.value = false
       snapshotWanted = true
       void poll(true)
       return
     }
+    if (initialized && epoch === nextEpoch && nextCursor <= cursor) return
     // A dropped control frame is safe: ask for a bounded HTTP snapshot once rather
     // than guessing which clipboard item was missed.
     const firstSequence = data.entries?.find((entry) => Number.isFinite(entry.sequence))?.sequence
@@ -349,6 +360,13 @@ function createClient(endpoint: Endpoint, key: string) {
     const entries = Array.isArray(data.entries) ? data.entries : []
     if (entries.length) accept({ epoch: nextEpoch, cursor: nextCursor, entries })
     else {
+      // A second tab's WS handshake is metadata-only. A higher cursor proves that we owe a
+      // snapshot, not that we have already consumed those entries.
+      if (initialized && nextCursor > cursor) {
+        snapshotWanted = true
+        void poll(true)
+        return
+      }
       epoch = nextEpoch
       cursor = Math.max(cursor, nextCursor)
       // The server intentionally sends metadata-only on WS attach. Do not mark

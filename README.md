@@ -122,6 +122,12 @@ On startup dw-terminal prints — to **stdout**, so an agent driving it can read
 - **Linux / WSL** — one Linux binary covers both. On WSL2 a Windows browser reaches the server at `http://localhost:<port>`.
 - **macOS** — release binaries are signed with a Developer ID and notarized, so Gatekeeper allows them. (Homebrew and the install script also clear the quarantine flag as a fallback.)
 
+**Markdown → DOCX** uses [Pandoc](https://pandoc.org/installing.html) on the machine running
+the server (brew install pandoc on macOS; sudo apt install pandoc on Debian/Ubuntu).
+In a Markdown preview, open **文件操作 → 转 DOCX** to preview and download the same-named
+document. Relative images resolve from the Markdown file's directory; missing images produce
+a conversion error. The source Markdown is preserved.
+
 ## Screenshots
 
 ### Standard view — tmux panes + quick-key toolbar

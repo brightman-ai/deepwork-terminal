@@ -237,8 +237,10 @@ func (s *Server) publishClipboardEntry(e clipboardEntry) {
 	if s == nil || s.clipboard == nil {
 		return
 	}
-	epoch, cursor := s.clipboard.metadata()
-	payload, _ := json.Marshal(ClipboardDeltaPayload{Epoch: epoch, Cursor: cursor, Entries: []clipboardEntry{e}})
+	epoch, _ := s.clipboard.metadata()
+	// Another writer may already have appended a later entry. This delta must advance only to
+	// ITS entry's sequence; using the store's latest cursor can hide an undelivered event.
+	payload, _ := json.Marshal(ClipboardDeltaPayload{Epoch: epoch, Cursor: e.Sequence, Entries: []clipboardEntry{e}})
 	frame, _ := json.Marshal(WSControlMessage{Type: MsgTypeClipboardDelta, Payload: payload})
 	if h := s.ensureControlHub(); h != nil {
 		h.publish(frame)

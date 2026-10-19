@@ -1544,9 +1544,9 @@ const remoteClipboard = useRemoteClipboard({
 })
 let releaseClipboardControl: (() => void) | null = null
 watch(wsStatus, (status) => {
-  if (status === 'connected') {
-    if (!releaseClipboardControl) releaseClipboardControl = remoteClipboard.claimControlPlane()
-  } else if (releaseClipboardControl) {
+  // A connected PTY socket alone does not prove the app supports clipboard control frames.
+  // Claim on the first recognized frame so an older app retains its shared HTTP fallback.
+  if (status !== 'connected' && releaseClipboardControl) {
     releaseClipboardControl()
     releaseClipboardControl = null
   }
@@ -2265,9 +2265,11 @@ function onTerminalReady(terminal: Terminal) {
           applyAgentSignalFrame(msg.payload)
           break
         case 'clipboard_delta':
+          if (!releaseClipboardControl) releaseClipboardControl = remoteClipboard.claimControlPlane()
           remoteClipboard.applyClipboardDelta(msg.payload)
           break
         case 'clipboard_targets':
+          if (!releaseClipboardControl) releaseClipboardControl = remoteClipboard.claimControlPlane()
           remoteClipboard.applyClipboardTargets(msg.payload)
           break
         case 'error':

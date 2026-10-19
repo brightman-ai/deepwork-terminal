@@ -16,7 +16,7 @@
  * model here. The pieces it would reuse (PanelPane search, CanvasPane readonly) are
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
-import { ref, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
 import { useVirtualList } from '@vueuse/core'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { Copy, Check, Folder, FileText, ChevronLeft, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive, PanelLeft, PanelLeftClose } from 'lucide-vue-next'
@@ -46,6 +46,7 @@ import {
 import { useTreeUpload } from '@terminal/composables/cli/useTreeUpload'
 import { nextTick } from 'vue'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
+import PreviewDocumentTabs from './PreviewDocumentTabs.vue'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
 import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
 import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
@@ -996,6 +997,7 @@ interface Preview {
   lineStart?: number
   lineEnd?: number
   result: RawResult
+  scrollTop?: number
   /** Bytes for an explicit Markdown→DOCX conversion; the artifact is preview/download only and
    * is not silently written into the user's working tree. */
   generatedDocx?: ArrayBuffer
@@ -1004,10 +1006,19 @@ interface Preview {
 }
 const MAX_OPEN_PREVIEWS = 8
 const previews = ref<Preview[]>([])
+const previewRequests = new Map<string, AbortController>()
 const activePreviewKey = ref('')
 const preview = computed(() => previews.value.find((p) => p.key === activePreviewKey.value) ?? null)
 const previewLoading = computed(() => preview.value?.loading ?? false)
 const markdownConvertBusy = ref(false)
+const fileActionsMenu = ref<HTMLDetailsElement | null>(null)
+function closeFileActions(): void { if (fileActionsMenu.value) fileActionsMenu.value.open = false }
+function onFileActionsOutside(event: PointerEvent): void {
+  if (fileActionsMenu.value?.open && !fileActionsMenu.value.contains(event.target as Node)) closeFileActions()
+}
+onMounted(() => document.addEventListener('pointerdown', onFileActionsOutside))
+onBeforeUnmount(() => document.removeEventListener('pointerdown', onFileActionsOutside))
+let markdownConvertRequest: AbortController | null = null
 
 function previewKey(absPath: string, rel: string): string {
   // Include the anchor in the identity: the same relative name in two panes is two different
@@ -1018,6 +1029,8 @@ function previewKey(absPath: string, rel: string): string {
 // Free image object URLs when a tab is closed or evicted. Text and converted document bytes stay
 // bounded by the tab cap; images are the only browser-owned resource that needs explicit release.
 function revokePreviewUrl(p: Preview): void {
+  previewRequests.get(p.key)?.abort()
+  previewRequests.delete(p.key)
   if (p.result.kind === 'image') URL.revokeObjectURL(p.result.url)
 }
 
@@ -1026,9 +1039,6 @@ function activatePreview(key: string): void {
   if (!p) return
   p.lastUsedAt = Date.now()
   activePreviewKey.value = key
-}
-function previewDomKey(key: string): string {
-  return encodeURIComponent(key)
 }
 
 function evictPreviewOverflow(): void {
@@ -1053,7 +1063,10 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
     timedOut = true
     request.abort()
   }, PATH_RESOLUTION_TIMEOUT_MS)
-  const state: PathResolutionState = { query, requestedPath, previousPreviewKey: restorePreviewKey, lineStart, lineEnd, loading: true, candidates: [], totalCandidates: 0, hasMore: false }
+  // Keep the request identity reactive from creation. Assigning a raw object to a ref wraps it
+  // in a proxy: comparing ref.value to that raw object would discard EVERY response, and raw
+  // mutations would not update the loading/candidate UI either.
+  const state = reactive<PathResolutionState>({ query, requestedPath, previousPreviewKey: restorePreviewKey, lineStart, lineEnd, loading: true, candidates: [], totalCandidates: 0, hasMore: false })
   pathResolution.value = state
   activePreviewKey.value = ''
   setTreeCollapsed(false)
@@ -1069,8 +1082,10 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
     }
     const cwd = treeCwd.value || props.cwd || ''
     const allCandidates = filePathCandidates(result.entries, cwd, query)
-    state.totalCandidates = result.totalMatches ?? allCandidates.length
-    state.hasMore = !!result.nextOffset || state.totalCandidates > allCandidates.length
+    // totalMatches counts server hits (including directories/fuzzy names). It cannot be
+    // compared to the filtered exact-suffix list to infer unseen pages.
+    state.hasMore = !!result.nextOffset || (result.totalMatches ?? result.entries.length) > result.entries.length
+    state.totalCandidates = state.hasMore ? result.totalMatches ?? allCandidates.length : allCandidates.length
     state.candidates = allCandidates.slice(0, MAX_PATH_CANDIDATES)
     state.incomplete = !!result.incomplete
     state.truncated = !!result.truncated
@@ -1120,6 +1135,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
   const key = previewKey(absPath, rel)
   const existing = previews.value.find((p) => p.key === key)
   if (existing) {
+    if (lineStart) existing.scrollTop = undefined
     existing.lineStart = lineStart
     existing.lineEnd = lineEnd
     activatePreview(key)
@@ -1129,6 +1145,8 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
   // Every stage of multi-step archive/conversion reads belongs to this same location.
   const sessionId = props.sessionId
   const cwd = props.cwd
+  const request = new AbortController()
+  previewRequests.set(key, request)
   const entry: Preview = {
     key, name, absPath, rel, lineStart, lineEnd, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
   }
@@ -1139,29 +1157,33 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     const spec = formatFor(name)
     if (spec.fetch === 'bytes' || spec.fetch.startsWith('convert:')) {
       const target = spec.fetch.startsWith('convert:') ? spec.fetch.slice('convert:'.length) : ''
-      const r = await filesRawBytes(sessionId, rel, cwd, target ? { convertTo: target } : undefined)
+      const r = await filesRawBytes(sessionId, rel, cwd, { convertTo: target || undefined, signal: request.signal })
       if (!r.ok) return { kind: 'error', status: r.status, reason: r.reason }
       if (target === 'html') return { kind: 'sheet', html: new TextDecoder('utf-8').decode(r.data), size: r.size }
       return { kind: spec.kind === 'docx' ? 'docx' : 'pdf', data: r.data, size: r.size }
     }
     if (spec.fetch === 'mediaUrl') return { kind: 'audio', url: filesMediaUrl(sessionId, rel, cwd), size: 0 }
     if (spec.fetch === 'zipList') {
-      const r = await filesZipList(sessionId, rel, cwd)
+      const r = await filesZipList(sessionId, rel, cwd, request.signal)
       if (!r.ok) return { kind: 'error', status: r.status, reason: r.reason }
       if (spec.kind === 'xmind') {
         const hasThumb = r.entries.some(e => e.name === 'Thumbnails/thumbnail.png')
-        const json = await filesZipEntryText(sessionId, rel, 'content.json', cwd)
+        const json = await filesZipEntryText(sessionId, rel, 'content.json', cwd, request.signal)
         return { kind: 'xmind', contentJson: json,
           thumbUrl: hasThumb ? filesZipEntryUrl(sessionId, rel, 'Thumbnails/thumbnail.png', cwd) : '' }
       }
       return { kind: 'zip', entries: r.entries, truncated: r.truncated }
     }
-    const result = await filesRaw(sessionId, rel, cwd)
+    const result = await filesRaw(sessionId, rel, cwd, request.signal)
     return spec.kind === 'csv' && result.kind === 'text' ? { kind: 'csv', text: result.text } : result
   }
   try {
     const result = await read()
-    if (result.kind === 'error' && result.status === 404 && fallbackQuery) {
+    if (request.signal.aborted || previewRequests.get(key) !== request) {
+      if (result.kind === 'image') URL.revokeObjectURL(result.url)
+      return
+    }
+    if (result.kind === 'error' && result.status === 404 && fallbackQuery && activePreviewKey.value === key) {
       const staleIndex = previews.value.findIndex((p) => p.key === key)
       if (staleIndex >= 0) previews.value.splice(staleIndex, 1)
       if (activePreviewKey.value === key) activePreviewKey.value = ''
@@ -1178,14 +1200,18 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     current.lastUsedAt = Date.now()
     evictPreviewOverflow()
   } catch {
+    if (request.signal.aborted || previewRequests.get(key) !== request) return
     const current = previews.value.find((p) => p.key === key)
     if (current) {
       current.result = { kind: 'error', reason: '文件读取失败，请重试' }
       current.loading = false
     }
   } finally {
-    const current = previews.value.find((p) => p.key === key)
-    if (current) current.loading = false
+    if (previewRequests.get(key) === request) {
+      previewRequests.delete(key)
+      const current = previews.value.find((p) => p.key === key)
+      if (current) current.loading = false
+    }
     // Loading tabs are retained while their request is in flight so a user can switch among
     // them. Once any request settles, run the same LRU invariant for success and failure paths;
     // a burst of slow/404 previews must not leave the tab cache above its eight-document cap.
@@ -1204,6 +1230,10 @@ async function previewRecent(f: RecentFileItem): Promise<void> {
 async function previewTreeFile(node: TreeNode): Promise<void> {
   await previewRel(node.entry.name, nodeAbsPath(node), node.rel)
 }
+function browseFiles(): void {
+  activePreviewKey.value = ''
+  setTreeCollapsed(false)
+}
 function closePreview(): void {
   closePreviewTab(activePreviewKey.value)
 }
@@ -1218,6 +1248,8 @@ function closePreviewTab(key: string): void {
   activePreviewKey.value = next?.key ?? ''
 }
 function clearPreviews(): void {
+  markdownConvertRequest?.abort()
+  markdownConvertRequest = null
   pathSearchRequest?.abort()
   pathSearchRequest = null
   pathResolution.value = null
@@ -1228,6 +1260,7 @@ function clearPreviews(): void {
 
 /** Open a path supplied by the terminal link provider. */
 function previewPath(path: string, lineStart?: number, lineEnd?: number): void {
+  cancelPathResolution()
   const normalized = normalizeTerminalPath(path)
   const resolution = resolveTerminalPath(normalized)
   if (resolution.kind === 'search') {
@@ -1321,6 +1354,7 @@ function searchPreviewFile(name: string): void {
   pathSearchRequest = null
   pathResolution.value = null
   activePreviewKey.value = ''
+  setTreeCollapsed(false)
   // Path resolution always searched the pane's anchored cwd root. Keep the
   // recovery action on that same scope even if the reader was drilled into a
   // deep directory before the terminal link was clicked.
@@ -1391,8 +1425,13 @@ async function convertMarkdownToDocx(): Promise<void> {
   const source = preview.value
   if (!source || !isMarkdownPreview(source.name) || markdownConvertBusy.value) return
   markdownConvertBusy.value = true
+  const request = new AbortController()
+  markdownConvertRequest = request
+  const sessionId = props.sessionId
+  const cwd = props.cwd
   try {
-    const converted = await filesRawBytes(props.sessionId, source.rel, props.cwd, { convertTo: 'docx' })
+    const converted = await filesRawBytes(sessionId, source.rel, cwd, { convertTo: 'docx', signal: request.signal })
+    if (request.signal.aborted || !previews.value.some((p) => p.key === source.key)) return
     if (!converted.ok) {
       toast(converted.reason || 'Markdown 转 DOCX 失败，请重试')
       return
@@ -1415,10 +1454,11 @@ async function convertMarkdownToDocx(): Promise<void> {
       loading: false,
       lastUsedAt: Date.now(),
     })
-    activePreviewKey.value = key
+    if (activePreviewKey.value === source.key) activePreviewKey.value = key
     evictPreviewOverflow()
     toast('已转换为同名 DOCX，可直接下载')
   } finally {
+    if (markdownConvertRequest === request) markdownConvertRequest = null
     markdownConvertBusy.value = false
   }
 }
@@ -1673,9 +1713,8 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <p v-if="pathResolution.hasMore" class="mb-2 text-[0.62rem] leading-snug text-amber-600 dark:text-amber-400">结果较多，仅显示前 {{ pathResolution.candidates.length }} 个；可打开目录搜索继续筛选。</p>
         <ul class="flex flex-col gap-1.5">
           <li v-for="candidate in pathResolution.candidates" :key="candidate.rel">
-            <button type="button" class="min-h-11 w-full rounded-md border border-border bg-card px-3 py-2 text-left hover:bg-muted/50 touch-manipulation" :data-testid="`fp-path-candidate-${candidate.rel}`" @click="choosePathCandidate(candidate)">
-              <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span>{{ candidate.name }}</span><span v-if="!candidate.exact" class="rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">近似</span></span>
-              <span class="mt-0.5 block break-all text-[0.65rem] text-muted-foreground">{{ candidate.absPath }}</span>
+            <button type="button" class="min-h-11 w-full rounded-md border border-border bg-card px-3 py-2 text-left hover:bg-muted/50 touch-manipulation" :title="candidate.absPath" :data-testid="`fp-path-candidate-${candidate.rel}`" @click="choosePathCandidate(candidate)">
+              <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span class="min-w-0 break-all">{{ candidate.rel }}</span><span v-if="!candidate.exact" class="shrink-0 rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">近似</span></span>
             </button>
           </li>
         </ul>
@@ -1686,6 +1725,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
       <button type="button" class="fp-tree-expand" title="展开目录树" data-testid="fp-tree-expand" @click="setTreeCollapsed(false)"><PanelLeft :size="14" /><span>目录</span></button>
     </div>
     <div v-show="!treeCollapsed" class="fp-browser-pane flex flex-col min-h-0 overflow-hidden">
+      <PreviewDocumentTabs v-if="!preview && previews.length" :tabs="previews" :active-key="activePreviewKey" @select="activatePreview" @close="closePreviewTab" />
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
       <DrawerSearchBox
         v-model="treeQuery"
@@ -2046,28 +2086,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
     <!-- ── Preview reader ── -->
     <Transition name="fp-fade">
       <div v-if="preview" class="fp-preview fp-preview-pane flex min-h-0 flex-1 flex-col bg-background z-10" data-testid="fp-preview">
-        <div v-if="previews.length" class="fp-preview-tabs shrink-0 flex items-center gap-1 overflow-x-auto border-b border-border/60 px-2 py-1 no-scrollbar" data-testid="fp-preview-tabs">
-          <button
-            v-for="(tab, tabIndex) in previews"
-            :key="tab.key"
-            type="button"
-            class="fp-preview-tab inline-flex min-w-0 max-w-[12rem] items-center gap-1 rounded px-2 py-1 text-[0.62rem]"
-            :class="tab.key === activePreviewKey ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-muted/60'"
-            :title="tab.absPath"
-            :data-testid="`fp-preview-tab-${previewDomKey(tab.key)}`"
-            @click="activatePreview(tab.key)"
-          >
-            <span class="fp-preview-tab-index" :aria-label="`标签 ${tabIndex === 9 ? 0 : tabIndex + 1}`">{{ tabIndex === 9 ? 0 : tabIndex + 1 }}</span>
-            <span class="min-w-0 truncate">{{ tab.name }}</span>
-            <span v-if="tab.loading" class="shrink-0 opacity-70">…</span>
-            <span
-              class="shrink-0 rounded px-0.5 text-[0.7rem] leading-none opacity-70 hover:opacity-100"
-              :aria-label="`关闭 ${tab.name}`"
-              :data-testid="`fp-preview-tab-close-${previewDomKey(tab.key)}`"
-              @click.stop="closePreviewTab(tab.key)"
-            >×</span>
-          </button>
-        </div>
+        <PreviewDocumentTabs :tabs="previews" :active-key="activePreviewKey" @select="activatePreview" @close="closePreviewTab" />
         <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
           <button
             class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground touch-manipulation"
@@ -2075,7 +2094,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             title="返回文件列表"
             aria-label="返回文件列表"
             data-testid="fp-preview-browse"
-            @click="activePreviewKey = ''"
+            @click="browseFiles"
           ><ChevronLeft class="size-3.5" /></button>
           <button
             class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground touch-manipulation"
@@ -2088,63 +2107,23 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title"><MidTruncatedName :name="preview.name" tooltip="" /></span>
-          <!-- 复制内容 (primary — a content preview's copy means "copy what I'm reading") -->
-          <button
-            v-if="preview.result.kind === 'text'"
-            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            type="button" title="复制内容"
-            data-testid="fp-preview-copy-content"
-            @click="copyContent"
-          >
-            <Check v-if="copiedKey === 'content'" class="size-3.5 text-green-500" />
-            <Copy v-else class="size-3.5" />
-          </button>
-          <!-- 复制路径 (secondary — distinct Link2 glyph so it isn't mistaken for content) -->
-          <button
-            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            type="button" title="复制路径"
-            data-testid="fp-preview-copy-path"
-            @click="copyText(preview.absPath, 'p')"
-          >
-            <Check v-if="copiedKey === 'p'" class="size-3.5 text-green-500" />
-            <Link2 v-else class="size-3.5" />
-          </button>
-          <!-- 下载 (works for EVERY format — text/image/binary/oversized — via /files/raw?download=1) -->
-          <button
-            class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            type="button" title="下载文件"
-            data-testid="fp-preview-download"
-            @click="doDownload"
-          >
-            <Download class="size-3.5" />
-          </button>
-          <button
-            v-if="preview.result.kind === 'text' && isMarkdownPreview(preview.name)"
-            class="min-h-7 rounded border border-border px-2 text-[0.6rem] text-primary hover:bg-muted/50 disabled:opacity-50"
-            type="button"
-            title="转换为同名 DOCX（不改写原 Markdown）"
-            data-testid="fp-preview-convert-docx"
-            :disabled="markdownConvertBusy"
-            @click="void convertMarkdownToDocx()"
-          >{{ markdownConvertBusy ? '转换中…' : '转 DOCX' }}</button>
-          <button
-            class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation"
-            type="button" title="在目录树中定位"
-            aria-label="在目录树中定位"
-            data-testid="fp-preview-reveal-tree"
-            @click="void revealPreviewInTree()"
-          ><Folder class="size-3.5" /></button>
-          <button
-            class="px-1.5 py-1 rounded text-[0.6rem] text-green-500 border border-border hover:bg-muted/50"
-            type="button" title="插入到对话"
-            @click="injectPath(preview.absPath)"
-          >插入</button>
+          <details :key="preview.key" ref="fileActionsMenu" class="fp-file-actions relative shrink-0" @keydown.esc.stop.prevent="closeFileActions">
+            <summary class="min-h-11 min-w-11 flex items-center justify-center rounded cursor-pointer text-muted-foreground hover:bg-muted/50" aria-label="文件操作" title="文件操作" data-testid="fp-preview-actions"><MoreVertical class="size-4" /></summary>
+            <div class="fp-file-actions-panel absolute right-0 top-full z-40 min-w-48 rounded-md border border-border bg-card p-1 shadow-lg" @click="closeFileActions">
+              <button v-if="preview.result.kind === 'text'" type="button" data-testid="fp-preview-copy-content" @click="copyContent"><Copy class="size-3.5" />复制内容</button>
+              <button type="button" data-testid="fp-preview-copy-path" @click="copyText(preview.absPath, 'p')"><Link2 class="size-3.5" />复制路径</button>
+              <button type="button" data-testid="fp-preview-download" @click="doDownload"><Download class="size-3.5" />下载文件</button>
+              <button v-if="preview.result.kind === 'text' && isMarkdownPreview(preview.name)" type="button" data-testid="fp-preview-convert-docx" :disabled="markdownConvertBusy" @click="void convertMarkdownToDocx()"><FileText class="size-3.5" />{{ markdownConvertBusy ? '转换中…' : '转 DOCX' }}</button>
+              <button type="button" data-testid="fp-preview-reveal-tree" @click="void revealPreviewInTree()"><Folder class="size-3.5" />在目录树中定位</button>
+              <button type="button" @click="injectPath(preview.absPath)"><Link2 class="size-3.5" />插入到对话</button>
+            </div>
+          </details>
           <button class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground touch-manipulation" type="button" title="关闭" data-testid="fp-preview-close" @click="closePreview">&times;</button>
         </div>
-        <div class="shrink-0 max-h-24 overflow-auto border-b border-border/50 px-3 py-2 text-[0.68rem] leading-relaxed text-muted-foreground break-all select-text" data-testid="fp-preview-location" :title="preview.absPath">{{ locationLabel(preview.absPath) }}</div>
+        <div class="shrink-0 truncate border-b border-border/50 px-3 py-1 text-[0.68rem] leading-relaxed text-muted-foreground select-text" data-testid="fp-preview-location" :title="preview.absPath">{{ locationLabel(preview.absPath) }}</div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
@@ -2286,6 +2265,11 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 .fp-workspace { position: relative; }
 .fp-browser-pane { flex: 0 0 min(38%, 320px); min-width: 220px; border-right: 1px solid hsl(var(--border) / 0.7); }
 .fp-preview-pane { min-width: 0; }
+.fp-file-actions summary { list-style: none; }
+.fp-file-actions summary::-webkit-details-marker { display: none; }
+.fp-file-actions-panel > button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 10px; border-radius: 4px; font-size: 12px; text-align: left; }
+.fp-file-actions-panel > button:hover { background: hsl(var(--muted) / 0.6); }
+.fp-file-actions-panel > button:disabled { opacity: 0.5; }
 .fp-tree-collapsed-rail {
   flex: 0 0 30px; display: flex; align-items: flex-start; justify-content: center;
   padding-top: 8px; border-right: 1px solid hsl(var(--border) / 0.7); background: hsl(var(--muted) / 0.16);
@@ -2296,14 +2280,6 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
   color: hsl(var(--muted-foreground)); font-size: 0.5rem; cursor: pointer;
 }
 .fp-tree-expand:hover, .fp-tree-expand:focus-visible { background: hsl(var(--muted) / 0.55); color: hsl(var(--foreground)); }
-.fp-preview-tab-index {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 1.05rem; height: 1.05rem; flex: 0 0 auto;
-  border: 1px solid hsl(var(--border)); border-radius: 999px;
-  color: hsl(var(--muted-foreground)); font-size: 0.55rem; line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-.fp-preview-tab.bg-accent .fp-preview-tab-index { border-color: hsl(var(--primary) / 0.7); color: hsl(var(--foreground)); }
 @media (max-width: 768px) {
   .fp-workspace { display: block; overflow: hidden; }
   .fp-browser-pane { width: 100%; height: 100%; border-right: 0; }

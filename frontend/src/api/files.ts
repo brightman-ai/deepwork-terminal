@@ -255,13 +255,13 @@ export async function gitDiff(sessionId: string, cwd?: string, signal?: AbortSig
  * the response Content-Type: image/* → an image (wrapped in an object URL), text/plain
  * → text, application/json → the {binary}/{tooLarge} metadata sentinels.
  */
-export async function filesRaw(sessionId: string, relPath: string, cwd?: string): Promise<RawResult> {
+export async function filesRaw(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal): Promise<RawResult> {
   if (!sessionId) return { kind: 'error' }
   const { cliFetch } = useCliAuth()
   try {
     let path = withScope('/files/raw', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
-    const resp = await cliFetch(cliApi(path))
+    const resp = await cliFetch(cliApi(path), { signal })
     if (!resp.ok) {
       // Surface the reason: the raw handler answers a failure with { "error": "<why>" }
       // (403 path not allowed / 404 not found / 400 is a directory). Carry both the status
@@ -482,14 +482,14 @@ export function filesMediaUrl(sessionId: string, relPath: string, cwd?: string):
 export interface ZipEntry { name: string; size: number; compressed: number; isDir: boolean }
 
 /** GET /files/raw?…&zip=1 — zip/xmind 的条目清单（只读中央目录，不解压）。 */
-export async function filesZipList(sessionId: string, relPath: string, cwd?: string): Promise<{ ok: true; entries: ZipEntry[]; truncated: boolean } | { ok: false; status: number; reason: string }> {
+export async function filesZipList(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal): Promise<{ ok: true; entries: ZipEntry[]; truncated: boolean } | { ok: false; status: number; reason: string }> {
   if (!sessionId) return { ok: false, status: 0, reason: '' }
   const { cliFetch } = useCliAuth()
   let path = withScope('/files/raw', sessionId, cwd)
   if (relPath) path += `&path=${encodeURIComponent(relPath)}`
   path += '&zip=1'
   try {
-    const resp = await cliFetch(cliApi(path))
+    const resp = await cliFetch(cliApi(path), { signal })
     if (!resp.ok) {
       let reason = ''
       try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }
@@ -515,11 +515,11 @@ export function filesZipEntryUrl(sessionId: string, relPath: string, entry: stri
 }
 
 /** zip 家族里一个**文本**条目的内容（xmind 的 content.json 用它）。 */
-export async function filesZipEntryText(sessionId: string, relPath: string, entry: string, cwd?: string): Promise<string> {
+export async function filesZipEntryText(sessionId: string, relPath: string, entry: string, cwd?: string, signal?: AbortSignal): Promise<string> {
   if (!sessionId) return ''
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(filesZipEntryUrl(sessionId, relPath, entry, cwd))
+    const resp = await cliFetch(filesZipEntryUrl(sessionId, relPath, entry, cwd), { signal })
     return resp.ok ? await resp.text() : ''
   } catch {
     return ''
@@ -533,7 +533,7 @@ export async function filesZipEntryText(sessionId: string, relPath: string, entr
  * the bytes. Auth rides cliFetch's header on top of the download URL. Errors mirror filesRaw
  * ({status, reason}) so the preview's failure explanations stay uniform.
  */
-export async function filesRawBytes(sessionId: string, relPath: string, cwd?: string, opts?: { convertPdf?: boolean; convertTo?: string }): Promise<RawBytesResult> {
+export async function filesRawBytes(sessionId: string, relPath: string, cwd?: string, opts?: { convertPdf?: boolean; convertTo?: string; signal?: AbortSignal }): Promise<RawBytesResult> {
   if (!sessionId) return { ok: false, status: 0, reason: '' }
   const { cliFetch } = useCliAuth()
   try {
@@ -542,7 +542,7 @@ export async function filesRawBytes(sessionId: string, relPath: string, cwd?: st
     const url = target
       ? filesConvertUrl(sessionId, relPath, target, cwd)
       : filesDownloadUrl(sessionId, relPath, cwd)
-    const resp = await cliFetch(url)
+    const resp = await cliFetch(url, { signal: opts?.signal })
     if (!resp.ok) {
       let reason = ''
       try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }
