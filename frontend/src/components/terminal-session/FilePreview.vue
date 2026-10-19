@@ -27,6 +27,7 @@ import { highlightCode, addCopyButtons, renderDiagrams, renderMath, loadHljs } f
 import { usePreviewEscape } from '../../composables/cli/usePreviewEscape'
 import { filesRawImageUrl } from '@terminal/api/files'
 import { handleFindShortcut } from './terminalFindShortcut'
+import { sourceLineHtml } from './sourceLineHtml'
 
 const props = defineProps<{
   name: string
@@ -142,7 +143,7 @@ watch(() => props.name, () => void nextTick(() => scrollEl.value?.focus()), { im
 const wrap = ref(true)
 const LINE_NUMBERS_KEY = 'dw.filepreview.lineNumbers'
 const showLineNumbers = ref(localStorage.getItem(LINE_NUMBERS_KEY) !== '0')
-const codeLines = computed(() => props.text.split('\n'))
+const sourceLinesHtml = computed(() => sourceLineHtml(codeHtml.value))
 function toggleLineNumbers(): void {
   showLineNumbers.value = !showLineNumbers.value
   localStorage.setItem(LINE_NUMBERS_KEY, showLineNumbers.value ? '1' : '0')
@@ -214,6 +215,16 @@ function scrollToSourceLine(line?: number): void {
   if (!scroller || !root) return
   const source = props.text
   const sourceLines = source.split('\n')
+  // Code/plain readers have real source-line boxes. The gutter and wrapped text share that
+  // exact row, so font scaling and soft wrapping cannot make line 513 look like line 569.
+  if (kind.value !== 'markdown') {
+    const row = root.querySelector<HTMLElement>('[data-source-line="' + Math.min(line, sourceLines.length) + '"]')
+    if (row) {
+      const top = scroller.scrollTop + row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - Math.max(20, scroller.clientHeight * 0.18)
+      scroller.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+    }
+    return
+  }
   let target = Math.min(source.length, sourceLines.slice(0, line - 1).reduce((n, part) => n + part.length + 1, 0))
   // Markdown is rendered into headings/lists/paragraphs, so source offsets do
   // not equal DOM text offsets (the `# ` and list markers disappear). Prefer
@@ -662,8 +673,7 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
     />
     <div v-else-if="kind === 'markdown'" ref="contentEl" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" :style="{ fontSize: `${0.78 * fontScale}rem` }" v-html="mdHtml" />
     <div v-else class="fp-code-stage">
-      <ol v-if="showLineNumbers" class="fp-line-numbers" aria-hidden="true"><li v-for="(_, i) in codeLines" :key="i">{{ i + 1 }}</li></ol>
-      <pre ref="contentEl" class="fp-code hljs" :class="wrap ? 'fp-wrap' : 'fp-nowrap'" :style="{ fontSize: `${0.72 * fontScale}rem` }"><code v-html="codeHtml" /></pre>
+      <pre ref="contentEl" class="fp-code hljs" :class="[wrap ? 'fp-wrap' : 'fp-nowrap', { 'fp-numbered': showLineNumbers }]" :style="{ fontSize: `${0.72 * fontScale}rem` }"><code v-html="sourceLinesHtml" /></pre>
     </div>
 
     <!-- back-to-top -->
@@ -818,28 +828,25 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
   -webkit-user-select: text;
   user-select: text;
 }
-.fp-code-stage {
-  display: flex;
-  align-items: flex-start;
-  min-width: max-content;
-}
-.fp-line-numbers {
+.fp-code-stage { min-width: 0; }
+.fp-code :deep(.fp-source-line) { display: flex; min-height: 1.6em; }
+.fp-code :deep(.fp-source-text) { display: block; flex: 1; min-width: 0; }
+.fp-code.fp-numbered :deep(.fp-source-line)::before {
+  content: attr(data-source-line);
   position: sticky;
   left: 0;
   z-index: 2;
-  flex: 0 0 auto;
-  min-width: 3.2em;
-  margin: 0;
-  padding: 14px 10px 14px 8px;
+  flex: 0 0 3.5em;
+  margin-right: 10px;
+  padding-right: 10px;
   border-right: 1px solid var(--fp-border-soft);
   background: var(--fp-bg);
   color: var(--fp-muted);
   font: inherit;
-  line-height: 1.6;
   text-align: right;
   user-select: none;
 }
-.fp-line-numbers li { list-style: none; height: 1.6em; }
+.fp-code.fp-nowrap :deep(.fp-source-line) { min-width: max-content; }
 .fp-ln-icon { font-size: 0.72rem; font-weight: 700; line-height: 1; }
 
 /* ── reading-progress bar (pinned to the scroll viewport top) ── */
@@ -940,6 +947,7 @@ onBeforeUnmount(() => { io?.disconnect(); if (findTimer) clearTimeout(findTimer)
 
 /* ── code (whole-file view) ── */
 .fp-code {
+  width: 100%;
   margin: 0; padding: 34px 12px 28px;
   font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', ui-monospace, monospace;
   line-height: 1.6; color: var(--fp-text); background: transparent; tab-size: 4;
