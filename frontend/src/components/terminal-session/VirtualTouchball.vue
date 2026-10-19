@@ -3,10 +3,12 @@
     <!-- Draggable ring — JumpDesktop style -->
     <div
       class="virtual-touchball"
+      data-testid="virtual-touchball"
       :style="{ left: position.x + 'px', top: position.y + 'px' }"
       @touchstart.prevent="onTouchStart"
       @touchmove.prevent="onTouchMove"
       @touchend.prevent="onTouchEnd"
+      @touchcancel.prevent="cancelGesture"
     >
       <svg class="touchball-ring" width="32" height="32" viewBox="0 0 32 32">
         <circle cx="16" cy="16" r="13" fill="rgba(0,0,0,0.15)" stroke="rgba(255,255,255,0.7)" stroke-width="2"/>
@@ -23,6 +25,7 @@
     <div
       v-if="cursorPosition"
       class="cursor-indicator"
+      data-testid="virtual-mouse-cursor"
       :style="{
         left: cursorPosition.x + 'px',
         top: cursorPosition.y + 'px',
@@ -43,12 +46,13 @@
  * VirtualTouchball — JumpDesktop-style draggable ring with separate cursor.
  * ALWAYS visible on mobile. Supports tap, double-tap, triple-tap, long-press, drag.
  */
-import { reactive, onMounted } from 'vue'
+import { reactive, onMounted, onUnmounted, watch } from 'vue'
 import { CURSOR_TIP_X, CURSOR_TIP_Y } from './touchballCursorGeometry'
 
-defineProps<{
+const props = defineProps<{
   visible: boolean
   cursorPosition?: { x: number; y: number } | null
+  bottomInset?: number
 }>()
 
 const emit = defineEmits<{
@@ -71,11 +75,21 @@ onMounted(() => {
   // MOB-007: park at the bottom-right corner (just above the 58px quick bar) instead
   // of mid-terminal-body — the old x=82%·y=55% resting spot floated the 72px ring over
   // the terminal text (file-path lines were covered). Still fully draggable from here.
-  const quickBarH = 58
+  const quickBarH = props.bottomInset ?? 58
   position.x = Math.round(window.innerWidth - BALL_HALF - 8)
   position.y = Math.round(window.innerHeight - quickBarH - BALL_HALF - 8)
-  clampPosition()
+  clampPosition(true)
   emit('positionChange', position.x, position.y)
+  window.addEventListener('resize', onViewportChange)
+  window.visualViewport?.addEventListener('resize', onViewportChange)
+  window.visualViewport?.addEventListener('scroll', onViewportChange)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', onViewportChange)
+  window.visualViewport?.removeEventListener('resize', onViewportChange)
+  window.visualViewport?.removeEventListener('scroll', onViewportChange)
+  cancelGesture()
 })
 
 let touchStartTime = 0
@@ -88,9 +102,43 @@ let longPressTimer: ReturnType<typeof setTimeout> | null = null
 let tapCount = 0
 let multiTapTimer: ReturnType<typeof setTimeout> | null = null
 
-function clampPosition() {
-  position.x = Math.max(BALL_HALF, Math.min(window.innerWidth - BALL_HALF, position.x))
-  position.y = Math.max(BALL_HALF, Math.min(window.innerHeight - BALL_HALF, position.y))
+function clampPosition(reserveToolbar = false) {
+  // The visual viewport shrinks with the on-screen keyboard and may move while
+  // zooming. Keep the ring reachable in client coordinates after either change.
+  const viewport = window.visualViewport
+  const left = viewport?.offsetLeft ?? 0
+  const top = viewport?.offsetTop ?? 0
+  const width = viewport?.width ?? window.innerWidth
+  const height = Math.max(0, (viewport?.height ?? window.innerHeight) - (reserveToolbar ? props.bottomInset ?? 0 : 0))
+  const halfX = Math.min(BALL_HALF, width / 2)
+  const halfY = Math.min(BALL_HALF, height / 2)
+  position.x = Math.max(left + halfX, Math.min(left + width - halfX, position.x))
+  position.y = Math.max(top + halfY, Math.min(top + height - halfY, position.y))
+}
+
+function onViewportChange() {
+  // Reuse the owner's measured toolbar height, so a shorter viewport does not
+  // leave the ring behind controls. Deliberate drags keep their existing reach.
+  const previousY = position.y
+  clampPosition(true)
+  if (position.y !== previousY) {
+    // When vertical space disappears, re-park at the side rather than dropping
+    // a middle-of-screen ring behind the centered workbench dock.
+    const viewport = window.visualViewport
+    position.x = (viewport?.offsetLeft ?? 0) + (viewport?.width ?? window.innerWidth) - BALL_HALF - 8
+    clampPosition(true)
+  }
+  emit('positionChange', position.x, position.y)
+}
+
+watch(() => props.bottomInset, onViewportChange)
+
+function cancelGesture() {
+  if (longPressTimer) clearTimeout(longPressTimer)
+  if (multiTapTimer) clearTimeout(multiTapTimer)
+  longPressTimer = multiTapTimer = null
+  tapCount = 0
+  hasMoved = true
 }
 
 function onTouchStart(e: TouchEvent) {

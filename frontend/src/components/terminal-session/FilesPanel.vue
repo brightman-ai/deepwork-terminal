@@ -17,7 +17,7 @@
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
 import { ref, reactive, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
-import { useVirtualList } from '@vueuse/core'
+import { useMediaQuery, useVirtualList } from '@vueuse/core'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { Copy, Check, Folder, FileText, ChevronLeft, ChevronRight, ChevronsDownUp, Loader2, Download, Link2, Upload, Image as ImageIcon, FilePlus, FolderPlus, Pencil, Trash2, X, MoreVertical, Keyboard, Settings, RefreshCw, ArrowDownAZ, Clock, HardDrive, PanelLeft, PanelLeftClose } from 'lucide-vue-next'
 import { useUploadLimit } from '@terminal/composables/cli/uploadLimits'
@@ -61,7 +61,7 @@ import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview
 import XmindPreview from '@terminal/components/terminal-session/XmindPreview.vue'
 import { CAT_LABEL, CAT_TINT, CAT_ORDER, catOf, extOf, formatFor, isImageName } from '@terminal/components/terminal-session/previewFormats'
 import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
-import { filePathCandidates, normalizeTerminalPath, resolveTerminalPath, type TerminalPathCandidate } from '@terminal/components/terminal-session/terminalPathResolver'
+import { filePathCandidates, normalizeTerminalPath, resolveTerminalPath, terminalPathSearchQuery, type TerminalPathCandidate } from '@terminal/components/terminal-session/terminalPathResolver'
 
 // cwd is the drawer's EFFECTIVE pane working directory, OWNED by ResourceDrawer (CHG:
 // drawer-workbench). In FOLLOW mode it tracks the live active pane; once the user LOCKS the
@@ -145,6 +145,9 @@ const viewError = ref('')
 const treeTruncated = ref(false)
 const TREE_COLLAPSED_KEY = 'dw.fp.treeCollapsed'
 const treeCollapsed = ref(localStorage.getItem(TREE_COLLAPSED_KEY) === '1')
+// One responsive fact drives both the overlay CSS and the tree action. Merely
+// expanding the tree behind an absolute reader leaves mobile users trapped.
+const compactWorkspace = useMediaQuery('(max-width: 768px)')
 function setTreeCollapsed(value: boolean): void {
   treeCollapsed.value = value
   localStorage.setItem(TREE_COLLAPSED_KEY, value ? '1' : '0')
@@ -996,6 +999,8 @@ interface Preview {
   /** Optional source location supplied by a terminal link (`path:line[:end]`). */
   lineStart?: number
   lineEnd?: number
+  /** A repeated click on the same source line is a new navigation intent. */
+  jumpVersion: number
   result: RawResult
   scrollTop?: number
   /** Bytes for an explicit Markdown→DOCX conversion; the artifact is preview/download only and
@@ -1073,14 +1078,20 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
   // A terminal link is anchored to the pane cwd, independent of whichever
   // directory the user last drilled into in the browser.
   try {
-    const result = await filesSearch(props.sessionId, treeCwd.value || props.cwd, query, { signal: request.signal })
+    const cwd = treeCwd.value || props.cwd || ''
+    const retrievalQuery = terminalPathSearchQuery(query, cwd)
+    if (!retrievalQuery) {
+      state.loading = false
+      state.error = '路径省略过多，请打开目录搜索补充文件名'
+      return
+    }
+    const result = await filesSearch(props.sessionId, cwd, retrievalQuery, { signal: request.signal })
     if (pathResolution.value !== state) return
     if (result.error) {
       state.loading = false
       state.error = result.error
       return
     }
-    const cwd = treeCwd.value || props.cwd || ''
     const allCandidates = filePathCandidates(result.entries, cwd, query)
     // totalMatches counts server hits (including directories/fuzzy names). It cannot be
     // compared to the filtered exact-suffix list to infer unseen pages.
@@ -1138,6 +1149,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     if (lineStart) existing.scrollTop = undefined
     existing.lineStart = lineStart
     existing.lineEnd = lineEnd
+    existing.jumpVersion++
     activatePreview(key)
     return
   }
@@ -1148,7 +1160,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
   const request = new AbortController()
   previewRequests.set(key, request)
   const entry: Preview = {
-    key, name, absPath, rel, lineStart, lineEnd, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
+    key, name, absPath, rel, lineStart, lineEnd, jumpVersion: 0, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
   }
   previews.value.push(entry)
   activePreviewKey.value = key
@@ -1234,6 +1246,10 @@ function browseFiles(): void {
   activePreviewKey.value = ''
   setTreeCollapsed(false)
 }
+function togglePreviewTree(): void {
+  if (compactWorkspace.value) browseFiles()
+  else setTreeCollapsed(!treeCollapsed.value)
+}
 function closePreview(): void {
   closePreviewTab(activePreviewKey.value)
 }
@@ -1294,6 +1310,7 @@ async function revealPreviewInTree(): Promise<void> {
   const rel = previewTreeRel(p)
   if (rel === null) { toast('这个文件不在当前工作目录树内'); return }
   setTreeCollapsed(false)
+  if (compactWorkspace.value) activePreviewKey.value = ''
   const parent = parentRelOf(rel)
   if (parent !== treeRootRel.value || treeQuery.value.trim()) await reRoot(parent, false)
   focusedRel.value = rel
@@ -1339,7 +1356,7 @@ function previewErrorText(r: RawResult): string {
       if (p && !p.rel.includes('/') && !p.rel.startsWith('/')) {
         return `当前工作目录找不到 ${p.name}（可能已删除，也可能不在当前目录；请在目录树/搜索中定位）`
       }
-      return '文件不存在或已被移动'
+      return '当前路径无法读取，文件可能不存在、已移动或无法访问'
     }
     case 400: return '这是一个目录，无法作为文件预览'
   }
@@ -1451,6 +1468,7 @@ async function convertMarkdownToDocx(): Promise<void> {
       rel: source.rel,
       result: { kind: 'docx', data: converted.data, size: converted.size },
       generatedDocx: converted.data,
+      jumpVersion: 0,
       loading: false,
       lastUsedAt: Date.now(),
     })
@@ -1646,10 +1664,10 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           <ImageIcon v-if="isImage(f.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <button class="min-w-0 flex-1 text-left" type="button" :title="f.path" @click="previewRecent(f)">
-            <span class="block text-xs font-medium text-foreground"><MidTruncatedName :name="f.name" /></span>
+            <span class="block text-xs font-medium text-foreground select-text cursor-text"><MidTruncatedName :name="f.name" /></span>
             <span class="mt-0.5 flex items-center gap-1.5 text-[0.6rem] text-muted-foreground truncate">
               <span v-if="f.tool" class="px-1 rounded bg-muted text-muted-foreground">{{ f.tool }}</span>
-              <span class="truncate">{{ f.dir }}</span>
+              <span class="truncate select-text cursor-text">{{ f.dir }}</span>
             </span>
             <span class="text-[0.58rem] text-muted-foreground/70 tabular-nums">{{ fmtSize(f.size) }}<template v-if="f.size && f.tsMs"> · </template>{{ relTime(f.tsMs) }}</span>
           </button>
@@ -1678,24 +1696,25 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
          The tree remains the source surface while a document is open. Desktop uses a stable
          two-column workspace; narrow/mobile drawers keep the reader as a sheet and expose the
          same browse button, so the navigation model does not change with the viewport. -->
-    <div v-else class="fp-workspace relative flex flex-1 min-h-0 overflow-hidden" :class="{ 'is-tree-collapsed': treeCollapsed }">
+    <div v-else class="fp-workspace relative flex flex-1 min-h-0 overflow-hidden" :class="{ 'is-tree-collapsed': treeCollapsed, 'is-compact': compactWorkspace }">
     <div v-if="pathResolution" class="absolute inset-0 z-30 flex flex-col bg-background" data-testid="fp-path-resolution">
       <div class="shrink-0 flex items-center gap-2 border-b border-border px-3 py-2">
         <FileText class="size-4 shrink-0 text-primary/80" />
-        <span class="min-w-0 flex-1 text-xs font-medium truncate" :title="pathResolution.requestedPath">定位文件：{{ pathResolution.requestedPath }}</span>
+        <span class="min-w-0 flex-1 text-xs font-medium truncate select-text cursor-text" :title="pathResolution.requestedPath" data-testid="fp-path-resolution-reference">定位文件：{{ pathResolution.requestedPath }}</span>
+        <button type="button" class="min-h-11 min-w-11 flex items-center justify-center shrink-0 rounded text-muted-foreground hover:bg-muted/50" title="复制原始路径" aria-label="复制原始路径" data-testid="fp-path-resolution-copy" @click="copyText(pathResolution.requestedPath, 'path-resolution')"><Check v-if="copiedKey === 'path-resolution'" class="size-3.5 text-green-500" /><Copy v-else class="size-3.5" /></button>
         <button type="button" class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation" title="返回目录" data-testid="fp-path-resolution-cancel" @click="cancelPathResolution"><X class="mx-auto size-3.5" /></button>
       </div>
       <div v-if="pathResolution.loading" class="flex-1 flex flex-col items-center justify-center gap-3 px-5 text-center">
         <p class="text-xs text-muted-foreground animate-pulse">正在当前工作目录尝试定位 {{ pathResolution.query }}…</p>
         <p class="text-[0.65rem] text-muted-foreground/70">目录较大时自动定位可能较慢，你可以直接进入目录下搜索。</p>
-        <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-open-search-loading" @click="searchPreviewFile(pathResolution.query)">目录下搜索</button>
+        <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-open-search-loading" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">目录下搜索</button>
       </div>
       <div v-else-if="pathResolution.error" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
         <p class="text-xs text-muted-foreground leading-snug">{{ pathResolution.error }}</p>
         <p class="text-[0.65rem] text-muted-foreground/70">搜索没有改变当前目录或文件内容。</p>
         <div class="flex items-center gap-2">
           <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
-          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(pathResolution.query)">打开目录搜索</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">打开目录搜索</button>
         </div>
       </div>
       <div v-else-if="!pathResolution.candidates.length" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
@@ -1704,7 +1723,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <p class="text-[0.65rem] text-muted-foreground/70">文件可能已移动、尚未写入，或当前 pane 的工作目录不同。</p>
         <div class="flex items-center gap-2">
           <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
-          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(pathResolution.query)">打开目录搜索</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">打开目录搜索</button>
         </div>
       </div>
       <div v-else class="flex-1 overflow-y-auto p-3">
@@ -1714,11 +1733,11 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <ul class="flex flex-col gap-1.5">
           <li v-for="candidate in pathResolution.candidates" :key="candidate.rel">
             <button type="button" class="min-h-11 w-full rounded-md border border-border bg-card px-3 py-2 text-left hover:bg-muted/50 touch-manipulation" :title="candidate.absPath" :data-testid="`fp-path-candidate-${candidate.rel}`" @click="choosePathCandidate(candidate)">
-              <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span class="min-w-0 break-all">{{ candidate.rel }}</span><span v-if="!candidate.exact" class="shrink-0 rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">近似</span></span>
+              <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span class="min-w-0 break-all select-text cursor-text">{{ candidate.rel }}</span><span v-if="!candidate.exact" class="shrink-0 rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">近似</span></span>
             </button>
           </li>
         </ul>
-        <button v-if="pathResolution.hasMore" type="button" class="mt-3 min-h-11 w-full rounded-md border border-border px-3 py-2 text-left text-xs text-primary hover:bg-muted/50" data-testid="fp-path-resolution-open-search" @click="searchPreviewFile(pathResolution.query)">打开目录搜索继续筛选</button>
+        <button v-if="pathResolution.hasMore" type="button" class="mt-3 min-h-11 w-full rounded-md border border-border px-3 py-2 text-left text-xs text-primary hover:bg-muted/50" data-testid="fp-path-resolution-open-search" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">打开目录搜索继续筛选</button>
       </div>
     </div>
     <div v-if="treeCollapsed && !preview" class="fp-tree-collapsed-rail" data-testid="fp-tree-collapsed-rail">
@@ -1964,7 +1983,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
               <ImageIcon v-else-if="isImage(e.name)" class="size-4 mt-3 shrink-0 text-violet-500" />
               <FileText v-else class="size-4 mt-3 shrink-0" :class="catTextClass(e.name)" />
               <button class="min-w-0 flex-1 text-left py-2 min-h-11" type="button" :title="e.rel" @click="onSearchHit(e)">
-                <span class="block text-xs text-foreground" :class="{ 'font-medium': e.isDir }"><MidTruncatedName :name="e.name" :tooltip="e.rel" /></span>
+                <span class="block text-xs text-foreground select-text cursor-text" :class="{ 'font-medium': e.isDir }"><MidTruncatedName :name="e.name" :tooltip="e.rel" /></span>
                 <span v-if="e.isDir && searchContexts.get(e.label)" class="block mt-1 text-xs text-foreground/80 break-words [overflow-wrap:anywhere]" :data-testid="`fp-search-context-${e.rel}`">{{ searchContexts.get(e.label) }}</span>
                 <span class="block mt-1 text-[0.65rem] text-muted-foreground tabular-nums">
                   <span v-if="!e.isDir" :data-testid="`fp-search-size-${e.rel}`">{{ fmtSize(e.size) }} · </span>
@@ -2053,7 +2072,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
                   <ImageIcon v-else-if="isImage(n.entry.name)" class="size-4 shrink-0 text-violet-500" />
                   <FileText v-else class="size-4 shrink-0 text-muted-foreground" :class="recentEditedAt(n) ? 'text-primary/80' : catTextClass(n.entry.name)" />
                   <span class="min-w-0 flex-1 text-xs text-foreground">
-                    <span class="block" :class="{ 'font-medium': n.entry.isDir }"><MidTruncatedName :name="n.entry.name" /></span>
+                    <span class="block select-text cursor-text" :class="{ 'font-medium': n.entry.isDir }"><MidTruncatedName :name="n.entry.name" /></span>
                     <span class="block text-[0.65rem] text-muted-foreground tabular-nums whitespace-nowrap">
                       <span v-if="!n.entry.isDir" :data-testid="`fp-tree-size-${n.rel}`">{{ fmtSize(n.entry.size) }} · </span>
                       <span :title="n.entry.mtimeMs ? absTime(n.entry.mtimeMs) : undefined" :data-testid="`fp-tree-time-${n.rel}`">{{ n.entry.mtimeMs ? absTime(n.entry.mtimeMs) : '修改时间未知' }}</span>
@@ -2102,7 +2121,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             :title="treeCollapsed ? '展开目录树' : '收起目录树'"
             aria-label="目录树"
             data-testid="fp-toggle-tree"
-            @click="setTreeCollapsed(!treeCollapsed)"
+            @click="togglePreviewTree"
           ><PanelLeftClose v-if="!treeCollapsed" class="size-3.5" /><PanelLeft v-else class="size-3.5" /></button>
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
@@ -2120,10 +2139,16 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           </details>
           <button class="min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground touch-manipulation" type="button" title="关闭" data-testid="fp-preview-close" @click="closePreview">&times;</button>
         </div>
-        <div class="shrink-0 truncate border-b border-border/50 px-3 py-1 text-[0.68rem] leading-relaxed text-muted-foreground select-text" data-testid="fp-preview-location" :title="preview.generatedDocx ? '转换预览，可下载保存' : preview.absPath">{{ preview.generatedDocx ? '转换预览 · 可下载保存为 ' + preview.name : locationLabel(preview.absPath) }}</div>
+        <div class="shrink-0 border-b border-border/50 px-3 py-1 text-[0.68rem] leading-relaxed text-muted-foreground select-text" data-testid="fp-preview-location">
+          <span v-if="preview.generatedDocx">转换预览 · 可下载保存为 {{ preview.name }}</span>
+          <details v-else :key="preview.key">
+            <summary class="cursor-pointer truncate list-inside select-text" :title="preview.absPath" aria-label="展开完整路径" data-testid="fp-preview-location-toggle">{{ locationLabel(preview.absPath) }}</summary>
+            <div class="max-h-28 overflow-auto whitespace-pre-wrap break-all py-1" data-testid="fp-preview-full-path">{{ preview.absPath }}</div>
+          </details>
+        </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :jump-version="preview.jumpVersion" :active="active" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
@@ -2280,11 +2305,9 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
   color: hsl(var(--muted-foreground)); font-size: 0.5rem; cursor: pointer;
 }
 .fp-tree-expand:hover, .fp-tree-expand:focus-visible { background: hsl(var(--muted) / 0.55); color: hsl(var(--foreground)); }
-@media (max-width: 768px) {
-  .fp-workspace { display: block; overflow: hidden; }
-  .fp-browser-pane { width: 100%; height: 100%; border-right: 0; }
-  .fp-preview-pane { position: absolute; inset: 0; }
-}
+.fp-workspace.is-compact { display: block; overflow: hidden; }
+.fp-workspace.is-compact .fp-browser-pane { width: 100%; height: 100%; border-right: 0; }
+.fp-workspace.is-compact .fp-preview-pane { position: absolute; inset: 0; }
 /* Horizontal chip row: scrollable but without a visible scrollbar (mobile). */
 .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }

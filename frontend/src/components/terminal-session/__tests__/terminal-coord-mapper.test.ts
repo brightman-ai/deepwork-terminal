@@ -4,35 +4,10 @@
  * [Ref: CAP-touch-mouse S3, DDC-09]
  */
 import { describe, test, expect } from 'bun:test'
-import type { CellCoord } from '../../../types/terminal'
+import { useTerminalCoordMapper, terminalCellAtPoint, type TerminalDimensions } from '../../../composables/cli/useTerminalCoordMapper'
 
-// Re-implement coord mapper logic for testing.
-interface TerminalDimensions {
-  cols: number
-  rows: number
-  cellWidth: number
-  cellHeight: number
-  offsetX: number
-  offsetY: number
-}
-
-function screenToCell(dim: TerminalDimensions, screenX: number, screenY: number): CellCoord {
-  if (dim.cellWidth <= 0 || dim.cellHeight <= 0) {
-    return { col: 0, row: 0 }
-  }
-  let col = Math.floor((screenX - dim.offsetX) / dim.cellWidth)
-  let row = Math.floor((screenY - dim.offsetY) / dim.cellHeight)
-  col = Math.max(0, Math.min(col, dim.cols - 1))
-  row = Math.max(0, Math.min(row, dim.rows - 1))
-  return { col, row }
-}
-
-function cellToScreen(dim: TerminalDimensions, col: number, row: number): { x: number; y: number } {
-  return {
-    x: dim.offsetX + (col + 0.5) * dim.cellWidth,
-    y: dim.offsetY + (row + 0.5) * dim.cellHeight,
-  }
-}
+const screenToCell = (dim: TerminalDimensions, x: number, y: number) => useTerminalCoordMapper(() => dim).screenToCell(x, y)
+const cellToScreen = (dim: TerminalDimensions, col: number, row: number) => useTerminalCoordMapper(() => dim).cellToScreen(col, row)
 
 const mockDim: TerminalDimensions = {
   cols: 80,
@@ -99,5 +74,21 @@ describe('TerminalCoordMapper', () => {
     const result = screenToCell(zeroDim, 100, 100)
     expect(result.col).toBe(0)
     expect(result.row).toBe(0)
+  })
+})
+
+
+describe('strict file-pointer coordinates', () => {
+  test('rejects toolbar and outside points rather than clamping them onto a file', () => {
+    expect(terminalCellAtPoint(mockDim, 55, 56)).toEqual({ col: 5, row: 2 })
+    expect(terminalCellAtPoint(mockDim, 729.9, 451.9)).toEqual({ col: 79, row: 23 })
+    for (const [x, y] of [[9, 20], [10, 19], [730, 20], [10, 452]]) {
+      expect(terminalCellAtPoint(mockDim, x, y)).toBeUndefined()
+    }
+  })
+
+  test('rejects unmeasurable grids and nonfinite pointer events', () => {
+    expect(terminalCellAtPoint({ ...mockDim, cellWidth: 0 }, 55, 56)).toBeUndefined()
+    expect(terminalCellAtPoint(mockDim, Number.NaN, 56)).toBeUndefined()
   })
 })
