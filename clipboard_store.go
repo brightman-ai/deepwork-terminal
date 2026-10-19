@@ -41,11 +41,20 @@ func newClipboardStore() *clipboardStore {
 	return &clipboardStore{epoch: uuid.NewString(), changed: make(chan struct{})}
 }
 func (c *clipboardStore) add(e clipboardEntry) clipboardEntry {
+	added, _ := c.addChanged(e)
+	return added
+}
+
+// addChanged is the mutation primitive used by the server control plane. The bool is true only
+// when this ID entered the store; callers can therefore publish one delta without turning a
+// duplicate replay into a second browser event. The legacy add method above intentionally keeps
+// its old one-value shape for tests and non-network callers.
+func (c *clipboardStore) addChanged(e clipboardEntry) (clipboardEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, old := range c.entries {
 		if old.ID == e.ID {
-			return old
+			return old, false
 		}
 	}
 	c.sequence++
@@ -61,7 +70,13 @@ func (c *clipboardStore) add(e clipboardEntry) clipboardEntry {
 		c.bytes -= len(c.entries[0].Text)
 		c.entries = c.entries[1:]
 	}
-	return e
+	return e, true
+}
+
+func (c *clipboardStore) metadata() (string, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.epoch, c.sequence
 }
 
 // Wait on the same lock as add: a copy between checking the cursor and waiting
@@ -93,7 +108,26 @@ func (s *Server) onClipboard(sess *Session, text string, offset int64, replayed 
 	sess.mu.Lock()
 	name := sess.Name
 	sess.mu.Unlock()
-	s.clipboard.add(clipboardEntry{ID: fmt.Sprintf("%s:%d", sess.ID, offset), SessionID: sess.ID, Source: name, Text: text, Direction: "remote", Replayed: replayed})
+	// Replayed entries reconstruct server history after restart and must not be announced as
+	// newly arrived browser content. addClipboardEntry handles the normal event path; restored
+	// entries are inserted directly for that reason.
+	e := clipboardEntry{ID: fmt.Sprintf("%s:%d", sess.ID, offset), SessionID: sess.ID, Source: name, Text: text, Direction: "remote", Replayed: replayed}
+	if replayed {
+		s.clipboard.add(e)
+		return
+	}
+	s.addClipboardEntry(e)
+}
+
+func (s *Server) addClipboardEntry(e clipboardEntry) clipboardEntry {
+	if s == nil || s.clipboard == nil {
+		return e
+	}
+	added, ok := s.clipboard.addChanged(e)
+	if ok {
+		s.publishClipboardEntry(added)
+	}
+	return added
 }
 
 // ClipboardBufferPath is shared with the local CLI. The path contains no user

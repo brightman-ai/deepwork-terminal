@@ -33,7 +33,14 @@ const standaloneCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval';
 // Standalone: ListenAndServe() runs API + SPA.
 // Embedded: Handler() returns API routes for a host to mount.
 type Server struct {
-	clipboard          *clipboardStore
+	clipboard *clipboardStore
+	// control is the application-owned WS control plane. It carries global clipboard and
+	// topology facts; muxd remains terminal-byte-only and therefore needs no restart when this
+	// plane evolves.
+	control            *controlHub
+	controlMu          sync.Mutex
+	targetsCache       clipboardTargetsSnapshot
+	targetsBuild       *clipboardTargetsBuild
 	fileSearchMu       sync.Mutex
 	fileSearchIndexes  map[string]*fileSearchIndex
 	workbenchCWDMu     sync.Mutex
@@ -205,6 +212,10 @@ func NewServer(opts ...Option) (*Server, error) {
 	if s.tmuxProvider == nil {
 		s.tmuxProvider = newDefaultTmuxProvider()
 	}
+	// One server-level topology publisher feeds every attached browser WS. This is deliberately
+	// started after the manager/provider are ready so the first snapshot describes restored
+	// sessions and tmux panes; it does not require (or touch) the existing muxd process.
+	s.startControlPublisher(s.watchCtx)
 	// Native agent-state push so standalone streams per-session agent state over
 	// the existing WS transport without a host. A host-injected
 	// Hooks.AgentStatePush wins over this default (back-compat).

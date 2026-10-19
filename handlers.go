@@ -561,6 +561,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = writeWS(ctx, conn, websocket.MessageText, metaMsg)
 	}
 
+	// Subscribe to the server-level control plane once for this socket.  The initial frames are
+	// deliberately bounded: clipboard history is recovered by the browser's one-shot HTTP
+	// snapshot, while this frame only establishes epoch/cursor.  Target topology comes from the
+	// shared cache; this connection never invokes clipboardTargets directly.
+	controlCh, unsubscribeControl := s.ensureControlHub().subscribe()
+	defer unsubscribeControl()
+	if frame := s.clipboardMetadataFrame(); frame != nil {
+		_ = writeWS(ctx, conn, websocket.MessageText, frame)
+	}
+	if frame := s.cachedClipboardTargetsFrame(); frame != nil {
+		_ = writeWS(ctx, conn, websocket.MessageText, frame)
+	}
+
 	// Subscribe to agent state changes (if available) — replaces independent SSE connection.
 	var agentCh <-chan json.RawMessage
 	if s.hooks.AgentStatePush != nil {
@@ -705,6 +718,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		var latePaste []byte    // a paste-mode answer waiting for the parser to reach ground
 		for {
 			select {
+			case msg, ok := <-controlCh:
+				if !ok {
+					controlCh = nil
+					continue
+				}
+				if err := writeWS(ctx, conn, websocket.MessageText, msg); err != nil {
+					logger.Debug("ws control frame write failed", "id", id, "error", err)
+					return
+				}
 			case frame := <-pasteCh:
 				// The late paste-mode answer (see the re-ask above the writer). Rides the
 				// single writer like everything else; one frame, the channel is then dead.

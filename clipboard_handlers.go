@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +31,9 @@ type clipboardTmux interface {
 
 func (s *Server) clipboardTargets(ctx context.Context, onlySession string) ([]clipboardTarget, error) {
 	targets := make([]clipboardTarget, 0)
+	if s == nil || s.mgr == nil {
+		return targets, nil
+	}
 	for _, sess := range s.mgr.List() {
 		if onlySession != "" && sess.ID != onlySession {
 			continue
@@ -77,13 +79,12 @@ func shellQuoteClipboard(s string) string { return "'" + strings.ReplaceAll(s, "
 func (s *Server) handleClipboardTargets(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	targets, err := s.clipboardTargets(ctx, "")
-	if err != nil {
+	snap := s.clipboardTargetsSnapshot(ctx)
+	if snap.revision == 0 {
 		writeJSON(w, 503, map[string]string{"error": "目标列表暂不可用，请重试"})
 		return
 	}
-	host, _ := os.Hostname()
-	writeJSON(w, 200, map[string]any{"targets": targets, "host": host})
+	writeJSON(w, 200, map[string]any{"targets": snap.targets, "host": snap.host, "revision": snap.revision})
 }
 func (s *Server) handleClipboardHistory(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
@@ -132,7 +133,7 @@ func (s *Server) handleClipboardSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "保存失败，请重试"})
 		return
 	}
-	e := s.clipboard.add(clipboardEntry{ID: uuid.NewString(), SessionID: body.Target.SessionID, Source: body.Target.Name, TargetID: body.Target.ID, Text: body.Text, Direction: "local", Action: "已存到远端剪贴板"})
+	e := s.addClipboardEntry(clipboardEntry{ID: uuid.NewString(), SessionID: body.Target.SessionID, Source: body.Target.Name, TargetID: body.Target.ID, Text: body.Text, Direction: "local", Action: "已存到远端剪贴板"})
 	writeJSON(w, 200, map[string]any{"entry": e, "target": body.Target})
 }
 func (s *Server) handleClipboardSend(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +175,6 @@ func (s *Server) handleClipboardSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 502, map[string]string{"error": "发送未确认，请检查目标终端后再决定是否重试"})
 		return
 	}
-	e := s.clipboard.add(clipboardEntry{ID: uuid.NewString(), SessionID: body.Target.SessionID, Source: body.Target.Name, TargetID: body.Target.ID, Text: body.Text, Direction: "local", Action: "已发送到目标终端"})
+	e := s.addClipboardEntry(clipboardEntry{ID: uuid.NewString(), SessionID: body.Target.SessionID, Source: body.Target.Name, TargetID: body.Target.ID, Text: body.Text, Direction: "local", Action: "已发送到目标终端"})
 	writeJSON(w, 200, map[string]any{"ok": true, "entry": e})
 }
