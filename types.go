@@ -683,6 +683,12 @@ const (
 	// the same reason: a bell can ring in a background session that has no WebSocket of its
 	// own. See session_signal.go.
 	MsgTypeAgentSignal = "agent_signal"
+	// server → client: global clipboard history delta. The frame is metadata-only on initial
+	// attach and carries newly observed entries thereafter; epoch/cursor make a dropped frame
+	// recoverable through the HTTP snapshot without replaying history on every WS.
+	MsgTypeClipboardDelta = "clipboard_delta"
+	// server → client: global clipboard target topology snapshot (sessions/tmux panes).
+	MsgTypeClipboardTargets = "clipboard_targets"
 	// server → client: the session's grid is now this big. NOT an echo of the client's own
 	// resize — it is the size the session actually entered after fitting every window
 	// watching it, which is a different number whenever a smaller window is also attached.
