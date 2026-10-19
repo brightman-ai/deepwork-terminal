@@ -41,10 +41,13 @@ const props = defineProps<{
   /** Optional 1-based source location supplied by a terminal file link. */
   lineStart?: number
   lineEnd?: number
+  /** Reading position owned by the document tab, including after canceling path lookup. */
+  initialScrollTop?: number
 }>()
 const emit = defineEmits<{
   (e: 'navigate', absPath: string): void
   (e: 'toast', msg: string): void
+  (e: 'scroll-position', top: number): void
 }>()
 
 const ext = computed(() => {
@@ -192,6 +195,7 @@ function onScroll(): void {
   const max = el.scrollHeight - el.clientHeight
   progress.value = max > 0 ? el.scrollTop / max : 0
   showTop.value = el.scrollTop > 400
+  emit('scroll-position', el.scrollTop)
 }
 
 /**
@@ -257,8 +261,11 @@ function scrollToSourceLine(line?: number): void {
 }
 
 watch([() => props.lineStart, () => props.text, codeHtml], () => {
-  if (props.lineStart) void nextTick(() => scrollToSourceLine(props.lineStart))
-})
+  void nextTick(() => {
+    if (props.initialScrollTop !== undefined) scrollEl.value?.scrollTo({ top: props.initialScrollTop })
+    else if (props.lineStart) scrollToSourceLine(props.lineStart)
+  })
+}, { immediate: true })
 watch([() => props.name, () => props.text, () => props.lineStart], () => { lineJumpApproximate.value = false })
 function scrollToTop(): void {
   scrollEl.value?.scrollTo({ top: 0, behavior: 'smooth' })

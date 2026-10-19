@@ -58,7 +58,7 @@ import {
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
 import type { RendererCause } from '@terminal/composables/cli/renderHealth'
-import { editedDiffLineLink, findTerminalFileLinks, terminalCellRange } from './terminalFileLinks'
+import { editedDiffLineLink, findWrappedTerminalFileLinks, wrappedTerminalRows, terminalCellRange } from './terminalFileLinks'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -518,7 +518,9 @@ function initTerminal() {
     provideLinks: (bufferLineNumber, callback) => {
       const line = terminal?.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true) ?? ''
       const bufferLine = terminal?.buffer.active.getLine(bufferLineNumber - 1)
-      let links = findTerminalFileLinks(line)
+      const buffer = terminal?.buffer.active
+      const group = buffer ? wrappedTerminalRows(buffer, bufferLineNumber - 1) : { rows: [], currentRow: 0 }
+      let links = findWrappedTerminalFileLinks(group.rows, group.currentRow)
       // Claude/Codex edit previews put the file path in a header (`Edited
       // file.ts (+2 -2)`) and render the changed source lines below it as a
       // numbered gutter. Make each gutter number a link to the same file at
@@ -531,7 +533,7 @@ function initTerminal() {
           priorLines.push(terminal.buffer.active.getLine(row - 1)?.translateToString(true) ?? '')
         }
         const gutterLink = editedDiffLineLink(line, priorLines)
-        if (gutterLink) links = [...links, gutterLink]
+        if (gutterLink) links = [...links, { ...gutterLink, row: group.currentRow, rawStart: gutterLink.start, rawLength: gutterLink.displayLength! }]
       }
       callback(links.length ? links.map((link) => ({
         text: link.path,

@@ -39,7 +39,7 @@ func (s *Server) convertMarkdownToDocx(ctx context.Context, src string, info os.
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", fmt.Errorf("cache dir: %w", err)
 	}
-	h := sha256.Sum256([]byte(src + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10) + "|docx|gfm"))
+	h := sha256.Sum256([]byte(src + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10) + "|docx|gfm-resources-v2"))
 	outDir := filepath.Join(cacheDir, hex.EncodeToString(h[:16]))
 	if convertCacheHit(outDir) {
 		return outDir, nil
@@ -62,7 +62,10 @@ func (s *Server) convertMarkdownToDocx(ctx context.Context, src string, info os.
 	defer os.RemoveAll(tmpDir)
 	out := filepath.Join(tmpDir, "main.docx")
 	cmd := exec.CommandContext(cctx, markdownConvertBin,
-		"--from=gfm", "--to=docx", "--output="+out, src)
+		"--from=gfm", "--to=docx", "--fail-if-warnings", "--resource-path="+filepath.Dir(src), "--output="+out, src)
+	// Markdown images are relative to the source, not the terminal server's launch directory.
+	// Failing on missing resources prevents a successful-looking DOCX that silently lost images.
+	cmd.Dir = filepath.Dir(src)
 	if output, runErr := cmd.CombinedOutput(); runErr != nil {
 		return "", fmt.Errorf("pandoc: %w (%s)", runErr, strings.TrimSpace(string(output)))
 	}

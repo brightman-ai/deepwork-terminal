@@ -46,6 +46,23 @@ func TestClipboardControlPublishCarriesEpochAndCursor(t *testing.T) {
 	}
 }
 
+func TestClipboardControlCursorBelongsToPublishedEntry(t *testing.T) {
+	s := &Server{clipboard: newClipboardStore(), control: newControlHub()}
+	ch, unsubscribe := s.control.subscribe()
+	defer unsubscribe()
+	// Simulate two writers appending before the first writer gets to publish.
+	first := s.clipboard.add(clipboardEntry{ID: "first", Text: "one"})
+	second := s.clipboard.add(clipboardEntry{ID: "second", Text: "two"})
+	for _, entry := range []clipboardEntry{first, second} {
+		s.publishClipboardEntry(entry)
+		var msg WSControlMessage
+		require.NoError(t, json.Unmarshal(<-ch, &msg))
+		var payload ClipboardDeltaPayload
+		require.NoError(t, json.Unmarshal(msg.Payload, &payload))
+		require.Equal(t, entry.Sequence, payload.Cursor, "must not acknowledge the other writer's undelivered entry")
+	}
+}
+
 func TestClipboardTargetsSnapshotIsSharedAndRevisioned(t *testing.T) {
 	s := &Server{clipboard: newClipboardStore()}
 	first := s.clipboardTargetsSnapshot(context.Background())

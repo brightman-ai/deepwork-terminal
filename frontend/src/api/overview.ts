@@ -30,7 +30,8 @@ const overviewCache = new Map<string, OverviewCacheEntry>()
 const overviewPending = new Map<string, OverviewPending>()
 
 function overviewKey(sessionId: string, cwd?: string, tool?: string): string {
-  return `${sessionId}\u0000${cwd || ''}\u0000${tool || ''}`
+  // Auth/base rotation must not reuse another endpoint's snapshot. This key stays in memory.
+  return JSON.stringify([cliApi('/'), useCliAuth().getAuthCode(), sessionId, cwd || '', tool || ''])
 }
 
 function subscribeOverview(pending: OverviewPending, signal?: AbortSignal): Promise<SessionMetricsBag> {
@@ -74,6 +75,8 @@ export async function sessionOverview(
   if (cached) overviewCache.delete(key)
 
   let pending = overviewPending.get(key)
+  // A new owner arriving after the last owner canceled needs its own live request.
+  if (pending?.controller.signal.aborted) pending = undefined
   if (!pending) {
     const controller = new AbortController()
     const { cliFetch } = useCliAuth()
@@ -100,12 +103,14 @@ export async function sessionOverview(
         return EMPTY_OVERVIEW
       }
     })()
-    pending = { controller, promise, subscribers: 0, settled: false }
-    overviewPending.set(key, pending)
+    const entry = { controller, promise, subscribers: 0, settled: false }
+    pending = entry
+    overviewPending.set(key, entry)
     void promise.then((value) => {
-      pending!.settled = true
-      overviewPending.delete(key)
-      if (!controller.signal.aborted) {
+      entry.settled = true
+      if (overviewPending.get(key) === entry) overviewPending.delete(key)
+      // Failed reads are unknown, not successful empty snapshots to cache.
+      if (!controller.signal.aborted && value !== EMPTY_OVERVIEW) {
         if (overviewCache.size >= OVERVIEW_CACHE_MAX) {
           const oldest = overviewCache.keys().next().value
           if (oldest) overviewCache.delete(oldest)
