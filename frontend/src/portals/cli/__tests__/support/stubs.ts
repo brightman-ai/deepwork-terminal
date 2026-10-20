@@ -17,7 +17,10 @@ export const CliTerminalSurfaceStub = defineComponent({
     pasteFallback: { type: Boolean, default: undefined },
   },
   setup(props, { slots, expose }) {
-    expose({ focusTerminal: () => { focusCalls.push(props.sessionId) } })
+    expose({
+      focusTerminal: () => { focusCalls.push(props.sessionId) },
+      focusTaskInput: () => { focusCalls.push(props.sessionId) },
+    })
     return () => h(
       'div',
       { class: 'stub-surface', 'data-sid': props.sessionId, 'data-active': String(props.active) },

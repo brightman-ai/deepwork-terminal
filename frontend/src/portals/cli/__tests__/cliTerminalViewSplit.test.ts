@@ -364,3 +364,51 @@ describe('拖拽分隔条：夹在两格都够用的范围内，不会拖进折�
     expect(ratioCalls).toEqual([['t1', bounds.min]])
   })
 })
+
+// A tab selection is a desktop keyboard handoff, including remote tabs.
+describe('desktop tab input handoff', () => {
+  it('switching to a remote tab hands input to its current pane', async () => {
+    const { props } = mount({ width: 1200, height: 800, mobile: false, split: row(), splitAllowed: true })
+    const remoteTab = { id: 't2', name: 'remote', sessionId: 'REMOTE', split: row(), isRemote: true, httpBase: 'http://other-machine:18074/api/cli', wsBase: 'ws://other-machine:18074/api/cli' }
+    props.tabsWithSession.push(remoteTab)
+    await settle()
+    props.activeTabId = 't2'
+    await settle()
+    expect(focusCalls).toEqual(['REMOTE'])
+  })
+  it('a remote session becoming ready after tab selection completes the input handoff', async () => {
+    const { props } = mount({ width: 1200, height: 800, mobile: false, split: row(), splitAllowed: true })
+    const remoteTab = { id: 't2', name: 'remote', sessionId: '', split: row(), isRemote: true }
+    props.tabsWithSession.push(remoteTab)
+    await settle()
+    props.activeTabId = 't2'
+    await settle()
+    expect(focusCalls).toEqual([])
+    props.tabsWithSession[1]!.sessionId = 'REMOTE'
+    await settle()
+    expect(focusCalls).toEqual(['REMOTE'])
+  })
+  it('switching mobile tabs does not open a software keyboard', async () => {
+    const { props } = mount({ ...PHONE_PORTRAIT, split: row() })
+    const remoteTab = { id: 't2', name: 'remote', sessionId: 'REMOTE', split: row(), isRemote: true, httpBase: 'http://other-machine:18074/api/cli', wsBase: 'ws://other-machine:18074/api/cli' }
+    props.tabsWithSession.push(remoteTab)
+    await settle()
+    props.activeTabId = 't2'
+    await settle()
+    expect(focusCalls).toEqual([])
+  })
+  it('a delayed focus request cannot steal focus back after another tab switch', async () => {
+    const { props } = mount({ width: 1200, height: 800, mobile: false, split: row(), splitAllowed: true })
+    const remoteTab = { id: 't2', name: 'remote', sessionId: 'REMOTE', split: row(), isRemote: true, httpBase: 'http://other-machine:18074/api/cli', wsBase: 'ws://other-machine:18074/api/cli' }
+    props.tabsWithSession.push(remoteTab)
+    await settle()
+    const frames: Array<() => void> = []
+    g.requestAnimationFrame = (cb: () => void) => { frames.push(cb); return frames.length }
+    props.activeTabId = 't2'
+    await settle()
+    props.activeTabId = 't1'
+    await settle()
+    frames.forEach((cb) => cb())
+    expect(focusCalls).toEqual(['S1'])
+  })
+})

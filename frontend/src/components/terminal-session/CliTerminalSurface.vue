@@ -3041,7 +3041,15 @@ function focusTerminal(): void {
   xtermRef.value?.terminal?.()?.focus()
 }
 
-defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, copyModeOpen })
+/** Restore the visible task's input after selecting its desktop tab. */
+function focusTaskInput(): void {
+  if (!props.active || isMobile.value || copyModeOpen.value || overviewOpen.value) return
+  if (terminalSearchOpen.value) refocusTerminalSearch()
+  else if (desktopComposeOpen.value) composeDesktopRef.value?.focusInput()
+  else focusTerminal()
+}
+
+defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, focusTaskInput, copyModeOpen })
 </script>
 
 <style scoped>
