@@ -3,10 +3,11 @@
  * Input is already escaped/highlighted code, never arbitrary document HTML. Numbers are CSS
  * generated from data-source-line so they cannot contaminate source offsets or document find.
  */
-export function sourceLineHtml(html: string): string {
+export function sourceLineHtml(html: string, location?: { start: number; end?: number }): string {
   const spans: string[] = []
   let line = 1
-  const openLine = () => '<span class="fp-source-line" data-source-line="' + line + '"><span class="fp-source-text">' + spans.join('')
+  const openLine = () => '<span class="fp-source-line' + (location && line >= location.start && line <= (location.end ?? location.start) ? ' is-target' : '')
+    + '" data-source-line="' + line + '"><span class="fp-source-text">' + spans.join('')
   const closeLine = () => '</span>'.repeat(spans.length) + '</span></span>'
   let result = openLine()
   let offset = 0

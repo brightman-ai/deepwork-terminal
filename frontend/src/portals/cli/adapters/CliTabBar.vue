@@ -1,5 +1,11 @@
 <template>
-  <div class="cli-tab-bar dw-titlebar-blend" data-testid="cli-portal-tab-bar">
+  <div v-if="sorting" class="cli-tab-sort-tools" role="region" aria-label="调整标签顺序" data-testid="cli-tab-sort-tools">
+    <button type="button" data-testid="cli-tab-sort-cancel" @click="cancelSorting">取消</button>
+    <span>调整顺序<span class="cli-tab-sort-hint"> · 拖动标签</span></span>
+    <button type="button" data-testid="cli-tab-sort-done" @click="finishSorting">完成</button>
+  </div>
+  <div ref="strip" class="cli-tab-bar dw-titlebar-blend" :class="{ 'is-sorting': sorting, 'is-dragging': draggedTabId }" data-testid="cli-portal-tab-bar">
+    <button v-if="quickSwitchLabel" type="button" class="cli-tab-bar__quick-switch" data-testid="cli-tab-quick-switch-trigger" :title="`快速切换标签（${quickSwitchLabel}）`" :disabled="sorting" @mousedown.prevent @click="emit('quick-switch')"><Search :size="14" /><span>切换</span><kbd>{{ quickSwitchLabel }}</kbd></button>
     <!-- D7 overview — LEADS the strip. It is the "zoom out to all terminals" control, so it
          belongs before the tabs it summarizes (the same reading order as a breadcrumb's root).
          It was in the far-right chrome cluster, where it read as one more utility icon next to
@@ -9,6 +15,7 @@
       type="button"
       data-testid="cli-portal-overview-trigger"
       title="标签总览（所有终端的状态与实时预览）"
+      :disabled="sorting"
       @click="emit('toggle-overview')"
     >
       <LayoutGrid :size="14" />
@@ -22,14 +29,14 @@
     </button>
 
     <!-- Groups + tabs -->
-    <template v-for="group in groups" :key="group.id">
+    <template v-for="group in displayGroups" :key="group.id">
       <!-- Group header (only when multiple groups) -->
       <div
         v-if="showGroupHeaders"
         class="cli-tab-bar__group-header"
         :style="group.color ? { '--group-color': group.color } : {}"
         :data-testid="`cli-portal-group-header-${group.id}`"
-        @click="emit('toggle-group', group.id)"
+        @click="!sorting && emit('toggle-group', group.id)"
       >
         <span class="group-name">{{ group.name }}</span>
         <span class="group-chevron">{{ group.collapsed ? '▸' : '▾' }}</span>
@@ -44,12 +51,20 @@
             'is-active': tab.id === activeTabId,
             'needs-input': tabStatus(tab.id) === 'waiting',
             'not-live': !!notLive(tab.id),
+            'is-drag-source': draggedTabId === tab.id,
+            'insert-before': insertBefore(tab.id),
+            'insert-after': insertAfter(tab.id, group),
           }"
           :title="tabTitle(tab)"
           :data-testid="`cli-portal-tab-${tab.id}`"
-          @click="emit('switch', tab.id)"
-          @dblclick.stop="emit('rename-start', tab.id)"
-          @contextmenu="emit('context-menu', $event, tab.id)"
+          :data-tab-id="tab.id"
+          :data-group-id="group.id"
+          @pointerdown="onPointerDown($event, tab.id, group.id)"
+          @click="allowTabAction($event) && emit('switch', tab.id)"
+          @dblclick.stop="allowTabAction($event) && emit('rename-start', tab.id)"
+          @contextmenu="onContextMenu($event, tab.id)"
+          @keydown="onTabKeyDown($event, tab.id, group.id)"
+          @dragstart.prevent
         >
           <!-- 前导点有两个轴，存活态优先：进程都不在了，"agent 在干嘛"就无从谈起。
                ① 没活着 → 中性灰、静止（LIVENESS_COLOR / LIVENESS_MOTION）
@@ -80,6 +95,7 @@
             @click.stop
             @dblclick.stop
             @mousedown.stop
+            @pointerdown.stop
           />
           <!-- 位置角标 —— 编号在这个屏幕上**唯一**的落点。
                名字一律不带编号（tabBaseName），角标一律带：所有标签一视同仁，眼睛永远在同一个
@@ -91,10 +107,11 @@
                对读屏用户把「这是第几个」整个删掉 —— 而 Alt+N 对他们只会更重要。读出来是「3 build」，
                和眼睛看到的一模一样。 -->
           <span
-            v-if="tabPositions.get(tab.id) !== undefined"
+            v-if="!sorting && tabPositions.get(tab.id) !== undefined"
             class="tab-pos"
             :data-testid="`cli-portal-tab-pos-${tab.id}`"
           >{{ tabPositions.get(tab.id) }}</span>
+          <span v-if="sorting" class="tab-sort-grip" aria-hidden="true">⠿</span>
           <!-- `v-else` 承重：重命名输入框和标签名是**互斥**的两种状态。少了它，改名时输入框和
                旧名字会同时出现在同一个标签里 —— 一个既在编辑又在显示旧值的格子。 -->
           <span v-if="renamingTabId !== tab.id" class="tab-name">{{ tabBaseName(tab.name) }}</span>
@@ -123,6 +140,7 @@
       class="cli-tab-bar__tab cli-tab-bar__tab--add"
       data-testid="cli-portal-add-tab"
       title="新建本机终端"
+      :disabled="sorting"
       @click="emit('add')"
     >+</button>
 
@@ -179,17 +197,23 @@
         type="button"
         data-testid="cli-portal-add-remote"
         title="新建远程终端"
+        :disabled="sorting"
         @click="emit('add-remote')"
       ><Server :size="14" /></button>
       <!-- Host-provided status widget (standalone mounts the UsageChip here via CliPortal). -->
       <slot name="status" />
     </div>
   </div>
+  <Teleport to="body">
+    <div v-if="ghost" class="cli-tab-drag-ghost" :style="{ left: `${ghost.x + 12}px`, top: `${ghost.y + 12}px` }" aria-hidden="true">{{ tabBaseName(ghost.name) }}</div>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { RefreshCw, Server, LayoutGrid } from 'lucide-vue-next'
+import { computed, ref, watch, nextTick } from 'vue'
+import { useTabReorder } from '@terminal/composables/cli/useTabReorder'
+import type { TabMove } from '@terminal/composables/cli/tabReorder'
+import { RefreshCw, Server, LayoutGrid, Search } from 'lucide-vue-next'
 import {
   agentSaidText,
   STATUS_COLOR,
@@ -239,9 +263,13 @@ const props = defineProps<{
   reopenedTabs?: Set<string>
   /** Global status counts for the roll-up capsule (same source, same numbers as the overview). */
   rollup: Record<EffectiveStatus, number>
+  /** Incremented by the host menu's 调整顺序 command. */
+  reorderRequest?: number
+  quickSwitchLabel?: string
 }>()
 
 const emit = defineEmits<{
+  (e: 'quick-switch'): void
   (e: 'switch', tabId: string): void
   (e: 'close', tabId: string): void
   (e: 'add'): void
@@ -255,8 +283,30 @@ const emit = defineEmits<{
   /** Right-click on a tab. The host owns the menu (it knows the live cwd + the tab set), so the
    *  bar only reports WHERE and ON WHAT — it never decides what the menu contains. */
   (e: 'context-menu', event: MouseEvent, tabId: string): void
+  (e: 'reorder', moves: TabMove[]): void
+  (e: 'reorder-notice', text: string): void
 }>()
 
+watch(() => props.activeTabId, async id => {
+  await nextTick()
+  if (!id) return
+  const tab = [...(strip.value?.querySelectorAll<HTMLElement>('[data-tab-id]') ?? [])].find(el => el.dataset.tabId === id)
+  tab?.scrollIntoView({ block: 'nearest', inline: 'center' })
+})
+
+const strip = ref<HTMLElement | null>(null)
+const {
+  sorting, displayGroups, draggedTabId, ghost, cancelSorting, finishSorting,
+  allowTabAction, onPointerDown, onContextMenu, onTabKeyDown, insertBefore, insertAfter,
+} = useTabReorder({
+  strip,
+  groups: () => props.groups,
+  renamingTabId: () => props.renamingTabId,
+  request: () => props.reorderRequest ?? 0,
+  commit: moves => emit('reorder', moves),
+  contextMenu: (event, tabId) => emit('context-menu', event, tabId),
+  notice: text => emit('reorder-notice', text),
+})
 
 // The force-fresh clear-and-reload lives in useAppUpdate.applyAppUpdate() now (SSOT for the
 // manual refresh button, the auto-update pill, and HelpCenter's manual entry).
@@ -309,6 +359,52 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
 </script>
 
 <style scoped>
+.cli-tab-sort-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: 3px 8px;
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  font-size: 12px;
+}
+.cli-tab-sort-tools button {
+  min-height: 30px;
+  padding: 2px 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  background: hsl(var(--accent));
+  color: inherit;
+  cursor: pointer;
+}
+.cli-tab-sort-hint { color: hsl(var(--muted-foreground)); }
+.cli-tab-bar.is-sorting { touch-action: none; }
+.cli-tab-bar__tab[data-tab-id] { user-select: none; -webkit-touch-callout: none; }
+.cli-tab-bar.is-sorting .cli-tab-bar__tab[data-tab-id] { touch-action: none; cursor: grab; }
+.cli-tab-bar.is-dragging { cursor: grabbing; }
+.cli-tab-bar__tab.is-drag-source { opacity: 0.35; outline: 1px dashed hsl(var(--muted-foreground)); outline-offset: -3px; }
+.cli-tab-bar__tab.insert-before { box-shadow: inset 3px 0 hsl(var(--foreground)); }
+.cli-tab-bar__tab.insert-after { box-shadow: inset -3px 0 hsl(var(--foreground)); }
+.tab-sort-grip { color: hsl(var(--muted-foreground)); font-size: 13px; }
+.cli-tab-drag-ghost {
+  position: fixed;
+  z-index: 1100;
+  pointer-events: none;
+  max-width: 180px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 6px 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  box-shadow: 0 4px 12px #0004;
+}
 /* Overview trigger — leads the strip, separated from the first tab by a hairline so it reads as
    chrome ("all of them") rather than as a tab. flex-shrink:0 keeps it pinned while tabs scroll. */
 .cli-tab-bar__overview {
@@ -326,6 +422,10 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
   cursor: pointer;
 }
 .cli-tab-bar__overview:hover { color: hsl(var(--foreground)); background: hsl(var(--accent)); }
+.cli-tab-bar__quick-switch { position: sticky; left: 0; z-index: 12; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 0 10px; border-right: 1px solid hsl(var(--border)); background: hsl(var(--card)); color: hsl(var(--muted-foreground)); font-size: 12px; }
+.cli-tab-bar__quick-switch:hover { color: hsl(var(--foreground)); background: hsl(var(--accent)); }
+.cli-tab-bar__quick-switch kbd { font-family: inherit; font-size: 10px; opacity: .7; }
+@media (max-width: 600px) { .cli-tab-bar__quick-switch kbd { display: none; } }
 .cli-tab-bar__overview:active { transform: scale(0.92); }
 
 /* PWA-only refresh button — sits on the right, mirrors the add-tab affordance. */

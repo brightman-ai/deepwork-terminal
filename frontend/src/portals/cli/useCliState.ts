@@ -1,4 +1,4 @@
-import { ref, computed, onMounted, onBeforeUnmount, reactive, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, reactive, nextTick, watch, provide } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkbench } from '@terminal/composables/cli/useWorkbench'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
@@ -16,6 +16,9 @@ import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
 import { useSessionsOverview } from '@terminal/composables/cli/useSessionsOverview'
 import { useOverviewUnits, URGENCY_ORDER, type EffectiveStatus, type OverviewUnit } from '@terminal/composables/cli/useAgentOverview'
 import { useTabContextMenu } from '@terminal/composables/cli/useTabContextMenu'
+import { useTabQuickSwitch } from '@terminal/composables/cli/useTabQuickSwitch'
+import type { QuickSwitchSignal } from '@terminal/composables/cli/quickSwitchRanking'
+import { terminalInputBlockedKey } from '@terminal/composables/cli/terminalInputOwner'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { type TabLiveness, type TabNotLive } from '@terminal/composables/cli/tabLiveness'
 import { reconcileTabs } from '@terminal/composables/cli/reconcileTabs'
@@ -58,7 +61,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
   }
 
   const {
-    loading, error, groups, activeTab, allTabs, showGroupHeaders,
+    loading, error, saveError, retrySave, reorderTabs, groups, activeTab, allTabs, showGroupHeaders,
     load, resync, addTab, setTabCwd, removeTab, renameTab, adoptRemoteTabName, setActiveTab,
     toggleGroupCollapsed, bindSession, unbindSession, setTabSplit,
   } = useWorkbench()
@@ -209,10 +212,11 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // onMounted/onBeforeUnmount lifecycle (tied to this component tree) is the only gate needed.
   // leader（默认 Ctrl+B）仍承载 tab/overview 等动作。`[` 不再映射到应用 Copy Mode；onLeaderFallback
   // 回放已捕获的前缀，使 Ctrl+B [ 在 tmux 与普通 shell 页面都完整到达 PTY。
-  const { leaderPending, leaderLabel } = useTabShortcuts({
+  const { leaderPending, leaderLabel, quickSwitchBinding, quickSwitchLabel } = useTabShortcuts({
     orderedTabIds: () => visibleTabIds.value,
     activeTabId: () => activeTab.value?.id,
-    isActive: () => true,
+    isActive: () => !quickSwitcher.open.value,
+    onQuickSwitch: openQuickSwitcher,
     onSelect: switchTab,
     onNew: quickCreateTab,
     onClose: (tabId: string) => { void closeTab(tabId) },
@@ -366,6 +370,44 @@ export function useCliState(runtime: PortalRuntimeResult) {
     for (const id of others) await closeTab(id)
   }
 
+  const tabReorderRequest = ref(0)
+  const quickSwitchSignals = computed(() => {
+    const units = new Map(overviewUnits.value.map(unit => [unit.key, unit]))
+    return new Map(allTabs.value.map(tab => {
+      const signals: QuickSwitchSignal[] = []
+      if (livenessOf(tab.id) === 'live') {
+        for (const id of [tab.sessionId, tab.split?.secondSessionId]) {
+          const unit = id ? units.get(id) : undefined
+          if (!unit || unit.liveness) continue
+          signals.push({ key: `${tab.id}:${unit.key}`, rawStatus: unit.rawStatus,
+            effectiveStatus: overview.effectiveStatus(unit), awaitingSince: Date.parse(unit.awaitingSince) || 0, activityAt: unit.activityAt ?? 0 })
+        }
+      }
+      return [tab.id, signals] as const
+    }))
+  })
+  const quickSwitcher = useTabQuickSwitch({
+    groups: () => groups.value,
+    activeId: () => activeTab.value?.id,
+    positions: () => tabPositions.value,
+    machine: tab => remotePeers.resolveTabConnection(tab).machineLabel,
+    status: id => {
+      const liveness = tabLivenessMap.value.get(id)
+      if (liveness && liveness !== 'live') return 'disconnected'
+      return tabStatuses.value.get(id) ?? 'terminal'
+    },
+    select: switchTab,
+    expand: toggleGroupCollapsed,
+    signals: () => quickSwitchSignals.value,
+    ready: () => !loading.value,
+    isReading: () => !overviewOpen.value && !!activeTab.value?.sessionId && activeWsStatus.value === 'connected',
+  })
+  function openQuickSwitcher(): void {
+    closeOverview()
+    tabMenu.close()
+    quickSwitcher.show()
+  }
+  provide(terminalInputBlockedKey, () => quickSwitcher.open.value)
   const tabMenu = useTabContextMenu({
     rename: startRenameTab,
     close: (id) => { void closeTab(id) },
@@ -377,6 +419,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     applyEnvHere: (id) => { void applyEnvToTab(id) },
     splitTab: (id, orientation) => { void splitTab(id, orientation) },
     unsplitTab: (id) => { void unsplitTab(id) },
+    reorder: () => { tabReorderRequest.value++ },
   })
 
   function openTabMenu(e: MouseEvent, tabId: string): void {
@@ -391,6 +434,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
       cwd: liveCwd(tabId),
       isTmux,
       isSplit: !!tab.split,
+      reorderAllowed: (groups.value.find(g => g.id === tab.groupId)?.tabs.length ?? 0) > 1,
       splitOrientation: tab.split?.orientation,
       // terminal-split REQ-010：移动端不提供新建分屏入口；已有分屏在移动端照常可见/可取消。
       // 同时不在 tmux-attached 的 tab 上提供——它已经有自己的分屏（TmuxQuickBar 的 vsplit/
@@ -473,7 +517,11 @@ export function useCliState(runtime: PortalRuntimeResult) {
   function onTabConnectionChange(tabId: string, status: WSConnectionStatus) { ensureRuntime(tabId).wsStatus = status }
 
   // ─── Tab bar operations ───────────────────────────────────────────────────────
-  function switchTab(tabId: string) { setActiveTab(tabId) }
+  function switchTab(tabId: string, options?: { restoring?: boolean }) {
+    const previous = activeTab.value?.id
+    setActiveTab(tabId)
+    if (previous !== tabId && !options?.restoring) quickSwitcher.noteVisit(tabId)
+  }
 
   async function closeTab(tabId: string) {
     const tab = allTabs.value.find(t => t.id === tabId)
@@ -1086,7 +1134,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
 
   return {
     scenario, breakpoint,
-    loading, error, groups, activeTab, allTabs, showGroupHeaders,
+    loading, error, saveError, retrySave, reorderTabs, tabReorderRequest, showNotice, groups, activeTab, allTabs, showGroupHeaders,
     toggleGroupCollapsed,
     tabRuntimes, registerSurface,
     activeWsStatus, activeAgentState, activeAgentNotifications, activeRtt, activeNetStats,
@@ -1110,6 +1158,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     reopenedTabIds,
     // D1-D7: tab-shortcut numbering + overview + guide banner deep-link
     tabPositions, tabDisplayName, tabStatuses, leaderPending, leaderLabel,
+    quickSwitcher, openQuickSwitcher, quickSwitchBinding, quickSwitchLabel,
     overviewOpen, toggleOverview, closeOverview, overviewGroups: overview.groups, overviewRollup: overview.rollup,
     selectOverviewIndex,
     openShortcutsSettings,

@@ -35,6 +35,7 @@ export interface TabMenuTarget {
    *  true（允许）处理，保持与 `isSplit` 同一种"不传=默认开"的读法。已分屏的 tab 不受这条限制
    *  （"取消分屏"任何视口都该能点，收起比放出宽松）。 */
   splitAllowed?: boolean
+  reorderAllowed?: boolean
 }
 
 /** What the host shell can actually do. `closeOthers` is optional — a shell that cannot express it
@@ -73,6 +74,8 @@ export interface TabMenuActions {
   /** 取消分屏，tab 回到单格。与 splitTab 成对——传了一个就该传另一个，分开可选只是为了复用
    *  "可选回调=条目消失"这同一套门控，不代表两者该被分别启用。 */
   unsplitTab?(id: string): void
+  /** Host's temporary sorting mode; absent in shells without a sortable strip. */
+  reorder?(id: string): void
 }
 
 export interface TabMenuItem {
@@ -136,6 +139,10 @@ export function useTabContextMenu(actions: TabMenuActions) {
         run: () => run(() => actions.applyEnvHere(t.id)),
       },
     ]
+    if (actions.reorder) {
+      list.splice(1, 0, { key: 'reorder', label: '调整顺序', disabled: t.reorderAllowed === false,
+        run: () => run(() => actions.reorder!(t.id)) })
+    }
     // 分屏（scope: terminal-split）。未分屏 → 两个方向各一项；已分屏 → 一项"取消分屏"，不与
     // "分屏"同屏共存（分屏了就不该再问"往哪分"）。宿主不传回调 = 这组条目整体不出现。
     if (!t.isSplit) {

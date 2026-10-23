@@ -37,6 +37,7 @@ export interface TabShortcutsAdapter {
   onSelect: (id: string) => void
   onNew: () => void
   onClose: (id: string) => void
+  onQuickSwitch?: () => void
   /**
    * leader 这条路此刻是否属于我们。
    *
@@ -130,9 +131,11 @@ export function resolveShortcutAction(
   cfg: ShortcutsConfig,
   orderedIds: string[],
   activeId: string | undefined,
-): { type: 'select'; id: string } | { type: 'new' | 'close' } | null {
+): { type: 'select'; id: string } | { type: 'new' | 'close' | 'quickSwitch' } | null {
   const order = computeVisibleTabOrder(orderedIds)
   const b = (action: ShortcutAction): string => bindingFor(cfg, action)
+  const quickSwitch = matchesBinding(e, b('quickSwitch'))
+  if (quickSwitch && cfg.overrides?.quickSwitch) return { type: 'quickSwitch' }
 
   const digit = matchesPrefixDigit(e, b('switchTab'))
   if (digit !== undefined) {
@@ -149,6 +152,7 @@ export function resolveShortcutAction(
   }
   if (matchesBinding(e, b('newTab'))) return { type: 'new' }
   if (matchesBinding(e, b('closeTab'))) return activeId ? { type: 'close' } : null
+  if (quickSwitch) return { type: 'quickSwitch' }
   return null
 }
 
@@ -246,6 +250,8 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
   leaderPending: ComputedRef<boolean>
   /** 提示条上印的键名。走 bindingLabel（绑定措辞的 SSOT），和设置页显示的是同一个结果。 */
   leaderLabel: ComputedRef<string>
+  quickSwitchBinding: ComputedRef<string>
+  quickSwitchLabel: ComputedRef<string>
 } {
   const { config, loading, load } = useShortcutsConfig()
 
@@ -390,6 +396,7 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
     // ── 单修饰键前缀那条路（和 leader 并行，互不影响）─────────────────────────────────────────
     const action = resolveShortcutAction(e, config.value, orderedIds, adapter.activeTabId())
     if (!action) return
+    if (action.type === 'quickSwitch' && (loading.value || !adapter.onQuickSwitch || e.isComposing)) return
 
     e.preventDefault()
     e.stopImmediatePropagation()
@@ -398,6 +405,7 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
       case 'select': adapter.onSelect(action.id); break
       case 'new': adapter.onNew(); break
       case 'close': { const id = adapter.activeTabId(); if (id) adapter.onClose(id); break }
+      case 'quickSwitch': clearLeader(); adapter.onQuickSwitch?.(); break
     }
   }
 
@@ -410,7 +418,9 @@ export function useTabShortcuts(adapter: TabShortcutsAdapter): {
     document.removeEventListener('keydown', handleKeydown, { capture: true })
   })
 
-  return { leaderPending, leaderLabel: computed(() => bindingLabel(config.value.leader)) }
+  return { leaderPending, leaderLabel: computed(() => bindingLabel(config.value.leader)),
+    quickSwitchBinding: computed(() => bindingFor(config.value, 'quickSwitch')),
+    quickSwitchLabel: computed(() => bindingLabel(bindingFor(config.value, 'quickSwitch'))) }
 }
 
 

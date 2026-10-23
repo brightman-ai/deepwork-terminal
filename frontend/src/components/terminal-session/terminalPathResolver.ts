@@ -56,9 +56,10 @@ export function resolveDocumentPath(sourcePath: string, reference: string): stri
 }
 
 /** Decide whether a terminal path is complete enough for a direct read. */
-export function resolveTerminalPath(path: string): TerminalPathResolution {
+export function resolveTerminalPath(path: string, searchOnly = false): TerminalPathResolution {
   const normalized = normalizeTerminalPath(path)
   if (!normalized) return { kind: 'search', query: '' }
+  if (searchOnly) return { kind: 'search', query: normalized }
   // Dots can also be a real filename. Preserve the literal fast path and only
   // recover the omitted fragments after a 404; basenames still use the index.
   if (hasPathElision(normalized)) {

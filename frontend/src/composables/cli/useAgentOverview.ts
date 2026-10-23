@@ -540,10 +540,15 @@ export function useOverviewUnits(windows: Ref<OverviewUnit[]>, overviewOpen: Ref
   // while a reload honestly re-asks, and the entry is dropped the moment the unit stops awaiting
   // so the NEXT completion shows up again on its own.
   const undatedSeen = ref<Set<string>>(new Set())
+  let receivedUnits = false
 
   watch(
     windows,
     (wins) => {
+      // Before the first feed arrives, [] means "loading", not "all sessions
+      // removed". Pruning here erased persisted acknowledgments on every F5.
+      if (!receivedUnits && !wins.length) return
+      receivedUnits = true
       const live = new Set<string>()
       let changed = false
       for (const w of wins) {

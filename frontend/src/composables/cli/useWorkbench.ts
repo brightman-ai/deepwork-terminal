@@ -34,6 +34,7 @@ import { fetchWorkbenchConfig, saveWorkbenchConfig } from '@terminal/api/workben
 import { mergeWorkbench } from '@terminal/composables/cli/workbenchMerge'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { moveTabBefore, sameTabOrder, type TabMove } from './tabReorder'
 
 /** 冲突重试上限。收敛通常发生在第一次重试；给个上限是为了让"两台设备高频对写"这种病态情形
  *  以一条 error 结束，而不是变成无限 PUT 循环。 */
@@ -48,6 +49,10 @@ export function useWorkbench() {
   const config = ref<WorkbenchConfig | null>(null)
   const loading = ref(true)
   const error = ref<string | null>(null)
+  // A write failure must not enter CliTerminalView's load-error branch: that
+  // branch unmounts every live terminal. Keep the current work and offer retry.
+  const saveError = ref<string | null>(null)
+  const pendingMoves: TabMove[] = []
 
   /** 「`config` 真的代表过服务端状态」。false = 只读到了兜底默认值 → 禁止存盘（缺陷②）。 */
   const hydrated = ref(false)
@@ -132,11 +137,14 @@ export function useWorkbench() {
    * 读不到就保持现状——读失败不是"服务端空了"的证据（同 tabLiveness 的 null ≠ 空集合）。
    */
   async function resync(): Promise<void> {
-    if (!config.value) return
+    if (!config.value || flushing) return
+    const readBaseline = baseline
     try {
       const got = await fetchWorkbenchConfig()
-      if (!got.hydrated) return
-      config.value = mergeWorkbench(baseline, config.value, got.config)
+      // Do not apply a read overtaken by an acknowledged write. Otherwise its
+      // old rev/order could overwrite a move that flush has just acknowledged.
+      if (!got.hydrated || flushing || baseline !== readBaseline) return
+      config.value = mergeWorkbench(baseline, config.value, got.config, pendingMoves)
       // 基准前移到"服务端那一版"：合并结果正是建立在它之上的，本地独有的部分相对它仍然算
       // "本地新增"（因为确实还没上去），这正是下一次冲突合并需要的语义。
       baseline = snapshot(got.config)
@@ -157,6 +165,7 @@ export function useWorkbench() {
     if (!hydrated.value) return // 闸门：没读到服务端状态，绝不写
     config.value.lastSaved = new Date().toISOString()
     const outgoing = snapshot(config.value)
+    const moveCount = pendingMoves.length
     const outcome = await saveWorkbenchConfig(outgoing)
     switch (outcome.kind) {
       case 'saved':
@@ -165,14 +174,15 @@ export function useWorkbench() {
           if (config.value) config.value.rev = outcome.rev
         }
         baseline = outgoing
-        error.value = null
+        pendingMoves.splice(0, moveCount)
+        saveError.value = null
         return
       case 'conflict': {
         if (attempt >= MAX_CONFLICT_RETRIES) {
-          error.value = '标签列表保存冲突未能收敛，已保留本地状态'
+          saveError.value = '标签列表保存冲突未能收敛，已保留本地状态'
           return
         }
-        config.value = mergeWorkbench(baseline, config.value, outcome.current)
+        config.value = mergeWorkbench(baseline, config.value, outcome.current, pendingMoves)
         // 合并结果建立在服务端那一版之上，所以基准也跟着走到那一版，否则下一轮又是陈旧的。
         baseline = snapshot(outcome.current)
         return flush(attempt + 1)
@@ -180,7 +190,7 @@ export function useWorkbench() {
       case 'skipped':
         return // 401/429 —— 认证弹窗会接手，不覆盖也不报错
       case 'failed':
-        error.value = outcome.message
+        saveError.value = outcome.message
         return
     }
   }
@@ -195,6 +205,8 @@ export function useWorkbench() {
         pending = false
         await flush()
       } while (pending)
+    } catch (err) {
+      saveError.value = err instanceof Error ? err.message : '标签列表保存失败'
     } finally {
       flushing = false
     }
@@ -205,6 +217,29 @@ export function useWorkbench() {
       clearTimeout(saveTimer)
     }
     saveTimer = setTimeout(() => { void kick() }, 500)
+  }
+
+  async function retrySave(): Promise<void> {
+    if (saveTimer !== null) clearTimeout(saveTimer)
+    saveTimer = null
+    await kick()
+  }
+
+  /** One desktop drop / one mobile “完成” is one configuration change. Pending
+   * moves stay local until a successful save acknowledges exactly that batch. */
+  function reorderTabs(moves: readonly TabMove[]): void {
+    if (!hydrated.value) { saveError.value = '标签列表尚未加载，暂时无法保存顺序'; return }
+    let changed = false
+    for (const move of moves) {
+      const group = groups.value.find(g => g.id === move.groupId)
+      if (!group) continue
+      const next = moveTabBefore(group.tabs, move.tabId, move.beforeTabId)
+      if (sameTabOrder(group.tabs, next)) continue
+      group.tabs = next
+      pendingMoves.push({ ...move })
+      changed = true
+    }
+    if (changed) void save()
   }
 
   // ─── tab operations ───────────────────────────────────────────────────────
@@ -407,6 +442,7 @@ export function useWorkbench() {
     config,
     loading,
     error,
+    saveError,
     /** 读到过服务端状态吗。false 时 save() 全程 no-op —— 消费方若要在界面上说明"当前未同步"
      *  可以读它，但**不要**用它去绕过闸门。 */
     hydrated,
@@ -419,6 +455,8 @@ export function useWorkbench() {
     /** 重新读服务端并合并进本地。挂在"页面重新可见"上，见 useCliState 的 onMounted。 */
     resync,
     save,
+    retrySave,
+    reorderTabs,
     addTab,
     setTabCwd,
     removeTab,

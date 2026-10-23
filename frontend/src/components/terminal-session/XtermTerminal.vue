@@ -87,7 +87,7 @@ const emit = defineEmits<{
   (e: 'data', data: Uint8Array): void
   (e: 'resize', cols: number, rows: number): void
   (e: 'ready', terminal: Terminal): void
-  (e: 'file-path', path: string, lineStart?: number, lineEnd?: number): void
+  (e: 'file-path', path: string, lineStart?: number, lineEnd?: number, searchOnly?: boolean): void
 }>()
 
 // Mobile uses a smaller cell so the narrow phone screen fits MORE columns. Programs that draw
@@ -152,7 +152,7 @@ function activateFileLinkAt(x: number, y: number): boolean {
   virtualFileHover.value = null
   virtualPointerPoint = undefined
   virtualPointerRow = -1
-  emit('file-path', link.path, link.lineStart, link.lineEnd)
+  emit('file-path', link.path, link.lineStart, link.lineEnd, link.searchOnly)
   return true
 }
 
@@ -576,7 +576,7 @@ function initTerminal() {
       callback(links.length ? links.map((link) => ({
         text: link.path,
         range: { start: { x: link.cellStart, y: bufferLineNumber }, end: { x: link.cellEnd, y: bufferLineNumber } },
-        activate: () => emit('file-path', link.path, link.lineStart, link.lineEnd),
+        activate: () => emit('file-path', link.path, link.lineStart, link.lineEnd, link.searchOnly),
       })) : undefined)
     },
   }

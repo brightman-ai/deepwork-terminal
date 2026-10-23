@@ -5,7 +5,7 @@
     data-testid="cli-portal"
   >
     <!-- D6: first-run shortcuts guide, collapses into a small icon after acknowledgement. -->
-    <ShortcutsGuideBanner :on-open-settings="openShortcutsSettings" />
+    <ShortcutsGuideBanner v-show="!saveError" :on-open-settings="openShortcutsSettings" />
 
     <CliTabBar
       :groups="groups"
@@ -18,6 +18,9 @@
       :tab-liveness="tabLivenessMap"
       :reopened-tabs="reopenedTabIds"
       :rollup="overviewRollup"
+      :reorder-request="tabReorderRequest"
+      :quick-switch-label="quickSwitchLabel"
+      @quick-switch="openQuickSwitcher"
       @switch="switchTab"
       @close="closeTab"
       @add="quickCreateTab"
@@ -29,6 +32,8 @@
       @toggle-group="toggleGroupCollapsed"
       @toggle-overview="toggleOverview"
       @context-menu="openTabMenu"
+      @reorder="reorderTabs"
+      @reorder-notice="showNotice"
     >
       <!-- Usage chip trails the tabs (contextual to the terminal session) — the SAME position
            pro-embed uses (CliV2 mounts it right after its TopTabBar), so the chip sits identically
@@ -40,6 +45,11 @@
       </template>
     </CliTabBar>
 
+    <div v-if="saveError" class="cli-save-error" role="status" data-testid="cli-workbench-save-error">
+      <span>标签顺序或设置未保存：{{ saveError }}</span>
+      <button type="button" data-testid="cli-workbench-save-retry" @click="retrySave">重试保存</button>
+    </div>
+
     <!-- The per-surface status row (tmux pane bar ↔ "终端 N <status>" strip) now lives
          INSIDE CliTerminalSurface (the SSOT), so the host no longer mounts or re-wires it.
          CliPortal owns only the tab bar + connection/lifecycle.
@@ -49,6 +59,7 @@
          xterm 绑的是长命进程，不能随可见性生灭），所以这里用 v-show 只藏画面、不拆连接；已结束的
          标签本来就没有 surface，藏的只是一块空白。 -->
     <CliTerminalView
+      ref="terminalView"
       v-show="!detachedCard"
       :loading="loading"
       :error="error"
@@ -98,6 +109,7 @@
 
     <!-- Remote-terminal picker (mesh): add/select a peer, then open a tab connected to it. -->
     <RemoteTermDialog v-model:open="remoteDialogOpen" :on-connect="createRemoteTab" />
+    <TabQuickSwitcher :open="quickSwitcher.open.value" :query="quickSwitcher.query.value" :items="quickSwitcher.results.value" :selected-id="quickSwitcher.selectedId.value" :active-id="activeTab?.id" :binding="quickSwitchBinding" :binding-label="quickSwitchLabel" :message="quickSwitcher.message.value" :total="quickSwitcher.total.value" :status-kinds="quickSwitcher.statusKinds.value" :filter="quickSwitcher.filter.value" :filters="quickSwitcher.filters.value" :filter-stale="quickSwitcher.filterStale.value" @filter="quickSwitcher.setFilter" @refresh-filter="quickSwitcher.refreshFilter" @search="quickSwitcher.search" @move="quickSwitcher.move" @select="selectQuickTab" @close="quickSwitcher.close" />
 
     <!-- 一次性轻提示。用行内元素而不是 window.alert：原生弹窗在 headless 下阻塞 JS 线程，
          那条路就再也验收不了（见 useCliState 的 showNotice）。 -->
@@ -127,7 +139,8 @@ import { cliScenarios, cliBreakpointOverrides } from './cliScenarios'
 import { cliLayoutPolicy } from './cliLayoutPolicy'
 import { useCliState } from './useCliState'
 import { resolveDeepLinkTabId, syncTabQuery, resolveDeepLinkPaneIndex, syncPaneQuery } from './tabDeepLink'
-import { ref, watch } from 'vue'
+import { ref, watch, nextTick } from 'vue'
+import TabQuickSwitcher from '@terminal/components/cli/TabQuickSwitcher.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CliTabBar, CliTerminalView } from './adapters'
 import RemoteTermDialog from '@terminal/components/terminal-session/RemoteTermDialog.vue'
@@ -148,7 +161,7 @@ const runtime = usePortalRuntime({
 
 const {
   breakpoint,
-  loading, error, groups, activeTab, showGroupHeaders,
+  loading, error, saveError, retrySave, reorderTabs, tabReorderRequest, showNotice, groups, activeTab, showGroupHeaders,
   toggleGroupCollapsed,
   registerSurface,
   surfaceTabs,
@@ -162,6 +175,7 @@ const {
   selectOverviewIndex, openShortcutsSettings,
   tabMenu, openTabMenu,
   notice,
+  quickSwitcher, openQuickSwitcher, quickSwitchBinding, quickSwitchLabel,
   // leader 等待态 + 它的键名。键名走 bindingLabel（绑定措辞的 SSOT），所以提示条和设置页
   // 显示的是同一个结果，不会写成两种样子。
   leaderPending, leaderLabel,
@@ -170,6 +184,13 @@ const {
   setSplitRatio, setSplitOrientation, toggleZoom, closeSplitPane, activeTabSplitAllowed,
   activeAgentState,
 } = useCliState(runtime)
+
+const terminalView = ref<InstanceType<typeof CliTerminalView>>()
+async function selectQuickTab(id: string): Promise<void> {
+  if (!quickSwitcher.select(id)) return
+  await nextTick()
+  if (!breakpoint.isMobile.value) terminalView.value?.focusActiveTerminal()
+}
 
 // One visible-session snapshot only. The old top-bar number came from the UsageChip's selected
 // fleet window and could silently combine several Codex sessions. This HUD follows the active tab
@@ -197,7 +218,7 @@ watch(
     if (deepLinkApplied.value || !groups.value.length) return
     const target = resolveDeepLinkTabId(route.query.t, allTabs.value)
     deepLinkApplied.value = true
-    if (target && target !== activeTab.value?.id) switchTab(target)
+    if (target && target !== activeTab.value?.id) switchTab(target, { restoring: true })
   },
   { immediate: true },
 )
@@ -241,6 +262,27 @@ watch(
 </script>
 
 <style scoped>
+.cli-save-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 5px 10px;
+  background: hsl(var(--card));
+  border-bottom: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground));
+  font-size: 12px;
+}
+.cli-save-error button {
+  flex-shrink: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  padding: 3px 8px;
+  background: hsl(var(--accent));
+  color: inherit;
+  cursor: pointer;
+}
 /* Overview overlay — the card grid needs real estate (it shows live output), so it takes the
    surface rather than floating as a small popover. Scrim click closes.
 

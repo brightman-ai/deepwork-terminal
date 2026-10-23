@@ -69,10 +69,10 @@ type treeEntry struct {
 }
 
 type treeResponse struct {
-	CWD     string      `json:"cwd"`
-	Rel     string      `json:"rel"`
-	Entries []treeEntry `json:"entries"`
-	Truncated bool      `json:"truncated,omitempty"`
+	CWD       string      `json:"cwd"`
+	Rel       string      `json:"rel"`
+	Entries   []treeEntry `json:"entries"`
+	Truncated bool        `json:"truncated,omitempty"`
 }
 
 // A directory row is a navigation surface, not a full stat dump. Bound the first
@@ -272,7 +272,24 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := r.URL.Query().Get("path")
-	target, err := safeResolve(cwd, rel)
+	var target string
+	var err error
+	if r.URL.Query().Get("navigate") == "1" {
+		// An authenticated operator clicked this directory explicitly. Resolve the
+		// literal target first; ordinary tree/CRUD requests remain confined to cwd.
+		// Returning the selected root keeps all subsequent relative reads unambiguous.
+		target, err = resolvePreviewPath(cwd, rel)
+		if err == nil {
+			if within, withinErr := safeResolve(cwd, target); withinErr == nil && pathUnder(cwd, target) {
+				rel, err = filepath.Rel(cwd, target)
+				target = within
+			} else {
+				cwd, rel = target, ""
+			}
+		}
+	} else {
+		target, err = safeResolve(cwd, rel)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
 		return
@@ -327,9 +344,9 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, treeResponse{
-		CWD:     cwd,
-		Rel:     cleanRel(rel),
-		Entries: out,
+		CWD:       cwd,
+		Rel:       cleanRel(rel),
+		Entries:   out,
 		Truncated: truncated,
 	})
 }

@@ -78,6 +78,11 @@ const kind = computed<'markdown' | 'code' | 'plain'>(() => {
   if (['md', 'markdown', 'mdx'].includes(ext.value)) return 'markdown'
   return lang.value ? 'code' : 'plain'
 })
+// An explicit source location must use source coordinates, including Markdown.
+// Ordinary document opens retain the existing rich reader.
+const markdownSource = ref(!!props.lineStart)
+const showMarkdown = computed(() => kind.value === 'markdown' && !markdownSource.value)
+watch(() => props.name, () => { markdownSource.value = !!props.lineStart })
 
 // ── html: source ⇄ rendered ──────────────────────────────────────────────────────────
 // An agent's .html output is usually meant to be LOOKED at (a report, a chart), but it is
@@ -147,8 +152,8 @@ const contentEl = ref<HTMLElement>()
 watch(() => props.name, () => void nextTick(() => scrollEl.value?.focus()), { immediate: true })
 const wrap = ref(true)
 const LINE_NUMBERS_KEY = 'dw.filepreview.lineNumbers'
-const showLineNumbers = ref(localStorage.getItem(LINE_NUMBERS_KEY) !== '0')
-const sourceLinesHtml = computed(() => sourceLineHtml(codeHtml.value))
+const showLineNumbers = ref(!!props.lineStart || localStorage.getItem(LINE_NUMBERS_KEY) !== '0')
+const sourceLinesHtml = computed(() => sourceLineHtml(codeHtml.value, props.lineStart ? { start: props.lineStart, end: props.lineEnd } : undefined))
 function toggleLineNumbers(): void {
   showLineNumbers.value = !showLineNumbers.value
   localStorage.setItem(LINE_NUMBERS_KEY, showLineNumbers.value ? '1' : '0')
@@ -194,6 +199,7 @@ const progress = ref(0)
 const showTop = ref(false)
 const lightboxSrc = ref('')
 const lineJumpApproximate = ref(false)
+const lineJumpOutOfRange = computed(() => !!props.lineStart && props.lineStart > props.text.split('\n').length)
 
 function onScroll(): void {
   const el = scrollEl.value
@@ -207,16 +213,12 @@ function onScroll(): void {
 }
 
 /**
- * Move the reader to a source line without adding line-number markup to the
- * highlighted HTML. highlight.js nests spans across tokens, so a Range over the
- * rendered text is both cheaper and more accurate than splitting its HTML by
- * newline (which would produce invalid nested spans). The same best-effort
- * mapping also gives markdown previews a useful landing point when the source
- * line's text survives the markdown renderer.
+ * Source rows are the exact navigation oracle. Switching to rich Markdown keeps
+ * the previous best-effort text mapping, explicitly marked as approximate.
  */
 function scrollToSourceLine(line?: number): void {
   if (!line || !Number.isSafeInteger(line) || line < 1) return
-  lineJumpApproximate.value = kind.value === 'markdown'
+  lineJumpApproximate.value = showMarkdown.value
   const scroller = scrollEl.value
   const root = contentEl.value
   if (!scroller || !root) return
@@ -224,7 +226,7 @@ function scrollToSourceLine(line?: number): void {
   const sourceLines = source.split('\n')
   // Code/plain readers have real source-line boxes. The gutter and wrapped text share that
   // exact row, so font scaling and soft wrapping cannot make line 513 look like line 569.
-  if (kind.value !== 'markdown') {
+  if (!showMarkdown.value) {
     const row = root.querySelector<HTMLElement>('[data-source-line="' + Math.min(line, sourceLines.length) + '"]')
     if (row) {
       const top = scroller.scrollTop + row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - Math.max(20, scroller.clientHeight * 0.18)
@@ -240,7 +242,7 @@ function scrollToSourceLine(line?: number): void {
   // not equal DOM text offsets (the `# ` and list markers disappear). Prefer
   // the rendered form of the requested line when it has a stable text token;
   // source offsets remain the fallback for empty/structural lines.
-  if (kind.value === 'markdown') {
+  if (showMarkdown.value) {
     const query = sourceLines[line - 1]
       ?.trim()
       .replace(/^#{1,6}\s+/, '')
@@ -308,10 +310,21 @@ function applyReadingIntent(): void {
   }
 }
 watch([() => props.lineStart, () => props.jumpVersion], () => {
+  if (props.lineStart) {
+    markdownSource.value = true
+    showLineNumbers.value = true
+    htmlRendered.value = false
+  }
   sourceAnchorLine = props.lineStart
   restoreReadingTop = false
   void nextTick(applyReadingIntent)
 })
+function toggleMarkdownSource(): void {
+  markdownSource.value = !markdownSource.value
+  tocOpen.value = false
+  sourceAnchorLine = props.lineStart
+  void nextTick(applyReadingIntent)
+}
 watch([() => props.active, () => props.text, codeHtml], () => { void nextTick(applyReadingIntent) }, { immediate: true })
 watch([scrollEl, contentEl], ([scroller, content]) => {
   sourceLayoutObserver?.disconnect()
@@ -331,7 +344,7 @@ function scrollToTop(): void {
 let io: IntersectionObserver | null = null
 async function enhance(): Promise<void> {
   const root = contentEl.value
-  if (!root || kind.value !== 'markdown') return
+  if (!root || !showMarkdown.value) return
   addCopyButtons(root, (t) => void copyText(t))
   wireLinks(root)
   wireImages(root)
@@ -340,12 +353,12 @@ async function enhance(): Promise<void> {
   await Promise.allSettled([highlightCode(root), renderDiagrams(root, theme.value), renderMath(root)])
   wireDiagrams(root) // after renderDiagrams — the SVGs now exist and can be made openable
 }
-watch([mdHtml, () => props.name], () => {
+watch([mdHtml, () => props.name, showMarkdown], () => {
   activeId.value = ''
   progress.value = 0
   void nextTick(enhance)
 })
-watch(codeHtml, () => { if (findQuery.value.trim()) void nextTick(runFind) })
+watch([codeHtml, showMarkdown], () => { if (!showMarkdown.value && findQuery.value.trim()) void nextTick(runFind) })
 void nextTick(enhance)
 
 function setupScrollSpy(root: HTMLElement): void {
@@ -623,15 +636,28 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
     <div v-if="lineJumpApproximate" class="fp-line-note" data-testid="file-preview-line-approximate">
       Markdown 行号按渲染文本近似定位；重复内容可能需要用文档内查找确认。
     </div>
+    <div v-if="lineJumpOutOfRange" class="fp-line-note" data-testid="file-preview-line-out-of-range">
+      第 {{ props.lineStart }} 行已超出当前文件，已定位到文件末尾。
+    </div>
 
     <!-- sticky current-section (markdown only, once we know where we are) -->
-    <div v-if="kind === 'markdown' && activeHeadingText" class="fp-crumb" data-testid="file-preview-crumb">
+    <div v-if="showMarkdown && activeHeadingText" class="fp-crumb" data-testid="file-preview-crumb">
       <List class="size-3 shrink-0 opacity-70" />
       <span class="truncate">{{ activeHeadingText }}</span>
     </div>
 
     <!-- floating toolbar -->
+    <div class="fp-toolbar-slot">
     <div class="fp-toolbar">
+      <button
+        v-if="kind === 'markdown'"
+        class="fp-tb-btn fp-view-toggle"
+        type="button"
+        :title="markdownSource ? '切换到阅读视图' : '切换到带行号的源码'"
+        :aria-pressed="markdownSource"
+        data-testid="file-preview-markdown-source"
+        @click="toggleMarkdownSource"
+      ><Eye v-if="markdownSource" class="size-3.5" /><Code2 v-else class="size-3.5" />{{ markdownSource ? '阅读' : '源码' }}</button>
       <button
         v-if="canRenderHtml"
         class="fp-tb-btn"
@@ -652,11 +678,11 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
         data-testid="file-preview-html-browser"
         @click="openHtmlInBrowser"
       ><ExternalLink class="size-3.5" /></button>
-      <button v-if="toc.length" class="fp-tb-btn" :class="{ 'is-on': tocOpen }" type="button" title="目录" data-testid="file-preview-toc" @click="tocOpen = !tocOpen"><List class="size-3.5" /></button>
+      <button v-if="showMarkdown && toc.length" class="fp-tb-btn" :class="{ 'is-on': tocOpen }" type="button" title="目录" data-testid="file-preview-toc" @click="tocOpen = !tocOpen"><List class="size-3.5" /></button>
       <button class="fp-tb-btn" :class="{ 'is-on': findOpen }" type="button" title="文档内查找" data-testid="file-preview-find" @click="toggleFind"><Search class="size-3.5" /></button>
       <button class="fp-tb-btn" type="button" title="缩小字号" @click="bumpFont(-0.1)"><Minus class="size-3.5" /></button>
       <button class="fp-tb-btn" type="button" title="放大字号" @click="bumpFont(0.1)"><Plus class="size-3.5" /></button>
-      <button v-if="kind !== 'markdown'" class="fp-tb-btn" :class="{ 'is-on': showLineNumbers }" type="button" :title="showLineNumbers ? '关闭行号' : '显示行号'" data-testid="file-preview-line-numbers" @click="toggleLineNumbers"><span class="fp-ln-icon">#</span></button>
+      <button v-if="!showMarkdown" class="fp-tb-btn" :class="{ 'is-on': showLineNumbers }" type="button" :title="showLineNumbers ? '关闭行号' : '显示行号'" data-testid="file-preview-line-numbers" @click="toggleLineNumbers"><span class="fp-ln-icon">#</span></button>
       <button class="fp-tb-btn" :class="{ 'is-on': wrap }" type="button" :title="wrap ? '关闭自动换行' : '自动换行'" data-testid="file-preview-wrap" @click="wrap = !wrap"><WrapText class="size-3.5" /></button>
       <!-- Theme lives in the toolbar that already exists: no new row, no rearranged controls. -->
       <button
@@ -669,6 +695,7 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
         <Sun v-if="theme === 'dark'" class="size-3.5" />
         <Moon v-else class="size-3.5" />
       </button>
+    </div>
     </div>
 
     <!-- find bar -->
@@ -708,7 +735,7 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
       :title="props.name"
       data-testid="file-preview-html-frame"
     />
-    <div v-else-if="kind === 'markdown'" ref="contentEl" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" :style="{ fontSize: `${0.78 * fontScale}rem` }" v-html="mdHtml" />
+    <div v-else-if="showMarkdown" ref="contentEl" class="fp-md" :class="wrap ? 'fp-md-wrap' : 'fp-md-nowrap'" :style="{ fontSize: `${0.78 * fontScale}rem` }" v-html="mdHtml" />
     <div v-else class="fp-code-stage">
       <pre ref="contentEl" class="fp-code hljs" :class="[wrap ? 'fp-wrap' : 'fp-nowrap', { 'fp-numbered': showLineNumbers }]" :style="{ fontSize: `${0.72 * fontScale}rem` }"><code v-html="sourceLinesHtml" /></pre>
     </div>
@@ -869,6 +896,7 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
 }
 .fp-code-stage { min-width: 0; }
 .fp-code :deep(.fp-source-line) { display: flex; min-height: 1.6em; }
+.fp-code :deep(.fp-source-line.is-target) { background: var(--fp-mark); box-shadow: inset 3px 0 var(--fp-link); }
 .fp-code :deep(.fp-source-text) { display: block; flex: 1; min-width: 0; }
 .fp-code.fp-numbered :deep(.fp-source-line)::before {
   content: attr(data-source-line);
@@ -908,8 +936,12 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
 }
 
 /* ── floating toolbar ── */
+.fp-toolbar-slot {
+  position: sticky; top: 6px; z-index: 7; height: 0;
+  display: flex; justify-content: flex-end; align-items: flex-start; pointer-events: none;
+}
 .fp-toolbar {
-  position: absolute; top: 6px; right: 8px; z-index: 7;
+  position: relative; right: 8px; pointer-events: auto;
   display: flex; gap: 3px; padding: 2px;
   border-radius: 8px; background: var(--fp-surface); border: 1px solid var(--fp-border);
 }
@@ -919,6 +951,7 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
 }
 .fp-tb-btn:hover { color: var(--fp-heading); background: var(--fp-surface-soft); }
 .fp-tb-btn.is-on { color: var(--fp-link); background: var(--fp-surface-soft); }
+.fp-view-toggle { gap: 3px; font-size: 0.68rem; white-space: nowrap; }
 .fp-tb-btn:disabled { opacity: 0.35; }
 
 /* ── find bar ── */

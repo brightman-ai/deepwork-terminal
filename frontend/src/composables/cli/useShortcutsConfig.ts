@@ -22,7 +22,7 @@ import { useServerStore } from './useServerStore'
  *  override machinery so it is configured and stored the same way. */
 export type ShortcutAction =
   | 'switchTab' | 'prevTab' | 'nextTab' | 'newTab' | 'closeTab'
-  | 'findInTerminal' | 'toggleComposeDesktop'
+  | 'findInTerminal' | 'toggleComposeDesktop' | 'quickSwitch'
 
 /**
  * A modifier (or modifier combo) that can serve as the global prefix.
@@ -45,6 +45,7 @@ export const ACTION_CODES: Record<Exclude<ShortcutAction, 'switchTab' | 'findInT
   nextTab: 'ArrowDown',
   newTab: 'KeyN',
   closeTab: 'KeyW',
+  quickSwitch: 'KeyP',
   // Desktop-only (mobile reaches the compose bar through its bottom toolbar — no keyboard to
   // bind). Unlike findInTerminal, there is no OS/browser idiom to defer to here, so it just
   // follows the user's own prefix like the tab actions above instead of a special-cased default.
@@ -85,7 +86,7 @@ export const DEFAULT_FIND_IN_TERMINAL_BINDING = IS_MAC_PLATFORM ? 'Meta+KeyF' : 
 export const DEFAULT_LEADER = 'Ctrl+KeyB'
 
 /** leader 能触发的动作。比 ShortcutAction 多两个：它们本来就没有单修饰键绑定可给。 */
-export type LeaderAction = Exclude<ShortcutAction, 'findInTerminal'> | 'overview' | 'rename'
+export type LeaderAction = Exclude<ShortcutAction, 'findInTerminal' | 'quickSwitch'> | 'overview' | 'rename'
 
 /**
  * leader 之后按哪个键。**照抄 tmux**，因为要的就是"和 tmux 一样的快捷键"，而且第二段已经不受
@@ -225,7 +226,7 @@ const ARROW_GLYPH: Record<string, string> = {
 export function bindingLabel(binding: string): string {
   return binding
     .split('+')
-    .map((seg) => ARROW_GLYPH[seg] ?? seg.replace(/^Key/, '').replace(/^Digit/, ''))
+    .map((seg) => seg === 'Alt' && IS_MAC_PLATFORM ? 'Option' : seg === 'Meta' ? (IS_MAC_PLATFORM ? 'Cmd' : 'Win') : ARROW_GLYPH[seg] ?? seg.replace(/^Key/, '').replace(/^Digit/, ''))
     .join(' + ')
 }
 

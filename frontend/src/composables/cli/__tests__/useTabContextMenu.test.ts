@@ -36,6 +36,19 @@ function item(menu: ReturnType<typeof useTabContextMenu>, key: string) {
 }
 
 describe('useTabContextMenu', () => {
+  it('offers sorting only in capable hosts, honors group limits and closes before starting', () => {
+    const { menu, log } = harness({ reorder: id => log.push(`reorder:${id}`) })
+    menu.openAt(fakeEvent().e, { id: 't1', name: 'one', reorderAllowed: true })
+    expect(item(menu, 'reorder').disabled).toBe(false)
+    item(menu, 'reorder').run()
+    expect(menu.open.value).toBe(false)
+    expect(log).toEqual(['reorder:t1'])
+    menu.openAt(fakeEvent().e, { id: 't1', name: 'one', reorderAllowed: false })
+    expect(item(menu, 'reorder').disabled).toBe(true)
+    const other = harness().menu
+    other.openAt(fakeEvent().e, { id: 't1', name: 'one' })
+    expect(other.items.value.some(i => i.key === 'reorder')).toBe(false)
+  })
   it('opens at the pointer and suppresses the browser menu', () => {
     const { menu } = harness()
     const { e, calls } = fakeEvent(200, 44)
