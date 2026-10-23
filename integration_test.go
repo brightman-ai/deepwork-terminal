@@ -79,6 +79,17 @@ func TestIntegration_WSBinaryIO(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // Let readLoop start.
 
 	ws := DialTestWS(t, server, sess.ID, "")
+	// Connections begin as observers. Declare this test client visible before
+	// expecting PTY bytes, as the real terminal does on attach.
+	payload, err := json.Marshal(ResizePayload{Cols: 80, Rows: 24})
+	require.NoError(t, err)
+	visible, err := json.Marshal(WSControlMessage{Type: MsgTypeResize, Payload: payload})
+	require.NoError(t, err)
+	require.NoError(t, ws.Write(context.Background(), websocket.MessageText, visible))
+	require.Eventually(t, func() bool {
+		grid := sess.Viewport()
+		return grid.Cols == 80 && grid.Rows == 24
+	}, time.Second, 5*time.Millisecond)
 
 	// Inject data via pipe (simulates PTY output).
 	writeEnds.Get(0).Write([]byte("hello from pty"))

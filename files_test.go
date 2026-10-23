@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -68,11 +69,19 @@ func TestFilesTree_TraversalEscape403(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 
-	// Same guard on /files/raw.
-	r2, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, "../../etc/passwd"), "")
+	// File previews have a separate explicit-path contract. Verify it against
+	// a controlled sibling file instead of expecting the tree's traversal rule.
+	outside := filepath.Join(t.TempDir(), "preview.md")
+	require.NoError(t, os.WriteFile(outside, []byte("EXPLICIT PREVIEW"), 0o644))
+	rel, err := filepath.Rel(cwd, outside)
+	require.NoError(t, err)
+	r2, err := httpGet(formatURL(server, "/files/raw?session=%s&path=%s", sess.ID, url.QueryEscape(rel)), "")
 	require.NoError(t, err)
 	defer r2.Body.Close()
-	assert.Equal(t, http.StatusForbidden, r2.StatusCode)
+	assert.Equal(t, http.StatusOK, r2.StatusCode)
+	body, err := io.ReadAll(r2.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "EXPLICIT PREVIEW", string(body))
 }
 
 // TC-FS-03: GET /files/tree lists a single directory level, dirs-first then name.

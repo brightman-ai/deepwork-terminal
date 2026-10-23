@@ -11,7 +11,7 @@
  * Auth: same authed cliFetch (X-CLI-Auth) the rest of the terminal API uses.
  */
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
-import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { cliApi, getCliApiPrefix } from '@terminal/composables/cli/useCliApiPrefix'
 import type { SessionMetricsBag } from '@ce/types/sessionMetrics'
 
 export type { SessionMetricsBag } from '@ce/types/sessionMetrics'
@@ -31,7 +31,7 @@ const overviewPending = new Map<string, OverviewPending>()
 
 function overviewKey(sessionId: string, cwd?: string, tool?: string): string {
   // Auth/base rotation must not reuse another endpoint's snapshot. This key stays in memory.
-  return JSON.stringify([cliApi('/'), useCliAuth().getAuthCode(), sessionId, cwd || '', tool || ''])
+  return JSON.stringify([getCliApiPrefix(), useCliAuth().getAuthCode(), sessionId, cwd || '', tool || ''])
 }
 
 function subscribeOverview(pending: OverviewPending, signal?: AbortSignal): Promise<SessionMetricsBag> {

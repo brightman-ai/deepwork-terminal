@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: brightman-ai/deepwork
-          ref: 658ee60b49489852f488e491edd0a84f9b0c906e
+          ref: 185258183ccfdd8de2752ec743aae666f327bcd5
           path: deepwork
 
       - name: Set up Bun

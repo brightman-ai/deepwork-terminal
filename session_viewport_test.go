@@ -246,7 +246,7 @@ func TestPTYSizeReportsTheDaemonsAnswerNotOurRequest(t *testing.T) {
 // is right.
 func TestResizeReachesViewersInStreamOrder(t *testing.T) {
 	sess := &Session{ID: "order", viewers: map[string]*viewer{}}
-	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+8)}
+	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+8), size: muxd.Grid{Cols: 80, Rows: 24}}
 	sess.viewers["a"] = v
 
 	fanOut(sess, "BEFORE")
@@ -294,7 +294,7 @@ func TestControlFramesAreNeverEvictedForLaterOnes(t *testing.T) {
 	sess := &Session{ID: "backpressure", viewers: map[string]*viewer{}}
 	// Deliberately small: four output slots under a full reserve, so the queue is driven
 	// past its output capacity by the loop below with no room to spare.
-	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+4)}
+	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+4), size: muxd.Grid{Cols: 80, Rows: 24}}
 	sess.viewers["stuck"] = v
 
 	sess.applyGrid(muxd.Grid{Cols: 80, Rows: 24})
@@ -336,7 +336,7 @@ func TestControlFramesAreNeverEvictedForLaterOnes(t *testing.T) {
 // stale, and the re-sync announces the grid with the screen drawn for it.
 func TestAResizeThatDoesNotFitMakesTheViewerStaleInsteadOfEvicting(t *testing.T) {
 	sess := &Session{ID: "resize-burst", viewers: map[string]*viewer{}}
-	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+4)}
+	v := &viewer{ch: make(chan viewerFrame, viewerControlReserve+4), size: muxd.Grid{Cols: 80, Rows: 24}}
 	sess.viewers["stuck"] = v
 
 	for i := 0; i < 4; i++ { // exactly the output capacity: nothing lost yet
