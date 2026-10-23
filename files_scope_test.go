@@ -76,9 +76,11 @@ func TestFilesExplicitScopeStaysWithDisplayedDirectory(t *testing.T) {
 	require.Equal(t, "hello", string(data))
 	_, err = os.Stat(filepath.Join(live, "upload.txt"))
 	require.True(t, os.IsNotExist(err))
-	// The safety boundary remains relative to the selected root.
+	// Writes remain confined to the selected root; authenticated file previews
+	// intentionally support explicit paths outside it (see TestResolvePreviewPath).
 	scope.Set("path", "../escape.txt")
-	resp = get("/files/raw", scope)
+	resp, err = httpPostForm(formatURL(server, "/files/create"), scope, "")
+	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	// Automatic callers (terminal paste and older clients) retain live-process semantics.
