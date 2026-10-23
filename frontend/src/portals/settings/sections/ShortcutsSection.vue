@@ -68,6 +68,7 @@ const GROUPS: { title: string; sub: string; rows: ShortcutRow[] }[] = [
     sub: '跟随上面的前缀键',
     rows: [
       { key: 'switchTab', label: '切到第 N 个标签', hint: '前缀 + 数字键 1-9' },
+      { key: 'quickSwitch', label: '快速切换标签', hint: '搜索名称、目录或编号；空查询显示最近使用' },
       { key: 'prevTab', label: '上一个标签', hint: '' },
       { key: 'nextTab', label: '下一个标签', hint: '' },
       { key: 'newTab', label: '新建标签', hint: '' },

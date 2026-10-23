@@ -137,7 +137,7 @@
             <button
               class="rd-lock"
               :class="{ 'is-locked': locked }"
-              :title="locked ? `已锁定 ${baseName(lockedCwd)} · 点击恢复跟随主区域` : '锁定到当前 pane（之后切换主区域不跟随）'"
+              :title="locked ? `已锁定 ${baseName(filesCwd)} · 点击恢复跟随主区域` : '锁定到当前 pane（之后切换主区域不跟随）'"
               data-testid="resource-drawer-lock"
               @click="toggleLock"
             >
@@ -188,7 +188,9 @@
               mode="tree"
               :active="open && isActive && topTab === 'tree'"
               :session-id="sessionId"
-              :cwd="effectiveCwd"
+              :cwd="filesCwd"
+              @preview-location="lockPreviewLocation"
+              @directory-location="selectDirectoryLocation"
               @inject="onChildInject"
               @compose-draft="onChildComposeDraft"
             />
@@ -200,7 +202,8 @@
               mode="recent"
               :active="open && isActive && topTab === 'recent'"
               :session-id="sessionId"
-              :cwd="effectiveCwd"
+              :cwd="filesCwd"
+              @open-file="openFilePreview"
               @inject="onChildInject"
               @compose-draft="onChildComposeDraft"
             />
@@ -570,13 +573,34 @@ const followedCwd = computed(() => (props.cwd !== undefined ? props.cwd : tmux.a
 const followedTool = computed<AgentTool>(() => (props.tool !== undefined ? props.tool : tmux.activeTool.value))
 const effectiveCwd = computed(() => (locked.value ? lockedCwd.value : followedCwd.value))
 const effectiveTool = computed<AgentTool>(() => (locked.value ? lockedTool.value : followedTool.value))
+// Explicit file navigation may leave the terminal's project. It owns only the
+// file panels, never the shell cwd, transcript, review or overview context.
+const selectedFilesCwd = ref('')
+const filesCwd = computed(() => selectedFilesCwd.value || effectiveCwd.value)
 function toggleLock(): void {
   if (!locked.value) {
     // Freeze onto whatever this instance is currently showing (its owning pane's live cwd).
     lockedCwd.value = followedCwd.value
     lockedTool.value = followedTool.value
   }
+  else selectedFilesCwd.value = ''
   locked.value = !locked.value
+}
+function selectDirectoryLocation(location: { cwd: string }): void {
+  if (!location.cwd) return
+  if (!locked.value) {
+    lockedCwd.value = followedCwd.value
+    lockedTool.value = followedTool.value
+  }
+  selectedFilesCwd.value = location.cwd
+  locked.value = true
+}
+function lockPreviewLocation(location: { cwd: string; path: string }): void {
+  if (locked.value || !location.cwd) return
+  // Freeze the existing permission root; FilesPanel owns the child browse view.
+  lockedCwd.value = location.cwd
+  lockedTool.value = effectiveTool.value
+  locked.value = true
 }
 
 // basename of the locked cwd, for the lock button's title ('' → '—').
@@ -734,10 +758,13 @@ const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : pa
 const panelRootEl = ref<HTMLElement>()
 const treeFilesPanelRef = ref<InstanceType<typeof FilesPanel>>()
 
-function openFilePreview(path: string, lineStart?: number, lineEnd?: number): void {
+function openFilePreview(path: string, lineStart?: number, lineEnd?: number, searchOnly?: boolean): void {
   topTab.value = 'tree'
   emit('update:open', true)
-  void nextTick(() => treeFilesPanelRef.value?.previewPath(path, lineStart, lineEnd))
+  // Relative paths printed by the terminal belong to that terminal, even after
+  // the file browser has explicitly moved to another project.
+  const sourceCwd = followedCwd.value || effectiveCwd.value
+  void nextTick(() => treeFilesPanelRef.value?.previewPath(path, lineStart, lineEnd, sourceCwd, searchOnly))
 }
 
 defineExpose({ effectivePanelWidthPx, panelRootEl, openFilePreview })

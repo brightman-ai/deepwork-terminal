@@ -9,6 +9,7 @@ describe('terminalPathResolver', () => {
 
   it('searches basenames instead of guessing the current directory', () => {
     expect(resolveTerminalPath('implementation-notes.md')).toEqual({ kind: 'search', query: 'implementation-notes.md' })
+    expect(resolveTerminalPath('case-产研组织.md')).toEqual({ kind: 'search', query: 'case-产研组织.md' })
   })
 
   it('opens explicit and absolute paths directly', () => {
@@ -18,6 +19,18 @@ describe('terminalPathResolver', () => {
 
   it('keeps a suffix path query for a 404 fallback', () => {
     expect(resolveTerminalPath('src/app.ts')).toEqual({ kind: 'direct', path: 'src/app.ts', fallbackQuery: 'src/app.ts' })
+  })
+
+  it('searches the complete suffix without trying cwd when a document base is unknown', () => {
+    expect(resolveTerminalPath('revisions/buddy-wireframe-v1.html', true)).toEqual({ kind: 'search', query: 'revisions/buddy-wireframe-v1.html' })
+    expect(resolveTerminalPath('./revisions/buddy-wireframe-v1.html', true)).toEqual({ kind: 'search', query: './revisions/buddy-wireframe-v1.html' })
+    const candidates = filePathCandidates([
+      { name: 'buddy-wireframe-v1.html', rel: 'revisions/buddy-wireframe-v1.html', isDir: false },
+      { name: 'buddy-wireframe-v1.html', rel: 'docs/buddy/revisions/buddy-wireframe-v1.html', isDir: false },
+      { name: 'buddy-wireframe-v1.html', rel: 'other/buddy-wireframe-v1.html', isDir: false },
+    ], '/project', 'revisions/buddy-wireframe-v1.html')
+    expect(candidates.map(c => c.rel)).toEqual(['revisions/buddy-wireframe-v1.html', 'docs/buddy/revisions/buddy-wireframe-v1.html'])
+    expect(candidates.every(c => c.exact)).toBe(true)
   })
 
   it('filters directories and anchors candidates under cwd', () => {

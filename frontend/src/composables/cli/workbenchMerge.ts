@@ -26,12 +26,13 @@
  *
  *  ① 纯函数，不碰网络、不碰 ref、不改入参。三方合并是这次修复里唯一需要密集单测的逻辑，
  *    它必须能在没有浏览器、没有服务端的情况下被逐个 case 钉住。
- *  ② 顺序以**服务端为骨架**，本地独有的标签追加在后。标签位置决定编号（终端N / Alt+N），
- *    两台设备必须收敛到同一个顺序，否则同一个编号在两边指向不同标签——那是这次事故的另一半。
+ *  ② 顺序以**服务端为骨架**，本地独有的标签追加在后，然后重放尚未存上的显式拖动。
+ *    未操作排序的陈旧页面没有待重放动作，不能凭旧数组覆盖服务端的新顺序。
  *  ③ `activeTabId` / `activeGroupId` **一律本地优先**。它们记的是"我正在看哪个"，不是共享事实；
  *    取服务端的会导致另一台设备一存盘就把你的焦点抢走。
  */
 import type { WorkbenchConfig, WorkbenchGroup, WorkbenchTab } from '@terminal/types/workbench'
+import { replayTabMoves, type TabMove } from './tabReorder'
 
 /** 参与字段级合并的标签字段。显式列出而不是 `Object.keys`：漏一个字段会静默丢一次用户改动，
  *  而多写一个不存在的 key 只是无害的 undefined 比较。改 WorkbenchTab 时这里要跟着改。 */
@@ -65,7 +66,11 @@ function mergeFields<T extends { id: string }>(
   if (!base) return { ...local }
   const out: T = { ...server }
   for (const f of fields) {
-    if (local[f] !== base[f]) out[f] = local[f]
+    // split is a JSON value object. Snapshots necessarily have different object
+    // identities; a reorder/cwd-only save must not overwrite a remote split edit.
+    const same = typeof local[f] === 'object' && typeof base[f] === 'object'
+      ? JSON.stringify(local[f]) === JSON.stringify(base[f]) : local[f] === base[f]
+    if (!same) out[f] = local[f]
   }
   return out
 }
@@ -81,6 +86,7 @@ export function mergeWorkbench(
   base: WorkbenchConfig | null,
   local: WorkbenchConfig,
   server: WorkbenchConfig,
+  moves: readonly TabMove[] = [],
 ): WorkbenchConfig {
   const baseTabs = byId(tabsOf(base))
   const localTabs = byId(tabsOf(local))
@@ -150,6 +156,7 @@ export function mergeWorkbench(
     if (!g) continue
     g.tabs.push(t.groupId === g.id ? t : { ...t, groupId: g.id })
   }
+  replayTabMoves(mergedGroups, moves)
 
   // 不变量③：焦点是本设备的私事。指向已经不存在的标签时才退回服务端的选择。
   const survivingIds = new Set(survivors.map(t => t.id))

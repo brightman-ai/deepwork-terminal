@@ -216,6 +216,20 @@ describe('needs-you state (backend awaitingUser + reload-proof seen)', () => {
     expect(ov2.effectiveStatus(win(1, { status: 'idle', awaiting: true, since: T2 }))).toBe('done-unseen')
   })
 
+  it('keeps seen completions during the empty hydration gap, but prunes a later authoritative removal', async () => {
+    localStorage.setItem('needsYouSeen', JSON.stringify({ '@1': T1 }))
+    const windows = ref<TmuxWindowState[]>([])
+    const ov = useAgentOverview(windows, ref(true))
+    await nextTick()
+    expect(JSON.parse(localStorage.getItem('needsYouSeen')!)['@1']).toBe(T1)
+    windows.value = [win(1, { status: 'idle', awaiting: true, since: T1 })]
+    await nextTick()
+    expect(ov.effectiveStatus(windows.value[0]!)).toBe('idle')
+    windows.value = []
+    await nextTick()
+    expect(JSON.parse(localStorage.getItem('needsYouSeen')!)).toEqual({})
+  })
+
   it('an UNDATED wait is dismissable for THIS session only — cleared now, re-asked after F5', async () => {
     // Two requirements pull against each other here. An undated wait carries no identity, so a
     // PERSISTED dismissal could never be invalidated by a later turn and would mute the window

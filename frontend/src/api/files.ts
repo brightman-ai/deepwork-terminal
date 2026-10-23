@@ -135,7 +135,7 @@ export async function filesRecent(sessionId: string, cwd?: string, signal?: Abor
 }
 
 /** GET /files/tree — one directory level under the session cwd (dirs first). */
-export async function filesTree(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal, refresh = false): Promise<TreeResponse | null> {
+export async function filesTree(sessionId: string, relPath: string, cwd?: string, signal?: AbortSignal, refresh = false, navigation?: { explicit: true }): Promise<TreeResponse | null> {
   if (!sessionId) return null
   const { cliFetch } = useCliAuth()
   const controller = new AbortController()
@@ -147,6 +147,7 @@ export async function filesTree(sessionId: string, relPath: string, cwd?: string
     let path = withScope('/files/tree', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
     if (refresh) path += '&refresh=1'
+    if (navigation?.explicit) path += '&navigate=1'
     const resp = await cliFetch(cliApi(path), { signal: controller.signal })
     if (!resp.ok) return null
     return await resp.json() as TreeResponse

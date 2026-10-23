@@ -160,7 +160,8 @@
       ref="terminalBodyRef"
       :class="{ 'is-selecting': isSelecting }"
       @touchstart.passive="onTerminalTouchStart"
-      @touchend.passive="onTerminalTouchEnd"
+      @touchmove.passive="onTerminalTouchMove"
+      @touchend="onTerminalTouchEnd"
     >
       <!-- TUI-mode fallback entry — shown only when copy/scroll is degraded (fullscreen TUI).
            The notify entry point lives on the pane bar's bell → the shared NotifyQuickSheet
@@ -511,7 +512,8 @@ let drawerWidthCssVarOwner: string | null = null
 </script>
 
 <script setup lang="ts">
-import { ref, shallowRef, reactive, computed, watch, nextTick, onMounted, onUnmounted, type Component } from 'vue'
+import { ref, shallowRef, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject, type Component } from 'vue'
+import { terminalInputBlockedKey } from '@terminal/composables/cli/terminalInputOwner'
 import { ArrowDownToLine, Copy, Search, Square } from 'lucide-vue-next'
 import { TooltipProvider } from 'reka-ui'
 import HoverTip from '@terminal/components/terminal-session/HoverTip.vue'
@@ -607,6 +609,8 @@ import type { SessionHudSnapshot } from '@terminal/composables/cli/useSessionHud
 import { REPLAY_RESET_SEQUENCE, parseServerGrid } from '@terminal/types/terminal'
 
 // ─── Props & Emits ────────────────────────────────────────────────────────────
+
+const terminalInputBlocked = inject(terminalInputBlockedKey, () => false)
 
 const props = defineProps<{
   sessionId: string
@@ -1196,14 +1200,14 @@ watch(validPaneKeys, (valid) => {
 // Per-instance component refs (drag-resized panel width + panel DOM root for selection
 // containment checks below) — a plain (non-reactive) map is fine: each property READ inside a
 // computed/watch still tracks the underlying exposed refs reactively regardless of the map itself.
-const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string, lineStart?: number, lineEnd?: number) => void } | null> = {}
+const drawerInstanceRefs: Record<string, { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string, lineStart?: number, lineEnd?: number, searchOnly?: boolean) => void } | null> = {}
 function setDrawerRef(key: string, el: unknown): void {
-  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string, lineStart?: number, lineEnd?: number) => void }
+  if (el) drawerInstanceRefs[key] = el as { effectivePanelWidthPx?: number; panelRootEl?: HTMLElement; openFilePreview?: (path: string, lineStart?: number, lineEnd?: number, searchOnly?: boolean) => void }
   else delete drawerInstanceRefs[key]
 }
 
-function onTerminalFilePath(path: string, lineStart?: number, lineEnd?: number): void {
-  drawerInstanceRefs[currentPaneKey.value]?.openFilePreview?.(path, lineStart, lineEnd)
+function onTerminalFilePath(path: string, lineStart?: number, lineEnd?: number, searchOnly?: boolean): void {
+  drawerInstanceRefs[currentPaneKey.value]?.openFilePreview?.(path, lineStart, lineEnd, searchOnly)
 }
 
 // ── Selection keep-alive across pane switches ───────────────────────────────────────────────
@@ -1532,6 +1536,7 @@ const latencyTimer = setInterval(() => {
 onUnmounted(() => clearInterval(latencyTimer))
 
 function sendBinary(data: Uint8Array, route = 'direct'): void {
+  if (terminalInputBlocked()) return
   inputTelemetry.recordSend(data, route)
   if (wsStatus.value === 'connected' && expectsEcho(data)) latency.noteSend(performance.now(), currentVisibilityEpoch())
   sendBinaryRaw(data)
@@ -2289,6 +2294,7 @@ function onTerminalData(data: Uint8Array) {
 }
 
 function sendTerminalData(data: Uint8Array) {
+  if (terminalInputBlocked()) return
   // 复制模式开着时，一个字节都不许进 PTY。
   //
   // CopyModeView 已经在 document 的捕获阶段吞 keydown，但那**不够**，而且不是理论上的不够：真机
@@ -2746,22 +2752,43 @@ function onDrawerComposeDraft(text: string) {
 
 let termTouchStartX = 0
 let termTouchStartY = 0
+let termTouchStartedAt = 0
+let termTouchCanActivate = false
 // Running anchor for incremental swipe-to-scroll (alt-screen): advanced one cell-height at a time.
 let termLastScrollY = 0
 
 function onTerminalTouchStart(e: TouchEvent) {
   if (!isMobile.value) return
+  termTouchCanActivate = e.touches.length === 1
   const touch = e.touches[0]
-  if (touch) { termTouchStartX = touch.clientX; termTouchStartY = touch.clientY; termLastScrollY = touch.clientY }
+  if (touch) {
+    termTouchStartX = touch.clientX; termTouchStartY = touch.clientY; termLastScrollY = touch.clientY
+    termTouchStartedAt = performance.now()
+  }
+}
+
+function onTerminalTouchMove(e: TouchEvent) {
+  const touch = e.touches[0]
+  if (e.touches.length !== 1 || !touch || Math.abs(touch.clientX - termTouchStartX) >= 10 || Math.abs(touch.clientY - termTouchStartY) >= 10) {
+    termTouchCanActivate = false
+  }
 }
 
 function onTerminalTouchEnd(e: TouchEvent) {
   if (!isMobile.value) return
   const touch = e.changedTouches[0]
   if (!touch) return
+  const canActivate = termTouchCanActivate && e.touches.length === 0 && performance.now() - termTouchStartedAt < 500
+  termTouchCanActivate = false
   const dx = Math.abs(touch.clientX - termTouchStartX)
   const dy = Math.abs(touch.clientY - termTouchStartY)
   if (dx < 10 && dy < 10) {
+    if (canActivate && anchorSM.state.value === 'IDLE' && xtermRef.value?.activateFileLinkAt(touch.clientX, touch.clientY)) {
+      // Consume only a confirmed file tap, avoiding a duplicate synthetic mouse
+      // activation. Scroll/pinch/long-press and selection keep their gestures.
+      if (e.cancelable) e.preventDefault()
+      return
+    }
     mobileOverlayRef.value?.moveBall(touch.clientX, touch.clientY)
   }
 }

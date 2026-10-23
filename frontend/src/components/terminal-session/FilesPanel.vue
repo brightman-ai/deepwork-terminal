@@ -48,6 +48,7 @@ import { nextTick } from 'vue'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import PreviewDocumentTabs from './PreviewDocumentTabs.vue'
 import FilePreview from '@terminal/components/terminal-session/FilePreview.vue'
+import { filePreviewLocation } from './filePreviewLocation'
 import DocxPreview from '@terminal/components/terminal-session/DocxPreview.vue'
 import PdfPreview from '@terminal/components/terminal-session/PdfPreview.vue'
 import MidTruncatedName from '@terminal/components/terminal-session/MidTruncatedName.vue'
@@ -75,6 +76,9 @@ const props = withDefaults(defineProps<{ sessionId: string; cwd: string; mode: '
 const emit = defineEmits<{
   (e: 'inject', path: string): void
   (e: 'compose-draft', text: string): void
+  (e: 'preview-location', location: { cwd: string; path: string }): void
+  (e: 'directory-location', location: { cwd: string }): void
+  (e: 'open-file', path: string): void
 }>()
 
 // ── 最近文件 ──
@@ -142,6 +146,7 @@ watch(recentCats, (cats) => {
 const treeCwd = ref(props.cwd || '')
 const treeLoading = ref(false)
 const viewError = ref('')
+const directoryLinkError = ref<{ path: string; sourceCwd?: string; message: string } | null>(null)
 const treeTruncated = ref(false)
 const TREE_COLLAPSED_KEY = 'dw.fp.treeCollapsed'
 const treeCollapsed = ref(localStorage.getItem(TREE_COLLAPSED_KEY) === '1')
@@ -160,6 +165,7 @@ function setTreeCollapsed(value: boolean): void {
 // 展开（兄弟目录概览），面包屑根段=回全树（手机无双击，两套语义必漂移 —— 只留一套）。
 const treeRootRel = ref('')
 interface FileLocation {
+  cwd: string
   root: string
   query: string
   results: SearchEntry[]
@@ -188,6 +194,7 @@ let restoringNavigation = false
 let navigationRevision = 0
 function rememberLocation(): FileLocation {
   return {
+    cwd: treeCwd.value || props.cwd,
     root: treeRootRel.value, query: treeQuery.value, results: searchResults.value,
     nextOffset: searchNextOffset.value, total: searchTotal.value, searchError: searchError.value,
     truncated: searchTruncated.value, searchPending: searching.value,
@@ -199,6 +206,7 @@ function rememberLocation(): FileLocation {
   }
 }
 function cancelNavigationRequests(): void {
+  directoryLinkError.value = null
   navigationRevision++
   viewSeq++
   viewRequest?.abort()
@@ -247,6 +255,10 @@ async function goBack(): Promise<void> {
   const revision = navigationRevision
   restoringNavigation = true
   try {
+    if (prev.cwd !== treeCwd.value) {
+      treeCwd.value = prev.cwd
+      emit('directory-location', { cwd: prev.cwd })
+    }
     treeRootRel.value = prev.root
     treeQuery.value = prev.query
     roots.value = prev.nodes
@@ -990,6 +1002,8 @@ const MAX_PATH_CANDIDATES = 20
 const PATH_RESOLUTION_TIMEOUT_MS = 2500
 
 interface Preview {
+  /** Original read namespace survives explicit changes of the file-browser root. */
+  cwd: string
   key: string
   name: string
   absPath: string
@@ -1028,7 +1042,7 @@ let markdownConvertRequest: AbortController | null = null
 function previewKey(absPath: string, rel: string): string {
   // Include the anchor in the identity: the same relative name in two panes is two different
   // documents, while repeated clicks in one pane should activate the existing tab.
-  return `${props.sessionId}\u0000${props.cwd}\u0000${absPath || rel}`
+  return `${props.sessionId}\u0000${treeCwd.value || props.cwd}\u0000${absPath || rel}`
 }
 
 // Free image object URLs when a tab is closed or evicted. Text and converted document bytes stay
@@ -1042,6 +1056,11 @@ function revokePreviewUrl(p: Preview): void {
 function activatePreview(key: string): void {
   const p = previews.value.find((item) => item.key === key)
   if (!p) return
+  cancelNavigationRequests()
+  if (p.cwd && p.cwd !== (treeCwd.value || props.cwd)) {
+    backStack.value.push(rememberLocation())
+    selectFileScope(p.cwd)
+  }
   p.lastUsedAt = Date.now()
   activePreviewKey.value = key
 }
@@ -1138,10 +1157,11 @@ function cancelPathResolution(): void {
   pathSearchRequest?.abort()
   pathSearchRequest = null
   pathResolution.value = null
-  if (state?.previousPreviewKey) activePreviewKey.value = state.previousPreviewKey
+  if (state?.previousPreviewKey) activatePreview(state.previousPreviewKey)
 }
 
 async function previewRel(name: string, absPath: string, rel: string, lineStart?: number, lineEnd?: number, fallbackQuery?: string, restorePreviewKey?: string): Promise<void> {
+  cancelNavigationRequests()
   const previousPreviewKey = restorePreviewKey ?? activePreviewKey.value
   const key = previewKey(absPath, rel)
   const existing = previews.value.find((p) => p.key === key)
@@ -1156,11 +1176,11 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
 
   // Every stage of multi-step archive/conversion reads belongs to this same location.
   const sessionId = props.sessionId
-  const cwd = props.cwd
+  const cwd = treeCwd.value || props.cwd
   const request = new AbortController()
   previewRequests.set(key, request)
   const entry: Preview = {
-    key, name, absPath, rel, lineStart, lineEnd, jumpVersion: 0, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
+    key, name, absPath, rel, cwd, lineStart, lineEnd, jumpVersion: 0, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
   }
   previews.value.push(entry)
   activePreviewKey.value = key
@@ -1193,6 +1213,14 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     const result = await read()
     if (request.signal.aborted || previewRequests.get(key) !== request) {
       if (result.kind === 'image') URL.revokeObjectURL(result.url)
+      return
+    }
+    if (result.kind === 'error' && result.status === 400 && result.reason === 'is a directory' && activePreviewKey.value === key) {
+      // A directory may itself have a file-like name (config.d, notes.md).
+      // Only the server's explicit type result can reroute a file preview.
+      previews.value = previews.value.filter(p => p.key !== key)
+      activePreviewKey.value = ''
+      await browseTerminalDirectory(rel, cwd)
       return
     }
     if (result.kind === 'error' && result.status === 404 && fallbackQuery && activePreviewKey.value === key) {
@@ -1235,6 +1263,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
 // the backend resolves session→cwd, so we send the absolute path's cwd-relative tail.
 // Recent items already carry an absolute path; derive a best-effort rel from dir+name.
 async function previewRecent(f: RecentFileItem): Promise<void> {
+  if (props.mode === 'recent') { emit('open-file', f.path); return }
   // The server anchors on session cwd; pass the absolute path and let safeResolve
   // collapse it (an absolute path is anchored into cwd, matching the contract).
   await previewRel(f.name, f.path, f.path)
@@ -1261,7 +1290,8 @@ function closePreviewTab(key: string): void {
   previews.value.splice(index, 1)
   if (!wasActive) return
   const next = previews.value[index] ?? previews.value[index - 1]
-  activePreviewKey.value = next?.key ?? ''
+  if (next) activatePreview(next.key)
+  else activePreviewKey.value = ''
 }
 function clearPreviews(): void {
   markdownConvertRequest?.abort()
@@ -1275,10 +1305,19 @@ function clearPreviews(): void {
 }
 
 /** Open a path supplied by the terminal link provider. */
-function previewPath(path: string, lineStart?: number, lineEnd?: number): void {
+function previewPath(path: string, lineStart?: number, lineEnd?: number, sourceCwd?: string, searchOnly = false): void {
   cancelPathResolution()
+  cancelNavigationRequests()
   const normalized = normalizeTerminalPath(path)
-  const resolution = resolveTerminalPath(normalized)
+  if (normalized.endsWith('/') && !searchOnly) {
+    void browseTerminalDirectory(normalized, sourceCwd)
+    return
+  }
+  if (sourceCwd && sourceCwd !== (treeCwd.value || props.cwd)) {
+    backStack.value.push(rememberLocation())
+    selectFileScope(sourceCwd)
+  }
+  const resolution = resolveTerminalPath(normalized, searchOnly)
   if (resolution.kind === 'search') {
     void searchTerminalPath(resolution.query, normalized, lineStart, lineEnd)
     return
@@ -1289,47 +1328,115 @@ function previewPath(path: string, lineStart?: number, lineEnd?: number): void {
   void previewRel(name, normalized, normalized, lineStart, lineEnd, resolution.fallbackQuery)
 }
 
+/** The parent owns the file scope; this view retains its navigation/cache state. */
+function selectFileScope(cwd: string): void {
+  cancelNavigationRequests()
+  const revision = navigationRevision
+  treeQuery.value = ''
+  treeRootRel.value = ''
+  treeCwd.value = cwd
+  roots.value = []
+  focusedRel.value = null
+  viewError.value = ''
+  emit('directory-location', { cwd })
+  // A cached document can live directly at its scope root. Its parent is then
+  // already '', so reRoot would otherwise skip loading the emptied tree.
+  void loadView().then(() => {
+    if (revision === navigationRevision && cwd === treeCwd.value && preview.value?.cwd === cwd) void locatePreviewInTree(false)
+  })
+}
+
+/** Validate the clicked target before committing a different file-browser root. */
+async function browseTerminalDirectory(path: string, sourceCwd?: string): Promise<void> {
+  const previous = rememberLocation()
+  cancelPathResolution()
+  cancelNavigationRequests()
+  ++previewLocationSeq
+  activePreviewKey.value = '' // keep cached documents; show the browsed directory
+  setTreeCollapsed(false)
+  const seq = ++viewSeq
+  const sessionId = props.sessionId
+  const scope = treeCwd.value || props.cwd
+  const request = new AbortController()
+  viewRequest = request
+  treeLoading.value = true
+  const current = () => seq === viewSeq && !request.signal.aborted && sessionId === props.sessionId && scope === (treeCwd.value || props.cwd)
+  const fail = (message: string) => { directoryLinkError.value = { path, sourceCwd, message } }
+  try {
+    const anchor = sourceCwd || scope || (await filesTree(sessionId, '', undefined, request.signal))?.cwd || ''
+    if (!current()) return
+    if (!anchor) {
+      fail('无法确定此目录的位置，请稍后重试。')
+      return
+    }
+    const result = await filesTree(sessionId, path, anchor, request.signal, false, { explicit: true })
+    if (!current()) return
+    if (!result) { fail('无法打开此目录：目录不存在或不可访问，请核对路径后重试。'); return }
+    backStack.value.push(previous)
+    treeQuery.value = ''
+    const rel = result.rel === '.' ? '' : result.rel
+    treeRootRel.value = rel
+    treeCwd.value = result.cwd
+    viewError.value = ''
+    anchorError.value = false
+    treeTruncated.value = !!result.truncated
+    roots.value = reconcile(null, result.entries, rel, 0)
+    focusedRel.value = null
+    if (treeScrollEl.value) treeScrollEl.value.scrollTop = 0
+    bumpTree()
+    emit('directory-location', { cwd: result.cwd })
+  } finally {
+    if (seq === viewSeq) treeLoading.value = false
+  }
+}
+
 /** Return a preview path in the tree's cwd-relative namespace when possible. */
 function previewTreeRel(p: Preview): string | null {
-  const base = (treeCwd.value || props.cwd || '').replace(/\/+$/, '')
-  const candidates = [p.rel, p.absPath]
-  for (const candidate of candidates) {
-    const value = candidate.trim().replace(/^@/, '')
-    if (!value) continue
-    if (base && value === base) return ''
-    if (base && value.startsWith(base + '/')) return value.slice(base.length + 1)
-    if (!value.startsWith('/')) return value.replace(/^\.\//, '')
-  }
-  return null
+  return filePreviewLocation(treeCwd.value || props.cwd || '', p.absPath, p.rel)?.rel ?? null
 }
 
 /** Jump from the reader back to the file's directory and center the file row. */
 async function revealPreviewInTree(): Promise<void> {
+  await locatePreviewInTree(true)
+}
+let previewLocationSeq = 0
+async function locatePreviewInTree(manual: boolean, seq = ++previewLocationSeq): Promise<void> {
   const p = preview.value
   if (!p) return
   const rel = previewTreeRel(p)
-  if (rel === null) { toast('这个文件不在当前工作目录树内'); return }
-  setTreeCollapsed(false)
-  if (compactWorkspace.value) activePreviewKey.value = ''
+  if (rel === null) { if (manual) toast('这个文件不在当前工作目录树内'); return }
+  const cwd = treeCwd.value || props.cwd
+  if (manual) {
+    setTreeCollapsed(false)
+    if (compactWorkspace.value) activePreviewKey.value = ''
+  } else {
+    emit('preview-location', { cwd, path: p.absPath })
+  }
   const parent = parentRelOf(rel)
-  if (parent !== treeRootRel.value || treeQuery.value.trim()) await reRoot(parent, false)
+  if (parent !== treeRootRel.value || treeQuery.value.trim()) await reRoot(parent, !manual)
+  const superseded = () => manual ? !!preview.value && preview.value.key !== p.key : seq !== previewLocationSeq || activePreviewKey.value !== p.key
+  if (superseded() || cwd !== (treeCwd.value || props.cwd) || parent !== treeRootRel.value) return
   focusedRel.value = rel
   bumpTree()
+  const index = visibleNodes.value.findIndex(node => node.rel === rel)
+  if (treeScrollEl.value && index >= 0) {
+    treeScrollEl.value.scrollTop = Math.max(0, index * TREE_ROW_HEIGHT - treeScrollEl.value.clientHeight / 2)
+    treeContainer.onScroll()
+  }
   await nextTick()
-  const escaped = (globalThis.CSS?.escape ? globalThis.CSS.escape(rel) : rel.replace(/["\\]/g, '\\$&'))
-  const row = treeScrollEl.value?.querySelector<HTMLElement>(`[data-testid="fp-tree-${escaped}"]`)
-  if (row) {
-    row.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  } else if (treeTruncated.value) {
-    // A capped directory cannot promise that the target row was materialized.
-    // Reuse the same scoped search surface instead of leaving a successful
-    // reveal click with no visible result.
+  if (superseded()) return
+  const row = [...(treeScrollEl.value?.querySelectorAll<HTMLElement>('[data-testid]') ?? [])].find(el => el.dataset.testid === `fp-tree-${rel}`)
+  if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  else if (manual && treeTruncated.value) {
     treeQuery.value = baseName(rel)
     toast('目录过大，已切到当前目录搜索定位')
-  } else {
-    toast('目录树当前未找到这个文件，请使用搜索定位')
-  }
+  } else if (manual) toast('目录树当前未找到这个文件，请使用搜索定位')
 }
+watch(() => [activePreviewKey.value, preview.value?.loading, preview.value?.result.kind, preview.value?.jumpVersion, treeCwd.value], () => {
+  const seq = ++previewLocationSeq
+  const p = preview.value
+  if (props.mode === 'tree' && p && !p.loading && p.result.kind !== 'error') void locatePreviewInTree(false, seq)
+})
 onUnmounted(clearPreviews)
 
 // An .html/.htm preview also gets a 渲染 URL, so FilePreview can offer the 源码/渲染 toggle.
@@ -1337,7 +1444,7 @@ onUnmounted(clearPreviews)
 const previewRenderSrc = computed(() => {
   const p = preview.value
   if (!p || p.result.kind !== 'text') return ''
-  return /\.html?$/i.test(p.name) ? filesRawRenderUrl(props.sessionId, p.rel, props.cwd) : ''
+  return /\.html?$/i.test(p.name) ? filesRawRenderUrl(props.sessionId, p.rel, p.cwd) : ''
 })
 
 // previewErrorText turns a failed /files/raw into a human reason (the ask: "allow it to fail,
@@ -1407,8 +1514,8 @@ function injectPath(path: string): void {
 // <a download>, NOT fetch→blob: the browser streams straight to disk instead of buffering the whole
 // file in JS memory (a large file / mobile would OOM), and the server's ServeContent download branch
 // carries Accept-Ranges so a dropped download resumes. Same rel the preview/tree row uses.
-function triggerDownload(rel: string, name: string): void {
-  const url = filesDownloadUrl(props.sessionId, rel, props.cwd)
+function triggerDownload(rel: string, name: string, cwd = treeCwd.value || props.cwd): void {
+  const url = filesDownloadUrl(props.sessionId, rel, cwd)
   if (!url) { toast('下载失败'); return }
   const a = document.createElement('a')
   a.href = url
@@ -1431,7 +1538,7 @@ function doDownload(): void {
     setTimeout(() => URL.revokeObjectURL(url), 0)
     return
   }
-  triggerDownload(p.rel, p.name)
+  triggerDownload(p.rel, p.name, p.cwd)
 }
 
 function isMarkdownPreview(name: string): boolean {
@@ -1445,7 +1552,7 @@ async function convertMarkdownToDocx(): Promise<void> {
   const request = new AbortController()
   markdownConvertRequest = request
   const sessionId = props.sessionId
-  const cwd = props.cwd
+  const cwd = source.cwd
   try {
     const converted = await filesRawBytes(sessionId, source.rel, cwd, { convertTo: 'docx', signal: request.signal })
     if (request.signal.aborted || !previews.value.some((p) => p.key === source.key)) return
@@ -1466,6 +1573,7 @@ async function convertMarkdownToDocx(): Promise<void> {
       name: docxName,
       absPath: docxPath,
       rel: source.rel,
+      cwd: source.cwd,
       result: { kind: 'docx', data: converted.data, size: converted.size },
       generatedDocx: converted.data,
       jumpVersion: 0,
@@ -1579,6 +1687,7 @@ function retryAnchor(): void {
 }
 
 function reanchor(): void {
+  directoryLinkError.value = null
   anchorError.value = false
   viewError.value = ''
   navigationRevision++
@@ -1745,6 +1854,11 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
     </div>
     <div v-show="!treeCollapsed" class="fp-browser-pane flex flex-col min-h-0 overflow-hidden">
       <PreviewDocumentTabs v-if="!preview && previews.length" :tabs="previews" :active-key="activePreviewKey" @select="activatePreview" @close="closePreviewTab" />
+      <div v-if="directoryLinkError" class="shrink-0 border-b border-border px-3 py-2 text-xs text-destructive" role="alert" data-testid="fp-directory-link-error">
+        <p class="break-words [overflow-wrap:anywhere]">{{ directoryLinkError.path }}：{{ directoryLinkError.message }}</p>
+        <button type="button" class="min-h-11 px-2 underline" @click="browseTerminalDirectory(directoryLinkError.path, directoryLinkError.sourceCwd)">重试</button>
+        <button type="button" class="min-h-11 px-2 underline" @click="directoryLinkError = null">关闭</button>
+      </div>
       <!-- Recursive search (debounced) — replaces the browse with a flat results list. -->
       <DrawerSearchBox
         v-model="treeQuery"
@@ -2148,7 +2262,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :jump-version="preview.jumpVersion" :active="active" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :jump-version="preview.jumpVersion" :active="active" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="preview.cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
@@ -2157,7 +2271,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           <SheetPreview
             v-else-if="preview.result.kind === 'sheet'"
             :name="preview.name" :html="preview.result.html"
-            :asset-url="(a: string) => filesConvertAssetUrl(sessionId, preview!.rel, 'html', a, cwd)"
+            :asset-url="(a: string) => filesConvertAssetUrl(sessionId, preview!.rel, 'html', a, preview!.cwd)"
           />
           <SheetPreview v-else-if="preview.result.kind === 'csv'" :name="preview.name" :csv-text="preview.result.text" />
           <AudioPreview v-else-if="preview.result.kind === 'audio'" :name="preview.name" :src="preview.result.url" />

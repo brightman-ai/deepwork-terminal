@@ -2,6 +2,11 @@ import { describe, expect, it } from 'bun:test'
 import { sourceLineHtml } from '../sourceLineHtml'
 
 describe('source line layout', () => {
+  it('marks only the requested source range without adding line numbers to copied text', () => {
+    const html = sourceLineHtml('first\nsecond\nthird\nfourth', {start: 2, end: 3})
+    expect([...html.matchAll(/class="fp-source-line is-target" data-source-line="(\d+)"/g)].map(m => m[1])).toEqual(['2', '3'])
+    expect(html.replace(/<[^>]*>/g, '')).toBe('first\nsecond\nthird\nfourth')
+  })
   it('keeps source text and its blank/trailing line identities', () => {
     const html = sourceLineHtml('first\n\nlast\n')
     expect(html.replace(/<[^>]*>/g, '')).toBe('first\n\nlast\n')

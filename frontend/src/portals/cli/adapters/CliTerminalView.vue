@@ -411,6 +411,14 @@ function clearFlash(tabId: string): void {
 /** 切到另一格：放大态下改为放大另一格（另一格此刻看不见，只换焦点没有意义），否则只移焦点。
  *  折叠态下只换本机显示哪一格——**绝不**发 toggle-zoom：那会改同步的分屏模型，把桌面的放大状态
  *  一起改了（REQ-SPL-03）。 */
+function focusActiveTerminal(): void {
+  const tab = props.tabsWithSession.find(t => t.id === props.activeTabId)
+  if (!tab) return
+  const target = currentPaneOf(tab.id)
+  paneRefs[target === 'first' ? tab.id : `${tab.id}__split2`]?.focusTerminal()
+}
+defineExpose({ focusActiveTerminal })
+
 function switchPane(tab: TabWithSession): void {
   const split = tab.split
   if (!split) return

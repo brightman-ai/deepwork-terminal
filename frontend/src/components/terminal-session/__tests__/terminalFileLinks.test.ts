@@ -2,6 +2,133 @@ import { describe, expect, it } from 'bun:test'
 import { diffLineNumber, editedDiffLineLink, editedDiffLineLinkFromBuffer, editedFileHeader, findTerminalFileLinks, findWrappedTerminalFileLinks, wrappedTerminalRows, parseFileLocationSuffix, terminalCellRange, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../terminalFileLinks'
 
 describe('findTerminalFileLinks', () => {
+  it('links the whole review directory in the reported Chinese sentence', () => {
+    const path = 'docs/.tg/work/20261022-asc-0.9.7-103/'
+    const text = `⏺ 三件上库文档已起草并预过文案门，供你审核(${path}):`
+    expect(findTerminalFileLinks(text)).toEqual([{ path, start: text.indexOf(path), end: text.indexOf(path) + path.length - 1 }])
+    expect(findTerminalFileLinks(`完整研究记录(docs/记录.md)已保存。`).map(l => l.path)).toEqual(['docs/记录.md'])
+  })
+
+  it('keeps directory boundaries, wrappers, hidden names and literal spaces', () => {
+    for (const path of ['docs/.tg/work/review-v0.9.7/', './docs/', '../docs/', '/work/中文目录/', '~/docs/', 'docs/config.d/', './docs', '/work/review']) {
+      for (const text of [path, `目录：${path}`, `(${path})`, `【${path}】`, `审核（${path}）:`, `审核(${path}):`, `\`${path}\``, `[目录](${path})`]) {
+        expect(findTerminalFileLinks(text).map(l => l.path)).toEqual([path])
+      }
+    }
+    expect(findTerminalFileLinks('"docs/中文 目录/"').map(l => l.path)).toEqual(['docs/中文 目录/'])
+    expect(findTerminalFileLinks('目录:docs/review/，文件:docs/a.md。').map(l => l.path)).toEqual(['docs/review/', 'docs/a.md'])
+    expect(findTerminalFileLinks('docs/review/（供审核）').map(l => l.path)).toEqual(['docs/review/'])
+  })
+
+  it('does not expose directory tails of addresses, expressions, globs or numeric ratios', () => {
+    for (const text of ['https://example.com/docs/', 'ssh:docs/review/', 'C:/work/', '${ROOT}/docs/', '$(pwd)/docs/', 'docs/*/', '3/5/', '3/5', 'a/b', '/', '//example.com/docs/', '/browser|tool_search/i.test(x)']) {
+      expect(findTerminalFileLinks(text)).toEqual([])
+    }
+  })
+
+  it('maps soft-wrapped directory fragments to the same whole target', () => {
+    const path = 'docs/.tg/work/20261022-asc-0.9.7-103/'
+    const rows = [{ text: '供你审核(' + path.slice(0, 22), isWrapped: false }, { text: path.slice(22) + '):', isWrapped: true }]
+    for (let row = 0; row < 2; row++) {
+      expect(findWrappedTerminalFileLinks(rows, row)).toHaveLength(1)
+      expect(findWrappedTerminalFileLinks(rows, row)[0].path).toBe(path)
+    }
+  })
+
+  it('ends a complete file reference before an adjacent parenthetical prose note', () => {
+    const path = 'topics/TH-0628-xge-NDR-X-Graph引擎细化与场景验证/讲解/S1商品分档与KA报预算/S1商品分档与KA报预算-自动档卖给谁多宽怎么收-v4-20261019.md'
+    for (const note of ['（v1 到 v3 在同一目录）', '(v1 到 v3 在同一目录)', '（说明）', '(note)', '【说明】', '[note]', '《说明》']) {
+      const text = `文件：${path}${note}`
+      expect(findTerminalFileLinks(text)).toEqual([{path, start: 3, end: path.length + 2}])
+    }
+    expect(findTerminalFileLinks('文件：docs/report.md:121（对应源码）')[0]).toMatchObject({path: 'docs/report.md', lineStart: 121})
+  })
+
+  it('keeps parentheses inside complete filenames and directories when trimming prose notes', () => {
+    for (const path of ['docs/report(final).md', 'docs/report.md(final).txt', 'docs/报告（终稿）.md', 'docs/a.md（目录）/b.md', 'docs/[draft].md', 'docs/(draft).md']) {
+      expect(findTerminalFileLinks(path)[0]?.path).toBe(path)
+      expect(findTerminalFileLinks(path + ':121')[0]).toMatchObject({path, lineStart: 121})
+    }
+  })
+
+  it('cuts ASCII and fullwidth label colons with or without spaces before a path', () => {
+    const path = 'topics/TH-0628-xge-NDR-X-Graph引擎细化与场景验证/讲解/报告-v3.md'
+    for (const label of ['v3', 'v3.1', '第三场纪要', '文件', 'output-v3']) {
+      for (const colon of [':', '：']) {
+        for (const gap of ['', ' ']) {
+          const line = `  - ${label}${colon}${gap}${path}`
+          expect(findTerminalFileLinks(line)).toEqual([{path, start: line.indexOf(path), end: line.indexOf(path) + path.length - 1}])
+        }
+      }
+    }
+    expect(findTerminalFileLinks('输出:文件:./docs/app.ts:121')[0]).toMatchObject({path: './docs/app.ts', lineStart: 121})
+  })
+
+  it('distinguishes label colons from file locations, URIs, drive letters and literal filename punctuation', () => {
+    for (const value of ['docs/app.ts:121', 'docs/app.ts:121:7', 'docs/app.ts:121-125']) {
+      expect(findTerminalFileLinks(value)[0]).toMatchObject({path: 'docs/app.ts', lineStart: 121})
+    }
+    for (const value of ['https://example.com/app.ts', 'https:docs/app.ts', 'ssh:docs/app.ts', 'mailto:docs/app.ts', 'data:text/app.ts', 'vscode:docs/app.ts', 'C:/docs/app.ts', 'C:docs/app.ts', '${LABEL}:docs/app.ts']) {
+      expect(findTerminalFileLinks(value)).toEqual([])
+    }
+    expect(findTerminalFileLinks('输出:https://example.com/app.ts')).toEqual([])
+    expect(findTerminalFileLinks('文件:file:///work/docs/app.ts:121')[0]).toMatchObject({path: '/work/docs/app.ts', lineStart: 121})
+    for (const value of ['docs/版本：报告.md', 'docs/文档：2026.md', '"版本：报告.md"']) {
+      expect(findTerminalFileLinks(value)[0]?.path).toBe(value.replaceAll('"', ''))
+    }
+  })
+
+  it('finds both quoted paths inside a shell-tool call instead of letting its parentheses swallow them', () => {
+    const path = 'docs/meetings/20261019-S1商品分档-快路径定位调整3/asr/meeting.qwen.txt'
+    const line = `Bash(until [ -s "${path}" ]; do sleep 5; done; cat "${path}")`
+    expect(findTerminalFileLinks(line)).toEqual([
+      {path, start: line.indexOf(path), end: line.indexOf(path) + path.length - 1},
+      {path, start: line.lastIndexOf(path), end: line.lastIndexOf(path) + path.length - 1},
+    ])
+  })
+
+  it('keeps independent quoted and bare command operands without linking command syntax as part of a path', () => {
+    for (const tool of ['Bash', 'Shell', 'RunCommand', 'UnfamiliarTool']) {
+      const line = `${tool}(cat "docs/中文 report.md" && cat 'docs/second.txt')`
+      expect(findTerminalFileLinks(line).map(l => l.path)).toEqual(['docs/中文 report.md', 'docs/second.txt'])
+      expect(findTerminalFileLinks(`${tool}(cat docs/a.md;cat docs/b.txt)`).map(l => l.path)).toEqual(['docs/a.md', 'docs/b.txt'])
+    }
+    expect(findTerminalFileLinks('Bash(cat <docs/in.txt >docs/out.txt)').map(l => l.path)).toEqual(['docs/in.txt', 'docs/out.txt'])
+    expect(findTerminalFileLinks('Bash((cat docs/a.md);cat docs/b.txt)').map(l => l.path)).toEqual(['docs/a.md', 'docs/b.txt'])
+    expect(findTerminalFileLinks('Bash(test -s "docs/report(final).md"; cat "docs/report(final).md")').map(l => l.path))
+      .toEqual(['docs/report(final).md', 'docs/report(final).md'])
+    expect(findTerminalFileLinks('docs/r&d.md docs/a;b.txt').map(l => l.path)).toEqual(['docs/r&d.md', 'docs/a;b.txt'])
+    expect(findTerminalFileLinks('(docs/中文 report.md)')[0]?.path).toBe('docs/中文 report.md')
+    expect(findTerminalFileLinks('Bash(curl "https://example.com/report.md")')).toEqual([])
+    expect(findTerminalFileLinks('Bash(cat "${ROOT}/report.md")')).toEqual([])
+  })
+
+  it('separates prose punctuation from whole paths without changing filename parentheses', () => {
+    const path = 'collab/work/whiteboard-ng自举-20261001/设计逐层校准-20261019/系统设计的层次与校准.md'
+    for (const [open, close] of [['(', ')'], ['（', '）'], ['[', ']'], ['【', '】']]) {
+      const line = `完整结构 ${open}${path}${close}已落盘。`
+      expect(findTerminalFileLinks(line)).toEqual([{path, start: 5 + open.length, end: 5 + open.length + path.length - 1}])
+    }
+    for (const prefix of ['文件：', '文件： ', '输出，', '说明；']) {
+      const value = '.../UEBA工程架构评审/UEBA基线-v2-20261019.md'
+      expect(findTerminalFileLinks(prefix + value)).toEqual([{path: value, start: prefix.length, end: prefix.length + value.length - 1}])
+    }
+    expect(findTerminalFileLinks('docs/报告（终稿）.md，docs/report(final).md。').map(l => l.path))
+      .toEqual(['docs/报告（终稿）.md', 'docs/report(final).md'])
+    expect(findTerminalFileLinks('docs/file[1].md)已生成')[0]?.path).toBe('docs/file[1].md')
+    expect(findTerminalFileLinks('The result (docs/report.md).')[0]?.path).toBe('docs/report.md')
+  })
+
+  it('associates comma-separated Codex stats and Claude Update records with their source rows', () => {
+    for (const header of ['  • Edited docs/report.md (+6, -4)', 'Edited docs/report.md (+6 −4)', '⏺ Update(docs/report.md)']) {
+      expect(editedFileHeader(header)).toBe('docs/report.md')
+    }
+    expect(editedDiffLineLink('      121 +新增内容', ['      120  原有内容', '  ⎿  Added 6 lines, removed 4 lines', '⏺ Update(docs/report.md)']))
+      .toMatchObject({path: 'docs/report.md', lineStart: 121})
+    expect(editedDiffLineLink('121 +new', ['unrelated text', '⏺ Update(docs/old.md)'])).toBeUndefined()
+    expect(editedFileHeader('Read(docs/report.md)')).toBeUndefined()
+  })
+
   it('finds supported relative paths in prose and parentheses', () => {
     const line = 'prototype/vocabulary/index.html (docs/product/voicemore-reading/prototype/vocabulary/index.html)'
     expect(findTerminalFileLinks(line).map((link) => link.path)).toEqual([
@@ -168,6 +295,48 @@ describe('whole references from agent transcript shapes', () => {
     expect(findTerminalFileLinks('['.repeat(12000))).toEqual([])
   })
 
+  it('separates Read tool line annotations from the reported absolute filename', () => {
+    const path = '/home/ubuntu/code/automation-design/docs/meetings/20261023-AF+AES联动讨论-1次/20261023-AF+AES联动讨论-1次.md'
+    const text = `● Read(${path} · lines 224-423)`
+    expect(findTerminalFileLinks(text)).toEqual([
+      { path, start: 7, end: 7 + path.length - 1, lineStart: 224, lineEnd: 423 },
+    ])
+  })
+
+  it('handles single-line, quoted and parenthesized tool paths without making notes clickable', () => {
+    for (const tool of ['Read', 'Update', 'Write', 'Edit', 'Edited']) {
+      for (const [target, path, annotation, lineEnd] of [
+        ['docs/report(final).md', 'docs/report(final).md', ' · lines 224-423', 423],
+        ['"docs/my report.md"', 'docs/my report.md', ' · line 224', 224],
+        ["'docs/中文 report.md'", 'docs/中文 report.md', ' · lines 224–423', 423],
+      ] as const) {
+        const text = `${tool}(${target}${annotation})`, link = findTerminalFileLinks(text)[0]!
+        expect(link).toMatchObject({ path, lineStart: 224, lineEnd })
+        expect(text.slice(link.start, link.end + 1)).toBe(path)
+        expect((link.displayLength ?? path.length)).toBe(path.length)
+      }
+    }
+  })
+
+  it('preserves literal middle dots and quoted annotation-looking filenames outside tool metadata', () => {
+    for (const text of [
+      'Read("/work/report · lines 224-423")',
+      'Read("docs/my report · lines 224-423.md")',
+      'Read(docs/report · lines 224-423.md)',
+      '"/work/report · lines 224-423"',
+      '[报告](/work/report · lines 224-423)',
+    ]) {
+      const link = findTerminalFileLinks(text)[0]!
+      expect(link.path).toContain(' · lines 224-423')
+      expect(link.lineStart).toBeUndefined()
+    }
+    for (const annotation of [' · lines 0-423', ' · lines 423-224', ' · line 9007199254740992']) {
+      expect(findTerminalFileLinks(`Read(/work/report.md${annotation})`)).toEqual([
+        { path: '/work/report.md', start: 5, end: 19 },
+      ])
+    }
+  })
+
   it('does not attach unrelated numbered output or a statistics sentence to an old Edited header', () => {
     expect(editedFileHeader('cost docs/report.md (+2 -2)')).toBeUndefined()
     expect(editedDiffLineLink('22 | other', ['unrelated output', 'Edited docs/old.md (+2 -2)'])).toBeUndefined()
@@ -179,6 +348,8 @@ describe('whole references from agent transcript shapes', () => {
       ['topics/TH-0628-…/讲解/📚基线.md:513-515', 'topics/TH-0628-…/讲解/📚基线.md', 513, 515],
       ['"docs/中文 report(final).md"', 'docs/中文 report(final).md', undefined, undefined],
       ['docs/cafe\u0301.md#L20-L25', 'docs/cafe\u0301.md', 20, 25],
+      ['Read(/work/中文+AES/report(final).md · lines 224-423)', '/work/中文+AES/report(final).md', 224, 423],
+      ['Read("docs/中文 report.md" · line 224)', 'docs/中文 report.md', 224, 224],
       ['@./tmp/clip/10-19-13/1348001-4410cc76d54ccf80.png', './tmp/clip/10-19-13/1348001-4410cc76d54ccf80.png', undefined, undefined],
     ] as const) {
       let offset = 0
@@ -211,6 +382,15 @@ describe('whole references from agent transcript shapes', () => {
       {text: 'Edited docs/long/', isWrapped: false}, {text: 'report.md (+2 -2)', isWrapped: true},
       {text: '20 + content', isWrapped: false}, {text: '21 + next', isWrapped: false},
     ]), 3)).toMatchObject({path: 'docs/long/report.md', lineStart: 21})
+    const claude = buffer([
+      {text: '⏺ Update(docs/report.md)', isWrapped: false},
+      {text: '  ⎿  Added 6 lines, removed 4 lines', isWrapped: false},
+      {text: '      120  context', isWrapped: false},
+      {text: '      121 +new', isWrapped: false},
+    ])
+    expect(terminalFileLinksAtRow(claude, 0)[0]).toMatchObject({path: 'docs/report.md', lineStart: 121})
+    expect(editedDiffLineLinkFromBuffer(claude, 3)).toMatchObject({path: 'docs/report.md', lineStart: 121})
+    expect(editedDiffLineLinkFromBuffer(claude, 2)).toMatchObject({path: 'docs/report.md', lineStart: 120})
     expect(wrappedTerminalRows(buffer([{text: '/tail.md', isWrapped: true}]), 0).rows).toEqual([])
     for (const length of [64, 65, 66]) {
       const long = Array.from({length}, (_, i) => ({text: i === length - 1 ? 'tail.md' : 'segment/', isWrapped: i > 0}))
@@ -280,12 +460,191 @@ describe('wrapped terminal file links', () => {
   })
 })
 
+describe('explicit file references in renderer-wrapped prose', () => {
+  const buffer = (lines: string[]) => ({ length: lines.length, getLine: (row: number) => {
+    const text = lines[row]
+    return text === undefined ? undefined : {isWrapped: false, length: text.length,
+      getCell: (col: number) => ({getChars: () => text[col], getWidth: () => 1})}
+  } })
+
+  it('recovers both fragments of the actual security-governance paragraph', () => {
+    const prefix = 'topics/TH-0923-gjlj-攻击路径治理商业设计与效果价值范式/数据飞轮壁垒/数据'
+    const suffix = '飞轮壁垒-分析梳理-v5-20261019.md'
+    const lines = [
+      '  我已核读这些会话的用户与助手消息、历版分析、业务线原始材料及 CEO 文档。完整结果保存为《数据飞轮壁垒·分析梳理 v5》 (' + prefix,
+      '  ' + suffix + ')，包含原始会话定位和逐项依据。',
+      '',
+      '  下一段中的 unrelated.md',
+    ]
+    const b = buffer(lines)
+    for (const row of [0, 1]) {
+      const links = terminalFileLinksAtRow(b, row)
+      expect(links).toHaveLength(1)
+      expect(links[0].path).toBe(prefix + suffix)
+      for (let col = links[0].cellStart - 1; col < links[0].cellEnd; col++) {
+        expect(terminalFileLinkAtCell(b, row, col)?.path).toBe(prefix + suffix)
+      }
+      expect(terminalFileSelectionAtCell(b, row, links[0].cellStart - 1, 200)).toMatchObject({startRow: 0, endRow: 1, path: prefix + suffix})
+    }
+    expect(terminalFileLinkAtCell(b, 1, 1)).toBeUndefined()
+    expect(terminalFileLinkAtCell(b, 1, 2 + suffix.length)).toBeUndefined()
+    expect(terminalFileLinksAtRow(b, 3)[0]?.path).toBe('unrelated.md')
+  })
+
+  it('recovers multiple hard continuations inside parentheses, quotes, backticks and Markdown targets', () => {
+    for (const [open, close] of [['(', ')'], ['（', '）'], ['"', '"'], ["'", "'"], ['`', '`'], ['[报告](', ')'], ['[报告](<', '>)'], ['`[Ref: ', ']`'], ['`cat ', '`'], ['Read(', ')']]) {
+      for (const head of ['  完整记录 ', '• 完整记录 ', '⏺ 完整记录 ']) {
+        const b = buffer([head + open + 'docs/数', '  据飞轮/报', '  告.md' + close + '已保存。'])
+        for (const row of [0, 1, 2]) expect(terminalFileLinksAtRow(b, row)[0]?.path).toBe('docs/数据飞轮/报告.md')
+      }
+    }
+    const tool = buffer(['⏺ Update(docs/数', '  据飞轮/报告.md)', '      12 +new'])
+    expect(terminalFileLinksAtRow(tool, 1)[0]).toMatchObject({path: 'docs/数据飞轮/报告.md', lineStart: 12})
+  })
+
+  it('retains real spaces in quoted filenames at a prose hard-wrap boundary', () => {
+    const b = buffer(['  记录 "docs/my ', '   report.md" 已保存。'])
+    expect(terminalFileLinksAtRow(b, 0)[0]?.path).toBe('docs/my  report.md')
+    expect(terminalFileLinksAtRow(b, 1)[0]?.path).toBe('docs/my  report.md')
+    const english = buffer(["  I've saved (docs/long-", '  report.md).'])
+    expect(terminalFileLinksAtRow(english, 1)[0]?.path).toBe('docs/long-report.md')
+  })
+
+  it('does not combine bare paths, independent records, blank paragraphs or a new bullet', () => {
+    for (const lines of [
+      ['  docs/partial', '  report.md'],
+      ['  输出 (docs/partial', '', '  report.md)'],
+      ['  输出 (docs/partial', '• report.md)'],
+      ['  输出 (docs/partial', '    report.md)'],
+      ['输出 (docs/partial', 'report.md)'],
+    ]) {
+      const b = buffer(lines)
+      for (let row = 0; row < lines.length; row++) expect(terminalFileLinksAtRow(b, row).some(l => l.path === 'docs/partialreport.md')).toBe(false)
+    }
+  })
+
+  it('keeps a hard-wrapped quoted URL or variable opaque instead of exposing its local-looking tail', () => {
+    for (const prefix of ['https://example.com/', '${ROOT}/', 'docs/<name>/']) {
+      const b = buffer(['  输出 "' + prefix, '  report.md"'])
+      for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row)).toEqual([])
+    }
+  })
+})
+
 describe('Markdown targets inside document edit previews', () => {
   const buffer = (lines: string[]) => ({ length: lines.length, getLine: (row: number) => {
     const text = lines[row]
     return text === undefined ? undefined : {isWrapped: false, length: text.length,
       getCell: (col: number) => ({getChars: () => text[col], getWidth: () => 1})}
   } })
+
+  it('keeps both reported HTML targets searchable when the numbered edit source is missing', () => {
+    const text = '     5 +**当前评审入口：[主界面与桌宠整合预览](buddy-main-preview.html)**。同一个预览中的「主界面 / 桌宠气泡」共享示例 chat、call 和字幕状态；旧版桌宠线框仍保留在下文，接受时的原稿归档于 [v1](revisions/buddy-wireframe-v1.html)。本稿不接生产 API/麦克风，所有示例内容为虚构剧本；不是安装版更新。'
+    for (const prior of [[], ['Edited stale/design.md (+1 -0)', 'unrelated output'], ['Edited docs/source.ts (+1 -0)'], ['Edited docs/.../design.md (+1 -0)']]) {
+      const b = buffer([...prior, text])
+      const links = terminalFileLinksAtRow(b, prior.length).filter(l => l.referenceStart >= 0)
+      expect(links.map(l => [l.path, l.searchOnly])).toEqual([['buddy-main-preview.html', true], ['revisions/buddy-wireframe-v1.html', true]])
+      for (const link of links) {
+        expect(terminalFileLinkAtCell(b, prior.length, link.cellStart - 1)).toMatchObject({ path: link.path, searchOnly: true })
+      }
+    }
+    const known = terminalFileLinksAtRow(buffer(['Edited docs/buddy/plan.md (+1 -0)', text]), 1).filter(l => l.documentRelative)
+    expect(known.map(l => [l.path, l.searchOnly])).toEqual([['./docs/buddy/buddy-main-preview.html', undefined], ['./docs/buddy/revisions/buddy-wireframe-v1.html', undefined]])
+  })
+
+  it('reassembles Codex hard-wrapped diff bodies without their hanging gutter or right padding', () => {
+    const b = buffer([
+      '• Added docs/audit/notes.md (+65 -0)',
+      '    44 +',
+      '    45 +FAQ 成品见 [第三轮答复](faq-run-a/workspace/respo ',
+      '        nse-3.md)。根执行者核了三版 FAQ 及问题树、解树： ',
+      '        旧条件只在来源／历史保留；',
+      '    46 +',
+    ])
+    for (const row of [2, 3]) {
+      const link = terminalFileLinksAtRow(b, row).find(l => l.documentRelative)
+      expect(link?.path).toBe('./docs/audit/faq-run-a/workspace/response-3.md')
+      for (let col = link!.cellStart - 1; col < link!.cellEnd; col++) {
+        expect(terminalFileLinkAtCell(b, row, col)?.path).toBe(link!.path)
+        const selection = terminalFileSelectionAtCell(b, row, col, 80)!
+        expect(selection).toMatchObject({startRow: 2, endRow: 3, endCol: 15})
+      }
+    }
+    expect(terminalFileLinkAtCell(b, 3, 7)).toBeUndefined()
+    expect(terminalFileLinksAtRow(b, 2).find(l => l.referenceStart === -1)).toMatchObject({path: 'docs/audit/notes.md', lineStart: 45})
+    expect(terminalFileLinksAtRow(b, 0)[0]).toMatchObject({path: 'docs/audit/notes.md', lineStart: 44})
+  })
+
+  it('recognizes a per-file tree header in a multi-file edit and traverses preceding hanging bodies', () => {
+    const b = buffer([
+      '• Edited 2 files (+3 -1)',
+      '  └ docs/first.md (+1 -0)',
+      '    121 +prior',
+      '         continuation of prior',
+      '    122 +[link](case-',
+      '         产研组织.md)',
+      '  └ docs/second.md (+2 -1)',
+      '    122 +[link](case-second.md)',
+    ])
+    expect(terminalFileLinksAtRow(b, 5).find(l => l.documentRelative)?.path).toBe('./docs/case-产研组织.md')
+    expect(terminalFileLinksAtRow(b, 4).find(l => l.referenceStart === -1)).toMatchObject({path: 'docs/first.md', lineStart: 122})
+    expect(terminalFileLinksAtRow(b, 7).find(l => l.referenceStart === -1)?.path).toBe('docs/second.md')
+  })
+
+  it('recovers hard-wrapped edit headers as well as their body, without borrowing a finished header', () => {
+    for (const header of [
+      ['• Added docs/audit/long-', 'notes.md (+65 -0)'],
+      ['  └ docs/audit/long- ', '  notes.md (+65 -0)'],
+    ]) {
+      const b = buffer([...header, '    45 +FAQ [答复](faq-run-a/workspace/respo', '        nse-3.md)'])
+      expect(terminalFileLinksAtRow(b, 3).find(l => l.documentRelative)?.path).toBe('./docs/audit/faq-run-a/workspace/response-3.md')
+      for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row).find(l => l.path === 'docs/audit/long-notes.md'))
+        .toMatchObject({path: 'docs/audit/long-notes.md', lineStart: 45})
+    }
+    const b = buffer(['Added docs/stale.md (+2 -0)', 'other-', 'notes.md (+2 -0)', '    45 +[link](child/report.md)'])
+    expect(terminalFileLinksAtRow(b, 3).find(l => l.documentRelative)).toMatchObject({ path: 'child/report.md', searchOnly: true })
+  })
+
+  it('does not join independent hard records or erase source indentation beyond the gutter', () => {
+    const b = buffer([
+      'Added docs/notes.md (+2 -0)',
+      '    1 +[link](docs/respo',
+      'unrelated output',
+      '       nse.md)',
+      'Added docs/notes.md (+2 -0)',
+      '    2 +[link](docs/with',
+      '         two spaces.md)',
+      '    3 +[next](separate.md)',
+    ])
+    expect(terminalFileLinksAtRow(b, 1).filter(l => l.documentRelative)).toEqual([])
+    expect(terminalFileLinksAtRow(b, 6).find(l => l.documentRelative)?.path).toBe('./docs/docs/with  two spaces.md')
+    expect(terminalFileLinksAtRow(b, 7).find(l => l.documentRelative)?.path).toBe('./docs/separate.md')
+  })
+
+  it('keeps a basename searchable when numbered Markdown has no reliable document base', () => {
+    const text = '3 +[产研组织的原始对话对照](case-产研组织.md)'
+    for (const lines of [
+      [text],
+      ['Added docs/report.md (+1 -0)', 'unrelated output', text],
+      ['Added docs/example.ts (+1 -0)', text],
+      ['Added docs/.../report.md (+1 -0)', text],
+    ]) {
+      const b = buffer(lines)
+      const row = lines.length - 1
+      const link = terminalFileLinksAtRow(b, row).find(l => l.path === 'case-产研组织.md')
+      expect(link).toBeDefined()
+      expect(link?.lineStart).toBeUndefined()
+      const start = text.indexOf('case-产研组织.md')
+      for (let col = start; col < start + 'case-产研组织.md'.length; col++) {
+        expect(terminalFileLinkAtCell(b, row, col)?.path).toBe('case-产研组织.md')
+      }
+    }
+  })
+
+  it('resolves a basename against a reliable current Markdown edit instead of searching unrelated directories', () => {
+    const b = buffer(['Added docs/design/report.md (+1 -0)', '3 +[产研组织的原始对话对照](case-产研组织.md)'])
+    expect(terminalFileLinksAtRow(b, 1).find(l => l.documentRelative)?.path).toBe('./docs/design/case-产研组织.md')
+  })
 
   it('uses the Added document directory for the screenshot shape, keeping the gutter on its source', () => {
     const doc = 'collab/work/whiteboard-ng自举-20261001/新版隔离重分析-20261019/audit/本轮结论.md'

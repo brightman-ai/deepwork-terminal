@@ -26,6 +26,17 @@ function key(o: Partial<{ code: string; key: string; altKey: boolean; ctrlKey: b
 }
 
 describe('parseBinding', () => {
+  it('opens quick switching using physical P, respects prefix and explicit overrides', () => {
+    const event = key({ code: 'KeyP', key: 'π', altKey: true })
+    expect(resolveShortcutAction(event, cfgOf({}), ['a', 'b'], 'a')).toEqual({ type: 'quickSwitch' })
+    expect(resolveShortcutAction(event, cfgOf({ prefix: 'Ctrl' }), ['a', 'b'], 'a')).toBeNull()
+    const cfg = cfgOf({ overrides: { quickSwitch: 'Meta+KeyP' } })
+    expect(bindingFor(cfg, 'quickSwitch')).toBe('Meta+KeyP')
+    expect(resolveShortcutAction(key({ code: 'KeyP', key: 'p', metaKey: true }), cfg, ['a', 'b'], 'a')).toEqual({ type: 'quickSwitch' })
+    expect(resolveShortcutAction(event, cfg, ['a', 'b'], 'a')).toBeNull()
+    expect(resolveShortcutAction(event, cfgOf({ overrides: { newTab: 'Alt+KeyP' } }), ['a'], 'a')).toEqual({ type: 'new' })
+    expect(resolveShortcutAction(key({ code: 'KeyN', key: 'n', altKey: true }), cfgOf({ overrides: { quickSwitch: 'Alt+KeyN' } }), ['a'], 'a')).toEqual({ type: 'quickSwitch' })
+  })
   it('splits modifiers from the physical code', () => {
     expect(parseBinding('Alt+KeyW')).toEqual({ alt: true, ctrl: false, shift: false, meta: false, code: 'KeyW' })
     expect(parseBinding('Ctrl+ArrowUp')).toEqual({ alt: false, ctrl: true, shift: false, meta: false, code: 'ArrowUp' })

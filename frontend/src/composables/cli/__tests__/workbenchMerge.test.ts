@@ -130,6 +130,50 @@ describe('mergeWorkbench — 字段级', () => {
 })
 
 describe('mergeWorkbench — 顺序与焦点', () => {
+  it('a sorting-only write does not overwrite a remote split change through cloned object identity', () => {
+    const split = { orientation: 'row' as const, ratio: 0.5, secondSessionId: 'second' }
+    const base = cfg([tab('a', { split }), tab('b')])
+    const local = JSON.parse(JSON.stringify(base)) as WorkbenchConfig
+    local.groups[0]!.tabs.reverse()
+    const server = cfg([tab('a', { split: { ...split, ratio: 0.7 } }), tab('b')])
+    const result = mergeWorkbench(base, local, server, [{ groupId: G, tabId: 'b', beforeTabId: 'a' }])
+    expect(find(result, 'a')?.split?.ratio).toBe(0.7)
+    expect(ids(result)).toEqual(['b', 'a'])
+  })
+  it('replays a pending move over remote additions/rename, preserving ids and focus', () => {
+    const base = cfg([tab('a'), tab('b'), tab('c')])
+    const local = cfg([tab('c'), tab('a'), tab('b')], { activeTabId: 'b' })
+    const server = cfg([tab('a', { name: 'renamed' }), tab('new'), tab('b'), tab('c')], { rev: 7 })
+    const result = mergeWorkbench(base, local, server, [{ groupId: G, tabId: 'c', beforeTabId: 'a' }])
+    expect(ids(result)).toEqual(['c', 'a', 'new', 'b'])
+    expect(find(result, 'a')?.name).toBe('renamed')
+    expect(result.activeTabId).toBe('b')
+    expect(result.rev).toBe(7)
+  })
+
+  it('a remote close wins over a pending move; a closed anchor cancels the move', () => {
+    const base = cfg([tab('a'), tab('b'), tab('c')])
+    const local = cfg([tab('c'), tab('a'), tab('b')])
+    const move = [{ groupId: G, tabId: 'c', beforeTabId: 'a' }]
+    expect(ids(mergeWorkbench(base, local, cfg([tab('a'), tab('b')]), move))).toEqual(['a', 'b'])
+    expect(ids(mergeWorkbench(base, local, cfg([tab('b'), tab('c')]), move))).toEqual(['b', 'c'])
+  })
+
+  it('a stale cwd-only save cannot undo a successfully saved reorder', () => {
+    const base = cfg([tab('a'), tab('b'), tab('c')])
+    const local = cfg([tab('a', { cwd: '/new' }), tab('b'), tab('c')])
+    const result = mergeWorkbench(base, local, cfg([tab('c'), tab('a'), tab('b')]))
+    expect(ids(result)).toEqual(['c', 'a', 'b'])
+    expect(find(result, 'a')?.cwd).toBe('/new')
+  })
+
+  it('simultaneous sorting rebases only the explicit local move onto the current server order', () => {
+    const base = cfg([tab('a'), tab('b'), tab('c')])
+    const local = cfg([tab('b'), tab('c'), tab('a')])
+    const server = cfg([tab('c'), tab('a'), tab('b')])
+    expect(ids(mergeWorkbench(base, local, server, [{ groupId: G, tabId: 'a', beforeTabId: null }]))).toEqual(['c', 'b', 'a'])
+  })
+
   it('顺序以服务端为骨架，本地独有的追加在后（两台设备必须收敛到同一编号）', () => {
     const base = cfg([tab('a')])
     const local = cfg([tab('a'), tab('mine')])
