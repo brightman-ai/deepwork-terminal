@@ -224,7 +224,9 @@ func TestKeyframe_SyncSplitsALiveStreamExactly(t *testing.T) {
 			fmt.Fprintf(&stream, "\x1b[3%dmrow %d\x1b[0m\r\n", i%8, i)
 		}
 		full := stream.String()
-		s.viewers["browser"] = &viewer{ch: make(chan viewerFrame, 1<<16)}
+		// A synchronized visible browser receives the post-snapshot stream.
+		// A zero-sized observer intentionally drops it, making this depend on timing.
+		s.viewers["browser"] = &viewer{ch: make(chan viewerFrame, 1<<16), size: g}
 
 		pause := time.Duration(rng.IntN(3000)) * time.Microsecond
 		var wg sync.WaitGroup
