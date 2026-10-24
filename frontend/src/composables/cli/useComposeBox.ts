@@ -87,6 +87,8 @@ export interface UseComposeBoxOptions {
    *  useVisualKeyboardInset); desktop has no such thing — a plain `el?.focus()` is correct there.
    *  Caller decides; this module has no opinion on what a device's keyboard does to the viewport. */
   focusEl: (el: HTMLTextAreaElement | null | undefined) => void
+  /** Desktop's host focuses after its floating placement has settled. Mobile owns mount focus. */
+  focusOnMount?: boolean
   /** Called right after a focus that might need viewport correction. No-op on desktop. */
   onFocusSideEffects?: () => void
   emit: {
@@ -105,6 +107,7 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
   const snippets = ref<string[]>([])
   const history = ref<string[]>([])
   let cleanupInputDiagnostics: (() => void) | null = null
+  let disposed = false
 
   // --- Copy-all feedback (icon flips to a checkmark briefly) ---
   const copyFeedback = ref(false)
@@ -505,16 +508,21 @@ export function useComposeBox(opts: UseComposeBoxOptions) {
     loadDraft()
     const injected = opts.draft()
     if (injected != null) text.value = injected
+    await nextTick()
+    autoResize()
+    if (opts.focusOnMount !== false) focus()
+    cleanupInputDiagnostics = attachCliInputDiagnostics(textareaRef.value ?? null, opts.diagnosticSurface)
+    // Remote snippets/history must not decide when the local editor receives focus. A late
+    // response used to refocus the box after the user had already started editing elsewhere
+    // (or begun an IME composition). Only hydrate the lists when it arrives.
     await serverStore.load()
+    if (disposed) return
     loadSnippets()
     loadHistory()
-    await nextTick()
-    focus()
-    autoResize()
-    cleanupInputDiagnostics = attachCliInputDiagnostics(textareaRef.value ?? null, opts.diagnosticSurface)
   })
 
   onUnmounted(() => {
+    disposed = true
     saveDraft()
     cleanupInputDiagnostics?.()
     cleanupInputDiagnostics = null

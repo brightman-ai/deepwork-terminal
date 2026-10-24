@@ -132,7 +132,7 @@
  *  - No soft-keyboard viewport dodging: desktop has no visual-viewport keyboard inset to correct.
  *  - Taller box (maxLines): desktop's vertical space isn't scarce the way a phone's is.
  */
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 import { useComposeBox } from '@terminal/composables/cli/useComposeBox'
 import { composerKeyAction } from '@terminal/composables/cli/composeKeys'
@@ -164,7 +164,7 @@ const emit = defineEmits<{
 }>()
 
 const {
-  text, textareaRef,
+  text, textareaRef, autoResize,
   showSnippets, showHistory, snippets, history,
   copyFeedback, showUndo,
   toggleSnippets, toggleHistory, saveSnippet, insertSnippet, deleteSnippet, clearHistory, insertFromHistory,
@@ -177,6 +177,7 @@ const {
   draft: () => props.draft,
   draftScope: () => props.sessionId,
   focusEl: (el) => el?.focus(),
+  focusOnMount: false,
   // No onFocusSideEffects — desktop has no soft-keyboard viewport to correct for.
   emit: { send: (t) => emit('send', t) },
 })
@@ -334,7 +335,14 @@ defineExpose({
   beginTyped,
   beginImeTyped,
   adoptCommitted,
-  focusInput: () => textareaRef.value?.focus(),
+  focusInput: async () => {
+    autoResize()
+    layout()
+    // Settle the floating box before creating the native caret/IME target. Subsequent typing
+    // must not race the initial ResizeObserver correction or a second mount-time focus.
+    await nextTick()
+    textareaRef.value?.focus({ preventScroll: true })
+  },
 })
 </script>
 
