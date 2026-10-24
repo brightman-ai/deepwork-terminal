@@ -928,7 +928,8 @@ func (s *Server) restoreViewer(ctx, logCtx context.Context, conn *websocket.Conn
 	// An observer tab already has an xterm instance and only needs the authoritative current
 	// screen. Replaying the full 5000-line history on every tab return was the other half of the
 	// reported black-screen/"正在恢复终端内容" delay. Initial connects and ordinary stale viewers
-	// retain the full history contract; observer returns use a bounded recent tail.
+	// retain the full history contract; observer returns use a bounded recent tail unless
+	// the browser is reading history and needs its previous viewport restored.
 	var vs viewerSync
 	var ok bool
 	if reason == "resync-fast" {

@@ -216,6 +216,10 @@ func (s *Session) ReleaseViewerOwner(subID string) {
 // resize crossing on the wire is an ordinary race, and the registry has already forgotten
 // the constraint that resize was about to change.
 func (s *Session) SetViewerSize(subID string, cols, rows int) error {
+	return s.setViewerSize(subID, cols, rows, false)
+}
+
+func (s *Session) setViewerSize(subID string, cols, rows int, preserveScrollback bool) error {
 	if cols < 0 || rows < 0 {
 		return fmt.Errorf("viewer size: cols/rows cannot be negative (%d×%d)", cols, rows)
 	}
@@ -235,7 +239,7 @@ func (s *Session) SetViewerSize(subID string, cols, rows int) error {
 		}
 		if wasObserver && wasDisplayed && cols > 0 && rows > 0 {
 			v.stale.Store(true)
-			pushViewerControl(v.ch, viewerFrame{Resync: true, Fast: true})
+			pushViewerControl(v.ch, viewerFrame{Resync: true, Fast: !preserveScrollback})
 		}
 	}
 	s.subMu.Unlock()

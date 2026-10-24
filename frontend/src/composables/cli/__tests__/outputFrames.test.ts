@@ -26,6 +26,7 @@ function harness(opts: { active?: boolean } = {}) {
   const timers = new Map<number, { at: number; cb: () => void }>()
   const log: string[] = []
   const writes: { text: string; onParsed?: () => void }[] = []
+  const restoreFlags: boolean[] = []
   let hidden = false
   let epoch = 0
   let active = opts.active ?? true
@@ -53,7 +54,8 @@ function harness(opts: { active?: boolean } = {}) {
   const deps: OutputFrameDeps = {
     gate,
     latency,
-    write: (data, onParsed) => {
+    write: (data, onParsed, restoring) => {
+      restoreFlags.push(!!restoring)
       const text = dec.decode(data)
       writes.push({ text, onParsed })
       log.push(`write:${text}`)
@@ -70,6 +72,7 @@ function harness(opts: { active?: boolean } = {}) {
     gate,
     latency,
     writes,
+    restoreFlags,
     log,
     get overlay() { return overlay },
     get now() { return now },
@@ -109,6 +112,14 @@ function harness(opts: { active?: boolean } = {}) {
 }
 
 describe('REQ-TS-16 遮罩显隐时刻 vs 恢复写入回调时刻', () => {
+  it('only a replacement frame asks the xterm owner to preserve its viewport', () => {
+    const h = harness()
+    h.binary('live output')
+    h.control('replay_reset')
+    h.binary('replacement')
+    h.binary('new output')
+    expect(h.restoreFlags).toEqual([false, true, false])
+  })
   it('Human 报的序列：遮罩撑到恢复"解析完并画出"才撤；清屏与恢复是同一次写入，之前屏幕不被清', () => {
     const h = harness()
     h.connect()

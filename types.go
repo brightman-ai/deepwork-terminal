@@ -633,6 +633,9 @@ type WSControlMessage struct {
 type ResizePayload struct {
 	Cols int `json:"cols"`
 	Rows int `json:"rows"`
+	// The existing browser is reading history. An observer return must retain the full
+	// scrollback contract so its reading anchor survives; this does not change the PTY grid.
+	PreserveScrollback bool `json:"preserveScrollback,omitempty"`
 }
 
 // ShellExitPayload is the payload for a "shell_exit" control message.

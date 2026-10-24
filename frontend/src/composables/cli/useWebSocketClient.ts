@@ -277,8 +277,8 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
     return true
   }
 
-  function sendResize(cols: number, rows: number): boolean {
-    return sendControl({ type: 'resize', payload: { cols, rows } })
+  function sendResize(cols: number, rows: number, preserveScrollback = false): boolean {
+    return sendControl({ type: 'resize', payload: { cols, rows, ...(preserveScrollback ? { preserveScrollback: true } : {}) } })
   }
 
   function scheduleReconnect() {
