@@ -116,13 +116,14 @@ export function sessionNoteText(id: string | undefined): string {
  * An EMPTY order means "we don't know the tab set yet" (still loading), not "no tabs" — filtering
  * on it would blank the overview, so that case degrades to showing everything in server order.
  */
-export function useSessionsOverview(activeId: () => string | undefined, order?: () => string[]) {
+export function useSessionsOverview(activeId: () => string | undefined, order?: () => string[], visibleIds?: () => readonly string[]) {
   // 显式信号（BEL / OSC）是另一条帧、另一条真相：上面这些字段是我们推断出来的，它是程序自己喊的。
   // 这里只把它的**原话**贴到卡片上；状态一个字不改——后端已经把它落在 awaitingUser（琥珀）上，
   // 前端再抬一次就成了"分不清却夸大"。
   const { signalFor } = useAgentSignals()
   const units = computed<OverviewUnit[]>(() => {
     const ids = order?.() ?? []
+    const viewing = visibleIds ? new Set(visibleIds()) : new Set([activeId()])
     const position = new Map(ids.map((id, i) => [id, i + 1]))
     const visible = position.size ? entries.value.filter((e) => position.has(e.id)) : entries.value
     // 同一个 cardToUnit，和 tmux window 走的是同一条。这里曾经是一段 20 行的内联映射，把
@@ -136,7 +137,7 @@ export function useSessionsOverview(activeId: () => string | undefined, order?: 
         // 终端N）由 overviewCardTitle 统一决定。以前这里回落成「终端 a1b2c3」，那串 id 前缀既
         // 认不出是哪个项目，又因为不长得像自动名而躲过了后面的 basename 回落。
         title: e.title ?? '',
-        active: e.id === activeId(),
+        active: viewing.has(e.id),
         cwd: e.cwd,
         // units 省略：这张卡就是它自己那一个单元。
         exited: e.exited,

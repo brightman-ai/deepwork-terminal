@@ -1,12 +1,12 @@
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import type { WorkbenchGroup } from '../../types/workbench'
 import { fuzzyMatch } from '../../utils/fuzzyMatch'
 import { getCliApiPrefix } from './useCliApiPrefix'
-import type { EffectiveStatus } from './useAgentOverview'
+import { distinctPaneStatuses, type PaneStatus, type TabPaneStatus } from './tabPanePresentation'
 import { createQuickSwitchRanker, decodeQuickSwitchHistory, encodeQuickSwitchHistory, recordQuickSwitchVisit, QUICK_SWITCH_DWELL_MS, type QuickSwitchSignal, type QuickSwitchRecommendation } from './quickSwitchRanking'
 
-export type QuickSwitchStatus = EffectiveStatus | 'disconnected' | 'terminal'
-export type QuickSwitchFilter = 'all' | Exclude<QuickSwitchStatus, 'terminal'>
+export type QuickSwitchStatus = PaneStatus
+export type QuickSwitchFilter = 'all' | Exclude<QuickSwitchStatus, 'terminal' | 'unknown'>
 export interface QuickSwitchFilterOption { id: QuickSwitchFilter; label: string; count: number }
 
 export interface QuickSwitchItem {
@@ -19,6 +19,7 @@ export interface QuickSwitchItem {
   position?: number
   collapsed: boolean
   status: QuickSwitchStatus
+  panes?: readonly TabPaneStatus[]
   reason?: string
 }
 
@@ -37,11 +38,13 @@ export function rankQuickSwitchItems(items: readonly QuickSwitchItem[], query: s
 }
 
 export function useTabQuickSwitch(adapter: {
+  open?: Ref<boolean>
   groups: () => WorkbenchGroup[]
   activeId: () => string | undefined
   positions: () => Map<string, number>
   machine: (tab: WorkbenchGroup['tabs'][number]) => string
   status: (id: string) => QuickSwitchStatus
+  panes?: (id: string) => readonly TabPaneStatus[]
   select: (id: string) => void
   expand: (id: string) => void
   signals?: () => ReadonlyMap<string, readonly QuickSwitchSignal[]>
@@ -50,7 +53,7 @@ export function useTabQuickSwitch(adapter: {
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null
   now?: () => number
 }) {
-  const open = ref(false)
+  const open = adapter.open ?? ref(false)
   const query = ref('')
   const selectedId = ref('')
   const message = ref('')
@@ -58,7 +61,7 @@ export function useTabQuickSwitch(adapter: {
   const order = ref<string[]>([])
   const reasons = ref(new Map<string, QuickSwitchRecommendation>())
   const filter = ref<QuickSwitchFilter>('all')
-  const classification = ref(new Map<string, QuickSwitchStatus>())
+  const classification = ref(new Map<string, readonly QuickSwitchStatus[]>())
   const now = adapter.now ?? Date.now
   const storageKey = `dw-quick-switch-history-v1:${getCliApiPrefix() || 'standalone'}`
   function storage() {
@@ -129,6 +132,7 @@ export function useTabQuickSwitch(adapter: {
   const items = computed<QuickSwitchItem[]>(() => adapter.groups().flatMap(g => g.tabs.map(t => ({
     id: t.id, name: t.name, cwd: t.cwd, group: g.name, machine: adapter.machine(t),
     engine: t.engine, position: adapter.positions().get(t.id), collapsed: g.collapsed, status: adapter.status(t.id),
+    panes: adapter.panes?.(t.id),
     reason: visibleReason(t.id),
   }))))
   watch(adapter.activeId, id => {
@@ -148,16 +152,16 @@ export function useTabQuickSwitch(adapter: {
     }
   }, { flush: 'sync' })
   const matches = computed(() => rankQuickSwitchItems(items.value, query.value, order.value))
-  const results = computed(() => matches.value.filter(item => filter.value === 'all' || classification.value.get(item.id) === filter.value))
+  const statusesOf = (item: QuickSwitchItem) => distinctPaneStatuses(item.panes?.length ? item.panes.map(pane => pane.status) : [item.status])
+  const results = computed(() => matches.value.filter(item => filter.value === 'all' || classification.value.get(item.id)?.includes(filter.value)))
   const total = computed(() => items.value.length)
-  const statusKinds = computed(() => new Set(classification.value.values()).size)
+  const statusKinds = computed(() => new Set([...classification.value.values()].flat().filter(status => status !== 'unknown' && status !== 'terminal')).size)
   const filterStale = computed(() => items.value.length !== classification.value.size
-    || items.value.some(item => classification.value.get(item.id) !== item.status))
+    || items.value.some(item => classification.value.get(item.id)?.join('|') !== statusesOf(item).join('|')))
   const filters = computed<QuickSwitchFilterOption[]>(() => {
     const counts = new Map<QuickSwitchStatus, number>()
     for (const item of matches.value) {
-      const status = classification.value.get(item.id)
-      if (status) counts.set(status, (counts.get(status) ?? 0) + 1)
+      for (const status of classification.value.get(item.id) ?? []) counts.set(status, (counts.get(status) ?? 0) + 1)
     }
     const options: QuickSwitchFilterOption[] = [
       { id: 'all', label: '全部', count: matches.value.length },
@@ -166,10 +170,10 @@ export function useTabQuickSwitch(adapter: {
       { id: 'running', label: '运行中', count: counts.get('running') ?? 0 },
       { id: 'idle', label: '空闲', count: counts.get('idle') ?? 0 },
     ]
-    if ([...classification.value.values()].includes('disconnected')) options.push({ id: 'disconnected', label: '未连接', count: counts.get('disconnected') ?? 0 })
+    if ([...classification.value.values()].some(statuses => statuses.includes('disconnected'))) options.push({ id: 'disconnected', label: '未连接', count: counts.get('disconnected') ?? 0 })
     return options
   })
-  function classify() { classification.value = new Map(items.value.map(item => [item.id, item.status])) }
+  function classify() { classification.value = new Map(items.value.map(item => [item.id, statusesOf(item)])) }
   function refreshFilter(): void {
     classify()
     if (!results.value.some(item => item.id === selectedId.value)) selectedId.value = results.value[0]?.id ?? ''

@@ -1,14 +1,9 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CheckCircle2, Search, Unplug, X } from 'lucide-vue-next'
-import type { QuickSwitchFilter, QuickSwitchFilterOption, QuickSwitchItem, QuickSwitchStatus } from '../../composables/cli/useTabQuickSwitch'
+import { Search, X } from 'lucide-vue-next'
+import type { QuickSwitchFilter, QuickSwitchFilterOption, QuickSwitchItem } from '../../composables/cli/useTabQuickSwitch'
 import { matchesBinding } from '../../composables/cli/useTabShortcuts'
-import { STATUS_COLOR, STATUS_MOTION } from '../../composables/cli/useAgentOverview'
-
-const statusLabels: Record<QuickSwitchStatus, string> = {
-  waiting: '等待输入', running: '运行中', 'done-unseen': '已完成',
-  idle: '空闲', disconnected: '未连接', terminal: '终端',
-}
+import PaneStatusIndicator from './PaneStatusIndicator.vue'
 
 const props = defineProps<{
   open: boolean; query: string; items: QuickSwitchItem[]; selectedId: string
@@ -149,22 +144,22 @@ onBeforeUnmount(() => {
           <button type="button" data-switcher-close data-testid="tab-quick-switcher-close" aria-label="关闭快速切换" @click="cancel"><X :size="16" /></button>
         </div>
         <div class="tab-switcher__heading"><span>{{ query.trim() || filter !== 'all' ? `匹配标签 · ${items.length} / ${total}` : '推荐顺序' }}</span><button v-if="showFilters && filterStale" type="button" data-switcher-refresh data-testid="tab-quick-switcher-refresh" @click="refreshFilter">状态有变化，更新筛选</button><kbd>{{ bindingLabel }}</kbd></div>
-        <div v-if="showFilters" ref="filterBar" class="tab-switcher__filters" role="group" aria-label="按状态筛选" data-testid="tab-quick-switcher-filters">
-          <button v-for="option in filters" :key="option.id" type="button" :data-switcher-filter="option.id" :data-testid="`tab-quick-switcher-filter-${option.id}`" :aria-pressed="filter === option.id" :disabled="option.id !== 'all' && !option.count" @click="applyFilter(option.id)">{{ option.label }}<span>{{ option.count }}</span></button>
+        <div v-if="showFilters" ref="filterBar" class="tab-switcher__filter-section">
+          <p v-if="items.some(item => (item.panes?.length ?? 0) > 1)" class="tab-switcher__filter-help">按标签计数，任一窗格符合即可</p>
+          <div class="tab-switcher__filters" role="group" aria-label="按状态筛选" data-testid="tab-quick-switcher-filters">
+            <button v-for="option in filters" :key="option.id" type="button" :data-switcher-filter="option.id" :data-testid="`tab-quick-switcher-filter-${option.id}`" :aria-pressed="filter === option.id" :disabled="option.id !== 'all' && !option.count" @click="applyFilter(option.id)">{{ option.label }}<span>{{ option.count }}</span></button>
+          </div>
         </div>
         <div v-if="message" class="tab-switcher__message" role="status">{{ message }}</div>
         <div id="tab-switcher-results" ref="list" role="listbox" class="tab-switcher__list" aria-label="终端标签">
           <button v-for="item in items" :id="`quick-tab-${item.id}`" :key="item.id" type="button" role="option" tabindex="-1" :aria-selected="item.id === selectedId" :data-testid="`tab-quick-switcher-item-${item.id}`" class="tab-switcher__item" @mousedown.prevent @click="select(item.id)">
             <span class="tab-switcher__position">{{ item.position ?? '·' }}</span>
-            <span class="tab-switcher__identity"><span class="tab-switcher__name"><span class="tab-switcher__title" :title="item.name">{{ item.name }}</span><small v-if="item.id === activeId">当前</small><small v-if="item.collapsed">{{ item.group }} · 已折叠</small></span><span class="tab-switcher__path" :title="item.cwd">{{ item.cwd }}</span><span class="tab-switcher__machine" :title="`${item.machine} · ${item.engine}`">{{ item.machine }} · {{ item.engine }}</span></span>
+            <span class="tab-switcher__identity"><span class="tab-switcher__name"><span class="tab-switcher__title" :title="item.name">{{ item.name }}</span><small v-if="item.id === activeId">当前</small><small v-if="item.collapsed">{{ item.group }} · 已折叠</small></span><span class="tab-switcher__path" :title="item.cwd">{{ item.cwd }}</span><span class="tab-switcher__machine" :title="`${item.machine} · ${item.engine}${item.reason ? ` · ${item.reason}` : ''}`">{{ item.machine }} · {{ item.engine }}<span v-if="item.reason" class="tab-switcher__reason"> · {{ item.reason }}</span></span></span>
             <span class="tab-switcher__detail">
-              <span class="tab-switcher__status" :data-status="item.status" :title="item.status === 'done-unseen' ? '已完成，尚未查看' : statusLabels[item.status]">
-                <CheckCircle2 v-if="item.status === 'done-unseen'" :size="13" aria-hidden="true" />
-                <Unplug v-else-if="item.status === 'disconnected'" :size="13" aria-hidden="true" />
-                <span v-else class="tab-switcher__status-dot" aria-hidden="true" />
-                {{ statusLabels[item.status] }}
-              </span>
-              <span v-if="item.reason" class="tab-switcher__reason">{{ item.reason }}</span>
+              <template v-if="item.panes && item.panes.length > 1">
+                <PaneStatusIndicator v-for="pane in item.panes" :key="pane.key" class="tab-switcher__status" :data-testid="`quick-pane-${item.id}-${pane.key}`" :status="pane.status" :label="pane.label" />
+              </template>
+              <PaneStatusIndicator v-else class="tab-switcher__status" :status="item.status" />
             </span>
           </button>
           <div v-if="!items.length" class="tab-switcher__empty" role="status">当前条件没有匹配的标签<button v-if="query" type="button" data-switcher-clear @click="clearSearch">清空搜索</button><button v-if="filter !== 'all'" type="button" data-switcher-filter="all" @click="applyFilter('all')">回到全部</button></div>
@@ -177,12 +172,14 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .tab-switcher-scrim { position: fixed; inset: 0; z-index: 10000; background: #0007; display: flex; justify-content: center; align-items: flex-start; padding: min(15vh, 110px) 16px 24px; }
-.tab-switcher { --status-waiting: v-bind('STATUS_COLOR.waiting'); --status-running: v-bind('STATUS_COLOR.running'); --status-done: v-bind("STATUS_COLOR['done-unseen']"); width: min(640px, 100%); max-height: calc(100dvh - min(15vh, 110px) - 24px); display: flex; flex-direction: column; overflow: hidden; color: hsl(var(--foreground)); background: hsl(var(--background)); border: 1px solid hsl(var(--border)); border-radius: 12px; box-shadow: 0 24px 80px #0008; }
+.tab-switcher { width: min(640px, 100%); max-height: calc(100dvh - min(15vh, 110px) - 24px); display: flex; flex-direction: column; overflow: hidden; color: hsl(var(--foreground)); background: hsl(var(--background)); border: 1px solid hsl(var(--border)); border-radius: 12px; box-shadow: 0 24px 80px #0008; }
 .tab-switcher__search { display: flex; align-items: center; gap: 12px; padding: 16px; border-bottom: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); }
 .tab-switcher__search input { width: 100%; min-width: 0; background: transparent; color: hsl(var(--foreground)); border: 0; outline: none; font-size: 15px; }
 .tab-switcher__search button { display: grid; place-items: center; min-width: 32px; min-height: 32px; border-radius: 6px; }
 .tab-switcher__heading { display: flex; flex: 0 0 32px; align-items: center; justify-content: space-between; gap: 8px; padding: 0 16px; color: hsl(var(--muted-foreground)); font-size: 11px; white-space: nowrap; }
 .tab-switcher__heading button { color: hsl(var(--primary)); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+.tab-switcher__filter-section { flex-shrink: 0; }
+.tab-switcher__filter-help { margin: 0; padding: 0 16px 6px; font-size: 10px; color: hsl(var(--muted-foreground)); }
 .tab-switcher__filters { display: flex; flex-shrink: 0; gap: 6px; padding: 2px 16px 10px; overflow-x: auto; overscroll-behavior-x: contain; }
 .tab-switcher__filters button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 5px; min-height: 30px; padding: 4px 9px; border: 1px solid hsl(var(--border)); border-radius: 5px; font-size: 12px; white-space: nowrap; }
 .tab-switcher__filters button[aria-pressed=true] { background: hsl(var(--accent)); border-color: hsl(var(--primary) / .65); }
@@ -201,21 +198,11 @@ kbd { font-family: inherit; font-size: 10px; opacity: .75; }
 .tab-switcher__name small { color: hsl(var(--muted-foreground)); font-size: 10px; white-space: nowrap; }
 .tab-switcher__path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; margin-top: 3px; color: hsl(var(--muted-foreground)); }
 .tab-switcher__machine { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; font-size: 10px; color: hsl(var(--muted-foreground)); }
-.tab-switcher__reason { font-size: 11px; color: hsl(var(--muted-foreground)); }
+.tab-switcher__reason { font-size: inherit; color: hsl(var(--muted-foreground)); }
 .tab-switcher__detail { display: grid; justify-items: end; flex-shrink: 0; gap: 5px; max-width: 140px; text-align: right; }
-.tab-switcher__status { --quick-status-color: hsl(var(--muted-foreground)); display: inline-flex; align-items: center; gap: 6px; padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--quick-status-color), transparent 65%); border-radius: 5px; background: color-mix(in srgb, var(--quick-status-color), transparent 92%); font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap; }
-.tab-switcher__status[data-status=waiting] { --quick-status-color: var(--status-waiting); }
-.tab-switcher__status[data-status=running] { --quick-status-color: var(--status-running); }
-.tab-switcher__status[data-status=done-unseen] { --quick-status-color: var(--status-done); }
-.tab-switcher__status svg { flex-shrink: 0; color: var(--quick-status-color); }
-.tab-switcher__status-dot { flex-shrink: 0; width: 8px; height: 8px; border: 1px solid var(--quick-status-color); border-radius: 50%; }
-.tab-switcher__status[data-status=waiting] .tab-switcher__status-dot { background: var(--quick-status-color); --dot-min-opacity: v-bind('STATUS_MOTION.waiting.minOpacity'); animation: status-dot-pulse v-bind('STATUS_MOTION.waiting.duration') v-bind('STATUS_MOTION.waiting.easing') infinite; }
-.tab-switcher__status[data-status=running] .tab-switcher__status-dot { background: var(--quick-status-color); --dot-min-opacity: v-bind('STATUS_MOTION.running.minOpacity'); animation: status-dot-pulse v-bind('STATUS_MOTION.running.duration') v-bind('STATUS_MOTION.running.easing') infinite; }
-@keyframes status-dot-pulse { 0%, 100% { opacity: var(--dot-min-opacity); } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .tab-switcher__status-dot { animation: none !important; opacity: 1; } }
 .tab-switcher__message, .tab-switcher__empty { padding: 16px; font-size: 13px; color: hsl(var(--muted-foreground)); }
 .tab-switcher__empty { display: grid; gap: 12px; justify-items: center; padding: 32px; }
 .tab-switcher__empty button { color: hsl(var(--primary)); }
 footer { display: flex; gap: 20px; padding: 10px 16px; border-top: 1px solid hsl(var(--border)); font-size: 11px; color: hsl(var(--muted-foreground)); }
-@media (max-width: 600px) { .tab-switcher-scrim { padding: 14px 10px; } .tab-switcher { max-height: calc(100dvh - 28px); } .tab-switcher__detail { max-width: 90px; } .tab-switcher__name { flex-wrap: wrap; gap: 4px; } .tab-switcher__search input { font-size: 16px; } }
+@media (max-width: 600px) { .tab-switcher-scrim { padding: 14px 10px; } .tab-switcher { max-height: calc(100dvh - 28px); } .tab-switcher__detail { max-width: 112px; } .tab-switcher__name { flex-wrap: wrap; gap: 4px; } .tab-switcher__search input { font-size: 16px; } }
 </style>

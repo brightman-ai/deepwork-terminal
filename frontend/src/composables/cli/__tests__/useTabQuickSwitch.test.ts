@@ -4,9 +4,45 @@ import { mountView } from '../../../portals/cli/__tests__/support/testRenderer'
 import { useTabQuickSwitch, rankQuickSwitchItems, type QuickSwitchItem, type QuickSwitchStatus } from '../useTabQuickSwitch'
 import type { WorkbenchGroup } from '../../../types/workbench'
 import { decodeQuickSwitchHistory, encodeQuickSwitchHistory } from '../quickSwitchRanking'
+import { aggregatePaneStatus, type TabPaneStatus } from '../tabPanePresentation'
 
 const item = (id: string, name: string, cwd: string, position?: number): QuickSwitchItem => ({ id, name, cwd, position, group: '研究', machine: '本机', engine: 'shell', collapsed: false, status: 'idle' })
 describe('tab quick switching', () => {
+  it('filters any pane, counts tabs once, and freezes membership while pane badges remain live', () => {
+    const panes = ref(new Map<string, TabPaneStatus[]>([
+      ['a', [{key: 'first', label: '', status: 'unknown'}]],
+      ['b', [{key: 'first', label: '左', status: 'running'}, {key: 'second', label: '右', status: 'waiting'}]],
+      ['c', [{key: 'first', label: '左', status: 'running'}, {key: 'second', label: '右', status: 'running'}]],
+      ['d', [{key: 'first', label: '上', status: 'done-unseen'}, {key: 'second', label: '下', status: 'idle'}]],
+    ]))
+    let model!: ReturnType<typeof useTabQuickSwitch>
+    const view = mountView(defineComponent({setup() {
+      model = useTabQuickSwitch({groups: () => [{id: 'g', name: '工作', collapsed: false, tabs: [...panes.value.keys()].map(id => ({id, groupId: 'g', name: id, cwd: '/work', engine: 'shell'}))}],
+        activeId: () => 'a', positions: () => new Map(), machine: () => '本机',
+        panes: id => panes.value.get(id)!, status: id => aggregatePaneStatus(panes.value.get(id)!),
+        select: () => {}, expand: () => {}, storage: null})
+      return () => null
+    }}), {})
+    try {
+      model.show()
+      expect(model.filters.value.map(option => [option.id, option.count])).toEqual([['all', 4], ['waiting', 1], ['done-unseen', 1], ['running', 2], ['idle', 1]])
+      model.setFilter('running'); expect(model.results.value.map(item => item.id)).toEqual(['b', 'c'])
+      panes.value.set('b', [{key: 'first', label: '左', status: 'waiting'}, {key: 'second', label: '右', status: 'running'}])
+      expect(model.filterStale.value).toBe(false)
+      panes.value.set('b', [{key: 'first', label: '左', status: 'waiting'}, {key: 'second', label: '右', status: 'waiting'}])
+      expect(model.filterStale.value).toBe(true)
+      expect(model.results.value.map(item => item.id)).toEqual(['b', 'c'])
+      expect(model.results.value[0]!.panes!.map(pane => pane.status)).toEqual(['waiting', 'waiting'])
+      expect(model.filters.value.find(option => option.id === 'running')!.count).toBe(2)
+      model.refreshFilter(); expect(model.results.value.map(item => item.id)).toEqual(['c'])
+      panes.value.get('c')![1]!.status = 'disconnected'
+      model.search('c')
+      expect(model.results.value.map(item => item.id)).toEqual(['c'])
+      expect(model.filters.value.find(option => option.id === 'disconnected')!.count).toBe(1)
+      expect(model.filters.value.find(option => option.id === 'running')!.count).toBe(1)
+      model.close(); model.show(); expect(model.filter.value).toBe('all'); expect(model.results.value).toHaveLength(4)
+    } finally { view.unmount() }
+  })
   let previousWindow: PropertyDescriptor | undefined, previousDocument: PropertyDescriptor | undefined
   beforeEach(() => {
     previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')

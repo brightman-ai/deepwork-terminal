@@ -15,6 +15,7 @@
       :rename-value="renameValue"
       :tab-positions="tabPositions"
       :tab-statuses="tabStatuses"
+      :tab-pane-statuses="tabPaneStatuses"
       :tab-liveness="tabLivenessMap"
       :reopened-tabs="reopenedTabIds"
       :rollup="overviewRollup"
@@ -74,6 +75,7 @@
       @agent-notifications="onTabAgentNotifications"
       @session-exit="onTabSessionExit"
       @connection-change="onTabConnectionChange"
+      @visible-sessions="onVisibleSessions"
       @dw-toggle-overview="toggleOverview"
       @split-ratio="setSplitRatio"
       @split-orientation="setSplitOrientation"
@@ -170,7 +172,7 @@ const {
   renamingTabId, renameValue, startRenameTab, commitRename, cancelRename,
   quickCreateTab,
   remoteDialogOpen, openRemoteDialog, createRemoteTab,
-  tabPositions, tabStatuses, tabLivenessMap, reopenedTabIds, detachedCard, detachedAction,
+  tabPositions, tabStatuses, tabPaneStatuses, onVisibleSessions, tabLivenessMap, reopenedTabIds, detachedCard, detachedAction,
   overviewOpen, toggleOverview, closeOverview, overviewGroups, overviewRollup,
   selectOverviewIndex, openShortcutsSettings,
   tabMenu, openTabMenu,
