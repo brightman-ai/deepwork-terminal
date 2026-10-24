@@ -269,9 +269,9 @@ func TestSession_BrokenHistoryDoesNotDisturbTheByteStream(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, "second reaches the ring", func() bool { return strings.Contains(string(s.ring.Read()), "second") })
 
-	if !s.History().Stats().Broken {
-		t.Fatal("the historian should have marked itself broken")
-	}
+	// The stream deliberately reaches the ring before the historian runs. Seeing "second"
+	// above is not a barrier for the sidecar; await its own result without delaying the stream.
+	waitFor(t, 2*time.Second, "the historian marks itself broken", func() bool { return s.History().Stats().Broken })
 	if got := string(s.ring.Read()); !strings.Contains(got, "first") || !strings.Contains(got, "second") {
 		t.Fatalf("the ring lost bytes when history broke: %q", got)
 	}
