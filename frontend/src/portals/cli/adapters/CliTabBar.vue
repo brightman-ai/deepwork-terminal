@@ -50,7 +50,7 @@
           :class="{
             'is-active': tab.id === activeTabId,
             'needs-input': tabStatus(tab.id) === 'waiting',
-            'not-live': !!notLive(tab.id),
+            'not-live': wholeTabNotLive(tab),
             'is-drag-source': draggedTabId === tab.id,
             'insert-before': insertBefore(tab.id),
             'insert-after': insertAfter(tab.id, group),
@@ -72,8 +72,11 @@
                   pane bar (STATUS_COLOR + STATUS_MOTION, seen-aware effectiveStatus). It used to
                   carry a private palette and no done-unseen tier, so a tab and its own overview
                   card could show different colours for the same terminal. -->
+          <span v-if="tab.split && paneStates(tab.id).length === 2" class="tab-pane-dots" :class="tab.split.orientation" :data-testid="`tab-pane-dots-${tab.id}`">
+            <PaneStatusIndicator v-for="pane in paneStates(tab.id)" :key="pane.key" :status="pane.status" :label="pane.label" compact :data-testid="`tab-pane-${tab.id}-${pane.key}`" />
+          </span>
           <span
-            v-if="notLive(tab.id)"
+            v-else-if="notLive(tab.id)"
             class="tab-agent-dot"
             :class="`l-${notLive(tab.id)}`"
             :data-testid="`cli-portal-tab-liveness-${tab.id}`"
@@ -239,6 +242,8 @@ import { useAppUpdate } from '@terminal/composables/cli/useAppUpdate'
 import { tabBaseName } from '@terminal/composables/cli/useTabDisplayName'
 import VersionBadge from '@terminal/components/chrome/VersionBadge.vue'
 import { TOPBAR_RIGHT_OUTLET_ID } from '@terminal/composables/cli/useTopbarOutlet'
+import PaneStatusIndicator from '@terminal/components/cli/PaneStatusIndicator.vue'
+import { PANE_STATUS_LABEL, type TabPaneStatus } from '@terminal/composables/cli/tabPanePresentation'
 
 // Auto-update detection: surfaces the "有更新" pill when a newer build is deployed, and
 // owns the shared clear-and-reload used by the pill + PWA refresh button + HelpCenter.
@@ -255,6 +260,7 @@ const props = defineProps<{
   /** tabId → seen-aware status, from the SAME useOverviewUnits instance the overview grid reads.
    *  Absent id = no agent = no dot (an empty shell has no status worth a colour). */
   tabStatuses: Map<string, EffectiveStatus>
+  tabPaneStatuses?: Map<string, TabPaneStatus[]>
   /** tabId → 存活态（进程还在不在）。缺条目 = live。和 tabStatuses 是两个轴，不是两种说法：
    *  进程没了的时候 agent 状态无从谈起，所以存活态优先渲染。 */
   tabLiveness?: Map<string, TabLiveness>
@@ -323,6 +329,12 @@ function notLive(tabId: string): TabNotLive | null {
   return tabNotLive(props.tabLiveness, tabId)
 }
 
+function paneStates(tabId: string): TabPaneStatus[] { return props.tabPaneStatuses?.get(tabId) ?? [] }
+function wholeTabNotLive(tab: WorkbenchTab): boolean {
+  return tab.split && paneStates(tab.id).length === 2
+    ? paneStates(tab.id).every(pane => pane.status === 'disconnected') : !!notLive(tab.id)
+}
+
 /** 这个标签现在挂的是自动重开出来的新 shell，且用户还没动过手。 */
 function reopened(tabId: string): boolean {
   return tabReopened(props.reopenedTabs, tabId)
@@ -344,7 +356,9 @@ function tabTitle(tab: WorkbenchTab): string {
   // 唯一能查到全名的地方（标签栏本身不再有别的地方摆得下全名）。
   const parts: string[] = [tabBaseName(tab.name)]
   const l = notLive(tab.id)
-  if (l) parts.push(LIVENESS_LABEL[l])
+  if (tab.split && paneStates(tab.id).length === 2) {
+    parts.push(...paneStates(tab.id).map(pane => `${pane.label}窗格：${PANE_STATUS_LABEL[pane.status]}`))
+  } else if (l) parts.push(LIVENESS_LABEL[l])
   // 小标只有两个字，放不下「为什么」——完整那句话在这里补上（终端里也写了同样一句）。
   if (reopened(tab.id)) parts.push('上一个进程已经结束，这是一个新的 shell')
   const said = agentSaidText(signalFor(tab.sessionId), sessionEntry(tab.sessionId)?.agentTool)
@@ -605,6 +619,8 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
   border-radius: 50%;
   flex-shrink: 0;
 }
+.tab-pane-dots { display: inline-flex; flex-shrink: 0; align-items: center; gap: 3px; }
+.tab-pane-dots.column { flex-direction: column; }
 .tab-agent-dot.s-waiting {
   background: var(--status-waiting);
   --dot-min-opacity: var(--dot-waiting-min);

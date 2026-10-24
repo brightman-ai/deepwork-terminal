@@ -9,12 +9,42 @@ import {
   useSessionsOverview,
 } from '../useSessionsOverview'
 import { applyAgentSignalFrame } from '../useAgentSignals'
+import { effectScope, nextTick, ref } from 'vue'
+import { useOverviewUnits } from '../useAgentOverview'
 
 function entry(id: string, extra: Record<string, unknown> = {}) {
   return { id, title: `终端 ${id}`, cwd: `/repo/${id}`, ...extra }
 }
 
 describe('useSessionsOverview', () => {
+  it('acknowledges completion per visible session and leaves a covered/hidden pane unread', async () => {
+    const scope = effectScope(), visible = ref(['pane-seen-left']), covered = ref(false)
+    const since = new Date(Date.now() - 5000).toISOString()
+    const completion = (id: string) => entry(id, {agentTool: 'claude', agentStatus: 'idle', awaitingUser: true, awaitingSince: since})
+    applySessionsOverviewFrame([completion('pane-seen-left'), completion('pane-seen-right')])
+    const state = scope.run(() => {
+      const feed = useSessionsOverview(() => 'pane-seen-left', () => ['pane-seen-left', 'pane-seen-right'], () => covered.value ? [] : visible.value)
+      const overview = useOverviewUnits(feed.units, ref(false))
+      return () => feed.units.value.map(unit => overview.effectiveStatus(unit))
+    })!
+    try {
+      expect(state()).toEqual(['idle', 'done-unseen'])
+      covered.value = true; visible.value = ['pane-seen-right']; await nextTick()
+      expect(state()).toEqual(['idle', 'done-unseen'])
+      covered.value = false; await nextTick()
+      expect(state()).toEqual(['idle', 'idle'])
+    } finally { scope.stop() }
+  })
+  it('marks only actual visible split sessions active for the shared seen layer', () => {
+    applySessionsOverviewFrame([entry('left'), entry('right'), entry('background')])
+    const visible = ref(['left'])
+    const { units } = useSessionsOverview(() => 'left', () => ['left', 'right', 'background'], () => visible.value)
+    const active = () => units.value.filter(unit => unit.active).map(unit => unit.key)
+    expect(active()).toEqual(['left'])
+    visible.value = ['right']; expect(active()).toEqual(['right'])
+    visible.value = ['left', 'right']; expect(active()).toEqual(['left', 'right'])
+    visible.value = []; expect(active()).toEqual([])
+  })
   it('numbers cards by the tab order, not the server list order', () => {
     applySessionsOverviewFrame([entry('c'), entry('a'), entry('b')])
     const { units } = useSessionsOverview(() => 'a', () => ['a', 'b', 'c'])

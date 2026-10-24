@@ -177,6 +177,7 @@
                 @focusin="(e: FocusEvent) => onPaneFocusIn(tab.id, 'second', e)"
                 @pointerdown.capture.passive="(e: PointerEvent) => onPanePointerDown(tab.id, 'second', e)"
                 @agent-state="(s) => emit('agent-state', `${tab.id}__split2`, s)"
+                @connection-change="(s) => emit('connection-change', `${tab.id}__split2`, s)"
               >
                 <template v-if="splitAllowed || switcherOn(tab.id, 'second')" #status-extra>
                   <SplitPaneSwitcher
@@ -220,7 +221,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CliTerminalSurface from '@terminal/components/terminal-session/CliTerminalSurface.vue'
 import SplitControlBar from '@terminal/components/terminal-session/SplitControlBar.vue'
 import SplitPaneSwitcher from '@terminal/components/terminal-session/SplitPaneSwitcher.vue'
@@ -283,6 +284,7 @@ const emit = defineEmits<{
   (e: 'connection-change', tabId: string, status: WSConnectionStatus): void
   /** 底栏的总览胶囊，原样上交给拥有标签的那一层执行。 */
   (e: 'dw-toggle-overview'): void
+  (e: 'visible-sessions', ids: string[]): void
   /** 拖拽分隔条松手后的最终比例——宿主负责持久化（useCliState.setSplitRatio）。拖拽过程中的
    *  高频中间值只在这个组件内部做视觉反馈，不逐帧上抛，见下方 onDividerMove。 */
   (e: 'split-ratio', tabId: string, ratio: number): void
@@ -358,6 +360,17 @@ function onSurfaceRef(tabId: string, el: unknown) {
 // 纯前端状态（不落盘、不跨设备）：最后获得焦点的那格。点进格子里的终端/输入框/按钮都算；
 // 分屏控件自己的按钮不算——点"切换焦点"按钮那一下会先让按钮拿到焦点，若也算，就永远切不走。
 const focusedPane = reactive<Record<string, PaneId>>({})
+
+const visibleSessions = computed(() => {
+  if (props.loading || props.error) return []
+  const tab = props.tabsWithSession.find(tab => tab.id === props.activeTabId)
+  if (!tab) return []
+  if (!tab.split) return tab.sessionId ? [tab.sessionId] : []
+  const visible = layoutOf(tab.id).visible
+  return [visible.first ? tab.sessionId : undefined, visible.second ? tab.split.secondSessionId : undefined]
+    .filter((id): id is string => !!id)
+})
+watch(visibleSessions, ids => emit('visible-sessions', ids), {immediate: true})
 
 function focusedPaneOf(tabId: string): PaneId {
   return focusedPane[tabId] ?? 'first'

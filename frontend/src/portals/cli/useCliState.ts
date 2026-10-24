@@ -14,7 +14,8 @@ import { leaderBytesFor, useTabShortcuts } from '@terminal/composables/cli/useTa
 import { computeVisibleTabOrder } from '@terminal/composables/cli/useVisibleTabOrder'
 import { displayTabName } from '@terminal/composables/cli/useTabDisplayName'
 import { useSessionsOverview } from '@terminal/composables/cli/useSessionsOverview'
-import { useOverviewUnits, URGENCY_ORDER, type EffectiveStatus, type OverviewUnit } from '@terminal/composables/cli/useAgentOverview'
+import { useOverviewUnits, type EffectiveStatus, type OverviewUnit } from '@terminal/composables/cli/useAgentOverview'
+import { presentTabPanes, aggregatePaneStatus, type PaneSessionFact } from '@terminal/composables/cli/tabPanePresentation'
 import { useTabContextMenu } from '@terminal/composables/cli/useTabContextMenu'
 import { useTabQuickSwitch } from '@terminal/composables/cli/useTabQuickSwitch'
 import type { QuickSwitchSignal } from '@terminal/composables/cli/quickSwitchRanking'
@@ -237,6 +238,9 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // fed by the pushed sessions_overview frame instead of tmux topology. Cards are keyed by PTY
   // session id; the visible tab order supplies the card number so it matches 终端N and Alt+N.
   const overviewOpen = ref(false)
+  const quickSwitcherOpen = ref(false)
+  const visibleSessionIds = ref<string[]>([])
+  function onVisibleSessions(ids: string[]): void { visibleSessionIds.value = ids }
   function toggleOverview(): void { overviewOpen.value = !overviewOpen.value }
   /** 关掉总览。Esc / 点遮罩 / 点中一张卡片走的都是它——「关闭总览」只有一处实现，
    *  模板里不再各写一份 `overviewOpen = false`。 */
@@ -258,6 +262,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
   const { entries: sessionEntries, units: liveOverviewUnits } = useSessionsOverview(
     () => activeTab.value?.sessionId,
     () => overviewIdOrder.value,
+    () => quickSwitcherOpen.value ? [] : visibleSessionIds.value,
   )
   /** 把服务端上报的**活着的 cwd** 同步回标签并持久化。
    *
@@ -324,17 +329,18 @@ export function useCliState(runtime: PortalRuntimeResult) {
    *  uses — not a second one that happened to agree. The strip keys on TAB id while the overview
    *  keys on SESSION id, so this is the one place the two identities are joined; every consumer
    *  downstream just reads the map. */
+  const tabPaneStatuses = computed(() => {
+    const entries = new Map(sessionEntries.value.map(entry => [entry.id, entry]))
+    const facts = new Map<string, PaneSessionFact>(overviewUnits.value.map(unit => [unit.key, {
+      status: overview.effectiveStatus(unit), exited: !!entries.get(unit.key)?.exited || !!unit.liveness,
+    }]))
+    return new Map(allTabs.value.map(tab => [tab.id, presentTabPanes(tab, facts, livenessOf(tab.id))]))
+  })
   const tabStatuses = computed(() => {
-    const bySession = new Map(overviewUnits.value.map(u => [u.key, overview.effectiveStatus(u)]))
     const out = new Map<string, EffectiveStatus>()
-    for (const tab of allTabs.value) {
-      const primary = tab.sessionId ? bySession.get(tab.sessionId) : undefined
-      const second = tab.split?.secondSessionId ? bySession.get(tab.split.secondSessionId) : undefined
-      // terminal-split REQ-006：任一格更紧急，tab 点就显示那个——复用既有 URGENCY_ORDER（tmux
-      // window 级红点"可能来自后台 pane"同一条规则），不新造第二套优先级。
-      const s = !second ? primary : !primary ? second
-        : (URGENCY_ORDER.indexOf(primary) <= URGENCY_ORDER.indexOf(second) ? primary : second)
-      if (s) out.set(tab.id, s)
+    for (const [id, panes] of tabPaneStatuses.value) {
+      const status = aggregatePaneStatus(panes)
+      if (status !== 'unknown' && status !== 'disconnected' && status !== 'terminal') out.set(id, status)
     }
     return out
   })
@@ -375,8 +381,9 @@ export function useCliState(runtime: PortalRuntimeResult) {
     const units = new Map(overviewUnits.value.map(unit => [unit.key, unit]))
     return new Map(allTabs.value.map(tab => {
       const signals: QuickSwitchSignal[] = []
-      if (livenessOf(tab.id) === 'live') {
-        for (const id of [tab.sessionId, tab.split?.secondSessionId]) {
+      for (const pane of tabPaneStatuses.value.get(tab.id) ?? []) {
+        if (pane.status !== 'disconnected' && pane.status !== 'unknown') {
+          const id = pane.sessionId
           const unit = id ? units.get(id) : undefined
           if (!unit || unit.liveness) continue
           signals.push({ key: `${tab.id}:${unit.key}`, rawStatus: unit.rawStatus,
@@ -387,20 +394,22 @@ export function useCliState(runtime: PortalRuntimeResult) {
     }))
   })
   const quickSwitcher = useTabQuickSwitch({
+    open: quickSwitcherOpen,
     groups: () => groups.value,
     activeId: () => activeTab.value?.id,
     positions: () => tabPositions.value,
     machine: tab => remotePeers.resolveTabConnection(tab).machineLabel,
-    status: id => {
-      const liveness = tabLivenessMap.value.get(id)
-      if (liveness && liveness !== 'live') return 'disconnected'
-      return tabStatuses.value.get(id) ?? 'terminal'
-    },
+    status: id => aggregatePaneStatus(tabPaneStatuses.value.get(id) ?? []),
+    panes: id => tabPaneStatuses.value.get(id) ?? [],
     select: switchTab,
     expand: toggleGroupCollapsed,
     signals: () => quickSwitchSignals.value,
     ready: () => !loading.value,
-    isReading: () => !overviewOpen.value && !!activeTab.value?.sessionId && activeWsStatus.value === 'connected',
+    isReading: () => {
+      const tab = activeTab.value
+      return !overviewOpen.value && !!tab && [[tab.sessionId, tab.id], [tab.split?.secondSessionId, `${tab.id}__split2`]]
+        .some(([id, key]) => !!id && !!key && visibleSessionIds.value.includes(id) && tabRuntimes[key]?.wsStatus === 'connected')
+    },
   })
   function openQuickSwitcher(): void {
     closeOverview()
@@ -1157,7 +1166,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     // 自动重开留下的标记：哪些标签现在挂的是新 shell（用户在里面首次输入即消失）
     reopenedTabIds,
     // D1-D7: tab-shortcut numbering + overview + guide banner deep-link
-    tabPositions, tabDisplayName, tabStatuses, leaderPending, leaderLabel,
+    tabPositions, tabDisplayName, tabStatuses, tabPaneStatuses, onVisibleSessions, leaderPending, leaderLabel,
     quickSwitcher, openQuickSwitcher, quickSwitchBinding, quickSwitchLabel,
     overviewOpen, toggleOverview, closeOverview, overviewGroups: overview.groups, overviewRollup: overview.rollup,
     selectOverviewIndex,
