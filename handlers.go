@@ -946,7 +946,7 @@ func (s *Server) handleControlMessage(ctx context.Context, conn *websocket.Conn,
 		// This declares the size of ONE window — this connection's — not the session's. The
 		// session is then fitted to the smallest window watching it, here and again in the
 		// daemon. See session_viewport.go.
-		if err := sess.SetViewerSize(subID, payload.Cols, payload.Rows); err != nil {
+		if err := sess.setViewerSize(subID, payload.Cols, payload.Rows, payload.PreserveScrollback); err != nil {
 			logger.Debug("declaring the viewer size failed", "id", sess.ID, "error", err)
 		}
 

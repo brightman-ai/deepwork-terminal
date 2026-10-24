@@ -15,7 +15,7 @@ export interface OutputFrameDeps {
   gate: RestoreGate
   latency: LatencyTracker
   /** 写给终端；`onParsed` 在 xterm 解析完这次数据时调用（不是画出）。 */
-  write(data: Uint8Array, onParsed?: () => void): void
+  write(data: Uint8Array, onParsed?: () => void, restoring?: boolean): void
   sched: FrameScheduler
   now(): number
   visibilityEpoch(): number
@@ -52,7 +52,7 @@ export function handleOutputFrame(deps: OutputFrameDeps, bytes: Uint8Array): voi
         deps.onLatencySample?.()
       }
     }, RESTORE_PAINT_FALLBACK_MS)
-  })
+  }, verdict.restore)
 }
 
 /**
@@ -67,5 +67,5 @@ export function handleControlFrame(deps: OutputFrameDeps, type: string): void {
   }
   const v = deps.gate.control(type)
   if (!v.flushReset) return
-  deps.write(deps.resetBytes, v.awaitPaint ? () => settleRestore(deps, v.epoch) : undefined)
+  deps.write(deps.resetBytes, v.awaitPaint ? () => settleRestore(deps, v.epoch) : undefined, true)
 }

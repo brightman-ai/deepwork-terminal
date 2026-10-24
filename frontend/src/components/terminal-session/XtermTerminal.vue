@@ -46,6 +46,7 @@ import {
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useXtermKeyboardFallback } from '@terminal/composables/cli/useXtermKeyboardFallback'
 import { clearXtermHelperTextareaValue } from '@terminal/composables/cli/useXtermHelperTextarea'
+import { captureTerminalViewport, restoreTerminalViewport } from '@terminal/composables/cli/terminalViewportRestore'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { createLogger } from '@ce/utils/obs'
 import { createRenderMetrics, type RenderMetrics } from '@terminal/composables/cli/terminalRenderMetrics'
@@ -798,7 +799,7 @@ onUnmounted(() => {
  * on screen. The restore overlay and the input-latency probe both need that distinction, so they
  * hang their own "painted" step off this callback (see framePaint.ts).
  */
-function write(data: string | Uint8Array, onParsed?: () => void) {
+function write(data: string | Uint8Array, onParsed?: () => void, restoring = false) {
   initTerminal()
   // Short-circuit, not just a guarded call: shouldSyncRenderAfterWrite fully TextDecoder's the
   // frame and runs three regexes over it. With the forced repaint off, that scan has no consumer,
@@ -820,6 +821,10 @@ function write(data: string | Uint8Array, onParsed?: () => void) {
     laidOutAtWrite,
   })
   const target = terminal
+  // Capture after previously queued bytes and ordered resizes have been parsed, immediately
+  // before the reset. Queue the whole frame now so later live output cannot overtake it.
+  let anchor: ReturnType<typeof captureTerminalViewport> | undefined
+  if (restoring) target?.write('', () => { if (target) anchor = captureTerminalViewport(target) })
   // Big frames go in as slices so xterm's WriteBuffer can yield between them (writeSlices.ts); the
   // frame's own bookkeeping hangs off the LAST slice, so "parsed" still means the whole frame.
   // [Ref: guide/troubleshooting/ime-shift-double-toggle.md]
@@ -827,6 +832,7 @@ function write(data: string | Uint8Array, onParsed?: () => void) {
   slices.forEach((slice, i) => {
     if (i < slices.length - 1) { target?.write(slice); return }
     target?.write(slice, () => {
+      if (anchor && terminal === target) restoreTerminalViewport(target, anchor)
       // 帧数与字节数**永远**记录（那是真实流量，与可见性无关）；只有耗时样本受闸门约束。
       renderMetrics?.noteFrame(
         dataLength(data),

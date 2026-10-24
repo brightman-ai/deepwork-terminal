@@ -1649,7 +1649,8 @@ function declareViewport(opts: { geometryChanged: boolean }): void {
     return
   }
 
-  const sent = sendResize(grid.cols, grid.rows)
+  const sent = sendResize(grid.cols, grid.rows, term.buffer.active.type === 'normal'
+    && term.buffer.active.viewportY < term.buffer.active.baseY)
   if (!sent) {
     wasViewer = false // 债留到能说话的那一刻——重连梯队会立刻还上
     return
@@ -2145,7 +2146,7 @@ function scheduleGhostRefresh(): void {
 const outputFrames: OutputFrameDeps = {
   gate: restoreGate,
   latency,
-  write: (data, onParsed) => xtermRef.value?.write(data, onParsed),
+  write: (data, onParsed, restoring) => xtermRef.value?.write(data, onParsed, restoring),
   sched: browserFrameScheduler,
   now: () => performance.now(),
   visibilityEpoch: currentVisibilityEpoch,
