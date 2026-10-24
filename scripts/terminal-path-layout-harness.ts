@@ -7,6 +7,9 @@ import { enableUnicode11 } from '../frontend/src/components/terminal-session/ter
 import { editedDiffLineLinkFromBuffer, findWrappedTerminalFileLinks, terminalCellRange, wrappedTerminalRows, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../frontend/src/components/terminal-session/terminalFileLinks'
 
 const samples = [
+  { text: '稿是原地改的 v2，没另起 v3（同一天三版会乱）：讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md（.docx 重出），643', path: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', selected: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', unprefixed: true },
+  { text: '稿是原地改的 v2，没另起 v3（同一天三版会乱）：讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md（.docx\r\n  重出），643', path: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', selected: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', unprefixed: true },
+  { text: 'docs/report.md(final)-old.txt（.pdf 重出）', path: 'docs/report.md(final)-old.txt', selected: 'docs/report.md(final)-old.txt', unprefixed: true },
   { text: '  - 交流提纲 v2（现行草稿，8 页加 1 页可选）：/home/ubuntu/code/automation-design/docs/topics/TH-1022-中行AI安全交流/中行AI安全交流-交流提纲-v2-20261022.md', path: '/home/ubuntu/code/automation-design/docs/topics/TH-1022-中行AI安全交流/中行AI安全交流-交流提纲-v2-20261022.md', selected: '/home/ubuntu/code/automation-design/docs/topics/TH-1022-中行AI安全交流/中行AI安全交流-交流提纲-v2-20261022.md', unprefixed: true },
   { text: '提纲（现行）：docs/报告(final).md:21', path: 'docs/报告(final).md', selected: 'docs/报告(final).md:21', line: 21, unprefixed: true },
   { text: '(optional):docs/report.md', path: 'docs/report.md', selected: 'docs/report.md', unprefixed: true },

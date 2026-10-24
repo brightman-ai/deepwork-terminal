@@ -51,6 +51,35 @@ describe('findTerminalFileLinks', () => {
     }
   })
 
+  it('does not mistake the extension inside a clipped prose note for the file type', () => {
+    const path = '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md'
+    const text = `稿是原地改的 v2，没另起 v3（同一天三版会乱）：${path}（.docx 重出），643`
+    expect(findTerminalFileLinks(text)).toEqual([{path, start: text.indexOf(path), end: text.indexOf(path) + path.length - 1}])
+    for (const file of ['docs/report.md', '/work/report.md', 'docs/report.md(final).txt', 'docs/报告（终稿）.md', 'docs/盲评.out']) {
+      for (const [open, close] of [['（', '）'], ['(', ')'], ['【', '】'], ['[', ']'], ['《', '》']]) {
+        for (const ext of ['.docx', '.pdf', '.html', '.json']) {
+          const sentence = `${file}${open}${ext} 重出${close}，正文已更新。`
+          expect(findTerminalFileLinks(sentence).map(l => l.path)).toEqual([file])
+          expect(sentence.slice(findTerminalFileLinks(sentence)[0]!.start, findTerminalFileLinks(sentence)[0]!.end + 1)).toBe(file)
+        }
+      }
+    }
+  })
+
+  it('retains internal filename brackets and explicit literal targets beside format-like notes', () => {
+    for (const file of ['docs/report.md(final).txt', 'docs/report.md(final)-old.txt', 'docs/a.md（目录）/b.md', 'docs/report.md（.docx）.txt']) {
+      expect(findTerminalFileLinks(file).map(l => l.path)).toEqual([file])
+      expect(findTerminalFileLinks(file + '（.docx 重出）').map(l => l.path)).toEqual([file])
+      expect(findTerminalFileLinks(file + '（普通说明）').map(l => l.path)).toEqual([file])
+    }
+    const literal = 'docs/report.md（.docx'
+    for (const text of [`"${literal}"`, `\`${literal}\``, `[原稿](<${literal}>)`]) {
+      expect(findTerminalFileLinks(text).map(l => l.path)).toEqual([literal])
+    }
+    expect(findTerminalFileLinks('docs/report.md（另见a.docx（重出））').map(l => l.path)).toEqual(['docs/report.md'])
+    expect(findTerminalFileLinks('docs/report.md:121（.docx 重出）')[0]).toMatchObject({path: 'docs/report.md', lineStart: 121})
+  })
+
   it('cuts ASCII and fullwidth label colons with or without spaces before a path', () => {
     const path = 'topics/TH-0628-xge-NDR-X-Graph引擎细化与场景验证/讲解/报告-v3.md'
     for (const label of ['v3', 'v3.1', '第三场纪要', '文件', 'output-v3']) {

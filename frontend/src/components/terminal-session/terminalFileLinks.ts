@@ -555,11 +555,14 @@ function bareFileReference(value: string, offset: number): { raw: string; start:
     }
     break
   }
-  const stack: string[] = []
+  const stack: Array<{ at: number; close: string }> = []
+  const topLevelOpenings: number[] = []
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === '\\') { i++; continue }
-    if (PATH_WRAPPERS[raw[i]]) stack.push(PATH_WRAPPERS[raw[i]])
-    else if (PATH_CLOSERS.has(raw[i]) && stack.pop() !== raw[i]) { raw = raw.slice(0, i); break }
+    if (PATH_WRAPPERS[raw[i]]) {
+      if (!stack.length) topLevelOpenings.push(i)
+      stack.push({at: i, close: PATH_WRAPPERS[raw[i]]})
+    } else if (PATH_CLOSERS.has(raw[i]) && stack.pop()?.close !== raw[i]) { raw = raw.slice(0, i); break }
   }
   raw = raw.replace(/[;,!]+$/u, '')
   if (raw.endsWith('.') && !raw.endsWith('...')) raw = raw.slice(0, -1)
@@ -569,9 +572,22 @@ function bareFileReference(value: string, offset: number): { raw: string; start:
   // otherwise an opening bracket after a complete file ends the reference.
   const location = raw.search(/(?::\d|#L\d)/)
   const path = location < 0 ? raw : raw.slice(0, location)
-  if (!isFileReference(path)) {
-    for (let i = 0; i < raw.length; i++) {
-      if (!PATH_WRAPPERS[raw[i]]) continue
+  const unclosed = new Set(stack.map(part => part.at))
+  const noteStart = topLevelOpenings.find(i => {
+    if (i >= path.length || !unclosed.has(i)) return false
+    const prefix = path.slice(0, i), name = prefix.slice(prefix.lastIndexOf('/') + 1)
+    return isFileReference(prefix) && (isSupportedPreviewName(name) || SPECIAL_FILE_NAMES.has(name)
+      || name[0] !== '.' && /\.[\p{L}\p{N}]{1,16}$/u.test(name) && !/[()[\]{},=]/.test(prefix))
+  })
+  // A token can end at `.docx` INSIDE a prose note cut by whitespace. Its
+  // extension cannot complete the file before that unmatched opener. Explicit
+  // quoted/Markdown targets do not use this bare-token heuristic.
+  if (noteStart !== undefined) raw = raw.slice(0, noteStart)
+  else if (!isFileReference(path)) {
+    // Later top-level notes follow the complete filename. Earlier balanced
+    // groups may belong to report.md(final).txt; nested note groups cannot win.
+    for (const i of topLevelOpenings.reverse()) {
+      if (i >= raw.length) continue
       const prefix = raw.slice(0, i)
       const name = prefix.slice(prefix.lastIndexOf('/') + 1)
       // Unknown extensions are allowed on simple paths (.out etc.), but a

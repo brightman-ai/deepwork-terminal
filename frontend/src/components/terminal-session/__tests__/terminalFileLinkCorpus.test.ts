@@ -31,6 +31,8 @@ const cases: Array<{ name: string; text: string; paths: string[]; printed?: stri
   { name: 'literal filename internal colons', text: 'docs/报告.md：附件.md', paths: ['docs/报告.md：附件.md'] },
   { name: 'literal internal parentheses with location', text: 'docs/report.md(final).txt:121', paths: ['docs/report.md(final).txt'], printed: ['docs/report.md(final).txt:121'], line: 121 },
   { name: 'source line before annotation', text: 'docs/report.md:121（对应源码）', paths: ['docs/report.md'], printed: ['docs/report.md:121'], line: 121 },
+  { name: 'format extension inside a whitespace-clipped prose note', text: '文件：docs/report.md（.docx 重出），643', paths: ['docs/report.md'], printed: ['docs/report.md'] },
+  { name: 'literal filename brackets followed by a format note', text: 'docs/report.md(final).txt（.pdf 重出）', paths: ['docs/report.md(final).txt'], printed: ['docs/report.md(final).txt'] },
   { name: 'custom extension and fullwidth field separator', text: '时间：2026-10-16｜来源：scratchpad/blind/盲评.out（Sonnet，匿名）', paths: ['scratchpad/blind/盲评.out'] },
   { name: 'shell option value', text: 'Bash(cat --output=docs/out.txt;cat "docs/in.txt")', paths: ['docs/out.txt', 'docs/in.txt'] },
   { name: 'standalone angle wrapper', text: '<docs/report.md>', paths: ['docs/report.md'] },
@@ -52,6 +54,16 @@ const cases: Array<{ name: string; text: string; paths: string[]; printed?: stri
 ]
 
 describe('reviewed transcript path grammar', () => {
+  it('keeps the reported v2 Markdown path and excludes its format note across every soft wrap', () => {
+    const path = '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md'
+    const text = `稿是原地改的 v2，没另起 v3（同一天三版会乱）：${path}（.docx 重出），643`
+    for (let split = 1; split < text.length; split++) {
+      const rows = [{text: text.slice(0, split), isWrapped: false}, {text: text.slice(split), isWrapped: true}]
+      const links = [0, 1].flatMap(row => findWrappedTerminalFileLinks(rows, row))
+      expect([...new Set(links.map(link => link.path))]).toEqual([path])
+      expect(links.map(link => rows[link.row].text.slice(link.rawStart, link.rawStart + link.rawLength)).join('')).toBe(path)
+    }
+  })
   it('keeps the reported parenthesized HTML and Markdown paths separate from adjacent Chinese prose across every soft wrap', () => {
     const base = 'docs/.tg/work/20261017-002300-reading-density-design/article-closure-20261020/feedback-20261024/'
     const paths = [base + 'comparison.html', base + 'design.md']
