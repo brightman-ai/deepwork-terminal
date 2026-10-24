@@ -250,6 +250,8 @@ async function run(): Promise<void> {
     const prefix = 'topics/TH-0923-gjlj-攻击路径治理商业设计与效果价值范式/数据飞轮壁垒/数据'
     const suffix = '飞轮壁垒-分析梳理-v5-20261019.md'
     for (const prose of [
+      {text: '文件：/home/ubuntu/code/automation-design/collab/work/w\r\n  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/\r\n  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.\r\n  md（393 行，第一屏五段是全部结论，证据行号在附录 A）。\r\n', path: '/home/ubuntu/code/automation-design/collab/work/whiteboard-ng自举-20261001/交接-20261024-Fable独立重审/独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.md', selected: '/home/ubuntu/code/automation-design/collab/work/w\n  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/\n  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.\n  md'},
+      {text: '  文件：./docs/long-report.doc\r\n  x（已保存）\r\n', path: './docs/long-report.docx', selected: './docs/long-report.doc\n  x'},
       {text: `  我已核读这些会话的用户与助手消息、历版分析、业务线原始材料及 CEO 文档。完整结果保存为《数据飞轮壁垒·分析梳理 v5》 (\x1b[32m${prefix}\x1b[0m\r\n  ${suffix})，包含原始会话定位和逐项依据。\r\n`, path: prefix + suffix, selected: prefix + '\n  ' + suffix},
       {text: '  记录 "docs/my \r\n   report.md" 已保存。\r\n', path: 'docs/my  report.md', selected: 'docs/my \n   report.md'},
       {text: '• 记录 [报告](docs/数\r\n  据飞轮/报\r\n  告.md)已保存。\r\n', path: 'docs/数据飞轮/报告.md', selected: 'docs/数\n  据飞轮/报\n  告.md'},
@@ -275,6 +277,19 @@ async function run(): Promise<void> {
         for (const changed of [32, 120, cols]) {
           term.resize(changed, 40)
           inspectNegative(text, changed, 'hard-prose-reflow')
+        }
+      } catch (error) { failures.push(String(error)) }
+    }
+    for (const prefix of ['https://example.com/', '${ROOT}/', 'docs/<name>/', 'C:/work/']) {
+      try {
+        term.reset()
+        term.resize(cols, 40)
+        const text = `  文件：${prefix}long-\r\n  report.md（已保存）\r\n`
+        await write(text)
+        inspectNegative(text, cols, 'labelled-hard-prose')
+        for (const changed of [32, 120, cols]) {
+          term.resize(changed, 40)
+          inspectNegative(text, changed, 'labelled-hard-prose-reflow')
         }
       } catch (error) { failures.push(String(error)) }
     }

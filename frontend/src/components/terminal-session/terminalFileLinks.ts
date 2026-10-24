@@ -116,6 +116,70 @@ function referenceDelimiters(text: string): { open: number; closed: Array<{start
   return {open: stack.length, closed}
 }
 
+/** A label explicitly introduces a bare reference too. CLI prose wraps its
+ * token with a fixed hanging gutter even without quotes/parentheses. Recover
+ * through a complete filename, never through a second label/root/record. */
+function renderedLabelledReferenceRows(buffer: TerminalBufferLike, current: number, original: {rows: WrappedTerminalRow[]; currentRow: number}): typeof original | undefined {
+  const fileName = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
+  const completeFile = (path: string): boolean => SPECIAL_FILE_NAMES.has(fileName(path))
+    || fileName(path)[0] !== '.' && /\.[\p{L}\p{N}]{1,16}$/u.test(fileName(path))
+  let first = current - original.currentRow, probe = original.rows
+  let searched = probe.length, workLeft = 128_000
+  while (searched <= 64) {
+    const head = logicalRecordText(probe)
+    workLeft -= head.length
+    if (workLeft < 0 || !head.trim() || diffLineNumber(head) !== undefined || EDIT_HEADER_RE.test(head) || EDIT_TOOL_HEADER_RE.test(head)) return undefined
+    const token = /[^\s"'`|｜，。；！？、]+$/u.exec(head)
+    const start = token ? bareFileReference(token[0], token.index).start : -1
+    const value = start >= 0 ? head.slice(start) : ''
+    if (value.includes('/') && /[:：]\s*$/u.test(head.slice(0, start)) && !referenceDelimiters(value).open) {
+      const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(value)
+      const initial = findTerminalFileLinks(head).find(link => link.start === start)?.path
+      const initialFile = initial && completeFile(initial)
+      const indent = /^( *)(?:[•●⏺*-] +)?/u.exec(head)![0].length || 2
+      const gutter = ' '.repeat(indent)
+      const groups = [probe], cuts: number[] = []
+      let next = first + probe.length, total = probe.length, length = head.length
+      while (next < buffer.length && total < 64) {
+        const part = softWrappedTerminalRows(buffer, next)
+        const tail = logicalRecordText(part.rows)
+        const body = tail.slice(indent)
+        if (!part.rows.length || total + part.rows.length > 64 || !tail.startsWith(gutter) || !body || /^\s/u.test(body)
+          || /^(?:[•●⏺*-] +|\/|~\/|\.{1,2}\/)/u.test(body)
+          || /^[\p{L}\p{N}_.()[\]（）【】《》-]+[:：]/u.test(body)
+          || diffLineNumber(tail) !== undefined || EDIT_HEADER_RE.test(tail) || EDIT_TOOL_HEADER_RE.test(tail)) break
+        cuts.push(length); groups.push(part.rows)
+        length += body.length; total += part.rows.length; next += part.rows.length
+        const rows = mergeRenderedRows(groups, indent, false), text = logicalRecordText(rows)
+        workLeft -= text.length
+        if (workLeft < 0) return undefined
+        const link = findTerminalFileLinks(text).find(link => link.start === start)
+        const path = opaque ? text.slice(start).split(/[\s（(]/u, 1)[0] : link?.path
+        if (path && completeFile(path) && (opaque || cuts.every(cut => start < cut && cut < link!.start + (link!.displayLength ?? link!.end - link!.start + 1)))) {
+          // report.h + tml is one filename; report.md + other.md is two.
+          // Only an extension continuation can extend an already complete file.
+          if (initialFile && !(path.startsWith(initial) && /^[\p{L}\p{N}]+$/u.test(path.slice(initial.length)) && isSupportedPreviewName(fileName(path)))) {
+            if (!path.startsWith(initial) || !/^[\p{L}\p{N}]+$/u.test(path.slice(initial.length))) break
+          } else {
+            const following = next < buffer.length ? logicalRecordText(softWrappedTerminalRows(buffer, next).rows) : ''
+            const extension = following.startsWith(gutter) ? /^([\p{L}\p{N}]+)(?=$|[\s（(])/u.exec(following.slice(indent))?.[1] : undefined
+            const endsAtBoundary = opaque ? text.slice(start) === path : link!.start + (link!.displayLength ?? link!.end - link!.start + 1) === text.length
+            if (!(endsAtBoundary && extension && isSupportedPreviewName(fileName(path + extension)))) {
+              return current < next ? {rows, currentRow: current - first} : undefined
+            }
+          }
+        }
+        if (/\s/u.test(body)) break
+      }
+    }
+    if (first === 0 || !/^ {2}/.test(head) || /^\s*[•●⏺*-] +/u.test(head)) return undefined
+    probe = softWrappedTerminalRows(buffer, first - 1).rows
+    if (!probe.length) return undefined
+    searched += probe.length; first -= probe.length
+  }
+  return undefined
+}
+
 /** Normal assistant paragraphs also hard-wrap with a blank hanging gutter.
  * Only join when ONE explicitly delimited reference spans EVERY hard boundary.
  * Blank lines, new bullets/edit records and unindented output are boundaries.
@@ -231,6 +295,8 @@ export function wrappedTerminalRows(buffer: TerminalBufferLike, current: number)
   if (header) return header
   const prose = renderedProseReferenceRows(buffer, current, original)
   if (prose) return prose
+  const labelled = renderedLabelledReferenceRows(buffer, current, original)
+  if (labelled) return labelled
   const groups = [original.rows]
   let first = current - original.currentRow
   let total = original.rows.length

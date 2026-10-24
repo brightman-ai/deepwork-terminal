@@ -531,6 +531,71 @@ describe('explicit file references in renderer-wrapped prose', () => {
   })
 })
 
+describe('labelled bare paths with CLI hard continuations', () => {
+  const buffer = (lines: string[]) => ({ length: lines.length, getLine: (row: number) => {
+    const text = lines[row]
+    return text === undefined ? undefined : { isWrapped: false, length: text.length,
+      getCell: (col: number) => ({ getChars: () => text[col], getWidth: () => 1 }) }
+  } })
+
+  it('recovers the reported absolute path including the separated extension, without the label or note', () => {
+    const lines = ['文件：/home/ubuntu/code/automation-design/collab/work/w',
+      '  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/',
+      '  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.',
+      '  md（393 行，第一屏五段是全部结论，证据行号在附录 A）。']
+    const path = '/home/ubuntu/code/automation-design/collab/work/whiteboard-ng自举-20261001/交接-20261024-Fable独立重审/独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.md'
+    for (const head of [lines[0], '  ' + lines[0], '⏺ ' + lines[0]]) {
+      const b = buffer([head, ...lines.slice(1)])
+      for (let row = 0; row < lines.length; row++) {
+        const links = terminalFileLinksAtRow(b, row)
+        expect(links.map(l => l.path)).toEqual([path])
+        for (let col = links[0]!.cellStart - 1; col < links[0]!.cellEnd; col++) {
+          expect(terminalFileLinkAtCell(b, row, col)?.path).toBe(path)
+        }
+      }
+      expect(terminalFileLinkAtCell(b, 0, head.indexOf('文件'))).toBeUndefined()
+      expect(terminalFileLinkAtCell(b, 3, lines[3].indexOf('393'))).toBeUndefined()
+    }
+  })
+
+  it('recovers labelled path token continuations, including a recognized extension prefix', () => {
+    for (const path of ['docs/long-report.md', './docs/report.html', '~/docs/report.docx', '/work/result.json', '/work/readme.markdown']) {
+      for (let cut = 1; cut < path.length; cut++) {
+        // A filesystem/name anchor has to occur before the first hard boundary.
+        if (!path.slice(0, cut).includes('/') || path[cut] === '/') continue
+        const b = buffer(['  结果文件: ' + path.slice(0, cut), '  ' + path.slice(cut) + '（已保存）'])
+        for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row).map(l => l.path)).toEqual([path])
+      }
+    }
+  })
+
+  it('does not splice complete files, new roots, new labels, records, blank rows or different gutters', () => {
+    for (const lines of [
+      ['  文件：/tmp/report.md', '  other.md'],
+      ['  文件：/tmp/report', '  /other.md'],
+      ['  文件：/tmp/report', '  文件：other.md'],
+      ['  文件：/tmp/report', '  ⏺ other.md'],
+      ['  文件：/tmp/report', '', '  other.md'],
+      ['  文件：/tmp/report', '    other.md'],
+      ['  文件：/tmp/report ', '  other.md'],
+      ['  /tmp/report', '  other.md'],
+    ]) {
+      const b = buffer(lines)
+      for (let row = 0; row < lines.length; row++) {
+        expect(wrappedTerminalRows(b, row).rows).toHaveLength(1)
+        expect(terminalFileLinksAtRow(b, row).some(l => l.path === '/tmp/reportother.md' || l.path === '/tmp/report.mdother.md')).toBe(false)
+      }
+    }
+  })
+
+  it('keeps labelled foreign addresses and dynamic targets opaque across their continuation', () => {
+    for (const prefix of ['https://example.com/', '${ROOT}/', 'docs/<name>/', 'C:/work/']) {
+      const b = buffer(['  文件：' + prefix + 'long-', '  report.md（已保存）'])
+      for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row)).toEqual([])
+    }
+  })
+})
+
 describe('Markdown targets inside document edit previews', () => {
   const buffer = (lines: string[]) => ({ length: lines.length, getLine: (row: number) => {
     const text = lines[row]
