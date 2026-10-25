@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -291,18 +292,18 @@ func TestFilesRaw_HTMLRenderAssets(t *testing.T) {
 	_, err := sm.CreateWithOptions(CreateOptions{Name: "html-assets", CWD: cwd})
 	require.NoError(t, err)
 	sess := sessionByName(t, sm, "html-assets")
-	renderURL := formatURL(server, "/files/raw?session=%s&cwd=%s&anchor=explicit&path=%s&render=1", sess.ID, url.QueryEscape(cwd), url.QueryEscape("docs/buddy.html"))
+	renderURL := formatURL(server, "/files/raw?session=%s&cwd=%s&anchor=explicit&path=%s&render=1&auth=%s", sess.ID, url.QueryEscape(cwd), url.QueryEscape("docs/buddy.html"), testAuthCode)
 	r, err := httpGet(renderURL, "")
 	require.NoError(t, err)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), `render-assets/`+sess.ID+`/docs/`)
+	assert.Contains(t, string(body), `render-assets/`+sess.ID+`/`+testAuthCode+`/`)
 	assert.Contains(t, r.Header.Get("Content-Security-Policy"), "script-src 'unsafe-inline' 'self' http://")
 
-	assetBase := "/files/render-assets/" + sess.ID + "/docs/"
+	assetBase := "/files/render-assets/" + sess.ID + "/" + testAuthCode + "/" + base64.RawURLEncoding.EncodeToString([]byte(cwd)) + "/docs/"
 	for name, wantType := range map[string]string{"buddy.css": "text/css", "buddy.js": "text/javascript", "buddy.svg": "image/svg+xml"} {
-		assetURL := formatURL(server, assetBase+name+"?session=%s&cwd=%s&anchor=explicit", sess.ID, url.QueryEscape(cwd))
+		assetURL := formatURL(server, "%s", assetBase+name)
 		asset, err := httpGet(assetURL, "")
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, asset.StatusCode, name)
