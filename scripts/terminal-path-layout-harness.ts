@@ -253,6 +253,9 @@ async function run(): Promise<void> {
     const prefix = 'topics/TH-0923-gjlj-攻击路径治理商业设计与效果价值范式/数据飞轮壁垒/数据'
     const suffix = '飞轮壁垒-分析梳理-v5-20261019.md'
     for (const prose of [
+      {text: '● Update(/work/skills/whiteboar\r\n        d-tg2/design/场景模拟-介\r\n        入点.md)\r\n', path: '/work/skills/whiteboard-tg2/design/场景模拟-介入点.md', selected: '/work/skills/whiteboar\n        d-tg2/design/场景模拟-介\n        入点.md'},
+      {text: '● Update("docs/my \r\n         report  final.md")\r\n', path: 'docs/my  report  final.md', selected: 'docs/my \n         report  final.md'},
+      {text: 'Read(docs/中文文档/long-\r\n        report.md · lines 12-20)\r\n', path: 'docs/中文文档/long-report.md', selected: 'docs/中文文档/long-\n        report.md'},
       {text: '文件：/home/ubuntu/code/automation-design/collab/work/w\r\n  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/\r\n  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.\r\n  md（393 行，第一屏五段是全部结论，证据行号在附录 A）。\r\n', path: '/home/ubuntu/code/automation-design/collab/work/whiteboard-ng自举-20261001/交接-20261024-Fable独立重审/独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.md', selected: '/home/ubuntu/code/automation-design/collab/work/w\n  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/\n  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.\n  md'},
       {text: '  文件：./docs/long-report.doc\r\n  x（已保存）\r\n', path: './docs/long-report.docx', selected: './docs/long-report.doc\n  x'},
       {text: `  我已核读这些会话的用户与助手消息、历版分析、业务线原始材料及 CEO 文档。完整结果保存为《数据飞轮壁垒·分析梳理 v5》 (\x1b[32m${prefix}\x1b[0m\r\n  ${suffix})，包含原始会话定位和逐项依据。\r\n`, path: prefix + suffix, selected: prefix + '\n  ' + suffix},

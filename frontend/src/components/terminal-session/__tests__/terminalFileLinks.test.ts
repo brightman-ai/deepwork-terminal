@@ -531,6 +531,70 @@ describe('explicit file references in renderer-wrapped prose', () => {
     expect(terminalFileLinksAtRow(tool, 1)[0]).toMatchObject({path: 'docs/数据飞轮/报告.md', lineStart: 12})
   })
 
+  it('removes the tool-title hanging gutter from every fragment of the reported Update path', () => {
+    const path = '/home/ubuntu/code/claude_remote/skills/whiteboard-tg2/design/whiteboard-t3预决策方案的场景模拟-介入点调用链与命名-v4附一-20261025.md'
+    const lines = ['● Update(/home/ubuntu/code/claude_remote/skills/whiteboar',
+      '        d-tg2/design/whiteboard-t3预决策方案的场景模拟-介',
+      '        入点调用链与命名-v4附一-20261025.md)',
+      '  ⎿  Added 1 line, removed 1 line', '      12 +new']
+    const b = buffer(lines)
+    for (const row of [0, 1, 2]) {
+      const links = terminalFileLinksAtRow(b, row)
+      expect(links).toHaveLength(1)
+      expect(links[0]).toMatchObject({path, lineStart: 12})
+      if (row > 0) expect(links[0].rawStart).toBe(8)
+      for (let col = links[0].cellStart - 1; col < links[0].cellEnd; col++) {
+        expect(terminalFileLinkAtCell(b, row, col)?.path).toBe(path)
+      }
+      expect(terminalFileSelectionAtCell(b, row, links[0].cellStart - 1, 80))
+        .toMatchObject({path, startRow: 0, endRow: 2})
+    }
+    expect(terminalFileLinkAtCell(b, 1, 7)).toBeUndefined()
+    expect(editedDiffLineLinkFromBuffer(b, 4)).toMatchObject({path, lineStart: 12})
+  })
+
+  it('recognizes eight-column continuations in file tool titles without requiring a bullet', () => {
+    for (const tool of ['Read', 'Update', 'Write', 'Edit', 'Edited']) {
+      for (const bullet of ['', '● ', '⏺ ', '• ']) {
+        for (const outer of ['', '  ']) {
+          const b = buffer([`${outer}${bullet}${tool}(docs/my report/介`,
+            `${outer}        入点.md${tool === 'Read' ? ' · lines 12-20' : ''})`])
+          for (const row of [0, 1]) {
+            expect(terminalFileLinksAtRow(b, row)[0])
+              .toMatchObject({path: 'docs/my report/介入点.md', ...(tool === 'Read' ? {lineStart: 12, lineEnd: 20} : {})})
+          }
+        }
+      }
+    }
+  })
+
+  it('preserves literal filename spaces around a tool-title hard boundary', () => {
+    for (const gutter of ['  ', '        ']) {
+      for (const [open, close] of [['', ''], ['"', '"'], ["'", "'"]]) {
+        const b = buffer([`● Update(${open}docs/my `, `${gutter} report  final.md${close})`])
+        for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row)[0]?.path).toBe('docs/my  report  final.md')
+      }
+    }
+    // An ordinary paragraph has no tool-title gutter; its extra spaces are content.
+    const b = buffer(['● 文档 (docs/my', '        report.md)'])
+    expect(terminalFileLinksAtRow(b, 1)[0]?.path).toBe('docs/my      report.md')
+  })
+
+  it('does not extend a tool title across a blank, new tool, finished title or another record', () => {
+    for (const lines of [
+      ['● Update(docs/partial', '', '        report.md)'],
+      ['● Update(docs/partial', '        Read(other.md)'],
+      ['● Update(docs/done.md)', '        report.md)'],
+      ['● Update(docs/partial', 'report.md)'],
+      ['● Update(docs/partial', '        more/', '  report.md)'],
+    ]) {
+      const b = buffer(lines)
+      for (let row = 0; row < lines.length; row++) {
+        expect(terminalFileLinksAtRow(b, row).some(link => link.path === 'docs/partialreport.md' || link.path === 'docs/partialmore/report.md')).toBe(false)
+      }
+    }
+  })
+
   it('retains real spaces in quoted filenames at a prose hard-wrap boundary', () => {
     const b = buffer(['  记录 "docs/my ', '   report.md" 已保存。'])
     expect(terminalFileLinksAtRow(b, 0)[0]?.path).toBe('docs/my  report.md')
