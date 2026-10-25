@@ -86,16 +86,44 @@ function logicalRecordText(rows: readonly WrappedTerminalRow[]): string {
   return rows.map(logicalRowText).join('')
 }
 
+function printedRecordWidth(buffer: TerminalBufferLike, first: number, count: number): number {
+  let width = 0
+  for (let row = first; row < first + count; row++) {
+    const line = buffer.getLine(row)
+    if (!line) return 0
+    let end = line.length
+    while (end > 0 && !line.getCell(end - 1)?.getChars()) end--
+    for (let col = 0; col < end; col++) width += line.getCell(col)?.getWidth() ?? 0
+    // The last wide glyph's filler was removed along with empty padding.
+    // Its leading cell already contributes both columns above.
+  }
+  return width
+}
+
 /** A Write result owns its final path field, including literal spaces. Its
  * continuation gutter is the tree prefix, not the assistant bullet width. */
-function toolResultReference(text: string): { indent: number; start: number; value: string; gitQuoted: boolean } | undefined {
+function toolResultReference(text: string): { indent: number; start: number; value: string; gitQuoted: boolean; quotationClosed: boolean } | undefined {
   const match = /^([ \u00a0]*[⎿└][ \u00a0]+)Wrote[ \u00a0]+\d+[ \u00a0]+lines?[ \u00a0]+to(?:[ \u00a0]+|(?=[/~.])|$)(.*)$/u.exec(text)
   if (!match) return undefined
   let value = match[2], start = text.length - value.length
-  const quoted = /^(['"`]).*\1$/u.test(value)
-  const gitQuoted = quoted && value[0] === '"'
-  if (quoted) { value = value.slice(1, -1); start++ }
-  return { indent: match[1].length, start, value, gitQuoted }
+  const quote = /^["'`]/u.test(value) ? value[0] : ''
+  const quotationClosed = !quote || value.length > 1 && value.endsWith(quote)
+  const gitQuoted = quote === '"'
+  if (quote) { value = value.slice(1, quotationClosed ? -1 : undefined); start++ }
+  return { indent: match[1].length, start, value, gitQuoted, quotationClosed }
+}
+
+/** Only the immediately preceding Write record can confirm an otherwise
+ * ambiguous slash continuation of its own receipt. Never borrow a nearby file. */
+function precedingWriteTarget(buffer: TerminalBufferLike, first: number): string | undefined {
+  if (first <= 0) return undefined
+  const original = softWrappedTerminalRows(buffer, first - 1)
+  if (!original.rows.length) return undefined
+  const group = renderedProseReferenceRows(buffer, first - 1, original) ?? original
+  const text = logicalRecordText(group.rows)
+  if (!/^\s*(?:[⏺●•]\s*)?Write\(/i.test(text)) return undefined
+  const links = findTerminalFileLinks(text)
+  return links.length === 1 ? links[0].path : undefined
 }
 
 function mergeRenderedRows(groups: WrappedTerminalRow[][], indent: number, trimPadding = true): WrappedTerminalRow[] {
@@ -158,12 +186,15 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
     || fileName(path)[0] !== '.' && /\.[\p{L}\p{N}]{1,16}$/u.test(fileName(path))
   let first = current - original.currentRow, probe = original.rows
   let searched = probe.length, workLeft = 128_000
+  let recovered: typeof original | undefined
   while (searched <= 64) {
     const head = logicalRecordText(probe)
     workLeft -= head.length
-    if (workLeft < 0 || !head.trim() || diffLineNumber(head) !== undefined || EDIT_HEADER_RE.test(head) || EDIT_TOOL_HEADER_RE.test(head)) return undefined
+    if (workLeft < 0) return undefined
+    if (!head.trim() || diffLineNumber(head) !== undefined || EDIT_HEADER_RE.test(head) || EDIT_TOOL_HEADER_RE.test(head)) return recovered
     const token = /[^\s"'`|｜，。；！？、]+$/u.exec(head)
     const receipt = FILE_TOOL_RESULT_RE.exec(head)
+    const writeTarget = receipt ? precedingWriteTarget(buffer, first) : undefined
     let receiptField = receipt ? toolResultReference(head) : undefined
     const start = receiptField?.start ?? (token ? bareFileReference(token[0], token.index).start : -1)
     const value = receiptField?.value ?? (start >= 0 ? head.slice(start) : '')
@@ -179,21 +210,36 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
       && (labelled || !suffix && paragraphOwnsBareReference(buffer, first, head, indent))) {
       const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(value)
       const initial = findTerminalFileLinks(head).find(link => receipt ? receiptField && link.start === receiptField.start : link.start === start)?.path
-      const initialFile = initial && completeFile(initial)
+      const initialFile = initial && (completeFile(initial) || initial === writeTarget)
       const gutter = ' '.repeat(indent)
       const groups = [probe], cuts: number[] = []
+      const recordWidths = [printedRecordWidth(buffer, first, probe.length)]
+      let unconfirmedRoot = false
       let next = first + probe.length, total = probe.length, length = head.length
       while (next < buffer.length && total < 64) {
         const part = softWrappedTerminalRows(buffer, next)
         const tail = logicalRecordText(part.rows)
         const body = tail.slice(indent)
         const awaitingReceiptPath = receipt && !receiptField?.value.replace(/^["'`]/u, '').trim()
+        let confirmedRootContinuation = false
+        if (writeTarget && /^(?:\/|~\/|\.{1,2}\/)/u.test(body)) {
+          const candidate = toolResultReference(logicalRecordText(mergeRenderedRows([...groups, part.rows], indent, false)))
+          if (candidate) confirmedRootContinuation = writeTarget.startsWith(normalizeTerminalPath(candidate.gitQuoted ? decodeQuotedPath(candidate.value) : candidate.value))
+        }
+        // A CLI's fixed-column paragraph can put a directory slash at the
+        // beginning of a hard continuation. Geometry alone isn't ownership:
+        // require a labelled/paragraph field AND its eventual prose terminator.
+        const uniformField = !receipt && recordWidths[0] >= 24
+          && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
+        const newRoot = /^(?:\/|~\/|\.{1,2}\/)/u.test(body)
         if (!part.rows.length || total + part.rows.length > 64 || !tail.startsWith(gutter) || !body || !receipt && /^\s/u.test(body)
           || /^(?:[•●⏺*-] +)/u.test(body)
-          || !awaitingReceiptPath && /^(?:\/|~\/|\.{1,2}\/)/u.test(body)
+          || !awaitingReceiptPath && !confirmedRootContinuation && !uniformField && newRoot
           || /^[\p{L}\p{N}_.()[\]（）【】《》-]+[:：]/u.test(body)
           || diffLineNumber(tail) !== undefined || EDIT_HEADER_RE.test(tail) || EDIT_TOOL_HEADER_RE.test(tail) || FILE_TOOL_RESULT_RE.test(tail)) break
         cuts.push(length); groups.push(part.rows)
+        recordWidths.push(printedRecordWidth(buffer, next, part.rows.length))
+        if (newRoot && !awaitingReceiptPath && !confirmedRootContinuation) unconfirmedRoot = true
         length += body.length; total += part.rows.length; next += part.rows.length
         const rows = mergeRenderedRows(groups, indent, false), text = logicalRecordText(rows)
         workLeft -= text.length
@@ -201,29 +247,51 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         receiptField = receipt ? toolResultReference(text) : undefined
         const link = findTerminalFileLinks(text).find(link => link.start === (receiptField?.start ?? start))
         const path = receipt ? receiptField?.value : opaque ? text.slice(start).split(/[\s（(，。；！？、]/u, 1)[0] : link?.path
-        if (path && completeFile(path) && (receipt || opaque || cuts.every(cut => start < cut && cut < link!.start + (link!.displayLength ?? link!.end - link!.start + 1)))) {
+        const receiptPath = receiptField && normalizeTerminalPath(receiptField.gitQuoted ? decodeQuotedPath(receiptField.value) : receiptField.value)
+        const incompleteKnownTarget = receiptPath && writeTarget && receiptPath !== writeTarget && writeTarget.startsWith(receiptPath)
+        const afterReference = link ? text.slice(link.start + (link.displayLength ?? link.end - link.start + 1)) : ''
+        const followingRecord = next < buffer.length ? logicalRecordText(softWrappedTerminalRows(buffer, next).rows) : ''
+        const separatedTerminator = !afterReference && followingRecord.startsWith(gutter)
+          && /^(?:[。！？，；]|[（(【《])/u.test(followingRecord.slice(indent))
+          && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
+        const terminatedPath = link && (/^(?:[。！？，；]|[（(【《])/u.test(afterReference) || separatedTerminator)
+        if (path && (completeFile(path) || terminatedPath || receiptPath === writeTarget && !!writeTarget)
+          && (!receipt || receiptField?.quotationClosed && !incompleteKnownTarget)
+          && (!unconfirmedRoot || terminatedPath)
+          && (receipt || opaque || cuts.every(cut => start < cut && cut < link!.start + (link!.displayLength ?? link!.end - link!.start + 1)))) {
           // report.h + tml is one filename; report.md + other.md is two.
           // Only an extension continuation can extend an already complete file.
-          if (initialFile && !(path.startsWith(initial) && /^[\p{L}\p{N}]+$/u.test(path.slice(initial.length)) && isSupportedPreviewName(fileName(path)))) {
+          const extendsFilename = initial && path.startsWith(initial) && isSupportedPreviewName(fileName(path))
+            && (!!writeTarget && receiptPath === writeTarget || /^[\p{L}\p{N}]+$/u.test(path.slice(initial.length))
+              || !isSupportedPreviewName(fileName(initial)) && /^[\p{L}\p{N}_-]+\.[\p{L}\p{N}]+$/u.test(path.slice(initial.length)))
+            || !!initial && head.slice(start) === initial + '.' && !isSupportedPreviewName(fileName(initial))
+              && path.startsWith(initial + '.') && isSupportedPreviewName(fileName(path))
+          if (initialFile && !extendsFilename) {
             if (!path.startsWith(initial) || !/^[\p{L}\p{N}]+$/u.test(path.slice(initial.length))) break
           } else {
             const following = next < buffer.length ? logicalRecordText(softWrappedTerminalRows(buffer, next).rows) : ''
-            const extension = following.startsWith(gutter) ? /^([\p{L}\p{N}]+)(?=$|[\s（(])/u.exec(following.slice(indent))?.[1] : undefined
+            const extension = following.startsWith(gutter) ? /^(\.?[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}]+)?)(?=$|[\s（(。！？，；])/u.exec(following.slice(indent))?.[1] : undefined
             const endsAtBoundary = receipt || (opaque ? text.slice(start) === path : link!.start + (link!.displayLength ?? link!.end - link!.start + 1) === text.length)
-            if (!(endsAtBoundary && extension && isSupportedPreviewName(fileName(path + extension)))) {
-              return current < next ? {rows, currentRow: current - first} : undefined
+            const pendingDot = text.slice(start) === path + '.'
+            if (!((endsAtBoundary || pendingDot) && extension && isSupportedPreviewName(fileName(path + (pendingDot ? '.' : '') + extension)))) {
+              if (current >= next) return recovered
+              recovered = {rows, currentRow: current - first}
+              if (receipt || labelled || /^\s*[•●⏺*-] +/u.test(head)) return recovered
+              // A later directory fragment may look like a new relative path.
+              // Continue to the paragraph's earlier owners before choosing it.
+              break
             }
           }
         }
         if (!receipt && /\s/u.test(body)) break
       }
     }
-    if (first === 0 || !/^ {2}/.test(head) || /^\s*[•●⏺*-] +/u.test(head)) return undefined
+    if (first === 0 || !/^ {2}/.test(head) || /^\s*[•●⏺*-] +/u.test(head)) return recovered
     probe = softWrappedTerminalRows(buffer, first - 1).rows
     if (!probe.length) return undefined
     searched += probe.length; first -= probe.length
   }
-  return undefined
+  return recovered
 }
 
 /** Normal assistant paragraphs also hard-wrap with a blank hanging gutter.
@@ -271,11 +339,11 @@ function renderedProseReferenceRows(buffer: TerminalBufferLike, current: number,
         if (workLeft < 0) return undefined
         const delimiters = referenceDelimiters(text)
         const spansCuts = (start: number, end: number): boolean => cuts.every(cut => start < cut && cut < end)
-        const owners = delimiters.closed.filter(range => spansCuts(range.start + (toolHeader ? 0 : 1), range.end - (toolHeader ? 0 : 1)))
+        const owners = delimiters.closed.filter(range => spansCuts(range.start, range.end))
         const links = owners.length ? findTerminalFileLinks(text) : []
         const owned = owners.some(range => {
           if (links.some(link => range.start < link.start && link.end < range.end
-            && (toolHeader || spansCuts(link.start, link.start + (link.displayLength ?? link.end - link.start + 1))))) return true
+            && (toolHeader || cuts.every(cut => link.start <= cut && cut <= link.start + (link.displayLength ?? link.end - link.start + 1))))) return true
           // A complete foreign/opaque target must own its continuation too;
           // otherwise its tail could become a fabricated local basename.
           const value = text.slice(range.start + 1, range.end - 1)
@@ -307,7 +375,7 @@ function renderedEditHeaderRows(buffer: TerminalBufferLike, current: number, ori
     if (editedFileHeader(text)) return undefined
     if (EDIT_HEADER_RE.test(text) || /^\s*[└├│]\s+/.test(text)) {
       // Completed aggregate headers such as "Edited 4 files" aren't a path.
-      if (EDIT_STATS_RE.test(text)) return undefined
+      if (EDIT_STATS_TAIL_RE.test(text)) return undefined
       const indent = /^[ \t]*/.exec(text)![0].length
       const groups = [probe]
       let next = first + probe.length
@@ -315,14 +383,15 @@ function renderedEditHeaderRows(buffer: TerminalBufferLike, current: number, ori
       while (next < buffer.length && total < 64) {
         const part = softWrappedTerminalRows(buffer, next)
         const tail = logicalRecordText(part.rows)
-        if (!part.rows.length || total + part.rows.length > 64 || !tail.trim() || diffLineNumber(tail) !== undefined
+        const statsContinuation = /\(\s*\+\d*(?:\s*,?\s*[-−]\s*\d*)?\s*$/.test(logicalRecordText(mergeRenderedRows(groups, indent)))
+        if (!part.rows.length || total + part.rows.length > 64 || !tail.trim() || !statsContinuation && diffLineNumber(tail) !== undefined
           || EDIT_HEADER_RE.test(tail) || EDIT_TOOL_HEADER_RE.test(tail) || /^\s*[•●⏺└├│⎿]/.test(tail)
           || !tail.startsWith(' '.repeat(indent))) break
         groups.push(part.rows)
         total += part.rows.length
         next += part.rows.length
         const rows = mergeRenderedRows(groups, indent)
-        if (EDIT_STATS_RE.test(tail)) {
+        if (EDIT_STATS_TAIL_RE.test(logicalRecordText(rows))) {
           return current < next && editedFileHeader(logicalRecordText(rows)) ? {rows, currentRow: current - first} : undefined
         }
       }
@@ -413,8 +482,10 @@ export function terminalCellRange(cells: readonly TerminalCellLike[], start: num
 const FILE_TOKEN_RE = /(?:\\[ \t()]|[^\s<>"'`|｜，。；！？、])+/gu
 const NON_FILE_SCHEME_RE = /^(?:https?|wss?|s?ftp|ssh|git|mailto|data|javascript|tel|urn|about|blob|vscode(?:-insiders)?):/i
 const INLINE_COMMAND_RE = /^(?:python(?:\d+(?:\.\d+)*)?|node|bun|npx|npm|pnpm|yarn|deno|ruby|perl|bash|sh|zsh|cat|head|tail|sed|awk|rg|grep|git|go|cargo|rustc|tsc|uv|pip\d*|pytest|chmod|cp|mv|ls|find|test|diff|wc|curl|wget|sudo)\s/
+const SCRIPT_COMMAND_RE = /^[^\s"'`]+\.(?:py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl)\s+\S/i
 const LOCATION_SUFFIX_RE = /^(?::(\d+)(?:(:|-)(\d+))?|#L(\d+)(?:-L(\d+))?)(?![\p{L}\p{N}_])/u
 const EDIT_STATS_RE = /\(\s*\+\d+(?:\s*,?\s*[-−]\s*\d+)?\s*\)/
+const EDIT_STATS_TAIL_RE = new RegExp(EDIT_STATS_RE.source + '\\s*$')
 const EDIT_HEADER_RE = /^\s*(?:[•●]\s*)?(?:Added|Edited|Updated|Update|Wrote|Write)\s+/i
 const EDIT_TOOL_HEADER_RE = /^\s*(?:[⏺●•]\s*)?(?:Update|Edit|Write)\(/i
 const FILE_TOOL_HEADER_RE = /^\s*(?:[⏺●•]\s*)?(?:Read|Update|Write|Edit|Edited)\(/i
@@ -444,12 +515,12 @@ export function parseFileLocationSuffix(suffix: string): FileLocation {
 }
 
 export function editedFileHeader(line: string): string | undefined {
-  if ((EDIT_HEADER_RE.test(line) && EDIT_STATS_RE.test(line)) || EDIT_TOOL_HEADER_RE.test(line)) {
+  if ((EDIT_HEADER_RE.test(line) && EDIT_STATS_TAIL_RE.test(line)) || EDIT_TOOL_HEADER_RE.test(line)) {
     return findTerminalFileLinks(line).find((link) => !link.lineStart)?.path
   }
   // Multi-file Codex edits put each file in a tree row with its own stats.
   const tree = /^\s*[└├│]\s+/.exec(line)
-  const stats = EDIT_STATS_RE.exec(line)
+  const stats = EDIT_STATS_TAIL_RE.exec(line)
   if (!tree || !stats || line.slice(stats.index + stats[0].length).trim()) return undefined
   const target = line.slice(tree[0].length, stats.index).trim()
   const links = findTerminalFileLinks(target)
@@ -658,6 +729,14 @@ function bareFileReference(value: string, offset: number): { raw: string; start:
       }
     }
   }
+  // A double em dash is a common prose separator after a complete filename.
+  // Keep it literal when the entire token still has its own filename suffix.
+  const fullName = raw.slice(raw.lastIndexOf('/') + 1)
+  if (!isSupportedPreviewName(fullName) && !/\.[\p{L}\p{N}]{1,16}$/u.test(fullName)) {
+    const note = raw.indexOf('——')
+    const prefix = raw.slice(0, note), name = prefix.slice(prefix.lastIndexOf('/') + 1)
+    if (note > 0 && isFileReference(prefix) && /\.[\p{L}\p{N}]{1,16}$/u.test(name)) raw = prefix
+  }
   return { raw, start }
 }
 
@@ -671,8 +750,8 @@ function parenthesisRanges(line: string, owned: readonly { start: number; end: n
     const end = opaque.get(i)
     if (end !== undefined) { i = end - 1; continue }
     if (line[i] === '\\') { i++; continue }
-    if (line[i] === '(' || line[i] === '（') stack.push({start: i, close: line[i] === '(' ? ')' : '）', call: line[i] === '(' && i > 0 && /[A-Za-z\d_$]/u.test(line[i - 1])})
-    else if (line[i] === ')' || line[i] === '）') {
+    if ('(（《【'.includes(line[i])) stack.push({start: i, close: PATH_WRAPPERS[line[i]], call: line[i] === '(' && i > 0 && /[A-Za-z\d_$]/u.test(line[i - 1])})
+    else if (')）》】'.includes(line[i])) {
       const opening = stack.pop()
       if (opening?.close === line[i]) pairs.push({start: opening.start, end: i + 1, call: opening.call})
     }
@@ -770,7 +849,17 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
   const result = toolResultReference(line)
   if (result) {
     owned.push({ start: 0, end: line.length })
-    add(result.value, result.start, '', false, result.gitQuoted)
+    if (result.quotationClosed) add(result.value, result.start, '', false, result.gitQuoted)
+  }
+  // Codex's edit title has a path field terminated by its final stats field.
+  // Spaces and parentheses inside that field belong to the filename.
+  const editPrefix = EDIT_HEADER_RE.exec(line) ?? /^\s*[└├│]\s+/.exec(line)
+  const editStats = EDIT_STATS_TAIL_RE.exec(line)
+  if (!result && editPrefix && editStats && editStats.index > editPrefix[0].length) {
+    const field = line.slice(editPrefix[0].length, editStats.index).trimEnd()
+    const quoted = /^(["'`]).*\1$/u.test(field)
+    owned.push({ start: 0, end: line.length })
+    add(quoted ? field.slice(1, -1) : field, editPrefix[0].length + (quoted ? 1 : 0), '', false, quoted && field[0] === '"')
   }
   // Raw Markdown often appears in command output; labels are not target paths.
   // Excluding another '[' avoids quadratic retries on unmatched bracket output.
@@ -800,12 +889,18 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
   // Quotes have priority over generic parentheses: Bash(... "a.md" ... "b.md")
   // contains independent references, not one parenthesized filename. Explicit
   // file-tool / Markdown wrappers above still own their complete targets.
-  for (const match of line.matchAll(/(['"`])((?:\\[^\r\n]|(?!\1)[^\\\r\n])*)\1/gu)) {
+  for (const match of line.matchAll(/((?<![\p{L}\p{N}])'|["`])((?:\\[^\r\n]|(?!\1)[^\\\r\n])*)\1/gu)) {
     const start = match.index ?? 0
     if (owned.some((range) => start >= range.start && start < range.end)) continue
     owned.push({ start, end: start + match[0].length })
     const value = match[2]
     if (!value || /^\s|\s$/.test(value)) continue
+    if (match[1] !== '`' && !isFileReference(value) && /`[^`]+`/.test(value)) {
+      // Quoted natural-language messages can themselves contain explicit code
+      // references. The outer quotation is prose, not one literal filename.
+      for (const link of findTerminalFileLinks(value)) links.push({...link, start: start + 1 + link.start, end: start + 1 + link.end})
+      continue
+    }
     if (match[1] === '`') {
       const reference = /^\[Ref:\s*(.+)\]$/i.exec(value)
       if (reference) {
@@ -819,8 +914,8 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
         }
         continue
       }
-      if (INLINE_COMMAND_RE.test(value)) {
-        const prefix = 'Bash('
+      if (INLINE_COMMAND_RE.test(value) || SCRIPT_COMMAND_RE.test(value) && !isFileReference(value)) {
+        const prefix = 'Bash( '
         for (const link of findTerminalFileLinks(prefix + value + ')')) {
           links.push({ ...link, start: start + 1 + link.start - prefix.length, end: start + 1 + link.end - prefix.length })
         }
@@ -838,9 +933,12 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
   for (const { start, end } of parentheses) {
     if (calls.some(range => start >= range.start && start < range.end)) continue
     if (owned.some(range => start < range.end && end > range.start)) continue
+    // These brackets can also be literal parts of a larger filename.
+    if (/^(?:\/|\.[\p{L}\p{N}_-])/u.test(line.slice(end))) continue
     if (start > 0 && !/[\s:：(\[（【\p{Script=Han}]/u.test(line[start - 1])) continue
     const value = line.slice(start + 1, end - 1)
     if (!value || /^\s|\s$/.test(value)) continue
+    if (!value.includes('/') && /,\s/.test(value)) continue
     const count = links.length
     const reference = /\s/.test(value) ? { raw: value, start: start + 1 } : bareFileReference(value, start + 1)
     add(reference.raw, reference.start, line.slice(end))
@@ -876,6 +974,7 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
       for (const token of tokens) {
         const option = inCall ? /^--[\w-]+=/.exec(token[0])?.[0] ?? '' : ''
         const reference = bareFileReference(token[0].slice(option.length), span.start + (token.index ?? 0) + option.length)
+        if (reference.raw === 'Node.js' && /^\s+(?:\d+\s+actions?\b|runtime\b)/i.test(line.slice(reference.start + reference.raw.length))) continue
         add(reference.raw, reference.start, '', true)
       }
     }
