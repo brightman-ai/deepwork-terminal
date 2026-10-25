@@ -14,8 +14,10 @@ export const corpusLayouts = (sample: typeof corpus.cases[number], width: number
 }
 
 describe('200-transcript study: independent, minimized reference identities', () => {
-  for (const sample of corpus.cases) it(`${sample.agent}/${sample.operation}/${sample.id}`, () => {
-    for (const hardWidth of [0, 32, 54, 80]) for (const rows of corpusLayouts(sample, hardWidth)) {
+  // Each CLI width is its own test: the longest identities must not bundle
+  // all 96 layout combinations into Bun's five-second per-test deadline.
+  for (const sample of corpus.cases) for (const hardWidth of [0, 32, 54, 80]) it(`${sample.agent}/${sample.operation}/${sample.id}/cli-${hardWidth}`, () => {
+    for (const rows of corpusLayouts(sample, hardWidth)) {
       for (const softWidth of [0, 24, 39]) {
         const buffer = transcriptCellBuffer(rows, softWidth)
         const seen = new Set<string>()
