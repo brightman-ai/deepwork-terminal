@@ -29,6 +29,7 @@ function detach(child: TNode): void {
 }
 
 const { createApp } = createRenderer<TNode, TNode>({
+  querySelector: selector => selector === 'body' ? teleportHost : null,
   createElement: (tag) => node('element', tag),
   createText: (text) => node('text', '', text),
   createComment: (text) => node('comment', '', text),
@@ -56,6 +57,8 @@ const { createApp } = createRenderer<TNode, TNode>({
     else el.props[key] = next
   },
 })
+
+const teleportHost = node('element', 'body')
 
 export function walk(root: TNode, visit: (n: TNode) => void): void {
   visit(root)
@@ -98,5 +101,5 @@ export function mountView<P extends Record<string, unknown>>(comp: Component, in
   const host = node('element', 'host')
   const app = createApp(defineComponent({ render: () => h(comp, props) }))
   app.mount(host)
-  return { host, props, unmount: () => app.unmount() }
+  return { host, teleports: teleportHost, props, unmount: () => app.unmount() }
 }
