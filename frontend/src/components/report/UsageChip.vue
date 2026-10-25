@@ -1071,6 +1071,10 @@ onUnmounted(() => {
           <span>{{ activeLoading ? '正在更新该时段用量…' : '已显示上次结果，更新仍在进行' }}</span>
           <button v-if="!activeLoading" type="button" @click="loadCurrentUsage">重试</button>
         </div>
+        <div v-else-if="activeReport?.available && activeReport.calculation_state === 'stale'" class="uchip-report-state" role="status">
+          <span>{{ activeReport.calculated_at ? `统计生成于 ${fmtAt(activeReport.calculated_at)}` : '已显示上次统计' }}</span>
+          <button type="button" :disabled="activeLoading" @click="loadCurrentUsage">{{ activeLoading ? '复核中…' : '更新' }}</button>
+        </div>
         <div v-if="activeLoading && !activeReport?.available" class="uchip-dim uchip-loading" role="status" aria-live="polite">{{ activeCalculating ? '正在计算该时段用量…' : '正在读取该时段用量…' }}</div>
         <template v-else-if="activeReport?.available">
           <!-- ── 官方订阅：一行一个账号（厂商 × 端点）。名字与上面的额度区同源，两处不该各叫各的 ── -->
