@@ -4,7 +4,7 @@
     <span>调整顺序<span class="cli-tab-sort-hint"> · 拖动标签</span></span>
     <button type="button" data-testid="cli-tab-sort-done" @click="finishSorting">完成</button>
   </div>
-  <div ref="strip" class="cli-tab-bar dw-titlebar-blend" :class="{ 'is-sorting': sorting, 'is-dragging': draggedTabId }" data-testid="cli-portal-tab-bar">
+  <div class="cli-tab-bar dw-titlebar-blend" :class="{ 'is-sorting': sorting, 'is-dragging': draggedTabId }" data-testid="cli-portal-tab-bar">
     <button v-if="quickSwitchLabel" type="button" class="cli-tab-bar__quick-switch" data-testid="cli-tab-quick-switch-trigger" :title="`快速切换标签（${quickSwitchLabel}）`" :disabled="sorting" @mousedown.prevent @click="emit('quick-switch')"><Search :size="14" /><span>切换</span><kbd>{{ quickSwitchLabel }}</kbd></button>
     <!-- D7 overview — LEADS the strip. It is the "zoom out to all terminals" control, so it
          belongs before the tabs it summarizes (the same reading order as a breadcrumb's root).
@@ -28,6 +28,10 @@
       </span>
     </button>
 
+    <!-- Only this region scrolls and accepts tab-reorder drops. The usage entry
+         stays outside it, so selecting/dragging a late tab cannot move the entry. -->
+    <div ref="strip" class="cli-tab-bar__tabs" data-testid="cli-tab-scroll-area">
+    <div class="cli-tab-bar__tab-list">
     <!-- Groups + tabs -->
     <template v-for="group in displayGroups" :key="group.id">
       <!-- Group header (only when multiple groups) -->
@@ -147,13 +151,6 @@
       @click="emit('add')"
     >+</button>
 
-    <!-- Usage chip TRAILS the tabs (it is contextual to the terminal session, so it belongs with
-         them — the same slot pro's CliV2 fills right after its TopTabBar). Keeping it here (not in
-         the far-right chrome cluster) makes the chip's placement identical in both shells. -->
-    <div v-if="$slots['tab-trailing']" class="cli-tab-bar__tab-trailing">
-      <slot name="tab-trailing" />
-    </div>
-
     <!-- Auto-update pill — appears ONLY when a newer build is live (zero footprint otherwise).
          Trails the usage chip; one tap clears client caches + hard-reloads onto the new build.
          This is the fix for "the tab keeps showing an old build after a redeploy". -->
@@ -205,6 +202,11 @@
       ><Server :size="14" /></button>
       <!-- Host-provided status widget (standalone mounts the UsageChip here via CliPortal). -->
       <slot name="status" />
+    </div>
+    </div>
+    </div>
+    <div v-if="$slots['tab-trailing']" class="cli-tab-bar__tab-trailing" data-testid="cli-tab-pinned-status">
+      <slot name="tab-trailing" :compact="compactTrailing" />
     </div>
   </div>
   <Teleport to="body">
@@ -313,6 +315,8 @@ const {
   contextMenu: (event, tabId) => emit('context-menu', event, tabId),
   notice: text => emit('reorder-notice', text),
 })
+
+const compactTrailing = computed(() => displayGroups.value.reduce((count, group) => count + (group.collapsed ? 0 : group.tabs.length), 0) > 6)
 
 // The force-fresh clear-and-reload lives in useAppUpdate.applyAppUpdate() now (SSOT for the
 // manual refresh button, the auto-update pill, and HelpCenter's manual entry).
@@ -489,13 +493,23 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
   height: 36px;
   background: hsl(var(--card));
   border-bottom: 1px solid hsl(var(--border));
+  min-width: 0;
+  overflow: hidden;
+  flex-shrink: 0;
+  container: cli-tabs / inline-size;
+}
+.cli-tab-bar__tabs {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   overflow-x: auto;
   overflow-y: hidden;
-  flex-shrink: 0;
+  overscroll-behavior-x: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
-.cli-tab-bar::-webkit-scrollbar { display: none; }
+.cli-tab-bar__tabs::-webkit-scrollbar { display: none; }
+.cli-tab-bar__tab-list { display: flex; align-items: stretch; min-width: 100%; width: max-content; height: 100%; }
 
 /* Group header */
 .cli-tab-bar__group-header {
@@ -685,11 +699,13 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
 }
 .cli-tab-bar__tab--add:hover { color: rgba(255,255,255,0.8); }
 
-/* Usage chip slot — trails the tabs (contextual), spaced from the + button. */
+/* Permanent status chrome, independent of the tab scroll position. */
 .cli-tab-bar__tab-trailing {
   display: inline-flex;
   align-items: center;
-  margin-left: 6px;
+  max-width: min(46%, 560px);
+  padding: 0 8px;
+  border-left: 1px solid hsl(var(--border));
   flex-shrink: 0;
 }
 

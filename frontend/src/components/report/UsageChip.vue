@@ -36,7 +36,7 @@ import { groupByVendor, type UsageVendorGroup } from './usageVendorGroups'
 import type { UsageRateCard } from './useUsageReport'
 import { groupPresentation } from './quotaStaleness'
 
-defineProps<{ showDetail?: boolean }>()
+defineProps<{ showDetail?: boolean; compact?: boolean }>()
 const emit = defineEmits<{ (e: 'detail'): void }>()
 
 const {
@@ -46,6 +46,7 @@ const {
 
 const open = ref(false)
 const wrapRef = ref<HTMLElement | null>(null)
+const pillRef = ref<HTMLButtonElement | null>(null)
 const popRef = ref<HTMLElement | null>(null)
 const popPos = ref({ top: 0, left: 0, maxHeight: 560 })
 let timer: ReturnType<typeof setInterval> | undefined
@@ -90,8 +91,7 @@ const viaLabel = (row: UsageProviderRow) => {
 // 所以标签表必须跟着后端的 windowKind 一起长，否则月窗会顶着「7天」的名字出现。
 const kindLabel = (k: string) => (k === '5h' ? '5小时' : k === '7d' ? '7天' : k === '30d' ? '30天' : k)
 
-// ── 花费区: 4 windows prefetched in PARALLEL, each into its OWN useUsageReport() instance
-// (isolated `report` ref) so switching windows is instant and concurrent fetches never race.
+// One last-good snapshot per window; only the visible window is requested.
 type ReportWindow = '24h' | '7d' | '14d' | '30d'
 const WINDOWS: { key: ReportWindow; label: string }[] = [
   { key: '24h', label: '今日' },
@@ -112,6 +112,9 @@ function loadActiveWindow(): ReportWindow {
 const activeWindow = ref<ReportWindow>(loadActiveWindow())
 const activeReport = computed(() => reportByWindow[activeWindow.value].report.value)
 const activeLoading = computed(() => reportByWindow[activeWindow.value].loading.value)
+const activeError = computed(() => reportByWindow[activeWindow.value].error.value)
+const activeCalculating = computed(() => reportByWindow[activeWindow.value].calculating.value)
+const usageUnavailableText = computed(() => activeReport.value?.reason === 'no_data_source' ? '该时段暂无本地用量记录' : '该时段用量暂时不可用')
 // Agent windows use the same isolated-cache rule as cost windows. A single mutable
 // report ref can briefly paint 24h data under a selected 7d label and lets late
 // responses overwrite a newer selection.
@@ -151,7 +154,8 @@ function pickTab(t: Tab) {
   tab.value = t
   tabTouched.value = true
   resetPopoverScroll()
-  if (t === 'agent') void loadAgentWindow(activeWindow.value)
+  if (t === 'agent') { cancelUsageLoads(); void loadAgentWindow(activeWindow.value) }
+  else loadCurrentUsage()
 }
 
 // Request billing remains the fact SSOT. Unknown is never API-paid; a runtime currently proven
@@ -366,17 +370,15 @@ const todayApi = computed<{ cost: number | null; currency: string }>(() => {
 // Naming it costs four characters and turns「0%」into a fact you can act on or dismiss. The
 // SELECTION rule is untouched: the tightest quota is still the one worth surfacing, because an
 // exhausted window you are not using today is still exhausted tomorrow.
-const pillText = computed(() => {
+const pillValue = computed(() => {
   if (pct.value !== null) {
-    const owner = subscriptions.value.length > 1 && headline.value
-      ? `${headline.value.display} ` : ''
-    return `${owner}${pct.value}%`
+    return `${pct.value}%`
   }
   if (hasApi.value) {
     const { cost, currency } = todayApi.value
     return cost === null ? 'API' : `API ${fmtCost(cost, currency)}`
   }
-  return '—' // present, but no reading we can stand behind — the popover explains why
+  return '用量'
 })
 const pillTitle = computed(() => {
   if (pct.value === null) return hasApi.value ? 'API 计费 · 今日实付 · 点开明细' : '用量 · 点开明细'
@@ -698,9 +700,11 @@ const agentArtifactKnown = computed(() => {
   return c?.state === 'complete' || c?.state === 'partial'
 })
 
-watch(activeWindow, (window) => {
+watch(activeWindow, (window, previous) => {
   localStorage.setItem(ACTIVE_WINDOW_KEY, window)
+  reportByWindow[previous].cancel()
   if (tab.value === 'agent') void loadAgentWindow(window)
+  else loadCurrentUsage()
 })
 
 function resetPopoverScroll(): void {
@@ -726,16 +730,18 @@ async function refreshAggregate(force = true, window: ReportWindow = activeWindo
   try { await agentByWindow[window].load(window, force) } finally { aggregateRefreshBusy = false }
 }
 
-function prefetchAll(): void {
-  // Only the selected window is a foreground need. Other windows load on selection, avoiding
-  // four simultaneous JSON responses and main-thread parses when the pill opens.
+function loadCurrentUsage(): void {
   void reportByWindow[activeWindow.value].load(activeWindow.value)
+}
+
+function cancelUsageLoads(): void {
+  for (const report of Object.values(reportByWindow)) report.cancel()
 }
 
 // Opening the popover re-reads what the runtimes have written. Cheap, no provider request.
 function reload(): void {
   void load()
-  prefetchAll()
+  loadCurrentUsage()
   void loadAgentWindow(activeWindow.value)
 }
 
@@ -752,7 +758,7 @@ function refreshAgent(): void {
 // button means "don't wait for the timer", not "spend some quota to find out".
 function refresh(): void {
   void probe()
-  prefetchAll()
+  loadCurrentUsage()
 }
 
 function gotoFullReport(): void {
@@ -814,8 +820,9 @@ function toggle() {
 
 watch(open, async (isOpen) => {
   removePlacementWatchers()
-  if (!isOpen) return
+  if (!isOpen) { cancelUsageLoads(); return }
   await nextTick()
+  if (!open.value) return
   installPlacementWatchers()
   schedulePlacement()
 })
@@ -824,10 +831,18 @@ watch(open, async (isOpen) => {
 // stale: a backgrounded tab has its timers throttled (and on mobile, suspended outright), so the
 // 60s poll simply does not run while you are away. Re-ask on the way back in.
 function onVisible(): void {
-  if (document.visibilityState !== 'visible') return
+  if (document.visibilityState !== 'visible') { cancelUsageLoads(); return }
   void load()
   void refreshAggregate(true)
-  if (open.value) prefetchAll()
+  if (open.value) loadCurrentUsage()
+}
+
+function onUsageKeydown(event: KeyboardEvent): void {
+  if (!open.value || event.key !== 'Escape') return
+  event.preventDefault()
+  event.stopPropagation()
+  open.value = false
+  pillRef.value?.focus?.({ preventScroll: true })
 }
 
 // The chip renders INLINE (no fixed overlay, no teleport) so its host decides placement — it
@@ -846,12 +861,15 @@ onMounted(() => {
     if (document.visibilityState === 'visible') void refreshAggregate(true)
   }, 30000)
   document.addEventListener('visibilitychange', onVisible)
+  document.addEventListener('keydown', onUsageKeydown, true)
   window.addEventListener('focus', onVisible)
 })
 onUnmounted(() => {
+  cancelUsageLoads()
   clearInterval(timer)
   if (aggregateTimer) clearInterval(aggregateTimer)
   document.removeEventListener('visibilitychange', onVisible)
+  document.removeEventListener('keydown', onUsageKeydown, true)
   window.removeEventListener('focus', onVisible)
   removePlacementWatchers()
 })
@@ -859,18 +877,20 @@ onUnmounted(() => {
 
 <template>
   <!-- Navigation is stable chrome: async data may change its label/content, never its presence. -->
-  <div ref="wrapRef" class="uchip-wrap">
+  <div ref="wrapRef" class="uchip-wrap" :class="{ 'is-compact': compact }">
     <button
+      ref="pillRef"
       class="uchip"
       :class="'lvl-' + level"
       type="button"
       :title="pillTitle"
+      :aria-label="pillTitle"
       aria-haspopup="dialog"
       :aria-expanded="open"
       @click.stop="toggle"
     >
       <Gauge :size="12" class="uchip-ic" />
-      <span class="uchip-pct">{{ pillText }}</span>
+      <span class="uchip-pct"><span v-if="pct !== null && headline" class="uchip-owner">{{ headline.display }}</span><span class="uchip-value">{{ pillValue }}</span></span>
       <span v-if="aggregateSpeedText" class="uchip-top-speed" :title="`整机观察响应吞吐 · ${activeWindow} 窗口 · 可见时约 30 秒刷新`">整机 {{ aggregateSpeedText }}</span>
     </button>
   </div>
@@ -889,6 +909,7 @@ onUnmounted(() => {
           <button type="button" role="tab" :aria-selected="tab === 'api'" :class="{ on: tab === 'api' }" @click="pickTab('api')">API 计费</button>
           <button type="button" role="tab" :aria-selected="tab === 'agent'" :class="{ on: tab === 'agent' }" @click="pickTab('agent')">Agent 效能</button>
         </div>
+        <div v-if="aggregateSpeedText" class="uchip-aggregate" :title="`整机观察响应吞吐 · ${activeWindow} 窗口`">整机 {{ aggregateSpeedText }}</div>
 
         <!-- ── 官方订阅 tab 独有：额度条 / 重置 / 新鲜度（API 计费没有额度窗口，不伪造）── -->
         <template v-if="tab === 'sub'">
@@ -1030,7 +1051,7 @@ onUnmounted(() => {
           <span>{{ costHeading }}</span>
           <button v-if="showDetail" type="button" class="uchip-detail" @click="gotoFullReport">详细报表 ›</button>
         </div>
-        <div class="uchip-winseg" role="tablist">
+        <div class="uchip-winseg" role="tablist" aria-label="用量统计时段">
           <button
             v-for="w in WINDOWS"
             :key="w.key"
@@ -1042,7 +1063,15 @@ onUnmounted(() => {
           >{{ w.label }}</button>
         </div>
 
-        <div v-if="activeLoading && !activeReport" class="uchip-dim uchip-loading">加载中…</div>
+        <div v-if="activeError" class="uchip-report-state is-error" role="alert">
+          <span>{{ activeError }}<small v-if="activeReport?.available">已保留该时段上次结果</small></span>
+          <button type="button" @click="loadCurrentUsage">重试</button>
+        </div>
+        <div v-else-if="activeCalculating && activeReport?.available" class="uchip-report-state" role="status">
+          <span>{{ activeLoading ? '正在更新该时段用量…' : '已显示上次结果，更新仍在进行' }}</span>
+          <button v-if="!activeLoading" type="button" @click="loadCurrentUsage">重试</button>
+        </div>
+        <div v-if="activeLoading && !activeReport?.available" class="uchip-dim uchip-loading" role="status" aria-live="polite">{{ activeCalculating ? '正在计算该时段用量…' : '正在读取该时段用量…' }}</div>
         <template v-else-if="activeReport?.available">
           <!-- ── 官方订阅：一行一个账号（厂商 × 端点）。名字与上面的额度区同源，两处不该各叫各的 ── -->
           <template v-if="tab === 'sub'">
@@ -1129,7 +1158,8 @@ onUnmounted(() => {
           <div v-else-if="tab === 'api'" class="uchip-foot">按内置价表估算，不是厂商账单。经中转/合约价使用时，实际单价可能与厂商标价不同。</div>
           <div v-else class="uchip-foot">按 API 价折算订阅窗口用量，仅表示等价值，不是 API 账单。</div>
         </template>
-        <div v-else class="uchip-dim uchip-loading">{{ activeReport?.reason || '用量数据不可用' }}</div>
+        <div v-else-if="activeCalculating" class="uchip-report-state" role="status"><span>计算时间较长，请稍后重试</span><button type="button" @click="loadCurrentUsage">重试</button></div>
+        <div v-else-if="!activeError" class="uchip-dim uchip-loading">{{ activeReport ? usageUnavailableText : '正在读取该时段用量…' }}</div>
         </template>
 
         <!-- ── Agent 效能：结果门优先，活动量明确不冒充能力 ── -->
@@ -1277,11 +1307,12 @@ onUnmounted(() => {
 <style scoped>
 /* Inline in the terminal tab row (host places it) — flows with the tabs, never floats over or
    blocks the right-panel controls. Popover anchors to it. */
-.uchip-wrap { display: inline-flex; position: relative; flex-shrink: 0; }
+.uchip-wrap { display: inline-flex; position: relative; min-width: 0; max-width: 100%; }
 .uchip {
   display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 9px;
   border: 1px solid var(--border, #2a2d35); background: rgba(255,255,255,0.04);
   color: var(--fg, #cbd0d8); cursor: pointer; font-size: 11px; font-variant-numeric: tabular-nums;
+  max-width: 100%; min-width: 0; min-height: 28px; white-space: nowrap;
 }
 .uchip:hover { background: rgba(255,255,255,0.08); }
 .uchip-ic { flex-shrink: 0; }
@@ -1290,13 +1321,31 @@ onUnmounted(() => {
 .uchip.lvl-crit .uchip-ic { color: #ef4444; }
 .uchip.lvl-crit { color: #f4b0b0; border-color: #5a2a2a; }
 .uchip.lvl-none .uchip-ic { color: #8b909a; }
-.uchip-pct { font-weight: 600; }
+.uchip-pct { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; }
+.uchip-owner { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.uchip-value { flex-shrink: 0; }
+.uchip-wrap.is-compact .uchip-owner { max-width: 9ch; }
+.uchip-wrap.is-compact .uchip-top-speed { display: none; }
 .uchip-top-speed {
   color: #bca5df;
   font-size: 9px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.uchip-aggregate { margin: 2px 0 10px; color: #bca5df; font-size: 10px; line-height: 1.5; }
+.uchip-report-state { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; padding: 8px; border-radius: 6px; background: #202733; color: #b9c7dc; font-size: 11px; }
+.uchip-report-state.is-error { color: #f0b0a6; background: #302321; }
+.uchip-report-state small { display: block; margin-top: 3px; color: #a4aab5; }
+.uchip-report-state button { flex-shrink: 0; padding: 4px 7px; border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
+@container cli-tabs (max-width: 900px) {
+  .uchip-top-speed { display: none; }
+  .uchip-owner { max-width: 9ch; }
+}
+@media (max-width: 600px) {
+  .uchip-top-speed { display: none; }
+  .uchip-owner { max-width: 8ch; }
 }
 
 .uchip-backdrop { position: fixed; inset: 0; z-index: 3000; }

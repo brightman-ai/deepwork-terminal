@@ -9,9 +9,10 @@
 // Fetch goes through cliFetch(cliApi(...)) so the SAME data layer works standalone
 // (/api/usage/report) AND pro-embedded (/api/cli/usage/report).
 
-import { ref } from 'vue'
+import { getCurrentScope, onScopeDispose } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { createUsageReportLoader } from './usageReportLoader'
 
 export interface UsageReportSummary {
   input_tokens: number
@@ -127,6 +128,8 @@ export interface UsageReportData {
   available: boolean
   reason?: string
   data_source?: string
+  calculated_at?: string
+  calculation_state?: 'fresh' | 'stale' | 'calculating'
 }
 
 /**
@@ -136,30 +139,15 @@ export interface UsageReportData {
  */
 export function useUsageReport() {
   const { cliFetch } = useCliAuth()
-  const report = ref<UsageReportData | null>(null)
-  const loading = ref(false)
-  const error = ref('')
-
-  async function load(window: '24h' | '7d' | '14d' | '30d' = '7d'): Promise<void> {
-    loading.value = true
-    error.value = ''
-    try {
-	  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-	  const params = new URLSearchParams({ window, timezone })
-	  const res = await cliFetch(cliApi(`/usage/report?${params}`), {
-        headers: { Accept: 'application/json' },
-      })
-      if (!res.ok) {
-        error.value = `加载用量失败 (${res.status})`
-        return
-      }
-      report.value = (await res.json()) as UsageReportData
-    } catch {
-      error.value = '加载用量失败'
-    } finally {
-      loading.value = false
-    }
-  }
-
-  return { report, loading, error, load }
+  const loader = createUsageReportLoader(async (window, signal) => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    const params = new URLSearchParams({ window, timezone })
+    const res = await cliFetch(cliApi(`/usage/report?${params}`), {
+      headers: { Accept: 'application/json' }, signal,
+    })
+    if (!res.ok) throw new Error(`加载用量失败 (${res.status})`)
+    return await res.json() as UsageReportData
+  })
+  if (getCurrentScope()) onScopeDispose(loader.cancel)
+  return loader
 }

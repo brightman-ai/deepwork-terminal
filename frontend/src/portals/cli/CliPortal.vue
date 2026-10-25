@@ -36,13 +36,10 @@
       @reorder="reorderTabs"
       @reorder-notice="showNotice"
     >
-      <!-- Usage chip trails the tabs (contextual to the terminal session) — the SAME position
-           pro-embed uses (CliV2 mounts it right after its TopTabBar), so the chip sits identically
-           in both shells. It is the SAME shared @terminal/components/report/UsageChip.vue (one SSOT).
-           Connection health + agent badge live in the per-surface status row inside CliTerminalSurface
-           (not here) to avoid the old DUPLICATE heartbeat; the chip is a different concern (订阅额度 %). -->
-      <template #tab-trailing>
-        <UsageChip />
+      <!-- One shared usage component; the adapter owns its permanent toolbar
+           space and requests a compact summary when the tab list is crowded. -->
+      <template #tab-trailing="{ compact }">
+        <UsageChip :compact="compact" />
       </template>
     </CliTabBar>
 
