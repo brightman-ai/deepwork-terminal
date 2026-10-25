@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	htmlstd "html"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,9 +39,15 @@ const binarySniffBytes = 8 << 10 // 8 KiB
 // document: it may paint and run its own inline scripts, but it cannot call out, embed
 // anything, or re-target the app. Paired with the client's sandboxed iframe — see the
 // render branch in handleFilesRaw for why both halves are required.
-const htmlRenderCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+const htmlRenderCSP = "default-src 'none'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; " +
 	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; frame-src 'none'; " +
 	"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+
+// htmlRenderAssetRE is deliberately narrow: the render base is only needed when an HTML
+// artifact has a conventional document asset reference. Inline scripts/styles and absolute
+// URLs do not need the proxy route. The original document stays byte-for-byte unchanged when
+// no such reference exists.
+var htmlRenderAssetRE = regexp.MustCompile(`(?is)<(?:link|script|img|source|video|audio|iframe)\b[^>]*(?:href|src)\s*=\s*["'][^"']+["']`)
 
 // isHTMLExt reports whether ext (lower-case, leading dot) is a file the render toggle may
 // serve as real HTML.
@@ -719,8 +728,18 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer rf.Close()
+		page, readErr := io.ReadAll(rf)
+		if readErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
+			return
+		}
+		// A raw API URL is not a directory URL, so a document's relative assets would
+		// otherwise resolve to /files/<name> instead of beside the source file. Add a
+		// document-local base only for pages that actually reference conventional assets;
+		// the proxy keeps the asset request authenticated and preserves ../ semantics.
+		page = injectHTMLRenderAssetBase(page, htmlRenderAssetBaseURL(r))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", htmlRenderCSP)
+		w.Header().Set("Content-Security-Policy", htmlRenderCSPForRequest(r))
 		// The global X-Frame-Options: SAMEORIGIN must GO for this response: the preview frame is
 		// sandboxed without allow-same-origin, so its origin is opaque and the legacy XFO
 		// same-origin comparison fails — the frame renders as a blocked page (observed: the
@@ -730,7 +749,7 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, rf)
+		_, _ = w.Write(page)
 		return
 	}
 
@@ -779,6 +798,115 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(head)
 	_, _ = io.Copy(w, f) // stream the remainder past the sniffed head
+}
+
+// handleFilesRenderAsset serves a relative asset referenced by a rendered HTML document.
+// The route is intentionally separate from /files/raw: raw keeps text previews text/plain,
+// while browser subresources need their real MIME type (CSS/JS/images) and must remain scoped
+// to the same authenticated session.
+func (s *Server) handleFilesRenderAsset(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session")
+	if sessionID == "" || r.FormValue("session") != sessionID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asset session"})
+		return
+	}
+	cwd, ok := s.requestWorkbenchCWD(r)
+	if !ok || cwd == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		return
+	}
+	rel := strings.TrimPrefix(filepath.ToSlash(r.PathValue("asset")), "/")
+	if rel == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing asset"})
+		return
+	}
+	target, err := resolvePreviewPath(cwd, filepath.FromSlash(rel))
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "path not allowed"})
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "is a directory"})
+		return
+	}
+	if info.Size() > rawPreviewMaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "asset too large"})
+		return
+	}
+	f, err := os.Open(target)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	defer f.Close()
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(target)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeContent(w, r, filepath.Base(target), info.ModTime(), f)
+}
+
+func htmlRenderCSPForRequest(r *http.Request) string {
+	// A sandboxed iframe has an opaque origin, so 'self' alone does not authorize a
+	// same-host subresource. Add the exact request origin while keeping all other hosts
+	// blocked. Top-level opens continue to work through 'self'.
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	origin := scheme + "://" + r.Host
+	return "default-src 'none'; script-src 'unsafe-inline' 'self' " + origin + "; " +
+		"style-src 'unsafe-inline' 'self' " + origin + "; img-src 'self' " + origin + " data: blob:; " +
+		"font-src 'self' " + origin + " data:; connect-src 'none'; frame-src 'none'; " +
+		"object-src 'none'; base-uri 'self' " + origin + "; form-action 'none'; frame-ancestors 'self'"
+}
+
+func htmlRenderAssetBaseURL(r *http.Request) string {
+	q := r.URL.Query()
+	// Keep the API prefix supplied by the host: the handler sees /files/raw after
+	// StripPrefix, so a relative base resolves correctly under /api or /api/cli.
+	q.Del("path")
+	q.Del("render")
+	q.Set("session", r.URL.Query().Get("session"))
+	dir := filepath.ToSlash(filepath.Dir(r.URL.Query().Get("path")))
+	if dir == "." || dir == "" {
+		dir = ""
+	}
+	parts := []string{"render-assets", url.PathEscape(r.URL.Query().Get("session"))}
+	if dir != "" {
+		for _, part := range strings.Split(strings.Trim(dir, "/"), "/") {
+			if part != "" && part != "." {
+				parts = append(parts, url.PathEscape(part))
+			}
+		}
+	}
+	return strings.Join(parts, "/") + "/?" + q.Encode()
+}
+
+func injectHTMLRenderAssetBase(page []byte, baseURL string) []byte {
+	if baseURL == "" || !htmlRenderAssetRE.Match(page) {
+		return page
+	}
+	lower := strings.ToLower(string(page))
+	if strings.Contains(lower, "<base ") {
+		return page
+	}
+	tag := []byte(`<base href="` + htmlstd.EscapeString(baseURL) + `">`)
+	if head := strings.Index(lower, "<head"); head >= 0 {
+		if end := strings.IndexByte(lower[head:], '>'); end >= 0 {
+			at := head + end + 1
+			return append(append(append([]byte(nil), page[:at]...), tag...), page[at:]...)
+		}
+	}
+	return append(tag, page...)
 }
 
 // resolvePreviewPath resolves a user-clicked /files/raw preview path. The endpoint is already

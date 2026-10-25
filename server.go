@@ -493,6 +493,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /files/tree", wrap(s.handleFilesTree))
 	s.mux.HandleFunc("GET /files/search", wrap(s.handleFilesSearch))
 	s.mux.HandleFunc("GET /files/raw", wrap(s.handleFilesRaw))
+	// Relative assets of a rendered HTML preview resolve under this route. The source
+	// directory is encoded in the wildcard path so ../ references keep their normal URL
+	// semantics while the query carries the authenticated session scope.
+	s.mux.HandleFunc("GET /files/render-assets/{session}/{asset...}", wrap(s.handleFilesRenderAsset))
 	// Write side of the workbench file service: mkdir/create/rename/delete, same
 	// session-cwd anchoring + safeResolve traversal guard as the read handlers above.
 	s.mux.HandleFunc("POST /files/mkdir", wrap(s.handleFilesMkdir))

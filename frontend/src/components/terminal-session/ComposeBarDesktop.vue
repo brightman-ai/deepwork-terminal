@@ -132,7 +132,7 @@
  *  - No soft-keyboard viewport dodging: desktop has no visual-viewport keyboard inset to correct.
  *  - Taller box (maxLines): desktop's vertical space isn't scarce the way a phone's is.
  */
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 import { useComposeBox } from '@terminal/composables/cli/useComposeBox'
 import { composerKeyAction } from '@terminal/composables/cli/composeKeys'
@@ -335,13 +335,21 @@ defineExpose({
   beginTyped,
   beginImeTyped,
   adoptCommitted,
-  focusInput: async () => {
+  focusInput: () => {
     autoResize()
     layout()
-    // Settle the floating box before creating the native caret/IME target. Subsequent typing
-    // must not race the initial ResizeObserver correction or a second mount-time focus.
-    await nextTick()
-    textareaRef.value?.focus({ preventScroll: true })
+    // openDesktopCompose already awaited the mount tick. Focus synchronously here: delaying
+    // this another tick lets a fast IME commit land before the native caret exists, after which
+    // the next syllables can be inserted at position 0. If another input already owns focus,
+    // preserve its selection; a newly focused box starts at the end of its draft.
+    const ta = textareaRef.value
+    if (!ta) return
+    const wasFocused = document.activeElement === ta
+    ta.focus({ preventScroll: true })
+    if (!wasFocused) {
+      const end = ta.value.length
+      try { ta.setSelectionRange(end, end) } catch { /* textarea may be unavailable in tests */ }
+    }
   },
 })
 </script>

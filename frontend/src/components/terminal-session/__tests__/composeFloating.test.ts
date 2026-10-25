@@ -68,3 +68,13 @@ describe('REQ-TI-01 接线', () => {
     expect(fn.match(/promptTracker\.noteSent/g)?.length).toBe(2) // 单字节分支 + 多字节分支
   })
 })
+
+describe('快速打开输入条的 caret / IME 时序', () => {
+  test('挂载后的 focusInput 不再跨 nextTick 延迟，并把首次 focus 的 caret 放到草稿末尾', () => {
+    const exposed = bar.slice(bar.indexOf('defineExpose({'), bar.indexOf('\n})', bar.indexOf('defineExpose({')))
+    expect(exposed).toContain('focusInput: () =>')
+    expect(exposed).not.toContain('await nextTick()')
+    expect(exposed).toContain('document.activeElement === ta')
+    expect(exposed).toContain('ta.setSelectionRange(end, end)')
+  })
+})
