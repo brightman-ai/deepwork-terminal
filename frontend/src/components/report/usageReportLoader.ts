@@ -53,6 +53,7 @@ export function createUsageReportLoader(fetchReport: FetchReport, options: {
     error.value = ''
     if (report.value?.window !== window) report.value = null
     const deadline = Date.now() + (options.maxCalculationMs ?? 45000)
+    let recheckedStale = false
     for (let attempt = 0; ; attempt++) {
       if (attempt > 0 && Date.now() >= deadline) return
       const request = new AbortController()
@@ -73,10 +74,15 @@ export function createUsageReportLoader(fetchReport: FetchReport, options: {
         clearTimeout(timeout)
         if (controller === request) controller = undefined
       }
-      const refreshing = next.calculation_state === 'calculating' || next.calculation_state === 'stale' || next.reason === 'calculating'
-      if (next.available || !report.value?.available || !refreshing) report.value = next
-      calculating.value = refreshing
-      if (!calculating.value || attempt >= retryDelays.length) return
+      const coldCalculation = next.calculation_state === 'calculating' || next.reason === 'calculating'
+      if (next.available || !report.value?.available || !coldCalculation) report.value = next
+      calculating.value = coldCalculation
+      // A stale snapshot is usable data, not an unfinished calculation. One
+      // follow-up can collect the scheduled refresh; unchanged revision-keyed
+      // backends may keep the original calculated_at and must not spin forever.
+      const recheckStale = next.available && next.calculation_state === 'stale' && !recheckedStale
+      if (recheckStale) recheckedStale = true
+      if ((!coldCalculation && !recheckStale) || attempt >= retryDelays.length) return
       if (!await wait(Math.max(0, Math.min(retryDelays[attempt]!, deadline - Date.now()))) || id !== generation) return
     }
   }

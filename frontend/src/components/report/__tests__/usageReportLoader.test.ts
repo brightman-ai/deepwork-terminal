@@ -79,9 +79,16 @@ describe('usage report request lifecycle', () => {
     let calls = 0; const update = deferred<UsageReportData>()
     const model = createUsageReportLoader(async window => ++calls === 1 ? {...ready(window, 7), calculation_state: 'stale'} : update.promise, {retryDelays: [0]})
     const work = model.load('7d'); await tick()
-    expect(model.report.value?.summary?.total_tokens).toBe(7); expect(model.calculating.value).toBe(true)
+    expect(model.report.value?.summary?.total_tokens).toBe(7); expect(model.calculating.value).toBe(false); expect(model.loading.value).toBe(true)
     update.resolve(ready('7d', 8)); await work
     expect(model.report.value?.summary?.total_tokens).toBe(8); expect(model.calculating.value).toBe(false)
+  })
+  it('does not treat an unchanged stale snapshot as an endless cold calculation', async () => {
+    let calls = 0
+    const model = createUsageReportLoader(async window => {calls++; return {...ready(window),calculation_state:'stale'}}, {retryDelays:[0,0,0]})
+    await model.load('7d')
+    expect(calls).toBe(2); expect(model.loading.value).toBe(false); expect(model.calculating.value).toBe(false)
+    expect(model.report.value?.available).toBe(true)
   })
   it('distinguishes no local data from failure or ongoing calculation', async () => {
     const model = createUsageReportLoader(async window => ({window, available: false, reason: 'no_data_source'}))
