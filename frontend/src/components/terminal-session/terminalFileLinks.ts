@@ -195,24 +195,31 @@ function renderedProseReferenceRows(buffer: TerminalBufferLike, current: number,
     if (workLeft < 0) return undefined
     if (!head.trim() || diffLineNumber(head) !== undefined || EDIT_HEADER_RE.test(head)) return undefined
     const prefix = /^( *)(?:[•●⏺*-] +)?/u.exec(head)![0]
-    if (!prefix.length) return undefined
+    const toolHeader = FILE_TOOL_HEADER_RE.test(head)
+    if (!prefix.length && !toolHeader) return undefined
     if (referenceDelimiters(head).open) {
       const groups = [probe]
       const cuts: number[] = []
       let next = first + probe.length, total = probe.length
       let logicalLength = head.length
+      let indent = prefix.length || 2
       while (next < buffer.length && total < 64) {
         const part = softWrappedTerminalRows(buffer, next)
         const tail = logicalRecordText(part.rows)
-        if (!part.rows.length || total + part.rows.length > 64 || !tail.slice(prefix.length).trim()
-          || !tail.startsWith(' '.repeat(prefix.length)) || /^\s*[•●⏺*-] +/u.test(tail)
-          || diffLineNumber(tail) !== undefined || EDIT_HEADER_RE.test(tail) || EDIT_TOOL_HEADER_RE.test(tail)) break
+        // Tool titles have an eight-column hanging gutter, unlike the two-column
+        // paragraph layout. Lock that observed layout on the first hard boundary;
+        // never trim arbitrary whitespace from paths or xterm soft continuations.
+        const toolIndent = /^ */.exec(head)![0].length + 8
+        if (groups.length === 1 && toolHeader && tail.startsWith(' '.repeat(toolIndent))) indent = toolIndent
+        if (!part.rows.length || total + part.rows.length > 64 || !tail.slice(indent).trim()
+          || !tail.startsWith(' '.repeat(indent)) || /^\s*[•●⏺*-] +/u.test(tail)
+          || diffLineNumber(tail) !== undefined || EDIT_HEADER_RE.test(tail) || FILE_TOOL_HEADER_RE.test(tail)) break
         cuts.push(logicalLength)
         groups.push(part.rows)
-        logicalLength += tail.length - prefix.length
+        logicalLength += tail.length - indent
         next += part.rows.length
         total += part.rows.length
-        const rows = mergeRenderedRows(groups, prefix.length, false)
+        const rows = mergeRenderedRows(groups, indent, false)
         const text = logicalRecordText(rows)
         workLeft -= text.length
         if (workLeft < 0) return undefined
@@ -233,7 +240,7 @@ function renderedProseReferenceRows(buffer: TerminalBufferLike, current: number,
         if (!delimiters.open) break
       }
     }
-    if (/^\s*[•●⏺*-] +/u.test(head) || EDIT_TOOL_HEADER_RE.test(head) || first === 0) return undefined
+    if (/^\s*[•●⏺*-] +/u.test(head) || FILE_TOOL_HEADER_RE.test(head) || first === 0) return undefined
     probe = softWrappedTerminalRows(buffer, first - 1).rows
     if (!probe.length) return undefined
     searched += probe.length
@@ -360,6 +367,7 @@ const LOCATION_SUFFIX_RE = /^(?::(\d+)(?:(:|-)(\d+))?|#L(\d+)(?:-L(\d+))?)(?![\p
 const EDIT_STATS_RE = /\(\s*\+\d+(?:\s*,?\s*[-−]\s*\d+)?\s*\)/
 const EDIT_HEADER_RE = /^\s*(?:[•●]\s*)?(?:Added|Edited|Updated|Update|Wrote|Write)\s+/i
 const EDIT_TOOL_HEADER_RE = /^\s*(?:[⏺●•]\s*)?(?:Update|Edit|Write)\(/i
+const FILE_TOOL_HEADER_RE = /^\s*(?:[⏺●•]\s*)?(?:Read|Update|Write|Edit|Edited)\(/i
 const DIFF_LINE_NUMBER_RE = /^(?:\s*(\d+)(?=\s+[-+−|│·─—])|[ \t]{2,}(\d+)(?= {2}))/
 const EDIT_SUMMARY_RE = /^\s*(?:⎿\s*)?(?:Added \d+ lines?(?:, removed \d+ lines?)?|Removed \d+ lines?)\s*$/i
 const PATH_WRAPPERS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '（': '）', '【': '】', '《': '》' }
