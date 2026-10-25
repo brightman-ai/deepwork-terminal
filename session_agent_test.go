@@ -82,6 +82,9 @@ func TestSessionAgentTracker_SameCwdSessionsGetDistinctTranscripts(t *testing.T)
 // the cwd without first proving an agent was actually running in THIS session.
 func TestSessionAgentTracker_NoAgentNoStatus(t *testing.T) {
 	tr := newSessionAgentTracker()
+	// Earlier process-tree fixtures can leave a terminated fake agent in the
+	// shared three-second snapshot. This assertion needs the current tree.
+	tr.inspector = agentintel.NewProcessInspector()
 	got := tr.State(context.Background(), "s1", os.Getpid(), t.TempDir(), nil)
 	if got.AgentTool != agentintel.ToolNone || got.AgentStatus != "" {
 		t.Fatalf("a shell with no agent reported tool=%q status=%q, want empty", got.AgentTool, got.AgentStatus)
