@@ -6,6 +6,8 @@ import { Terminal } from '../frontend/node_modules/@xterm/xterm'
 import { enableUnicode11 } from '../frontend/src/components/terminal-session/terminalUnicode'
 import { editedDiffLineLinkFromBuffer, findWrappedTerminalFileLinks, terminalCellRange, wrappedTerminalRows, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../frontend/src/components/terminal-session/terminalFileLinks'
 
+import { terminalPathScenarios, type TerminalPathScenario } from '../frontend/src/components/terminal-session/__tests__/fixtures/terminalPathScenarios'
+
 const samples = [
   { text: '稿是原地改的 v2，没另起 v3（同一天三版会乱）：讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md（.docx 重出），643', path: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', selected: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', unprefixed: true },
   { text: '稿是原地改的 v2，没另起 v3（同一天三版会乱）：讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md（.docx\r\n  重出），643', path: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', selected: '讲解/快模型推理加速适用边界/快模型推理加速适用边界-推理快慢原理-卡模型量化与PD分离-v2-20261024.md', unprefixed: true },
@@ -182,8 +184,36 @@ function inspectProse(cols: number, phase: string, path: string, selected: strin
   proseResults.push({cols, phase, path, fragments})
 }
 
+const scenarioResults: Array<{id: string; family: string; cols: number; phase: string; fragments: number}> = []
+function inspectScenario(scenario: TerminalPathScenario, cols: number, phase: string): void {
+  const seen = new Set<string>()
+  let fragments = 0
+  for (let row = 0; row < term.buffer.active.length; row++) for (const link of terminalFileLinksAtRow(term.buffer.active, row)) {
+    assert(scenario.paths.includes(link.path), `${scenario.id}/${cols}/${phase}: unexpected partial or altered target ${JSON.stringify(link.path)}`)
+    seen.add(link.path); fragments++
+    for (let col = link.cellStart - 1; col < link.cellEnd; col++) {
+      assert(terminalFileLinkAtCell(term.buffer.active, row, col)?.path === link.path, `${scenario.id}/${cols}/${phase}: cell identity differs`)
+    }
+    assert(terminalFileSelectionAtCell(term.buffer.active, row, link.cellStart - 1, term.cols)?.path === link.path,
+      `${scenario.id}/${cols}/${phase}: selection identity differs`)
+  }
+  assert(JSON.stringify([...seen].sort()) === JSON.stringify([...scenario.paths].sort()), `${scenario.id}/${cols}/${phase}: missing target`)
+  scenarioResults.push({id: scenario.id, family: scenario.family, cols, phase, fragments})
+}
+
 async function run(): Promise<void> {
   for (const cols of widths) {
+    for (const scenario of terminalPathScenarios) {
+      try {
+        term.reset(); term.resize(cols, 40)
+        await write(scenario.rows.join('\r\n') + '\r\n')
+        inspectScenario(scenario, cols, 'write')
+        for (const changed of [32, 120, cols]) {
+          term.resize(changed, 40)
+          inspectScenario(scenario, changed, 'reflow')
+        }
+      } catch (error) { failures.push(String(error)) }
+    }
     term.resize(cols, 40)
     for (const sample of samples) {
       try {
@@ -259,7 +289,7 @@ async function run(): Promise<void> {
       {text: '  • Saved\r\n    /work/中文目录/long-repo\r\n    rt.md。\r\n', path: '/work/中文目录/long-report.md', selected: '/work/中文目录/long-repo\n    rt.md'},
       {text: '● Update(/work/skills/whiteboar\r\n        d-tg2/design/场景模拟-介\r\n        入点.md)\r\n', path: '/work/skills/whiteboard-tg2/design/场景模拟-介入点.md', selected: '/work/skills/whiteboar\n        d-tg2/design/场景模拟-介\n        入点.md'},
       {text: '● Update("docs/my \r\n         report  final.md")\r\n', path: 'docs/my  report  final.md', selected: 'docs/my \n         report  final.md'},
-      {text: 'Read(docs/中文文档/long-\r\n        report.md · lines 12-20)\r\n', path: 'docs/中文文档/long-report.md', selected: 'docs/中文文档/long-\n        report.md'},
+      {text: '● Read(docs/中文文档/long-\r\n      report.md · lines 12-20)\r\n', path: 'docs/中文文档/long-report.md', selected: 'docs/中文文档/long-\n      report.md'},
       {text: '文件：/home/ubuntu/code/automation-design/collab/work/w\r\n  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/\r\n  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.\r\n  md（393 行，第一屏五段是全部结论，证据行号在附录 A）。\r\n', path: '/home/ubuntu/code/automation-design/collab/work/whiteboard-ng自举-20261001/交接-20261024-Fable独立重审/独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.md', selected: '/home/ubuntu/code/automation-design/collab/work/w\n  hiteboard-ng自举-20261001/交接-20261024-Fable独立重审/\n  独立重审-whiteboard-tg设计分析与方案-Fable-v1-20261024.\n  md'},
       {text: '  文件：./docs/long-report.doc\r\n  x（已保存）\r\n', path: './docs/long-report.docx', selected: './docs/long-report.doc\n  x'},
       {text: `  我已核读这些会话的用户与助手消息、历版分析、业务线原始材料及 CEO 文档。完整结果保存为《数据飞轮壁垒·分析梳理 v5》 (\x1b[32m${prefix}\x1b[0m\r\n  ${suffix})，包含原始会话定位和逐项依据。\r\n`, path: prefix + suffix, selected: prefix + '\n  ' + suffix},
@@ -317,8 +347,8 @@ async function run(): Promise<void> {
       } catch (error) { failures.push(String(error)) }
     }
   }
-  const checks = results.length + documentResults.length + negativeResults.length + renderedResults.length + proseResults.length
-  const report = { widths, sample_count: samples.length, negative_sample_count: negativeSamples.length, checks, document_context_checks: documentResults.length, negative_checks: negativeResults.length, rendered_record_checks: renderedResults.length, prose_record_checks: proseResults.length, failures, results, documentResults, negativeResults, renderedResults, proseResults,
+  const checks = results.length + documentResults.length + negativeResults.length + renderedResults.length + proseResults.length + scenarioResults.length
+  const report = { widths, sample_count: samples.length, negative_sample_count: negativeSamples.length, checks, document_context_checks: documentResults.length, negative_checks: negativeResults.length, rendered_record_checks: renderedResults.length, prose_record_checks: proseResults.length, failures, results, documentResults, negativeResults, renderedResults, proseResults, scenarioResults,
     method: 'Installed xterm with Unicode 11; actual writes, ANSI, buffer cells, resize/reflow; production path helpers.' }
   ;(window as unknown as { pathLayoutReport: unknown }).pathLayoutReport = report
   result.textContent = JSON.stringify({ checks, failures }, null, 2)

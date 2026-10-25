@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { terminalPathScenarios } from './fixtures/terminalPathScenarios'
 import { diffLineNumber, editedDiffLineLink, editedDiffLineLinkFromBuffer, editedFileHeader, findTerminalFileLinks, findWrappedTerminalFileLinks, wrappedTerminalRows, parseFileLocationSuffix, terminalCellRange, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../terminalFileLinks'
 
 describe('findTerminalFileLinks', () => {
@@ -553,18 +554,28 @@ describe('explicit file references in renderer-wrapped prose', () => {
     expect(editedDiffLineLinkFromBuffer(b, 4)).toMatchObject({path, lineStart: 12})
   })
 
-  it('recognizes eight-column continuations in file tool titles without requiring a bullet', () => {
-    for (const tool of ['Read', 'Update', 'Write', 'Edit', 'Edited']) {
+  it('uses each tool title opening-parenthesis column for aligned continuations', () => {
+    for (const [tool, column] of [['Read', 4], ['Update', 6], ['Write', 5], ['Edit', 4], ['Edited', 6]] as const) {
       for (const bullet of ['', '● ', '⏺ ', '• ']) {
         for (const outer of ['', '  ']) {
           const b = buffer([`${outer}${bullet}${tool}(docs/my report/介`,
-            `${outer}        入点.md${tool === 'Read' ? ' · lines 12-20' : ''})`])
+            `${' '.repeat(outer.length + column + (bullet ? 2 : 0))}入点.md${tool === 'Read' ? ' · lines 12-20' : ''})`])
           for (const row of [0, 1]) {
             expect(terminalFileLinksAtRow(b, row)[0])
               .toMatchObject({path: 'docs/my report/介入点.md', ...(tool === 'Read' ? {lineStart: 12, lineEnd: 20} : {})})
           }
         }
       }
+    }
+  })
+
+  it('keeps filename spaces beyond a shorter tool title alignment', () => {
+    const cases = [
+      {rows: ['● Read("docs/my', '        report.md")'], path: 'docs/my  report.md'},
+      {rows: ['● Write("docs/my', '        report.md")'], path: 'docs/my report.md'},
+    ]
+    for (const {rows, path} of cases) for (const row of [0, 1]) {
+      expect(terminalFileLinksAtRow(buffer(rows), row)[0]?.path).toBe(path)
     }
   })
 
@@ -621,6 +632,77 @@ describe('explicit file references in renderer-wrapped prose', () => {
       const b = buffer(['  输出 "' + prefix, '  report.md"'])
       for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row)).toEqual([])
     }
+  })
+})
+
+describe('rendered tool records from the reported Write/Wrote output', () => {
+  const buffer = (lines: string[]) => ({length: lines.length, getLine: (row: number) => {
+    const text = lines[row]
+    return text === undefined ? undefined : {isWrapped: false, length: text.length,
+      getCell: (col: number) => ({getChars: () => text[col], getWidth: () => 1})}
+  }})
+  const path = '/home/ubuntu/code/claude_remote/skills/whiteboard-t3/design/design.md'
+  const lines = ['● Write(/home/ubuntu/code/claude_remote/skills/whiteboard',
+    '       -t3/design/design.md)',
+    '  ⎿ \u00a0Wrote 89 lines to /home/ubuntu/code/claude_remo',
+    '     te/skills/whiteboard-t3/design/design.md']
+  it('keeps the original absolute target in both Write title fragments', () => {
+    const b = buffer(lines)
+    for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row).map(l => l.path)).toEqual([path])
+  })
+  it('keeps the original absolute target in both Wrote receipt fragments', () => {
+    const b = buffer(lines)
+    for (const row of [2, 3]) {
+      const links = terminalFileLinksAtRow(b, row)
+      expect(links.map(l => l.path)).toEqual([path])
+      for (let col = links[0].cellStart - 1; col < links[0].cellEnd; col++) {
+        expect(terminalFileLinkAtCell(b, row, col)?.path).toBe(path)
+      }
+      expect(terminalFileSelectionAtCell(b, row, links[0].cellStart - 1, 80))
+        .toMatchObject({path, startRow: 2, endRow: 3})
+    }
+    expect(terminalFileLinkAtCell(b, 2, 7)).toBeUndefined()
+    expect(terminalFileLinkAtCell(b, 3, 4)).toBeUndefined()
+  })
+})
+
+describe('tool record boundary matrices', () => {
+  const buffer = (rows: string[]) => ({length: rows.length, getLine: (i: number) => rows[i] === undefined ? undefined : {
+    isWrapped: false, length: rows[i].length, getCell: (j: number) => ({getChars: () => rows[i][j], getWidth: () => 1}),
+  }})
+  it('preserves tool paths and Read locations at every hard split of the argument or metadata', () => {
+    for (const [title, gutter] of [['● Read(', 6], ['● Update(', 8], ['● Write(', 7], ['● Edit(', 6]] as const) {
+      for (const path of ['/work/whiteboard/report.md', '~/docs/中文报告.md', './docs/my report(final).md']) {
+        const tail = path + (title.includes('Read') ? ' · lines 12-20)' : ')')
+        for (let cut = 0; cut < tail.length; cut++) {
+          const b = buffer([title + tail.slice(0, cut), ' '.repeat(gutter) + tail.slice(cut)])
+          const links = [0, 1].flatMap(row => terminalFileLinksAtRow(b, row))
+          expect(links.length).toBeGreaterThan(0)
+          for (const link of links) expect(link).toMatchObject({path, ...(title.includes('Read') ? {lineStart: 12, lineEnd: 20} : {})})
+        }
+      }
+    }
+  })
+  it('recovers receipt metadata and path cuts without borrowing another record', () => {
+    for (const [prefix, gutter] of [['  ⎿ \u00a0Wrote 89 lines to ', 5], ['  └  Wrote 1 line to ', 5], ['└ Wrote 1 line to ', 2], ['    ⎿  Wrote 1 line to ', 7]] as const) {
+      for (const path of ['/work/whiteboard/report.md', '~/docs/中文报告.md', 'docs/my  report.md']) {
+        const full = prefix + path
+        for (let cut = prefix.indexOf('Wrote') + 5; cut < full.length; cut++) {
+          // A new root after an existing partial target remains an independent record.
+          if (cut > prefix.length && full[cut] === '/') continue
+          const b = buffer([full.slice(0, cut), ' '.repeat(gutter) + full.slice(cut)])
+          const links = [0, 1].flatMap(row => terminalFileLinksAtRow(b, row))
+          expect(links.length).toBeGreaterThan(0)
+          for (const link of links) expect(link.path).toBe(path)
+        }
+      }
+    }
+    for (const tail of ['     /other.md', '     ● other.md', '  ⎿  Wrote 1 line to other.md', '', '    report.md']) {
+      const b = buffer(['  ⎿  Wrote 1 line to /work/long', tail])
+      for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row).some(l => l.path === '/work/longreport.md' || l.path === '/work/long/other.md')).toBe(false)
+    }
+    const b = buffer(['  ⎿  Wrote 2 lines to ', '     https://example.com/report.md'])
+    for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row)).toEqual([])
   })
 })
 
@@ -905,5 +987,26 @@ describe('Markdown targets inside document edit previews', () => {
     ]) expect(terminalFileLinksAtRow(buffer(lines), lines.length - 1).filter(l => l.documentRelative)).toEqual([])
     const b = buffer(['Added old/notes.md (+1 -0)', '1 +previous', 'Added next/audit/notes.md (+1 -0)', '1 +[linked](../guide.md)'])
     expect(terminalFileLinksAtRow(b, 3).find(l => l.documentRelative)?.path).toBe('./next/guide.md')
+  })
+})
+
+
+describe('shared path scenario catalog: independent identities across record families', () => {
+  for (const scenario of terminalPathScenarios) it(`${scenario.family}: ${scenario.id}`, () => {
+    const buffer = {length: scenario.rows.length, getLine: (row: number) => {
+      const text = scenario.rows[row]
+      return text === undefined ? undefined : {isWrapped: false, length: text.length,
+        getCell: (col: number) => ({getChars: () => text[col], getWidth: () => 1})}
+    }}
+    const seen = new Set<string>()
+    for (let row = 0; row < buffer.length; row++) for (const link of terminalFileLinksAtRow(buffer, row)) {
+      expect(scenario.paths).toContain(link.path)
+      seen.add(link.path)
+      for (let col = link.cellStart - 1; col < link.cellEnd; col++) {
+        expect(terminalFileLinkAtCell(buffer, row, col)?.path).toBe(link.path)
+      }
+      expect(terminalFileSelectionAtCell(buffer, row, link.cellStart - 1, 120)?.path).toBe(link.path)
+    }
+    expect([...seen].sort()).toEqual([...scenario.paths].sort())
   })
 })
