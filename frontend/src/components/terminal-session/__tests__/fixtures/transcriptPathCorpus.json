@@ -1,0 +1,1503 @@
+{
+  "study": {
+    "transcripts": 200,
+    "claude": 100,
+    "codex": 100,
+    "since": "2026-10-01",
+    "seed": 20261025,
+    "private_run": "20261025-210310-transcript-path-corpus-term",
+    "oracle": "Tool fields/patch headers and model-reviewed static prose wrappers; expected identities never use the production parser.",
+    "minimization": "ASCII/CJK name characters masked preserving column widths, separators, punctuation, extensions and path lengths. Original ±2-line contexts remain private.",
+    "limits": "No live CLI execution. Layouts simulate known formatters; original transcript text is not a terminal recording."
+  },
+  "cases": [
+    {
+      "id": "tool-000",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5485
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/A0文文文文-00000000/AAAAAA.md"
+    },
+    {
+      "id": "tool-001",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4545
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAA.md"
+    },
+    {
+      "id": "tool-002",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4090
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文-00000000/文文文文文.md"
+    },
+    {
+      "id": "tool-003",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4285
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文.md"
+    },
+    {
+      "id": "tool-004",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4545
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAAAAAA.md"
+    },
+    {
+      "id": "tool-005",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4355
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文.md"
+    },
+    {
+      "id": "tool-006",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4074
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/文文文文.md"
+    },
+    {
+      "id": "tool-007",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4602
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaaaaaaa-aa.aaaaaa.md"
+    },
+    {
+      "id": "tool-008",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4545
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文文文文-a0.md"
+    },
+    {
+      "id": "tool-009",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 3670
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/文文文文.md"
+    },
+    {
+      "id": "tool-010",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4545
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaaaaaaa-aa.aaaaaa.md"
+    },
+    {
+      "id": "tool-011",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4602
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaaa文文文文文文.md"
+    },
+    {
+      "id": "tool-012",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4545
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaaa文文文文文文.md"
+    },
+    {
+      "id": "tool-013",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4545
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaaaaaaa-aa.aaaaaa.md"
+    },
+    {
+      "id": "tool-014",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 3677
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/aaa_aaaaaa.py"
+    },
+    {
+      "id": "tool-015",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4426
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文文文文-a0.md"
+    },
+    {
+      "id": "tool-016",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5485
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文-文文文Aaaaa文文文文文-00000000/AAAAAA.md"
+    },
+    {
+      "id": "tool-017",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 3670
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/aaa_aaaaaa.py"
+    },
+    {
+      "id": "tool-018",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4317
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaa_aaaaaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-019",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5321
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文-文文文Aaaaa文文文文文-00000000/AAAAAA.md"
+    },
+    {
+      "id": "tool-020",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5781
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-021",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4190
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaa_aaaaaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-022",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5978
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-023",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5772
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-024",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4969
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文-文文文文文文文-文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-025",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5967
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-026",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5309
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文Aaaaa文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-027",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 4956
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文-文文文文文文文-文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-028",
+      "agent": "codex",
+      "operation": "edit",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5283
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文文Aaaaa文文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-029",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5248
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文Aaaaa文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-030",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5231
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文文Aaaaa文文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-031",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "d08a42c845ca1ee7",
+        "jsonl_line": 216
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-AAA-A-Aaaaa文文文文文文文文文/文文/A0文文-文文aaaa文文文文文文文/A0文文-文文文文文AAA文文文文-文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-032",
+      "agent": "codex",
+      "operation": "create",
+      "origin": {
+        "source_id": "0a9fc0c45cc938ae",
+        "jsonl_line": 165
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-AAA-A-Aaaaa文文文文文文文文文/文文/A0文文-文文aaaa文文文文文文文/A0文文-文文文文文AAA文文文文-文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-033",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "8992e6f9844984c0",
+        "jsonl_line": 2462
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaaaaa"
+    },
+    {
+      "id": "tool-034",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1634
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAAA-文文.md"
+    },
+    {
+      "id": "tool-035",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "d9af83aeeb6c4298",
+        "jsonl_line": 253
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa.sh"
+    },
+    {
+      "id": "tool-036",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 4463
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAAA-文文.md"
+    },
+    {
+      "id": "tool-037",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4815
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-038",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "4bf1a5391c078519",
+        "jsonl_line": 28
+      },
+      "path": "/aaaa/aaaaaa/.claude/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-039",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "b1910f1fd156f8e5",
+        "jsonl_line": 505
+      },
+      "path": "/aaaa/aaaaaa/.dw-teamworkbench/aaaaaaa-aaa/aaaaaaa/AAAAAA.md"
+    },
+    {
+      "id": "tool-040",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1640
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-041",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 446
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa.go"
+    },
+    {
+      "id": "tool-042",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 4457
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-043",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4861
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-044",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "148664366355dd8f",
+        "jsonl_line": 23
+      },
+      "path": "/aaa/aaaaaaaaaa-aaaaaa/AA-0000-AAA文文文文文文文文文文-00000000-0000.md"
+    },
+    {
+      "id": "tool-045",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "b1910f1fd156f8e5",
+        "jsonl_line": 503
+      },
+      "path": "/aaaa/aaaaaa/.dw-teamworkbench/aaaaaaa-aaa/aaaaaaa/aaaaaaa.py"
+    },
+    {
+      "id": "tool-046",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1734
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文.md"
+    },
+    {
+      "id": "tool-047",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 514
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaaaaa.go"
+    },
+    {
+      "id": "tool-048",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 4417
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文.md"
+    },
+    {
+      "id": "tool-049",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4782
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-050",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 113
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaa/文文文文.md"
+    },
+    {
+      "id": "tool-051",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 2234
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAA.md"
+    },
+    {
+      "id": "tool-052",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1755
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文.md"
+    },
+    {
+      "id": "tool-053",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 427
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaaaaa.go"
+    },
+    {
+      "id": "tool-054",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 4453
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文文.md"
+    },
+    {
+      "id": "tool-055",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4746
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-056",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 114
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaa/文文文文.md"
+    },
+    {
+      "id": "tool-057",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 3461
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaaaaaaa-aaaaaaaa/aaaaaa_aaaaaa_aaaa.go"
+    },
+    {
+      "id": "tool-058",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1638
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文.md"
+    },
+    {
+      "id": "tool-059",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 462
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaaaaa.go"
+    },
+    {
+      "id": "tool-060",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e0aaab49e52aa1b8",
+        "jsonl_line": 132
+      },
+      "path": "/aaa/aa-aaa-00000000-aa0aaaa0/a0/aaaaa/A0文文文文文AA文文文-文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-061",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4770
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-062",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 101
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaa/文文文文.md"
+    },
+    {
+      "id": "tool-063",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "b1910f1fd156f8e5",
+        "jsonl_line": 501
+      },
+      "path": "/aaaa/aaaaaa/.dw-teamworkbench/aaaaaaa-aaa/aaaaaaa/aaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-064",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 552
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AAAAA.md"
+    },
+    {
+      "id": "tool-065",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 1416
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaaaa/aaaaaaa.go"
+    },
+    {
+      "id": "tool-066",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 650
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AAAAA.md"
+    },
+    {
+      "id": "tool-067",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4896
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-068",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "148664366355dd8f",
+        "jsonl_line": 25
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-069",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "8992e6f9844984c0",
+        "jsonl_line": 2228
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaaaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-070",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 778
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/文0000文文文文文-文文.md"
+    },
+    {
+      "id": "tool-071",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 470
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa_aaa.go"
+    },
+    {
+      "id": "tool-072",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 4481
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文-文文文文-AAAA文文.md"
+    },
+    {
+      "id": "tool-073",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4876
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-074",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 117
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文.md"
+    },
+    {
+      "id": "tool-075",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "8992e6f9844984c0",
+        "jsonl_line": 1396
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaa/aaaaa_aaa.py"
+    },
+    {
+      "id": "tool-076",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 2022
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaaaaa.py"
+    },
+    {
+      "id": "tool-077",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 501
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaa_aaaaa.go"
+    },
+    {
+      "id": "tool-078",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "be72c260942805ed",
+        "jsonl_line": 172
+      },
+      "path": "/aaa/aa-aaa-00000000-aa0aaaa0/aaaa/aaaaa/AAAA文文-文文文文文-AaaaAaaaa文文Aaaaaaaaa-a0-00000000.md"
+    },
+    {
+      "id": "tool-079",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4799
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-080",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 119
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文文.md"
+    },
+    {
+      "id": "tool-081",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 3339
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaaaaaaa-aaaaaaaa/aaaa/aaaaaa_aaaaaaaa.go"
+    },
+    {
+      "id": "tool-082",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1795
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/文文文文-a0.md"
+    },
+    {
+      "id": "tool-083",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "d9af83aeeb6c4298",
+        "jsonl_line": 92
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaa/aaaaaa-aaaaaa"
+    },
+    {
+      "id": "tool-084",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 2020
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaaaa_aaaa.py"
+    },
+    {
+      "id": "tool-085",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4838
+      },
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-086",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "86a5bc8d99dda03f",
+        "jsonl_line": 102
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/aaaaaa/文文.md"
+    },
+    {
+      "id": "tool-087",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "8992e6f9844984c0",
+        "jsonl_line": 601
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaaaa_aaaaaaaa.py"
+    },
+    {
+      "id": "tool-088",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1797
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/文文文-文文文文文.md"
+    },
+    {
+      "id": "tool-089",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 472
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa_aaaaa.go"
+    },
+    {
+      "id": "tool-090",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1820
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaa_aaaaaa.py"
+    },
+    {
+      "id": "tool-091",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 4915
+      },
+      "path": "/aaa/aa00.png"
+    },
+    {
+      "id": "tool-092",
+      "agent": "claude",
+      "operation": "read",
+      "origin": {
+        "source_id": "13f1ef9ff6a4af1c",
+        "jsonl_line": 1457
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaa-aaa-aaa0/文文/文0文.md"
+    },
+    {
+      "id": "tool-093",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1636
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/AAAAAA.md"
+    },
+    {
+      "id": "tool-094",
+      "agent": "claude",
+      "operation": "create",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 1887
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaaaa_aaaa.py"
+    },
+    {
+      "id": "tool-095",
+      "agent": "claude",
+      "operation": "edit",
+      "origin": {
+        "source_id": "2e7eb9c88c189131",
+        "jsonl_line": 499
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa_aaaaa.go"
+    },
+    {
+      "id": "prose-357",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "1085213a77825721",
+        "jsonl_line": 447
+      },
+      "path": "aaaaa/A0-aaaaaaa-aaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-488",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "ca46370aeef5ea20",
+        "jsonl_line": 377
+      },
+      "path": "AAAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-395",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "13f1ef9ff6a4af1c",
+        "jsonl_line": 315
+      },
+      "path": "aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/aaaaaaa-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-398",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "13f1ef9ff6a4af1c",
+        "jsonl_line": 443
+      },
+      "path": "aa.py",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-185",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "67b320ac485abb21",
+        "jsonl_line": 340
+      },
+      "path": "aaaaaa/AA-0000-.../文文/AAAA文文文文文文/AAAA文文-文文文文文文文-文文文文文文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-555",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "e7380f325f1aec84",
+        "jsonl_line": 393
+      },
+      "path": "aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文-文文文文文文文文文文文文-文aaaaa文文文文-文文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-211",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "6fdd73aa75bd08b7",
+        "jsonl_line": 377
+      },
+      "path": "文文AA文文文文/aaaa/文文文-文文文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-156",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 6191
+      },
+      "path": "aaaAaaAaaaaaaa.ts",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-168",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 9002
+      },
+      "path": "aaaaaaAaa.ts",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-33",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "c2e9d23905451ee5",
+        "jsonl_line": 619
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文AA文文文文/文文AA文文文文-文文文文0000-AA文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-332",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "8992e6f9844984c0",
+        "jsonl_line": 3036
+      },
+      "path": "aaaaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-427",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "de65f6012ffbc19e",
+        "jsonl_line": 228
+      },
+      "path": "aaaaaaa/aaaaaaaa.json",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-39",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "c2e9d23905451ee5",
+        "jsonl_line": 1139
+      },
+      "path": "文文AA文文文文-AA文文文文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-431",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "de65f6012ffbc19e",
+        "jsonl_line": 311
+      },
+      "path": "~/aaa-aaaaaaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-327",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "8992e6f9844984c0",
+        "jsonl_line": 2872
+      },
+      "path": "aaaaaa-aaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-47",
+      "agent": "claude",
+      "operation": "reference",
+      "origin": {
+        "source_id": "57610e8f329696e4",
+        "jsonl_line": 643
+      },
+      "path": "aaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1110",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 9219
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文-00000000-Aaaaa文文文文/文文文文-文文文文文文文文文文文文文文-Aaaaa-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-997",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "c19fa6153ced06db",
+        "jsonl_line": 1716
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文AA文文文文/文文AA文文文文-文文文文文文-文文文-文文文-a00-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-695",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "54c6b494428120b6",
+        "jsonl_line": 92
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaa/aaaaaaa-a0-aaaaa/aaaaaa-aaaaa/00000000-AAAA文文文文文文文/00000000-AAAA文文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-907",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aed2cb8d087009f7",
+        "jsonl_line": 2481
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/aaaa/AA-0000-aaaa-文文文文文文-文文文文文文文-Aaaaa文文-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1145",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 12716
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaaaaaaa-a0-文文文文文文文-00000000/文文-文文文文文文文文文-00a0000/文文文文文文文文文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1223",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "d08a42c845ca1ee7",
+        "jsonl_line": 547
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-AAA-A-Aaaaa文文文文文文文文文/文文/A0文文-文文aaaa文文文文文文文/A0文文-文文文文文AAA文文文文-文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1067",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 6145
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1030",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "93e99c13bc1e74d6",
+        "jsonl_line": 4889
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaaaa/00000000-A0文AAAA文文文文文文文文文文文文文/00000000-A0文AAAA文文文文文文文文文文文文文-文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-998",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "c19fa6153ced06db",
+        "jsonl_line": 2005
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文AA文文文文/文文AA文文文文-文文文文文文文文文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-698",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "a2f228da976b5b22",
+        "jsonl_line": 315
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaa/文文文文文文文-aaaaa-a0.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-894",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aae12be8c48dc6bf",
+        "jsonl_line": 762
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文文文文文文/文文文文文文文-文文文文-a00-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1066",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 5859
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1144",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 12494
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaaaaaaa-a0-文文文文文文文-00000000/文文-0a0aaa0-文文文文文文文文文/文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-903",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aed2cb8d087009f7",
+        "jsonl_line": 2038
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/aaaa/AA-0000-aaaa-文文文文文文-文文文文文文文文文文文-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1142",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 12364
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaaaaaaa-a0-文文文文文文文-00000000/文文-a0000aa-文文文文文文文文文/文文A-文文文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1228",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "1c93c01373d8400e",
+        "jsonl_line": 197
+      },
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaaa-文文文文文文文文文文文文文文文文文/文文文文文文/文文文文文文-文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-654",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "a51c7d16f134c5c7",
+        "jsonl_line": 12
+      },
+      "path": "aaaaa-文文文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1038",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "6a19cd9fcc1081b2",
+        "jsonl_line": 12
+      },
+      "path": "文文-aaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-936",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aed2cb8d087009f7",
+        "jsonl_line": 5766
+      },
+      "path": "aaaaaaaaaa-aa.aaaaaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1125",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 10195
+      },
+      "path": "AAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1123",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 10195
+      },
+      "path": "aaaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-808",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "8d679dda0ec50400",
+        "jsonl_line": 3076
+      },
+      "path": "文文文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1124",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b74ae0e39ed95995",
+        "jsonl_line": 10195
+      },
+      "path": "aaaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-927",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aed2cb8d087009f7",
+        "jsonl_line": 4411
+      },
+      "path": "aaaaa/aaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-777",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "bf61f037bd37c21c",
+        "jsonl_line": 75
+      },
+      "path": "aaaaaaa/aaa_aaaaa.py",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-990",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "b7623f0a54d740fe",
+        "jsonl_line": 12
+      },
+      "path": "aaa_aaaaa.py",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-694",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "54c6b494428120b6",
+        "jsonl_line": 76
+      },
+      "path": "aaaa/aaaa.aaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-913",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aed2cb8d087009f7",
+        "jsonl_line": 2924
+      },
+      "path": ".aaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-918",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "aed2cb8d087009f7",
+        "jsonl_line": 3744
+      },
+      "path": "AAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-863",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "24a17806a303723e",
+        "jsonl_line": 161
+      },
+      "path": "aaaaa/文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-858",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "7008ae077d2afbec",
+        "jsonl_line": 173
+      },
+      "path": "AAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1177",
+      "agent": "codex",
+      "operation": "reference",
+      "origin": {
+        "source_id": "34da2cb01be130d4",
+        "jsonl_line": 131
+      },
+      "path": "aaaa_aaaaaaaaaa_aaaaaaaa_0000.py",
+      "wrapper": "quote"
+    }
+  ]
+}
