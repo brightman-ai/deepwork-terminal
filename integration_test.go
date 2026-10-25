@@ -523,7 +523,14 @@ func TestIntegration_PTYIndependence(t *testing.T) {
 
 	// PTY should still accept data.
 	_, err = writeEnds.Get(0).Write([]byte("still alive"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	// A pipe write hands bytes to the read loop, not necessarily to the replay
+	// buffer yet. Reconnect starts as an observer, so bytes arriving after its
+	// initial replay aren't broadcast until it declares visibility. Synchronize
+	// the disconnected output before checking that replay, rather than racing it.
+	require.Eventually(t, func() bool {
+		return strings.Contains(string(got.Buffer.Read()), "still alive")
+	}, time.Second, 5*time.Millisecond, "disconnected PTY output should reach the replay buffer")
 
 	// Can reconnect.
 	ws2 := DialTestWS(t, server, sess.ID, "")
