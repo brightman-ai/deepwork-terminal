@@ -274,6 +274,43 @@ func TestFilesRaw_HTMLRender(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rt.StatusCode)
 }
 
+// Relative resources in an agent-produced page must resolve through the authenticated
+// render-assets route. A raw API URL is not a directory URL, so without the injected base
+// the browser would request /files/buddy-main-preview.css and silently fall back to unstyled
+// HTML (and scripts would be blocked by nosniff).
+func TestFilesRaw_HTMLRenderAssets(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(cwd, "docs"), 0o755))
+	page := `<!doctype html><head><link rel="stylesheet" href="buddy.css"><script src="buddy.js"></script></head><body><img src="buddy.svg"></body>`
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "docs", "buddy.html"), []byte(page), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "docs", "buddy.css"), []byte("body{color:red}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "docs", "buddy.js"), []byte("document.title='ok'"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cwd, "docs", "buddy.svg"), []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), 0o644))
+
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "html-assets", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "html-assets")
+	renderURL := formatURL(server, "/files/raw?session=%s&cwd=%s&anchor=explicit&path=%s&render=1", sess.ID, url.QueryEscape(cwd), url.QueryEscape("docs/buddy.html"))
+	r, err := httpGet(renderURL, "")
+	require.NoError(t, err)
+	defer r.Body.Close()
+	body, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `render-assets/`+sess.ID+`/docs/`)
+	assert.Contains(t, r.Header.Get("Content-Security-Policy"), "script-src 'unsafe-inline' 'self' http://")
+
+	assetBase := "/files/render-assets/" + sess.ID + "/docs/"
+	for name, wantType := range map[string]string{"buddy.css": "text/css", "buddy.js": "text/javascript", "buddy.svg": "image/svg+xml"} {
+		assetURL := formatURL(server, assetBase+name+"?session=%s&cwd=%s&anchor=explicit", sess.ID, url.QueryEscape(cwd))
+		asset, err := httpGet(assetURL, "")
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, asset.StatusCode, name)
+		assert.True(t, strings.HasPrefix(asset.Header.Get("Content-Type"), wantType), name)
+		asset.Body.Close()
+	}
+}
+
 // TC-FS-04d: the standalone CSP must keep frame-src 'self'. Under 'none' the html preview's
 // same-origin sandboxed iframe is blocked by the browser and paints a broken-document glyph —
 // a SILENT failure that looks like a server bug (cost a full debugging round once). The
