@@ -253,6 +253,10 @@ async function run(): Promise<void> {
     const prefix = 'topics/TH-0923-gjlj-攻击路径治理商业设计与效果价值范式/数据飞轮壁垒/数据'
     const suffix = '飞轮壁垒-分析梳理-v5-20261019.md'
     for (const prose of [
+      {text: '● 采了，并举一反三成三条维护流程；给你看的结构总结一页在 \r\n  ~/code/claude_remote/skills/whiteboard-tg2/design/white\r\n  board-t3预决策方案-结构总结与落地顺序-v1-20261025.md。\r\n  你和 Codex 说的\r\n', path: '~/code/claude_remote/skills/whiteboard-tg2/design/whiteboard-t3预决策方案-结构总结与落地顺序-v1-20261025.md', selected: '~/code/claude_remote/skills/whiteboard-tg2/design/white\n  board-t3预决策方案-结构总结与落地顺序-v1-20261025.md'},
+      {text: '● 完成：结果在 ./docs/long-\r\n  report.html。\r\n', path: './docs/long-report.html', selected: './docs/long-\n  report.html'},
+      {text: '● 已记录\r\n  docs/white\r\n  board/design/long-repor\r\n  t.md。\r\n', path: 'docs/whiteboard/design/long-report.md', selected: 'docs/white\n  board/design/long-repor\n  t.md'},
+      {text: '  • Saved\r\n    /work/中文目录/long-repo\r\n    rt.md。\r\n', path: '/work/中文目录/long-report.md', selected: '/work/中文目录/long-repo\n    rt.md'},
       {text: '● Update(/work/skills/whiteboar\r\n        d-tg2/design/场景模拟-介\r\n        入点.md)\r\n', path: '/work/skills/whiteboard-tg2/design/场景模拟-介入点.md', selected: '/work/skills/whiteboar\n        d-tg2/design/场景模拟-介\n        入点.md'},
       {text: '● Update("docs/my \r\n         report  final.md")\r\n', path: 'docs/my  report  final.md', selected: 'docs/my \n         report  final.md'},
       {text: 'Read(docs/中文文档/long-\r\n        report.md · lines 12-20)\r\n', path: 'docs/中文文档/long-report.md', selected: 'docs/中文文档/long-\n        report.md'},
@@ -283,6 +287,19 @@ async function run(): Promise<void> {
         for (const changed of [32, 120, cols]) {
           term.resize(changed, 40)
           inspectNegative(text, changed, 'hard-prose-reflow')
+        }
+      } catch (error) { failures.push(String(error)) }
+    }
+    for (const prefix of ['https://example.com/', '${ROOT}/', 'docs/<name>/', 'C:/work/']) {
+      try {
+        term.reset()
+        term.resize(cols, 40)
+        const text = `● 保存到 ${prefix}long-\r\n  report.md。\r\n`
+        await write(text)
+        inspectNegative(text, cols, 'bare-paragraph')
+        for (const changed of [32, 120, cols]) {
+          term.resize(changed, 40)
+          inspectNegative(text, changed, 'bare-paragraph-reflow')
         }
       } catch (error) { failures.push(String(error)) }
     }

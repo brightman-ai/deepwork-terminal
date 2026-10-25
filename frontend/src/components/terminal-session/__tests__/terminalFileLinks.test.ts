@@ -624,7 +624,7 @@ describe('explicit file references in renderer-wrapped prose', () => {
   })
 })
 
-describe('labelled bare paths with CLI hard continuations', () => {
+describe('bare paths with CLI hard continuations', () => {
   const buffer = (lines: string[]) => ({ length: lines.length, getLine: (row: number) => {
     const text = lines[row]
     return text === undefined ? undefined : { isWrapped: false, length: text.length,
@@ -651,6 +651,27 @@ describe('labelled bare paths with CLI hard continuations', () => {
     }
   })
 
+  it('recovers the original bare path that starts on a continuation of an assistant paragraph', () => {
+    const path = '~/code/claude_remote/skills/whiteboard-tg2/design/whiteboard-t3预决策方案-结构总结与落地顺序-v1-20261025.md'
+    const lines = ['● 采了，并举一反三成三条维护流程；给你看的结构总结一页在 ',
+      '  ~/code/claude_remote/skills/whiteboard-tg2/design/white',
+      '  board-t3预决策方案-结构总结与落地顺序-v1-20261025.md。',
+      '  你和 Codex 说的']
+    const b = buffer(lines)
+    for (const row of [1, 2]) {
+      const links = terminalFileLinksAtRow(b, row)
+      expect(links.map(l => l.path)).toEqual([path])
+      for (let col = links[0].cellStart - 1; col < links[0].cellEnd; col++) {
+        expect(terminalFileLinkAtCell(b, row, col)?.path).toBe(path)
+      }
+      expect(terminalFileSelectionAtCell(b, row, links[0].cellStart - 1, 80))
+        .toMatchObject({path, startRow: 1, endRow: 2})
+    }
+    for (const row of [0, 3]) expect(terminalFileLinksAtRow(b, row)).toEqual([])
+    expect(terminalFileLinkAtCell(b, 2, 0)).toBeUndefined()
+    expect(terminalFileLinkAtCell(b, 2, lines[2].length - 1)).toBeUndefined()
+  })
+
   it('recovers labelled path token continuations, including a recognized extension prefix', () => {
     for (const path of ['docs/long-report.md', './docs/report.html', '~/docs/report.docx', '/work/result.json', '/work/readme.markdown']) {
       for (let cut = 1; cut < path.length; cut++) {
@@ -659,6 +680,57 @@ describe('labelled bare paths with CLI hard continuations', () => {
         const b = buffer(['  结果文件: ' + path.slice(0, cut), '  ' + path.slice(cut) + '（已保存）'])
         for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row).map(l => l.path)).toEqual([path])
       }
+    }
+  })
+
+  it('uses one matrix for path prefixes, paragraph positions, bullets, gutters and every eligible hard split', () => {
+    const paths = ['~/docs/whiteboard.md', '/work/docs/whiteboard.md', './docs/whiteboard.html',
+      '../docs/whiteboard.docx', 'docs/whiteboard.md', 'topics/.tg/中文目录/数据报告.markdown']
+    for (const path of paths) for (const bullet of ['● ', '⏺ ', '• ', '- ']) {
+      for (const outer of ['', '  ']) for (const placement of ['inline', 'next', 'later']) {
+        const gutter = ' '.repeat(outer.length + bullet.length)
+        for (let cut = 1; cut < path.length; cut++) {
+          if (!path.slice(0, cut).includes('/') || path[cut] === '/') continue
+          const prefix = outer + bullet + '已保存文档'
+          const lines = placement === 'inline'
+            ? [prefix + ' ' + path.slice(0, cut), gutter + path.slice(cut) + '。']
+            : [prefix, ...(placement === 'later' ? [gutter + '下面是完整记录'] : []),
+              gutter + path.slice(0, cut), gutter + path.slice(cut) + '。']
+          const b = buffer(lines), first = lines.length - 2
+          for (const row of [first, first + 1]) {
+            const links = terminalFileLinksAtRow(b, row)
+            expect(links.map(link => link.path)).toEqual([path])
+            expect(terminalFileLinkAtCell(b, row, links[0].cellStart - 1)?.path).toBe(path)
+            expect(terminalFileSelectionAtCell(b, row, links[0].cellStart - 1, 120)?.path).toBe(path)
+          }
+        }
+      }
+    }
+  })
+
+  it('keeps paragraph-owned bare paths separate from new files, records, paragraphs and literal spaces', () => {
+    for (const tail of ['/other.md', '~/other.md', '../other.md', './other.md',
+      '文件：other.md', '● other.md', '  other.md', '', '● Read(other.md)', '12 +other.md']) {
+      const b = buffer(['● 文件已保存', '  ~/docs/long', '  ' + tail])
+      for (const row of [1, 2]) expect(terminalFileLinksAtRow(b, row).some(link => link.path === '~/docs/longother.md')).toBe(false)
+    }
+    for (const lines of [
+      ['● ~/docs/done.md', '  other.md'],
+      ['● 记录', '', '  ~/docs/long', '  report.md'],
+      ['● 记录', '    ~/docs/long', '    report.md'],
+      ['● 记录', '  ~/docs/long ', '  report.md'],
+    ]) {
+      const b = buffer(lines)
+      for (let row = 0; row < lines.length; row++) expect(terminalFileLinksAtRow(b, row).some(link => link.path === '~/docs/longreport.md' || link.path === '~/docs/done.mdother.md')).toBe(false)
+    }
+    const spaces = buffer(['● "~/docs/my ', '   report.md"'])
+    for (const row of [0, 1]) expect(terminalFileLinksAtRow(spaces, row)[0]?.path).toBe('~/docs/my  report.md')
+  })
+
+  it('keeps paragraph-owned foreign or dynamic references opaque across bare hard continuations', () => {
+    for (const prefix of ['https://example.com/', '${ROOT}/', 'docs/<name>/', 'C:/work/']) {
+      const b = buffer(['● 保存到 ' + prefix + 'long-', '  report.md。'])
+      for (const row of [0, 1]) expect(terminalFileLinksAtRow(b, row)).toEqual([])
     }
   })
 
