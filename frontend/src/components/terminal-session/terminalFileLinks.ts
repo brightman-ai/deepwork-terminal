@@ -116,10 +116,31 @@ function referenceDelimiters(text: string): { open: number; closed: Array<{start
   return {open: stack.length, closed}
 }
 
-/** A label explicitly introduces a bare reference too. CLI prose wraps its
- * token with a fixed hanging gutter even without quotes/parentheses. Recover
- * through a complete filename, never through a second label/root/record. */
-function renderedLabelledReferenceRows(buffer: TerminalBufferLike, current: number, original: {rows: WrappedTerminalRow[]; currentRow: number}): typeof original | undefined {
+/** A bare reference may begin on a continuation of an assistant paragraph.
+ * Find its bullet owner through the same hanging gutter, without borrowing
+ * independent output, tool records or a neighbouring paragraph. */
+function paragraphOwnsBareReference(buffer: TerminalBufferLike, first: number, head: string, indent: number): boolean {
+  let text = head, total = 0, workLeft = 128_000
+  while (total < 64) {
+    workLeft -= text.length
+    if (workLeft < 0 || !text.trim() || diffLineNumber(text) !== undefined
+      || EDIT_HEADER_RE.test(text) || FILE_TOOL_HEADER_RE.test(text)) return false
+    const bullet = /^ *[•●⏺*-] +/u.exec(text)
+    if (bullet) return bullet[0].length === indent
+    if (!text.startsWith(' '.repeat(indent)) || /^\s/u.test(text.slice(indent)) || first === 0) return false
+    const prior = softWrappedTerminalRows(buffer, first - 1)
+    if (!prior.rows.length) return false
+    total += prior.rows.length
+    first -= prior.rows.length
+    text = logicalRecordText(prior.rows)
+  }
+  return false
+}
+
+/** A label or an assistant paragraph owns a bare reference even without a
+ * wrapper. Recover its fixed-gutter continuations through a complete filename,
+ * never through a second label/root/record. */
+function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, original: {rows: WrappedTerminalRow[]; currentRow: number}): typeof original | undefined {
   const fileName = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
   const completeFile = (path: string): boolean => SPECIAL_FILE_NAMES.has(fileName(path))
     || fileName(path)[0] !== '.' && /\.[\p{L}\p{N}]{1,16}$/u.test(fileName(path))
@@ -132,11 +153,19 @@ function renderedLabelledReferenceRows(buffer: TerminalBufferLike, current: numb
     const token = /[^\s"'`|｜，。；！？、]+$/u.exec(head)
     const start = token ? bareFileReference(token[0], token.index).start : -1
     const value = start >= 0 ? head.slice(start) : ''
-    if (value.includes('/') && /[:：]\s*$/u.test(head.slice(0, start)) && !referenceDelimiters(value).open) {
+    const indent = /^( *)(?:[•●⏺*-] +)?/u.exec(head)![0].length || 2
+    const labelled = /[:：]\s*$/u.test(head.slice(0, start))
+    // A relative suffix containing '/' is not a new path start if the preceding
+    // record is still inside an unfinished path. Keep looking for that owner.
+    const prior = first > 0 ? logicalRecordText(softWrappedTerminalRows(buffer, first - 1).rows) : ''
+    const priorToken = /[^\s"'`|｜，。；！？、]+$/u.exec(prior)?.[0] ?? ''
+    const suffix = !head.slice(0, start).trim() && !/^(?:\/|~\/|\.{1,2}\/)/u.test(value)
+      && priorToken.includes('/') && !completeFile(priorToken)
+    if (value.includes('/') && !referenceDelimiters(value).open
+      && (labelled || !suffix && paragraphOwnsBareReference(buffer, first, head, indent))) {
       const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(value)
       const initial = findTerminalFileLinks(head).find(link => link.start === start)?.path
       const initialFile = initial && completeFile(initial)
-      const indent = /^( *)(?:[•●⏺*-] +)?/u.exec(head)![0].length || 2
       const gutter = ' '.repeat(indent)
       const groups = [probe], cuts: number[] = []
       let next = first + probe.length, total = probe.length, length = head.length
@@ -154,7 +183,7 @@ function renderedLabelledReferenceRows(buffer: TerminalBufferLike, current: numb
         workLeft -= text.length
         if (workLeft < 0) return undefined
         const link = findTerminalFileLinks(text).find(link => link.start === start)
-        const path = opaque ? text.slice(start).split(/[\s（(]/u, 1)[0] : link?.path
+        const path = opaque ? text.slice(start).split(/[\s（(，。；！？、]/u, 1)[0] : link?.path
         if (path && completeFile(path) && (opaque || cuts.every(cut => start < cut && cut < link!.start + (link!.displayLength ?? link!.end - link!.start + 1)))) {
           // report.h + tml is one filename; report.md + other.md is two.
           // Only an extension continuation can extend an already complete file.
@@ -302,8 +331,8 @@ export function wrappedTerminalRows(buffer: TerminalBufferLike, current: number)
   if (header) return header
   const prose = renderedProseReferenceRows(buffer, current, original)
   if (prose) return prose
-  const labelled = renderedLabelledReferenceRows(buffer, current, original)
-  if (labelled) return labelled
+  const bare = renderedBareReferenceRows(buffer, current, original)
+  if (bare) return bare
   const groups = [original.rows]
   let first = current - original.currentRow
   let total = original.rows.length
