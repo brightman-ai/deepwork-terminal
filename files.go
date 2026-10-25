@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/brightman-ai/deepwork-terminal/agentintel"
+	"github.com/brightman-ai/kit/authgate"
 )
 
 // rawPreviewMaxBytes caps how large a file /files/raw streams for inline preview —
@@ -806,12 +808,17 @@ func (s *Server) handleFilesRaw(w http.ResponseWriter, r *http.Request) {
 // to the same authenticated session.
 func (s *Server) handleFilesRenderAsset(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("session")
-	if sessionID == "" || r.FormValue("session") != sessionID {
+	if sessionID == "" || !authgate.CodeMatches(r.PathValue("auth"), s.authCode()) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asset session"})
 		return
 	}
-	cwd, ok := s.requestWorkbenchCWD(r)
-	if !ok || cwd == "" {
+	cwdBytes, err := base64.RawURLEncoding.DecodeString(r.PathValue("cwd"))
+	if err != nil || len(cwdBytes) == 0 || !filepath.IsAbs(string(cwdBytes)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asset scope"})
+		return
+	}
+	cwd := filepath.Clean(string(cwdBytes))
+	if _, err := s.mgr.Get(sessionID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
 		return
 	}
@@ -870,17 +877,26 @@ func htmlRenderCSPForRequest(r *http.Request) string {
 }
 
 func htmlRenderAssetBaseURL(r *http.Request) string {
-	q := r.URL.Query()
-	// Keep the API prefix supplied by the host: the handler sees /files/raw after
-	// StripPrefix, so a relative base resolves correctly under /api or /api/cli.
-	q.Del("path")
-	q.Del("render")
-	q.Set("session", r.URL.Query().Get("session"))
+	// Query parameters on a <base href> are not inherited by relative resources: the
+	// browser drops them when resolving buddy.css, script.js, CSS url(...), and JS-created
+	// image URLs. Put the auth token and the explicit cwd into path segments instead, so
+	// every descendant request remains scoped without relying on query propagation.
+	session := r.URL.Query().Get("session")
+	auth := r.URL.Query().Get("auth")
+	cwd := r.URL.Query().Get("cwd")
+	if session == "" || auth == "" || cwd == "" {
+		return ""
+	}
 	dir := filepath.ToSlash(filepath.Dir(r.URL.Query().Get("path")))
 	if dir == "." || dir == "" {
 		dir = ""
 	}
-	parts := []string{"render-assets", url.PathEscape(r.URL.Query().Get("session"))}
+	parts := []string{
+		"render-assets",
+		url.PathEscape(session),
+		url.PathEscape(auth),
+		base64.RawURLEncoding.EncodeToString([]byte(filepath.Clean(cwd))),
+	}
 	if dir != "" {
 		for _, part := range strings.Split(strings.Trim(dir, "/"), "/") {
 			if part != "" && part != "." {
@@ -888,7 +904,7 @@ func htmlRenderAssetBaseURL(r *http.Request) string {
 			}
 		}
 	}
-	return strings.Join(parts, "/") + "/?" + q.Encode()
+	return strings.Join(parts, "/") + "/"
 }
 
 func injectHTMLRenderAssetBase(page []byte, baseURL string) []byte {
