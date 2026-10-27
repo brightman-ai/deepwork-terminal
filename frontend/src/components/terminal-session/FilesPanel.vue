@@ -62,7 +62,8 @@ import ArchivePreview from '@terminal/components/terminal-session/ArchivePreview
 import XmindPreview from '@terminal/components/terminal-session/XmindPreview.vue'
 import { CAT_LABEL, CAT_TINT, CAT_ORDER, catOf, extOf, formatFor, isImageName } from '@terminal/components/terminal-session/previewFormats'
 import DrawerSearchBox from '@terminal/components/terminal-session/DrawerSearchBox.vue'
-import { filePathCandidates, normalizeTerminalPath, resolveTerminalPath, terminalPathSearchQuery, type TerminalPathCandidate } from '@terminal/components/terminal-session/terminalPathResolver'
+import { normalizeTerminalPath, resolveTerminalPath, terminalPathSearchQuery, type TerminalPathCandidate } from '@terminal/components/terminal-session/terminalPathResolver'
+import { searchTerminalPathCandidates, terminalPathFilename } from './terminalPathSearch'
 
 // cwd is the drawer's EFFECTIVE pane working directory, OWNED by ResourceDrawer (CHG:
 // drawer-workbench). In FOLLOW mode it tracks the live active pane; once the user LOCKS the
@@ -984,6 +985,11 @@ function onSearchHit(entry: SearchEntry): void {
 interface PathResolutionState {
   query: string
   requestedPath: string
+  filenameFallback?: boolean
+  directoryInput?: string
+  directoryEditing?: boolean
+  directoryBusy?: boolean
+  directoryError?: string
   previousPreviewKey: string
   lineStart?: number
   lineEnd?: number
@@ -1098,20 +1104,25 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
   // directory the user last drilled into in the browser.
   try {
     const cwd = treeCwd.value || props.cwd || ''
+    const sessionId = props.sessionId
     const retrievalQuery = terminalPathSearchQuery(query, cwd)
     if (!retrievalQuery) {
       state.loading = false
       state.error = '路径省略过多，请打开目录搜索补充文件名'
       return
     }
-    const result = await filesSearch(props.sessionId, cwd, retrievalQuery, { signal: request.signal })
-    if (pathResolution.value !== state) return
+    const found = await searchTerminalPathCandidates(query, cwd,
+      (q) => filesSearch(sessionId, cwd, q, { signal: request.signal }), request.signal,
+      () => { if (pathResolution.value === state) state.filenameFallback = true },
+    )
+    if (pathResolution.value !== state || request.signal.aborted) return
+    const { result, candidates: allCandidates } = found
+    state.filenameFallback = found.filenameFallback
     if (result.error) {
       state.loading = false
       state.error = result.error
       return
     }
-    const allCandidates = filePathCandidates(result.entries, cwd, query)
     // totalMatches counts server hits (including directories/fuzzy names). It cannot be
     // compared to the filtered exact-suffix list to infer unseen pages.
     state.hasMore = !!result.nextOffset || (result.totalMatches ?? result.entries.length) > result.entries.length
@@ -1123,7 +1134,7 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
     state.loading = false
     // An incomplete index cannot prove uniqueness. Keep the chooser visible so
     // the user can see the evidence and retry after indexing settles.
-    if (state.candidates.length === 1 && state.candidates[0].exact && !state.hasMore && !result.incomplete && !result.truncated && result.indexState !== 'building') {
+    if (!state.filenameFallback && state.candidates.length === 1 && state.candidates[0].exact && !state.hasMore && !result.incomplete && !result.truncated && result.indexState !== 'building') {
       const candidate = state.candidates[0]
       pathResolution.value = null
       await previewRel(candidate.name, candidate.absPath, candidate.rel, lineStart, lineEnd)
@@ -1135,6 +1146,33 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
     }
   } finally {
     clearTimeout(timeout)
+    if (pathSearchRequest === request) pathSearchRequest = null
+  }
+}
+
+/** Explicit recovery changes only the file browser's scope, never the terminal cwd. */
+async function changePathSearchDirectory(): Promise<void> {
+  const state = pathResolution.value
+  const target = state?.directoryInput?.trim()
+  if (!state || !target || state.directoryBusy) return
+  pathSearchRequest?.abort()
+  const request = new AbortController()
+  pathSearchRequest = request
+  state.directoryBusy = true
+  state.directoryError = ''
+  try {
+    const result = await filesTree(props.sessionId, target, treeCwd.value || props.cwd, request.signal, false, { explicit: true })
+    if (pathResolution.value !== state || request.signal.aborted) return
+    if (!result) {
+      state.directoryError = '无法打开此目录，请核对目录路径后重试。'
+      return
+    }
+    const root = result.cwd.replace(/\/+$/, '') + (result.rel && result.rel !== '.' ? '/' + result.rel : '')
+    backStack.value.push(rememberLocation())
+    selectFileScope(root || '/')
+    await searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd, state.previousPreviewKey)
+  } finally {
+    state.directoryBusy = false
     if (pathSearchRequest === request) pathSearchRequest = null
   }
 }
@@ -1325,7 +1363,7 @@ function previewPath(path: string, lineStart?: number, lineEnd?: number, sourceC
   const slash = normalized.lastIndexOf('/')
   const name = slash >= 0 ? normalized.slice(slash + 1) : normalized
   if (!name) return
-  void previewRel(name, normalized, normalized, lineStart, lineEnd, resolution.fallbackQuery)
+  void previewRel(name, normalized, normalized, lineStart, lineEnd, resolution.fallbackQuery ?? normalized)
 }
 
 /** The parent owns the file scope; this view retains its navigation/cache state. */
@@ -1469,9 +1507,6 @@ function previewErrorText(r: RawResult): string {
   }
   if (r.reason) return `预览失败：${r.reason}`
   return r.status ? `预览失败（HTTP ${r.status}）` : '预览失败（网络错误，请重试）'
-}
-function isBarePreview(p: Preview | null): boolean {
-  return !!p && !p.rel.includes('/') && !p.rel.startsWith('/')
 }
 function searchPreviewFile(name: string): void {
   pathSearchRequest?.abort()
@@ -1809,30 +1844,48 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
     <div v-if="pathResolution" class="absolute inset-0 z-30 flex flex-col bg-background" data-testid="fp-path-resolution">
       <div class="shrink-0 flex items-center gap-2 border-b border-border px-3 py-2">
         <FileText class="size-4 shrink-0 text-primary/80" />
-        <span class="min-w-0 flex-1 text-xs font-medium truncate select-text cursor-text" :title="pathResolution.requestedPath" data-testid="fp-path-resolution-reference">定位文件：{{ pathResolution.requestedPath }}</span>
+        <div class="min-w-0 flex-1 select-text cursor-text">
+          <p class="text-xs font-medium break-all" data-testid="fp-path-resolution-reference">定位文件：{{ terminalPathFilename(pathResolution.requestedPath) || pathResolution.requestedPath }}</p>
+          <p v-if="pathResolution.requestedPath !== terminalPathFilename(pathResolution.requestedPath)" class="mt-1 text-[0.62rem] text-muted-foreground break-all" data-testid="fp-path-resolution-original">原引用：{{ pathResolution.requestedPath }}</p>
+        </div>
         <button type="button" class="min-h-11 min-w-11 flex items-center justify-center shrink-0 rounded text-muted-foreground hover:bg-muted/50" title="复制原始路径" aria-label="复制原始路径" data-testid="fp-path-resolution-copy" @click="copyText(pathResolution.requestedPath, 'path-resolution')"><Check v-if="copiedKey === 'path-resolution'" class="size-3.5 text-green-500" /><Copy v-else class="size-3.5" /></button>
         <button type="button" class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 touch-manipulation" title="返回目录" data-testid="fp-path-resolution-cancel" @click="cancelPathResolution"><X class="mx-auto size-3.5" /></button>
       </div>
+      <div class="shrink-0 border-b border-border px-3 py-2 text-[0.62rem] text-muted-foreground">
+        <div class="flex items-center gap-2">
+          <span class="min-w-0 flex-1 break-all" data-testid="fp-path-resolution-scope">搜索范围：{{ treeCwd || cwd || '当前工作目录' }}</span>
+          <button type="button" class="shrink-0 min-h-11 px-2 rounded border border-border text-primary hover:bg-muted/50 disabled:opacity-50" :disabled="pathResolution.loading || pathResolution.directoryBusy" data-testid="fp-path-resolution-change-directory" @click="pathResolution.directoryEditing = !pathResolution.directoryEditing; pathResolution.directoryInput ??= treeCwd || cwd">更换目录</button>
+        </div>
+        <form v-if="pathResolution.directoryEditing" class="mt-2 flex flex-col gap-2" @submit.prevent="changePathSearchDirectory">
+          <label class="flex flex-col gap-1">搜索目录
+            <input v-model="pathResolution.directoryInput" class="min-h-11 w-full rounded border border-border bg-background px-2 text-xs text-foreground" placeholder="输入目录的完整路径" aria-label="搜索目录" data-testid="fp-path-resolution-directory-input" :disabled="pathResolution.directoryBusy" />
+          </label>
+          <p>仅更换文件搜索范围，不改变终端的工作目录。</p>
+          <p v-if="pathResolution.directoryError" class="text-amber-600 dark:text-amber-400" role="alert">{{ pathResolution.directoryError }}</p>
+          <button type="submit" class="min-h-11 rounded border border-border px-2 text-primary hover:bg-muted/50 disabled:opacity-50" :disabled="pathResolution.directoryBusy || !pathResolution.directoryInput?.trim()" data-testid="fp-path-resolution-directory-submit">{{ pathResolution.directoryBusy ? '正在验证目录…' : '在此目录重新查找' }}</button>
+        </form>
+      </div>
+      <p v-if="pathResolution.filenameFallback" class="shrink-0 px-3 pt-3 text-[0.68rem] leading-snug text-muted-foreground" data-testid="fp-path-resolution-name-fallback">原路径暂未定位，已按文件名查找。请确认候选文件的位置后打开。</p>
       <div v-if="pathResolution.loading" class="flex-1 flex flex-col items-center justify-center gap-3 px-5 text-center">
-        <p class="text-xs text-muted-foreground animate-pulse">正在当前工作目录尝试定位 {{ pathResolution.query }}…</p>
+        <p class="text-xs text-muted-foreground animate-pulse">正在当前工作目录尝试定位 {{ terminalPathFilename(pathResolution.requestedPath) || pathResolution.query }}…</p>
         <p class="text-[0.65rem] text-muted-foreground/70">目录较大时自动定位可能较慢，你可以直接进入目录下搜索。</p>
-        <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-open-search-loading" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">目录下搜索</button>
+        <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-open-search-loading" @click="searchPreviewFile(terminalPathSearchQuery(terminalPathFilename(pathResolution.requestedPath), treeCwd || cwd))">按文件名搜索</button>
       </div>
       <div v-else-if="pathResolution.error" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
         <p class="text-xs text-muted-foreground leading-snug">{{ pathResolution.error }}</p>
         <p class="text-[0.65rem] text-muted-foreground/70">搜索没有改变当前目录或文件内容。</p>
         <div class="flex items-center gap-2">
           <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
-          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">打开目录搜索</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(terminalPathSearchQuery(terminalPathFilename(pathResolution.requestedPath), treeCwd || cwd))">按文件名搜索</button>
         </div>
       </div>
       <div v-else-if="!pathResolution.candidates.length" class="flex-1 flex flex-col items-center justify-center gap-2 px-5 text-center">
-        <p v-if="pathResolution.incomplete || pathResolution.truncated || pathResolution.indexState === 'building'" class="text-xs text-muted-foreground leading-snug">当前索引尚未完整，暂时不能确认 {{ pathResolution.query }} 不存在。</p>
-        <p v-else class="text-xs text-muted-foreground leading-snug">当前工作目录及子目录找不到 {{ pathResolution.query }}。</p>
-        <p class="text-[0.65rem] text-muted-foreground/70">文件可能已移动、尚未写入，或当前 pane 的工作目录不同。</p>
+        <p v-if="pathResolution.incomplete || pathResolution.truncated || pathResolution.indexState === 'building'" class="text-xs text-muted-foreground leading-snug">当前索引尚未完整，暂时不能确认 {{ terminalPathFilename(pathResolution.requestedPath) || pathResolution.query }} 不存在。</p>
+        <p v-else class="text-xs text-muted-foreground leading-snug">当前工作目录及子目录找不到 {{ terminalPathFilename(pathResolution.requestedPath) || pathResolution.query }}。</p>
+        <p class="text-[0.65rem] text-muted-foreground/70">文件可能已移动或在其他项目。可先按文件名搜索；若仍没有结果，请切换目录后再查找。</p>
         <div class="flex items-center gap-2">
           <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50 touch-manipulation" data-testid="fp-path-resolution-retry" @click="retryPathResolution">重试定位</button>
-          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">打开目录搜索</button>
+          <button type="button" class="min-h-11 px-3 py-2 rounded text-[0.62rem] text-muted-foreground border border-border hover:bg-muted/50 touch-manipulation" @click="searchPreviewFile(terminalPathSearchQuery(terminalPathFilename(pathResolution.requestedPath), treeCwd || cwd))">按文件名搜索</button>
         </div>
       </div>
       <div v-else class="flex-1 overflow-y-auto p-3">
@@ -1842,11 +1895,11 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <ul class="flex flex-col gap-1.5">
           <li v-for="candidate in pathResolution.candidates" :key="candidate.rel">
             <button type="button" class="min-h-11 w-full rounded-md border border-border bg-card px-3 py-2 text-left hover:bg-muted/50 touch-manipulation" :title="candidate.absPath" :data-testid="`fp-path-candidate-${candidate.rel}`" @click="choosePathCandidate(candidate)">
-              <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span class="min-w-0 break-all select-text cursor-text">{{ candidate.rel }}</span><span v-if="!candidate.exact" class="shrink-0 rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">近似</span></span>
+              <span class="flex items-center gap-1.5 text-xs font-medium text-foreground"><span class="min-w-0 break-all select-text cursor-text">{{ candidate.rel }}</span><span v-if="!candidate.exact" class="shrink-0 rounded bg-amber-500/10 px-1 py-px text-[0.52rem] font-normal text-amber-600 dark:text-amber-400">{{ pathResolution.filenameFallback && candidate.name === terminalPathFilename(pathResolution.requestedPath) ? '同名' : '近似' }}</span></span>
             </button>
           </li>
         </ul>
-        <button v-if="pathResolution.hasMore" type="button" class="mt-3 min-h-11 w-full rounded-md border border-border px-3 py-2 text-left text-xs text-primary hover:bg-muted/50" data-testid="fp-path-resolution-open-search" @click="searchPreviewFile(terminalPathSearchQuery(pathResolution.query, treeCwd || cwd))">打开目录搜索继续筛选</button>
+        <button v-if="pathResolution.hasMore" type="button" class="mt-3 min-h-11 w-full rounded-md border border-border px-3 py-2 text-left text-xs text-primary hover:bg-muted/50" data-testid="fp-path-resolution-open-search" @click="searchPreviewFile(terminalPathSearchQuery(terminalPathFilename(pathResolution.requestedPath), treeCwd || cwd))">按文件名继续搜索</button>
       </div>
     </div>
     <div v-if="treeCollapsed && !preview" class="fp-tree-collapsed-rail" data-testid="fp-tree-collapsed-rail">
@@ -2307,12 +2360,12 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
               <Check v-if="copiedKey === 'perr'" class="inline size-3 text-green-500" /> 复制路径
             </button>
             <button
-              v-if="isBarePreview(preview)"
+              v-if="preview"
               class="mt-1 px-2 py-1 rounded text-[0.62rem] text-primary border border-border hover:bg-muted/50"
               type="button"
               data-testid="fp-preview-search-bare"
               @click="searchPreviewFile(preview.name)"
-            >在当前目录搜索</button>
+            >按文件名搜索</button>
           </div>
         </div>
       </div>
