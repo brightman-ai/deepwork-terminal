@@ -1,5 +1,5 @@
 <template>
-  <div class="xterm-root" data-testid="terminal-surface" @click="focusTerminal">
+  <div class="xterm-root" data-testid="terminal-surface" @pointerdown.capture="fileClickGate.begin" @click="onTerminalClick">
     <div ref="terminalContainer" class="xterm-container" />
     <div v-if="virtualFileHover" class="virtual-file-hover" :style="virtualFileHover" aria-hidden="true" data-testid="terminal-file-link-hover" />
     <!-- Proxy textarea: mobile fallback for xterm input. Disabled on desktop
@@ -28,6 +28,7 @@
  * [Ref: CAP-terminal-io S2-3]
  */
 import { nextTick, ref, onMounted, onUnmounted, watch } from 'vue'
+import { createFileLinkClickGate } from './fileLinkClick'
 import { Terminal, type ILinkProvider, type IDisposable } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -144,6 +145,12 @@ function hoverFileLinkAt(x?: number, y?: number): void {
     top: `${point.rect.top - root.top + point.viewportRow * ch}px`,
     width: `${(link.cellEnd - link.cellStart + 1) * cw}px`, height: `${ch}px`,
   }
+}
+
+const fileClickGate = createFileLinkClickGate(activateFileLinkAt)
+function onTerminalClick(event: MouseEvent): void {
+  fileClickGate.complete(event)
+  focusTerminal()
 }
 
 function activateFileLinkAt(x: number, y: number): boolean {
@@ -577,7 +584,7 @@ function initTerminal() {
       callback(links.length ? links.map((link) => ({
         text: link.path,
         range: { start: { x: link.cellStart, y: bufferLineNumber }, end: { x: link.cellEnd, y: bufferLineNumber } },
-        activate: () => emit('file-path', link.path, link.lineStart, link.lineEnd, link.searchOnly),
+        activate: () => { fileClickGate.claim(); emit('file-path', link.path, link.lineStart, link.lineEnd, link.searchOnly) },
       })) : undefined)
     },
   }
