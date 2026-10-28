@@ -36,6 +36,8 @@ const props = defineProps<{
   path?: string
   /** /files/raw?…&render=1 URL for .html/.htm — enables the 源码/渲染 toggle when present. */
   renderSrc?: string
+  /** A successful explicit reread reloads an already-rendered HTML frame in place. */
+  contentVersion?: number
   /** Session identity for doc-relative image resolution (→ /files/raw URLs). */
   sessionId?: string
   /** Session cwd — anchors the raw URL exactly like the preview's own fetch. */
@@ -93,9 +95,12 @@ const canRenderHtml = computed(() => ['html', 'htm'].includes(ext.value) && !!pr
 const htmlRendered = ref(false)
 watch(() => [props.name, props.renderSrc], () => { htmlRendered.value = false })
 const showHtmlFrame = computed(() => canRenderHtml.value && htmlRendered.value)
+const htmlFrameSrc = computed(() => props.renderSrc && props.contentVersion !== undefined
+  ? props.renderSrc + (props.renderSrc.includes('?') ? '&' : '?') + 'preview=' + props.contentVersion
+  : props.renderSrc)
 function openHtmlInBrowser(): void {
   if (!props.renderSrc) return
-  const win = window.open(props.renderSrc, '_blank', 'noopener,noreferrer')
+  const win = window.open(htmlFrameSrc.value, '_blank', 'noopener,noreferrer')
   if (!win) emit('toast', '浏览器阻止了新窗口，请允许后重试')
 }
 
@@ -728,7 +733,7 @@ onBeforeUnmount(() => { io?.disconnect(); sourceLayoutObserver?.disconnect(); if
          page remove its own sandbox). The server's per-response CSP blocks network egress. -->
     <iframe
       v-if="showHtmlFrame"
-      :src="props.renderSrc"
+      :src="htmlFrameSrc"
       class="fp-frame"
       sandbox="allow-scripts"
       referrerpolicy="no-referrer"

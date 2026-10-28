@@ -262,7 +262,7 @@ export async function filesRaw(sessionId: string, relPath: string, cwd?: string,
   try {
     let path = withScope('/files/raw', sessionId, cwd)
     if (relPath) path += `&path=${encodeURIComponent(relPath)}`
-    const resp = await cliFetch(cliApi(path), { signal })
+    const resp = await cliFetch(cliApi(path), { signal, cache: 'no-store' })
     if (!resp.ok) {
       // Surface the reason: the raw handler answers a failure with { "error": "<why>" }
       // (403 path not allowed / 404 not found / 400 is a directory). Carry both the status
@@ -490,7 +490,7 @@ export async function filesZipList(sessionId: string, relPath: string, cwd?: str
   if (relPath) path += `&path=${encodeURIComponent(relPath)}`
   path += '&zip=1'
   try {
-    const resp = await cliFetch(cliApi(path), { signal })
+    const resp = await cliFetch(cliApi(path), { signal, cache: 'no-store' })
     if (!resp.ok) {
       let reason = ''
       try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }
@@ -520,7 +520,7 @@ export async function filesZipEntryText(sessionId: string, relPath: string, entr
   if (!sessionId) return ''
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(filesZipEntryUrl(sessionId, relPath, entry, cwd), { signal })
+    const resp = await cliFetch(filesZipEntryUrl(sessionId, relPath, entry, cwd), { signal, cache: 'no-store' })
     return resp.ok ? await resp.text() : ''
   } catch {
     return ''
@@ -543,7 +543,7 @@ export async function filesRawBytes(sessionId: string, relPath: string, cwd?: st
     const url = target
       ? filesConvertUrl(sessionId, relPath, target, cwd)
       : filesDownloadUrl(sessionId, relPath, cwd)
-    const resp = await cliFetch(url, { signal: opts?.signal })
+    const resp = await cliFetch(url, { signal: opts?.signal, cache: 'no-store' })
     if (!resp.ok) {
       let reason = ''
       try { reason = ((await resp.json()) as { error?: string }).error ?? '' } catch { /* non-JSON body */ }

@@ -1022,6 +1022,10 @@ interface Preview {
   /** A repeated click on the same source line is a new navigation intent. */
   jumpVersion: number
   result: RawResult
+  /** Successful reads survive a background reload; revisions also reload URL renderers. */
+  loaded: boolean
+  revision: number
+  refreshError?: string
   scrollTop?: number
   /** Bytes for an explicit Markdown→DOCX conversion; the artifact is preview/download only and
    * is not silently written into the user's working tree. */
@@ -1034,7 +1038,7 @@ const previews = ref<Preview[]>([])
 const previewRequests = new Map<string, AbortController>()
 const activePreviewKey = ref('')
 const preview = computed(() => previews.value.find((p) => p.key === activePreviewKey.value) ?? null)
-const previewLoading = computed(() => preview.value?.loading ?? false)
+const previewLoading = computed(() => !!preview.value?.loading && !preview.value.loaded)
 const markdownConvertBusy = ref(false)
 const fileActionsMenu = ref<HTMLDetailsElement | null>(null)
 function closeFileActions(): void { if (fileActionsMenu.value) fileActionsMenu.value.open = false }
@@ -1209,20 +1213,29 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     existing.lineEnd = lineEnd
     existing.jumpVersion++
     activatePreview(key)
+    await loadPreview(existing, fallbackQuery, previousPreviewKey)
     return
   }
 
-  // Every stage of multi-step archive/conversion reads belongs to this same location.
-  const sessionId = props.sessionId
-  const cwd = treeCwd.value || props.cwd
-  const request = new AbortController()
-  previewRequests.set(key, request)
   const entry: Preview = {
-    key, name, absPath, rel, cwd, lineStart, lineEnd, jumpVersion: 0, result: { kind: 'text', text: '' }, loading: true, lastUsedAt: Date.now(),
+    key, name, absPath, rel, cwd: treeCwd.value || props.cwd, lineStart, lineEnd, jumpVersion: 0,
+    result: { kind: 'text', text: '' }, loaded: false, revision: 0, loading: true, lastUsedAt: Date.now(),
   }
   previews.value.push(entry)
   activePreviewKey.value = key
   evictPreviewOverflow()
+  await loadPreview(entry, fallbackQuery, previousPreviewKey)
+}
+
+async function loadPreview(entry: Preview, fallbackQuery?: string, previousPreviewKey = ''): Promise<void> {
+  const { key, name, rel, cwd, lineStart, lineEnd } = entry
+  entry.loading = true
+  entry.refreshError = ''
+  // Every stage of multi-step archive/conversion reads belongs to this same location.
+  const sessionId = props.sessionId
+  previewRequests.get(key)?.abort()
+  const request = new AbortController()
+  previewRequests.set(key, request)
   const read = async (): Promise<RawResult> => {
     const spec = formatFor(name)
     if (spec.fetch === 'bytes' || spec.fetch.startsWith('convert:')) {
@@ -1253,6 +1266,10 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
       if (result.kind === 'image') URL.revokeObjectURL(result.url)
       return
     }
+    if (result.kind === 'error' && entry.loaded) {
+      entry.refreshError = previewErrorText(result, entry)
+      return
+    }
     if (result.kind === 'error' && result.status === 400 && result.reason === 'is a directory' && activePreviewKey.value === key) {
       // A directory may itself have a file-like name (config.d, notes.md).
       // Only the server's explicit type result can reroute a file preview.
@@ -1273,7 +1290,11 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
       if (result.kind === 'image') URL.revokeObjectURL(result.url)
       return
     }
+    const oldResult = current.result
     current.result = result
+    current.loaded = result.kind !== 'error'
+    if (current.loaded) current.revision++
+    if (oldResult.kind === 'image') void nextTick(() => URL.revokeObjectURL(oldResult.url))
     current.loading = false
     current.lastUsedAt = Date.now()
     evictPreviewOverflow()
@@ -1281,7 +1302,8 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     if (request.signal.aborted || previewRequests.get(key) !== request) return
     const current = previews.value.find((p) => p.key === key)
     if (current) {
-      current.result = { kind: 'error', reason: '文件读取失败，请重试' }
+      if (current.loaded) current.refreshError = '文件读取失败，请重试'
+      else current.result = { kind: 'error', reason: '文件读取失败，请重试' }
       current.loading = false
     }
   } finally {
@@ -1295,6 +1317,13 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     // a burst of slow/404 previews must not leave the tab cache above its eight-document cap.
     evictPreviewOverflow()
   }
+}
+
+function refreshPreview(): void {
+  const p = preview.value
+  if (!p || p.loading || p.generatedDocx) return
+  // Reload in the document's original namespace without changing its source jump or scroll.
+  void loadPreview(p)
 }
 
 // Recent files are previewed by their path relative to cwd when it sits under cwd;
@@ -1489,12 +1518,11 @@ const previewRenderSrc = computed(() => {
 // but say WHY"). The 403 case is the common one — a path outside the workbench-anchored root
 // (e.g. ~/.claude/projects/…/memory/x.md while the drawer is anchored to a project) — which the
 // bare "预览失败" never explained. Falls back to the backend's error string, then the status.
-function previewErrorText(r: RawResult): string {
+function previewErrorText(r: RawResult, p: Preview | null = preview.value): string {
   if (r.kind !== 'error') return '预览失败'
   switch (r.status) {
     case 403: return '此文件在工作台锚定目录之外，无法预览（切到该文件所在项目，或在目录树中打开）'
     case 404: {
-      const p = preview.value
       // A bare terminal link is resolved against the current workbench cwd. A 404 therefore
       // cannot distinguish “deleted” from “the agent printed a basename from another directory”;
       // say both possibilities and name the recovery path instead of asserting deletion.
@@ -1610,6 +1638,7 @@ async function convertMarkdownToDocx(): Promise<void> {
       rel: source.rel,
       cwd: source.cwd,
       result: { kind: 'docx', data: converted.data, size: converted.size },
+      loaded: true, revision: 0,
       generatedDocx: converted.data,
       jumpVersion: 0,
       loading: false,
@@ -2293,6 +2322,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title"><MidTruncatedName :name="preview.name" tooltip="" /></span>
+          <button v-if="!preview.generatedDocx" type="button" class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:opacity-50 touch-manipulation" :disabled="preview.loading" :aria-busy="preview.loading" title="重新读取文件内容" aria-label="刷新文档" data-testid="fp-preview-refresh" @click="refreshPreview"><RefreshCw class="mx-auto size-4" :class="{ 'animate-spin': preview.loading }" /></button>
           <details :key="preview.key" ref="fileActionsMenu" class="fp-file-actions relative shrink-0" @keydown.esc.stop.prevent="closeFileActions">
             <summary class="min-h-11 min-w-11 flex items-center justify-center rounded cursor-pointer text-muted-foreground hover:bg-muted/50" aria-label="文件操作" title="文件操作" data-testid="fp-preview-actions"><MoreVertical class="size-4" /></summary>
             <div class="fp-file-actions-panel absolute right-0 top-full z-40 min-w-48 rounded-md border border-border bg-card p-1 shadow-lg" @click="closeFileActions">
@@ -2313,9 +2343,14 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             <div class="max-h-28 overflow-auto whitespace-pre-wrap break-all py-1" data-testid="fp-preview-full-path">{{ preview.absPath }}</div>
           </details>
         </div>
+        <div v-if="preview.loading && preview.loaded" class="shrink-0 border-b border-border px-3 py-2 text-xs text-muted-foreground" role="status" data-testid="fp-preview-refreshing">正在重新读取文件，当前显示上次内容…</div>
+        <div v-else-if="preview.refreshError" class="shrink-0 flex items-center gap-2 border-b border-border bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400" role="alert" data-testid="fp-preview-refresh-error">
+          <span class="min-w-0 flex-1">刷新失败，仍显示上次内容。{{ preview.refreshError }}</span>
+          <button type="button" class="shrink-0 min-h-11 rounded border border-current px-2" data-testid="fp-preview-refresh-retry" @click="refreshPreview">重试</button>
+        </div>
         <div class="flex-1 overflow-auto">
           <div v-if="previewLoading" class="flex items-center justify-center h-full text-xs text-muted-foreground animate-pulse">加载中…</div>
-          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :jump-version="preview.jumpVersion" :active="active" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="preview.cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
+          <FilePreview v-else-if="preview.result.kind === 'text'" :key="preview.key" :name="preview.name" :text="preview.result.text" :path="preview.absPath" :line-start="preview.lineStart" :line-end="preview.lineEnd" :jump-version="preview.jumpVersion" :content-version="preview.revision" :active="active" :initial-scroll-top="preview.scrollTop" :render-src="previewRenderSrc" :session-id="sessionId" :cwd="preview.cwd" @scroll-position="preview.scrollTop = $event" @navigate="onDocNavigate" @toast="toast" />
           <div v-else-if="preview.result.kind === 'image'" class="flex h-full items-center justify-center overflow-auto p-3" style="background:#0e0b16" data-testid="fp-preview-image">
             <img :src="preview.result.url" :alt="preview.name" class="max-w-full max-h-full object-contain" />
           </div>
@@ -2327,7 +2362,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
             :asset-url="(a: string) => filesConvertAssetUrl(sessionId, preview!.rel, 'html', a, preview!.cwd)"
           />
           <SheetPreview v-else-if="preview.result.kind === 'csv'" :name="preview.name" :csv-text="preview.result.text" />
-          <AudioPreview v-else-if="preview.result.kind === 'audio'" :name="preview.name" :src="preview.result.url" />
+          <AudioPreview v-else-if="preview.result.kind === 'audio'" :name="preview.name" :src="preview.result.url + '&preview=' + preview.revision" />
           <ArchivePreview v-else-if="preview.result.kind === 'zip'" :name="preview.name" :entries="preview.result.entries" :truncated="preview.result.truncated" />
           <XmindPreview v-else-if="preview.result.kind === 'xmind'" :name="preview.name" :content-json="preview.result.contentJson" :thumb-url="preview.result.thumbUrl" />
           <div v-else-if="preview.result.kind === 'binary'" class="flex flex-col items-center justify-center gap-2 h-full px-4 text-center">
