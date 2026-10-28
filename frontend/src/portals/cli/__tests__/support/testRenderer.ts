@@ -19,7 +19,7 @@ export interface TNode {
 }
 
 function node(kind: TNode['kind'], tag = '', text = ''): TNode {
-  return { kind, tag, props: {}, style: { display: '' }, children: [], parent: null, text, clientWidth: 0, clientHeight: 0 }
+  return Object.assign({ kind, tag, props: {}, style: { display: '' }, children: [], parent: null, text, clientWidth: 0, clientHeight: 0 }, { ownerDocument: { body: { offsetHeight: 0 } }, classList: { add() {}, remove() {} }, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {} })
 }
 
 function detach(child: TNode): void {
