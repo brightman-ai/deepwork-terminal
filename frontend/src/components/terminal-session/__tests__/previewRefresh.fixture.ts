@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { plugin } from 'bun'
+import { findTerminalFileLinks } from '../terminalFileLinks'
 import { defineComponent, h, nextTick } from 'vue'
 import { installVueSfcLoader } from '../../../portals/cli/__tests__/support/sfcLoader'
 import { byTestId, findAll, fire, mountView, type TNode } from '../../../portals/cli/__tests__/support/testRenderer'
@@ -14,6 +15,7 @@ Object.assign(globalThis, {
  getComputedStyle:()=>({transitionDelay:'0s',transitionDuration:'0s',animationDelay:'0s',animationDuration:'0s'}),
 })
 ;(window as any).getComputedStyle = getComputedStyle
+const searches:string[]=[]
 const requests:{path:string;signal?:AbortSignal;cache?:string}[]=[]
 let body='第一版';let status=200;let late:((response:Response)=>void)|null=null;let hold=false
 const revoked:string[]=[];const originalRevoke=URL.revokeObjectURL;URL.revokeObjectURL=(url)=>revoked.push(url)
@@ -22,9 +24,14 @@ globalThis.fetch=(async(input:RequestInfo|URL,opts?:RequestInit)=>{
  if(url.pathname.endsWith('/files/raw')) {
   requests.push({path:url.searchParams.get('path')!,signal:opts?.signal??undefined,cache:opts?.cache})
   if(hold){hold=false;return new Promise<Response>(resolve=>{late=resolve})}
+  if(url.searchParams.get('path')?.startsWith('missing/'))return Response.json({error:'not found'},{status:404})
   if(status!==200)return Response.json({error:'unavailable'},{status})
   if(url.searchParams.get('path')!.endsWith('.png'))return new Response(new Blob(['image'],{type:'image/png'}))
   return new Response(body,{headers:{'Content-Type':'text/plain'}})
+ }
+ if(url.pathname.endsWith('/files/search')) {
+  const query=url.searchParams.get('q')!;searches.push(query)
+  return Response.json({entries:query==='研判链范式.md'?[{name:'研判链范式.md',rel:'found/研判链范式.md',isDir:false,size:100,mtimeMs:0}]:[],truncated:false,indexState:'ready'})
  }
  if(url.pathname.endsWith('/files/tree'))return Response.json({cwd:'/project',rel:'.',entries:[]})
  return Response.json({entries:[],items:[],maxBytes:1000000})
@@ -69,6 +76,13 @@ try {
  panel.previewPath('docs/image.png');await wait(()=>findAll(view.host,n=>n.tag==='img').length===1)
  click('fp-preview-refresh');await wait(()=>revoked.length===1)
  click('fp-preview-close');assert.equal(revoked.length,2,'replaced and closed image URLs must both be released')
+ const link=findTerminalFileLinks('● Read(missing/研判链范式.md ·lines 240-539)')[0]!
+ body='行范围正文';panel.previewPath(link.path,link.lineStart,link.lineEnd)
+ await wait(()=>byTestId(view.host,'fp-path-candidate-found/研判链范式.md').length===1)
+ assert.equal(byTestId(view.host,'fp-path-resolution-reference')[0].children.map(text).join(''),'定位文件：研判链范式.md')
+ assert.deepEqual(searches,['missing/研判链范式.md','研判链范式.md'])
+ click('fp-path-candidate-found/研判链范式.md');await wait(()=>shown().includes('行范围正文'))
+ assert.equal(byTestId(view.host,'fixture-reader')[0].props['data-line'],240)
  assert(requests.every(r=>r.cache==='no-store'),'explicit reads must bypass HTTP cache')
- console.log(JSON.stringify({passed:true,repeated_path_reads:true,refresh_and_retry:true,scroll_preserved:true,tab_snapshot_preserved:true,late_and_closed_isolation:true,line_navigation:true,image_cleanup:true,cache_bypass:true}))
+ console.log(JSON.stringify({passed:true,repeated_path_reads:true,refresh_and_retry:true,scroll_preserved:true,tab_snapshot_preserved:true,late_and_closed_isolation:true,line_navigation:true,image_cleanup:true,cache_bypass:true,annotation_search_and_line:true}))
 }finally{view.unmount();URL.revokeObjectURL=originalRevoke}

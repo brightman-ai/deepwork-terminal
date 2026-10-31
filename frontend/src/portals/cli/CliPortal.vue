@@ -73,7 +73,7 @@
       @session-exit="onTabSessionExit"
       @connection-change="onTabConnectionChange"
       @visible-sessions="onVisibleSessions"
-      @dw-toggle-overview="toggleOverview"
+      @dw-toggle-overview="breakpoint.isMobile.value ? openQuickSwitcher() : toggleOverview()"
       @split-ratio="setSplitRatio"
       @split-orientation="setSplitOrientation"
       @toggle-zoom="toggleZoom"
@@ -108,7 +108,7 @@
 
     <!-- Remote-terminal picker (mesh): add/select a peer, then open a tab connected to it. -->
     <RemoteTermDialog v-model:open="remoteDialogOpen" :on-connect="createRemoteTab" />
-    <TabQuickSwitcher :open="quickSwitcher.open.value" :query="quickSwitcher.query.value" :items="quickSwitcher.results.value" :selected-id="quickSwitcher.selectedId.value" :active-id="activeTab?.id" :binding="quickSwitchBinding" :binding-label="quickSwitchLabel" :message="quickSwitcher.message.value" :total="quickSwitcher.total.value" :status-kinds="quickSwitcher.statusKinds.value" :filter="quickSwitcher.filter.value" :filters="quickSwitcher.filters.value" :filter-stale="quickSwitcher.filterStale.value" @filter="quickSwitcher.setFilter" @refresh-filter="quickSwitcher.refreshFilter" @search="quickSwitcher.search" @move="quickSwitcher.move" @select="selectQuickTab" @close="quickSwitcher.close" />
+    <TabQuickSwitcher :open="quickSwitcher.open.value" :query="quickSwitcher.query.value" :items="quickSwitcher.results.value" :selected-id="quickSwitcher.selectedId.value" :active-id="activeTab?.id" :binding="quickSwitchBinding" :binding-label="quickSwitchLabel" :message="quickSwitcher.message.value" :total="quickSwitcher.total.value" :status-kinds="quickSwitcher.statusKinds.value" :filter="quickSwitcher.filter.value" :filters="quickSwitcher.filters.value" :filter-stale="quickSwitcher.filterStale.value" @filter="quickSwitcher.setFilter" @refresh-filter="quickSwitcher.refreshFilter" @search="quickSwitcher.search" @move="quickSwitcher.move" @select="selectQuickTab" @close="quickSwitcher.close" @overview="openObservation" />
 
     <!-- 一次性轻提示。用行内元素而不是 window.alert：原生弹窗在 headless 下阻塞 JS 线程，
          那条路就再也验收不了（见 useCliState 的 showNotice）。 -->
@@ -124,7 +124,7 @@
           :groups="overviewGroups"
           :rollup="overviewRollup"
           :is-mobile="breakpoint.isMobile.value"
-          @select="selectOverviewIndex"
+          @select="selectOverviewUnit"
           @close="closeOverview"
         />
       </div>
@@ -185,6 +185,16 @@ const {
 } = useCliState(runtime)
 
 const terminalView = ref<InstanceType<typeof CliTerminalView>>()
+function openObservation(): void {
+  quickSwitcher.close()
+  toggleOverview()
+}
+async function selectOverviewUnit(index: number, key?: string): Promise<void> {
+  const target = selectOverviewIndex(index, key)
+  if (!target) return
+  await nextTick()
+  terminalView.value?.revealPane(target.tabId, target.pane)
+}
 async function selectQuickTab(id: string): Promise<void> {
   if (!quickSwitcher.select(id)) return
   await nextTick()

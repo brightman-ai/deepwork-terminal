@@ -24,7 +24,7 @@ import { copyTextToClipboard } from '@ce/utils/clipboard'
 import { type TabLiveness, type TabNotLive } from '@terminal/composables/cli/tabLiveness'
 import { reconcileTabs } from '@terminal/composables/cli/reconcileTabs'
 import { reopenDetachedTabs, type ReopenCandidate } from '@terminal/composables/cli/reopenDetached'
-import { selectOverviewCard } from '@terminal/composables/cli/overviewSelection'
+import { overviewPaneTarget } from '@terminal/composables/cli/overviewSelection'
 import { postReopenNotice, reopenNoticeOf, forgetTerminalNotice } from '@terminal/composables/cli/terminalNotice'
 
 interface TabRuntime {
@@ -351,8 +351,12 @@ export function useCliState(runtime: PortalRuntimeResult) {
   /** Overview card → 切过去**并关掉总览**。编号就是可见标签的位置（活着的和已结束的一视同仁），
    *  所以这里直接按位置取标签，不再绕 session id —— 已结束的卡片同样点得动。
    *  「切+关」这件事本身由跨壳 SSOT selectOverviewCard 决定，两个壳不各写一遍。 */
-  function selectOverviewIndex(index: number): void {
-    selectOverviewCard(index, visibleTabIds.value, { switchTo: switchTab, closeOverview })
+  function selectOverviewIndex(index: number, key?: string) {
+    const target = overviewPaneTarget(key ?? overviewIdOrder.value[index - 1] ?? '', allTabs.value)
+    if (!target) return
+    switchTab(target.tabId)
+    closeOverview()
+    return target
   }
 
   // ─── Tab context menu ─────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@
           :class="[`s-${p.status}`, { 'is-here': p.active }]"
           :title="`${p.index} ${p.title} · ${p.label}`"
           :data-testid="`overview-pill-${p.index}`"
-          @click="emit('select', p.index)"
+          @click="emit('select', p.index, p.key)"
         >
           <span class="ao-pill-dot" />{{ p.index }}
         </button>
@@ -56,7 +56,7 @@
           :class="`s-${g.status}`"
           type="button"
           :data-testid="`overview-card-${w.index}`"
-          @click="emit('select', w.index)"
+          @click="emit('select', w.index, w.key)"
         >
           <div class="ao-card-head">
             <span class="ao-idx">{{ w.index }}</span>
@@ -97,7 +97,7 @@
             :class="`s-${a.status}`"
             type="button"
             :data-testid="`overview-card-${a.w.index}`"
-            @click="emit('select', a.w.index)"
+            @click="emit('select', a.w.index, a.w.key)"
           >
             <div class="ao-card-head">
               <span class="ao-idx">{{ a.w.index }}</span>
@@ -139,7 +139,7 @@
               class="ao-idle-chip"
               type="button"
               :data-testid="`overview-card-${w.index}`"
-              @click="emit('select', w.index)"
+              @click="emit('select', w.index, w.key)"
             >
               <span class="ao-idx">{{ w.index }}</span>
               <span class="ao-idle-name">{{ overviewCardTitle(w) }}</span>
@@ -179,7 +179,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'select', index: number): void
+  (e: 'select', index: number, key?: string): void
   /** Escape pressed. Both shells render this component under `v-if="overviewOpen"`, so the
    *  listener's lifetime is exactly the overlay's — no watch, no leak, and the two hosts get the
    *  same exit affordance instead of each remembering to wire one (only the scrim click existed,
@@ -267,10 +267,11 @@ const rollupSegments = computed(() =>
  * 优先），编号条回答「几号是什么状态」——后者只有在顺序和标签栏/快捷键一致时才成立，一旦
  * 按状态重排，编号条就变成需要逐个读的列表，失去"扫一眼"的价值。
  */
-interface PillItem { index: number; status: EffectiveStatus; title: string; active: boolean; label: string }
+interface PillItem { key: string; index: number; status: EffectiveStatus; title: string; active: boolean; label: string }
 const pills = computed<PillItem[]>(() =>
   props.groups
     .flatMap((g) => g.units.map((w) => ({
+      key: w.key,
       index: w.index,
       status: g.status,
       title: overviewCardTitle(w),

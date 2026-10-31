@@ -364,3 +364,15 @@ describe('拖拽分隔条：夹在两格都够用的范围内，不会拖进折�
     expect(ratioCalls).toEqual([['t1', bounds.min]])
   })
 })
+
+// Stable overview identity selects the actual pane, including phone-collapsed splits.
+for (const orientation of ['row', 'column'] as const) {
+  it(`overview can reveal the second ${orientation} pane on mobile without changing shared zoom`, async () => {
+    const m = mount({ ...PHONE_PORTRAIT, height: orientation === 'column' ? 240 : 700, split: row({ orientation }) })
+    ;(m.exposed as { revealPane(id: string, pane: string): void }).revealPane('t1', 'second')
+    await settle()
+    expect(state(m.host, 'S1')).toEqual([false, false])
+    expect(state(m.host, 'S2')).toEqual([true, true])
+    expect(m.zoomCalls).toEqual([])
+  })
+}

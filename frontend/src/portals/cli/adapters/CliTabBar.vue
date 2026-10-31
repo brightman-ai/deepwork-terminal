@@ -732,3 +732,10 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
 
 
 </style>
+
+<style scoped>
+@media (max-width: 600px) {
+  .cli-tab-bar__overview { display: none; }
+  .cli-tab-bar__tab-trailing { padding-inline: 4px; }
+}
+</style>

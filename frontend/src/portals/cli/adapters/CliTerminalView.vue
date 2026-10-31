@@ -430,7 +430,15 @@ function focusActiveTerminal(): void {
   const target = currentPaneOf(tab.id)
   paneRefs[target === 'first' ? tab.id : `${tab.id}__split2`]?.focusTerminal()
 }
-defineExpose({ focusActiveTerminal })
+function revealPane(tabId: string, pane: PaneId): void {
+  const tab = props.tabsWithSession.find(t => t.id === tabId)
+  if (!tab || pane === 'second' && !tab.split?.secondSessionId) return
+  const layout = layoutOf(tabId)
+  if (tab.split?.zoomed && !layout.collapsed && tab.split.zoomed !== pane) emit('toggle-zoom', tabId, pane)
+  focusedPane[tabId] = pane
+  if (!isMobile.value) void nextTick(focusActiveTerminal)
+}
+defineExpose({ focusActiveTerminal, revealPane })
 
 function switchPane(tab: TabWithSession): void {
   const split = tab.split
