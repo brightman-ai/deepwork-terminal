@@ -99,7 +99,8 @@ export function fire(n: TNode, prop: string, ...args: unknown[]): void {
 export function mountView<P extends Record<string, unknown>>(comp: Component, initial: P) {
   const props = reactive({ ...initial }) as P
   const host = node('element', 'host')
-  const app = createApp(defineComponent({ render: () => h(comp, props) }))
+  let exposed: unknown
+  const app = createApp(defineComponent({ render: () => h(comp, { ...props, ref: (instance: unknown) => { exposed = instance } }) }))
   app.mount(host)
-  return { host, teleports: teleportHost, props, unmount: () => app.unmount() }
+  return { host, teleports: teleportHost, props, get exposed() { return exposed }, unmount: () => app.unmount() }
 }

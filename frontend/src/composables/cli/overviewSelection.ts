@@ -32,3 +32,15 @@ export function selectOverviewCard(
   ports.switchTo(id)
   ports.closeOverview()
 }
+
+/** Overview cards represent sessions (including split second panes), not tab
+ * positions. Resolve their stable identity against the current workbench. */
+export function overviewPaneTarget(key: string, tabs: readonly {
+  id: string; sessionId?: string; split?: { secondSessionId?: string }
+}[]): { tabId: string; pane: 'first' | 'second' } | undefined {
+  for (const tab of tabs) {
+    if (key === tab.sessionId || !tab.sessionId && key === `tab:${tab.id}`) return { tabId: tab.id, pane: 'first' }
+    if (key === tab.split?.secondSessionId) return { tabId: tab.id, pane: 'second' }
+  }
+  return undefined
+}

@@ -15,6 +15,7 @@ const emit = defineEmits<{
   (e: 'move', delta: number): void
   (e: 'select', id: string): void
   (e: 'close'): void
+  (e: 'overview'): void
   (e: 'filter', filter: QuickSwitchFilter): void
   (e: 'refresh-filter'): void
 }>()
@@ -26,7 +27,7 @@ const showFilters = ref(false)
 const composing = ref(false)
 let returnFocus: HTMLElement | null = null
 let committed = false
-let finishing: { code: string; kind: 'cancel' | 'select' | 'filter' | 'refresh' | 'clear'; id: string } | null = null
+let finishing: { code: string; kind: 'cancel' | 'select' | 'filter' | 'refresh' | 'clear' | 'observe'; id: string } | null = null
 let resizeFrame = 0
 function measureFilters(): void {
   // Measure the original list. A short filtered result must never hide its controls.
@@ -42,6 +43,7 @@ function onResize(): void {
 function applyFilter(value: QuickSwitchFilter): void { emit('filter', value); void nextTick(() => input.value?.focus({ preventScroll: true })) }
 function refreshFilter(): void { emit('refresh-filter'); void nextTick(() => input.value?.focus({ preventScroll: true })) }
 function clearSearch(): void { emit('search', ''); void nextTick(() => input.value?.focus({ preventScroll: true })) }
+function observe(): void { committed = true; emit('overview') }
 function cancel(): void { committed = false; emit('close') }
 function select(id: string): void { committed = true; emit('select', id) }
 watch(() => props.open, async open => {
@@ -80,7 +82,7 @@ function onKey(event: KeyboardEvent): void {
     const target = document.activeElement as HTMLElement | null
     const filter = target?.getAttribute('data-switcher-filter')
     const kind = target?.hasAttribute('data-switcher-close') ? 'cancel' : filter ? 'filter'
-      : target?.hasAttribute('data-switcher-refresh') ? 'refresh' : target?.hasAttribute('data-switcher-clear') ? 'clear' : 'select'
+      : target?.hasAttribute('data-switcher-refresh') ? 'refresh' : target?.hasAttribute('data-switcher-clear') ? 'clear' : target?.hasAttribute('data-switcher-observe') ? 'observe' : 'select'
     finishing = { code: event.code, kind, id: filter ?? props.selectedId }
     return
   }
@@ -117,6 +119,7 @@ function onKeyUp(event: KeyboardEvent): void {
     if (option) applyFilter(option.id)
   } else if (action.kind === 'refresh') refreshFilter()
   else if (action.kind === 'clear') clearSearch()
+  else if (action.kind === 'observe') observe()
   else select(action.id)
 }
 onMounted(() => {
@@ -164,7 +167,7 @@ onBeforeUnmount(() => {
           </button>
           <div v-if="!items.length" class="tab-switcher__empty" role="status">当前条件没有匹配的标签<button v-if="query" type="button" data-switcher-clear @click="clearSearch">清空搜索</button><button v-if="filter !== 'all'" type="button" data-switcher-filter="all" @click="applyFilter('all')">回到全部</button></div>
         </div>
-        <footer>↑ ↓ 选择<span>Enter 切换</span><span>Esc 返回</span></footer>
+        <footer><button type="button" class="tab-switcher__observe" data-switcher-observe data-testid="tab-quick-switcher-observe" @click="observe">运行观察</button>↑ ↓ 选择<span>Enter 切换</span><span>Esc 返回</span></footer>
       </section>
     </div>
   </Teleport>
@@ -205,4 +208,8 @@ kbd { font-family: inherit; font-size: 10px; opacity: .75; }
 .tab-switcher__empty button { color: hsl(var(--primary)); }
 footer { display: flex; gap: 20px; padding: 10px 16px; border-top: 1px solid hsl(var(--border)); font-size: 11px; color: hsl(var(--muted-foreground)); }
 @media (max-width: 600px) { .tab-switcher-scrim { padding: 14px 10px; } .tab-switcher { max-height: calc(100dvh - 28px); } .tab-switcher__detail { max-width: 112px; } .tab-switcher__name { flex-wrap: wrap; gap: 4px; } .tab-switcher__search input { font-size: 16px; } }
+</style>
+
+<style scoped>
+.tab-switcher__observe { min-height: 44px; padding: 0 8px; border: 1px solid currentColor; border-radius: 6px; color: hsl(var(--primary)); background: transparent; cursor: pointer; margin-right: auto; }
 </style>

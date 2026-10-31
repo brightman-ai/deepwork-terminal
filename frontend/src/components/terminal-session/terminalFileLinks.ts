@@ -100,17 +100,17 @@ function printedRecordWidth(buffer: TerminalBufferLike, first: number, count: nu
   return width
 }
 
-/** A Write result owns its final path field, including literal spaces. Its
+/** Write receipts and compacted Referenced file items own their final path field. Their
  * continuation gutter is the tree prefix, not the assistant bullet width. */
-function toolResultReference(text: string): { indent: number; start: number; value: string; gitQuoted: boolean; quotationClosed: boolean } | undefined {
-  const match = /^([ \u00a0]*[⎿└][ \u00a0]+)Wrote[ \u00a0]+\d+[ \u00a0]+lines?[ \u00a0]+to(?:[ \u00a0]+|(?=[/~.])|$)(.*)$/u.exec(text)
+function toolResultReference(text: string): { indent: number; start: number; value: string; gitQuoted: boolean; quotationClosed: boolean; reference: boolean } | undefined {
+  const match = /^([ \u00a0]*[⎿└├│][ \u00a0]+)(?:Wrote[ \u00a0]+\d+[ \u00a0]+lines?[ \u00a0]+to(?:[ \u00a0]+|(?=[/~.])|$)|Referenced file:?(?:[ \u00a0]+|$))(.*)$/iu.exec(text)
   if (!match) return undefined
   let value = match[2], start = text.length - value.length
   const quote = /^["'`]/u.test(value) ? value[0] : ''
   const quotationClosed = !quote || value.length > 1 && value.endsWith(quote)
   const gitQuoted = quote === '"'
   if (quote) { value = value.slice(1, quotationClosed ? -1 : undefined); start++ }
-  return { indent: match[1].length, start, value, gitQuoted, quotationClosed }
+  return { indent: match[1].length, start, value, gitQuoted, quotationClosed, reference: /Referenced file/i.test(text.slice(0, start)) }
 }
 
 /** Only the immediately preceding Write record can confirm an otherwise
@@ -194,8 +194,8 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
     if (!head.trim() || diffLineNumber(head) !== undefined || EDIT_HEADER_RE.test(head) || EDIT_TOOL_HEADER_RE.test(head)) return recovered
     const token = /[^\s"'`|｜，。；！？、]+$/u.exec(head)
     const receipt = FILE_TOOL_RESULT_RE.exec(head)
-    const writeTarget = receipt ? precedingWriteTarget(buffer, first) : undefined
     let receiptField = receipt ? toolResultReference(head) : undefined
+    const writeTarget = receipt && !receiptField?.reference ? precedingWriteTarget(buffer, first) : undefined
     const start = receiptField?.start ?? (token ? bareFileReference(token[0], token.index).start : -1)
     const value = receiptField?.value ?? (start >= 0 ? head.slice(start) : '')
     const indent = receipt?.[1].length ?? (/^( *)(?:[•●⏺*-] +)?/u.exec(head)![0].length || 2)
@@ -221,7 +221,10 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         const tail = logicalRecordText(part.rows)
         const body = tail.slice(indent)
         const awaitingReceiptPath = receipt && !receiptField?.value.replace(/^["'`]/u, '').trim()
-        let confirmedRootContinuation = false
+        // A Referenced file tree item owns its wrapped path field. Uniform
+        // printed columns distinguish a split slash/../ from a new short item.
+        let confirmedRootContinuation = !!receiptField?.reference && !initialFile
+          && recordWidths[0] >= 24 && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
         if (writeTarget && /^(?:\/|~\/|\.{1,2}\/)/u.test(body)) {
           const candidate = toolResultReference(logicalRecordText(mergeRenderedRows([...groups, part.rows], indent, false)))
           if (candidate) confirmedRootContinuation = writeTarget.startsWith(normalizeTerminalPath(candidate.gitQuoted ? decodeQuotedPath(candidate.value) : candidate.value))
@@ -489,7 +492,7 @@ const EDIT_STATS_TAIL_RE = new RegExp(EDIT_STATS_RE.source + '\\s*$')
 const EDIT_HEADER_RE = /^\s*(?:[•●]\s*)?(?:Added|Edited|Updated|Update|Wrote|Write)\s+/i
 const EDIT_TOOL_HEADER_RE = /^\s*(?:[⏺●•]\s*)?(?:Update|Edit|Write)\(/i
 const FILE_TOOL_HEADER_RE = /^\s*(?:[⏺●•]\s*)?(?:Read|Update|Write|Edit|Edited)\(/i
-const FILE_TOOL_RESULT_RE = /^([ \u00a0]*[⎿└][ \u00a0]+)Wrote(?:[ \u00a0]|$)/u
+const FILE_TOOL_RESULT_RE = /^([ \u00a0]*[⎿└├│][ \u00a0]+)(?:Wrote|Referenced file)(?:[ \u00a0:]|$)/iu
 const DIFF_LINE_NUMBER_RE = /^(?:\s*(\d+)(?=\s+[-+−|│·─—])|[ \t]{2,}(\d+)(?= {2}))/
 const EDIT_SUMMARY_RE = /^\s*(?:⎿\s*)?(?:Added \d+ lines?(?:, removed \d+ lines?)?|Removed \d+ lines?)\s*$/i
 const PATH_WRAPPERS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '（': '）', '【': '】', '《': '》' }
@@ -879,7 +882,7 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
     // Tool UI appends display metadata, not a literal filename component.
     // Recognize only a trailing annotation in this owned tool argument: dots
     // and spaces inside quoted paths / Markdown destinations stay literal.
-    const annotation = /[ \t]+·[ \t]+lines?[ \t]+(\d+)(?:[ \t]*[-–][ \t]*(\d+))?[ \t]*$/i.exec(match[1])
+    const annotation = /\s*·\s*lines?\s+(\d+)(?:\s*[-–—]\s*(\d+))?\s*$/i.exec(match[1])
     const value = annotation ? match[1].slice(0, annotation.index) : match[1]
     const location = annotation ? `:${annotation[1]}${annotation[2] ? `-${annotation[2]}` : ''}` : ''
     const offset = start + match[0].indexOf('(') + 1

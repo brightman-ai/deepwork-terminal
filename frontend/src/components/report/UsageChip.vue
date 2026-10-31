@@ -1349,7 +1349,9 @@ onUnmounted(() => {
 }
 @media (max-width: 600px) {
   .uchip-top-speed { display: none; }
-  .uchip-owner { max-width: 8ch; }
+  .uchip-owner { display: none; }
+  .uchip { padding-inline: 6px; gap: 4px; max-width: 72px; }
+  .uchip-value { max-width: 42px; overflow: hidden; text-overflow: ellipsis; }
 }
 
 .uchip-backdrop { position: fixed; inset: 0; z-index: 3000; }
