@@ -80,6 +80,9 @@ jobs:
       - name: Test private transcript evidence extraction
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
+      - name: Check public fixture privacy
+        run: python3 scripts/check-public-fixtures.py
+
       - name: Build binary
         run: ./build.sh --skip-frontend
 

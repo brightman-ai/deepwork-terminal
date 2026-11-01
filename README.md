@@ -132,17 +132,11 @@ a conversion error. The source Markdown is preserved.
 
 ### Standard view — tmux panes + quick-key toolbar
 
-![Standard view: tmux panes and the quick-key toolbar](screenshots/ui-standard-tmux-panes.png)
-
 ---
 
 ### Paste, type, or speak to the agent
 
 `Ctrl/Cmd+V` a screenshot and the relative path is injected. The input box is also a normal field, so multi-line text and your phone's voice input go straight in.
-
-![Multi-line text input](screenshots/input-multiline.png)
-
-![Voice input via the system keyboard](screenshots/input-voice.png)
 
 ---
 
@@ -150,21 +144,9 @@ a conversion error. The source Markdown is preserved.
 
 Push "an agent is waiting" to wherever you already look — WeChat / Feishu / WeCom / DingTalk.
 
-![Multi-channel notifications](screenshots/notify-channels.png)
-
 WeChat (iLink) quota: each message you send buys ~10 pushes; reply anything to refresh.
 
-![WeChat notify](screenshots/notify-wechat-1.png)
-
-![WeChat notify](screenshots/notify-wechat-2.png)
-
-![WeChat notify — quota refresh](screenshots/notify-wechat-3.png)
-
-![WeChat notify — refreshed](screenshots/notify-wechat-4.png)
-
 A status strip up top shows each session's state plus connection latency.
-
-![Health / latency strip](screenshots/health-latency-bar.png)
 
 ---
 
@@ -172,31 +154,17 @@ A status strip up top shows each session's state plus connection latency.
 
 Two toolbars — one for tmux (panes / sessions), one general — with your live prefix shown. No tmux? Multiple terminals still work.
 
-![Two toolbars: tmux + general](screenshots/toolbar-two-rows.png)
-
-![Multiple terminals without tmux](screenshots/multi-terminal-no-tmux.png)
-
 ---
 
 ### Cross-session continuity — uploads, history, file drawer
 
 Past uploads and the prompts you actually typed are reusable from any new session; the file drawer browses the tree and previews files in the browser.
 
-![History: past uploads and inputs](screenshots/history-uploads.png)
-
-![File drawer: directory tree](screenshots/file-tree-browse.png)
-
-![File drawer: file preview](screenshots/file-preview.png)
-
 ---
 
 ### More
 
 Per-session token & cost overview; phone and PC share one session with takeover.
-
-![Session cost overview](screenshots/session-cost.png)
-
-![Multi-device takeover](screenshots/multi-device-takeover.png)
 
 ## 🔔 Notifications setup
 

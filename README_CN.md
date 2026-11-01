@@ -126,17 +126,11 @@ dw-terminal --addr :8222 --tunnel     # ……并开公网访问
 
 ### 标准界面 — tmux 分屏 + 快捷工具条
 
-![标准界面：tmux 分屏 pane + 顶部快捷工具条](screenshots/ui-standard-tmux-panes.png)
-
 ---
 
 ### 粘贴、输入、或语音说给 agent
 
 `Ctrl/Cmd+V` 粘贴截图，相对路径自动注入；输入区本质是普通输入框，多行文本和手机语音输入法也能直接发给 agent。
-
-![多行文本输入](screenshots/input-multiline.png)
-
-![语音输入法直接在输入框里用](screenshots/input-voice.png)
 
 ---
 
@@ -144,21 +138,9 @@ dw-terminal --addr :8222 --tunnel     # ……并开公网访问
 
 把「agent 在等你」推到你本来就在看的 IM——个人微信 / 飞书 / 企业微信 / 钉钉。
 
-![多通道推送](screenshots/notify-channels.png)
-
 个人微信（iLink）配额：每主动发一条消息约换 10 条推送，回任意字符即续。
 
-![个人微信通知](screenshots/notify-wechat-1.png)
-
-![个人微信通知](screenshots/notify-wechat-2.png)
-
-![个人微信通知 — 配额续订](screenshots/notify-wechat-3.png)
-
-![个人微信通知 — 已续订](screenshots/notify-wechat-4.png)
-
 顶部状态条常驻：每个会话的状态 + 连接延迟。
-
-![健康 / 延迟状态条](screenshots/health-latency-bar.png)
 
 ---
 
@@ -166,31 +148,17 @@ dw-terminal --addr :8222 --tunnel     # ……并开公网访问
 
 两条工具条——一条管 tmux（pane / 会话），一条通用，并实时显示当前前缀。没装 tmux？照样能开多个终端。
 
-![两条工具条：tmux + 通用](screenshots/toolbar-two-rows.png)
-
-![不用 tmux 也能多终端](screenshots/multi-terminal-no-tmux.png)
-
 ---
 
 ### 跨会话连贯 — 上传 / 输入历史 / 文件抽屉
 
 传过的文件、真输入过的 prompt 在任意新会话都能翻到；文件抽屉可在浏览器里浏览目录树、预览文件。
 
-![历史：传过的图片 / 输入过的 prompt](screenshots/history-uploads.png)
-
-![文件抽屉：目录树](screenshots/file-tree-browse.png)
-
-![文件抽屉：文件预览](screenshots/file-preview.png)
-
 ---
 
 ### 还有这些
 
 每会话 token 与成本总览；手机 / PC 共享同一会话，可抢占接管。
-
-![会话成本总览](screenshots/session-cost.png)
-
-![多端接管](screenshots/multi-device-takeover.png)
 
 ## 🔔 通知配置
 

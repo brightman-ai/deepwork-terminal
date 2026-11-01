@@ -1,0 +1,2 @@
+# Synthetic terminal screens retain prompt spaces and blank screen rows.
+agentintel/testdata/*.txt whitespace=-blank-at-eof,-blank-at-eol

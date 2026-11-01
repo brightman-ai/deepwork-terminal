@@ -1,0 +1,21 @@
+● Reviewing a synthetic example.
+
+● Read(/work/sample-project/docs/example-report.md)
+  ⎿  Read 39 lines
+
+● Read(/work/sample-project/src/example.ts · lines 30-99)
+  ⎿  Read 70 lines
+
+✢ Reticulating… (still thinking with xhigh effort)
+
+─────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────
+  🤖 Example Model | 💰 $1.25 | 🧠 10.0K(5%) | fast✗
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+                                          100000 tokens
+                                                  Debug
+
+  ● main
+  ◯ general-purpose  Example task… 1m 16s · ↓ 1.3k tokens
+

@@ -1,0 +1,17 @@
+● Bash(echo synthetic-example)
+  ⎿  synthetic-example
+  ⎿  (timeout 3m)
+
+✻ 示例输出… (37s · ↓ 1.3k tokens)
+  ⎿  ◼ P2 实施：示例步骤甲
+     ◻ P3 实施：示例步骤乙
+     ✔ P1 示例已完成
+
+─────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────
+  🤖 Example Model | 💰 $1.25 | 🧠 10.0K(5%) | fast✗
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+                    120000 tokens · ◎ /goal active (1h)
+                                                  Debug
+

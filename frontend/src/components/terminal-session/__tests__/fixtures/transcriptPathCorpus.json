@@ -1,0 +1,923 @@
+{
+  "study": {
+    "kind": "synthetic-grammar-fixtures",
+    "cases": 144,
+    "oracle": "Literal synthetic identities, independent of the production parser",
+    "generation": "Generic name characters preserve display widths, path lengths, separators, punctuation and extensions; CLI hard-wrap and xterm layouts are simulated.",
+    "limits": "Not a published transcript dataset or a claim of live CLI execution."
+  },
+  "cases": [
+    {
+      "id": "tool-000",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/A0文文文文-00000000/AAAAAA.md"
+    },
+    {
+      "id": "tool-001",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAA.md"
+    },
+    {
+      "id": "tool-002",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文-00000000/文文文文文.md"
+    },
+    {
+      "id": "tool-003",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文.md"
+    },
+    {
+      "id": "tool-004",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAAAAAA.md"
+    },
+    {
+      "id": "tool-005",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文.md"
+    },
+    {
+      "id": "tool-006",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/文文文文.md"
+    },
+    {
+      "id": "tool-007",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaaaaaaa-aa.aaaaaa.md"
+    },
+    {
+      "id": "tool-008",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文文文文-a0.md"
+    },
+    {
+      "id": "tool-009",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/文文文文.md"
+    },
+    {
+      "id": "tool-010",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaaaaaaa-aa.aaaaaa.md"
+    },
+    {
+      "id": "tool-011",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaaa文文文文文文.md"
+    },
+    {
+      "id": "tool-012",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaaa文文文文文文.md"
+    },
+    {
+      "id": "tool-013",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaaaaaaa-aa.aaaaaa.md"
+    },
+    {
+      "id": "tool-014",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/aaa_aaaaaa.py"
+    },
+    {
+      "id": "tool-015",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/文文文文文文文文-a0.md"
+    },
+    {
+      "id": "tool-016",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文-文文文Aaaaa文文文文文-00000000/AAAAAA.md"
+    },
+    {
+      "id": "tool-017",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/AAA文文-AAAA文A0-00000000/aaa_aaaaaa.py"
+    },
+    {
+      "id": "tool-018",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaa_aaaaaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-019",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文-文文文Aaaaa文文文文文-00000000/AAAAAA.md"
+    },
+    {
+      "id": "tool-020",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-021",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文文文文文文文-00000000/aaaa_aaaaaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-022",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-023",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-024",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文-文文文文文文文-文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-025",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-026",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文Aaaaa文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-027",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文-文文文文文文文-文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-028",
+      "agent": "codex",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文文Aaaaa文文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-029",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文Aaaaa文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-030",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文文文Aaaaa文文文文文-文文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-031",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-AAA-A-Aaaaa文文文文文文文文文/文文/A0文文-文文aaaa文文文文文文文/A0文文-文文文文文AAA文文文文-文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-032",
+      "agent": "codex",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-AAA-A-Aaaaa文文文文文文文文文/文文/A0文文-文文aaaa文文文文文文文/A0文文-文文文文文AAA文文文文-文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-033",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaaaaa"
+    },
+    {
+      "id": "tool-034",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAAA-文文.md"
+    },
+    {
+      "id": "tool-035",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa.sh"
+    },
+    {
+      "id": "tool-036",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAAA-文文.md"
+    },
+    {
+      "id": "tool-037",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-038",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/.claude/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-039",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/.dw-sampleproject/aaaaaaa-aaa/aaaaaaa/AAAAAA.md"
+    },
+    {
+      "id": "tool-040",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-041",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa.go"
+    },
+    {
+      "id": "tool-042",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-043",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-044",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aaaaaaaaaa-aaaaaa/AA-0000-AAA文文文文文文文文文文-00000000-0000.md"
+    },
+    {
+      "id": "tool-045",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/.dw-sampleproject/aaaaaaa-aaa/aaaaaaa/aaaaaaa.py"
+    },
+    {
+      "id": "tool-046",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文.md"
+    },
+    {
+      "id": "tool-047",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaaaaa.go"
+    },
+    {
+      "id": "tool-048",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文.md"
+    },
+    {
+      "id": "tool-049",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-050",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaa/文文文文.md"
+    },
+    {
+      "id": "tool-051",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/AAAAA.md"
+    },
+    {
+      "id": "tool-052",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文.md"
+    },
+    {
+      "id": "tool-053",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaaaaa.go"
+    },
+    {
+      "id": "tool-054",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文文.md"
+    },
+    {
+      "id": "tool-055",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-056",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaa/文文文文.md"
+    },
+    {
+      "id": "tool-057",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaaaaaaa-aaaaaaaa/aaaaaa_aaaaaa_aaaa.go"
+    },
+    {
+      "id": "tool-058",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文.md"
+    },
+    {
+      "id": "tool-059",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaaaaa.go"
+    },
+    {
+      "id": "tool-060",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaa/aa-aaa-00000000-aa0aaaa0/a0/aaaaa/A0文文文文文AA文文文-文文文文文-a0-00000000.md"
+    },
+    {
+      "id": "tool-061",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-062",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaa/文文文文.md"
+    },
+    {
+      "id": "tool-063",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/.dw-sampleproject/aaaaaaa-aaa/aaaaaaa/aaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-064",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AAAAA.md"
+    },
+    {
+      "id": "tool-065",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaaaa/aaaaaaa.go"
+    },
+    {
+      "id": "tool-066",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AAAAA.md"
+    },
+    {
+      "id": "tool-067",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-068",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文.md"
+    },
+    {
+      "id": "tool-069",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaaaa_aaaaaaa.py"
+    },
+    {
+      "id": "tool-070",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/文0000文文文文文-文文.md"
+    },
+    {
+      "id": "tool-071",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa_aaa.go"
+    },
+    {
+      "id": "tool-072",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文-文文文文-AAAA文文.md"
+    },
+    {
+      "id": "tool-073",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-074",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文.md"
+    },
+    {
+      "id": "tool-075",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaa/aaaaa_aaa.py"
+    },
+    {
+      "id": "tool-076",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaaaaa.py"
+    },
+    {
+      "id": "tool-077",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaa_aaaaa.go"
+    },
+    {
+      "id": "tool-078",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaa/aa-aaa-00000000-aa0aaaa0/aaaa/aaaaa/AAAA文文-文文文文文-AaaaAaaaa文文Aaaaaaaaa-a0-00000000.md"
+    },
+    {
+      "id": "tool-079",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-080",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文文文文文.md"
+    },
+    {
+      "id": "tool-081",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaaaaaaa-aaaaaaaa/aaaa/aaaaaa_aaaaaaaa.go"
+    },
+    {
+      "id": "tool-082",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/文文文文-a0.md"
+    },
+    {
+      "id": "tool-083",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaa/aaaaaa-aaaaaa"
+    },
+    {
+      "id": "tool-084",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaaaa_aaaa.py"
+    },
+    {
+      "id": "tool-085",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa0.png"
+    },
+    {
+      "id": "tool-086",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/aaaaaa/文文.md"
+    },
+    {
+      "id": "tool-087",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaaa/aaaaaaa/aaaaaa_aaaaaaaa.py"
+    },
+    {
+      "id": "tool-088",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/文文文-文文文文文.md"
+    },
+    {
+      "id": "tool-089",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa_aaaaa.go"
+    },
+    {
+      "id": "tool-090",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaa_aaaaaa.py"
+    },
+    {
+      "id": "tool-091",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaa/aa00.png"
+    },
+    {
+      "id": "tool-092",
+      "agent": "claude",
+      "operation": "read",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaa-aaa-aaa0/文文/文0文.md"
+    },
+    {
+      "id": "tool-093",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/AAAAAA.md"
+    },
+    {
+      "id": "tool-094",
+      "agent": "claude",
+      "operation": "create",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa_aaaaaa/aaaaaa/aaaaaaaaaa-aa/aaaaa/文文/文文文文-00000000/aaaaa_aaaa.py"
+    },
+    {
+      "id": "tool-095",
+      "agent": "claude",
+      "operation": "edit",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaa/aaa/aaaaa/aaaaa_aaaaa.go"
+    },
+    {
+      "id": "prose-357",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaa/A0-aaaaaaa-aaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-488",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "AAAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-395",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/aaaaaaa-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-398",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aa.py",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-185",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaaa/AA-0000-.../文文/AAAA文文文文文文/AAAA文文-文文文文文文文-文文文文文文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-555",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-文文文文文-文文文文文文文文文文文文-文aaaaa文文文文-文文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-211",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "文文AA文文文文/aaaa/文文文-文文文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-156",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaAaaAaaaaaaa.ts",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-168",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaaaAaa.ts",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-33",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文AA文文文文/文文AA文文文文-文文文文0000-AA文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-332",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-427",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaaaa/aaaaaaaa.json",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-39",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "文文AA文文文文-AA文文文文文-a0-00000000.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-431",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "~/aaa-aaaaaaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-327",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaaa-aaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-47",
+      "agent": "claude",
+      "operation": "reference",
+      "path": "aaaaa.sh",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1110",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/文文-00000000-Aaaaa文文文文/文文文文-文文文文文文文文文文文文文文-Aaaaa-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-997",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文AA文文文文/文文AA文文文文-文文文文文文-文文文-文文文-a00-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-695",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaa/aaaaaaa-a0-aaaaa/aaaaaa-aaaaa/00000000-AAAA文文文文文文文/00000000-AAAA文文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-907",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/aaaa/AA-0000-aaaa-文文文文文文-文文文文文文文-Aaaaa文文-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1145",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaaaaaaa-a0-文文文文文文文-00000000/文文-文文文文文文文文文-00a0000/文文文文文文文文文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1223",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-AAA-A-Aaaaa文文文文文文文文文/文文/A0文文-文文aaaa文文文文文文文/A0文文-文文文文文AAA文文文文-文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1067",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1030",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaaaa/00000000-A0文AAAA文文文文文文文文文文文文文/00000000-A0文AAAA文文文文文文文文文文文文文-文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-998",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文AA文文文文/文文AA文文文文-文文文文文文文文文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-698",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaa/文文文文文文文-aaaaa-a0.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-894",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaa-文文AA-0000AA文文文文/文文/文文文文文文文/文文文文文文文-文文文文-a00-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1066",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/AA-0000-aaaa-文文文文文文-Aaaaa文文文文文文文文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1144",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaaaaaaa-a0-文文文文文文文-00000000/文文-0a0aaa0-文文文文文文文文文/文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-903",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaa/aaaaaa/AA-0000-aaaa-文文文文文文/aaaa/AA-0000-aaaa-文文文文文文-文文文文文文文文文文文-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1142",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/aaaa/aaaaaaaaaa-aa文文-00000000/aaaaaaaaaa-a0-文文文文文文文-00000000/文文-a0000aa-文文文文文文文文文/文文A-文文文文文文文文.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-1228",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "/aaaa/aaaaaa/aaaa/aaaaaaaaaa-aaaaaa/aaaaaa/AA-0000-aaaa-文文文文文文文文文文文文文文文文文/文文文文文文/文文文文文文-文文文文-a0-00000000.md",
+      "wrapper": "markdown"
+    },
+    {
+      "id": "prose-654",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaa-文文文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1038",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "文文-aaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-936",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaaaaaaa-aa.aaaaaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1125",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "AAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1123",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-808",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "文文文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1124",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-927",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaa/aaaaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-777",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaaaa/aaa_aaaaa.py",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-990",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaa_aaaaa.py",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-694",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaa/aaaa.aaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-913",
+      "agent": "codex",
+      "operation": "reference",
+      "path": ".aaa.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-918",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "AAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-863",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaaa/文文.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-858",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "AAAAA.md",
+      "wrapper": "quote"
+    },
+    {
+      "id": "prose-1177",
+      "agent": "codex",
+      "operation": "reference",
+      "path": "aaaa_aaaaaaaaaa_aaaaaaaa_0000.py",
+      "wrapper": "quote"
+    }
+  ]
+}

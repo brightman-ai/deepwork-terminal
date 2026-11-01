@@ -1,0 +1,15 @@
+                   ✔ took 1s   tester@demo-host
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Untracked files:
+        docs/sample-report.md
+        examples/demo-notes/
+
+nothing added to commit but untracked files present
+
+  ~/work/sample-assets on  main ? git commit -a -m "example"
+
+                                  ✔ tester@demo-host
+  ~/work/sample-assets on  main ?
+
