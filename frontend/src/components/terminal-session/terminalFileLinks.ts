@@ -178,6 +178,14 @@ function paragraphOwnsBareReference(buffer: TerminalBufferLike, first: number, h
   return false
 }
 
+/** A location can itself end at a rendered boundary (:12 + 1-130). This is
+ * ownership of the same file's suffix, not permission to join another file. */
+function partialSourceLocation(field: string): RegExpExecArray | null {
+  if (splitLocalHtmlReference(field).suffix) return null
+  const match = /^(.+?)(:\d*(?:[-:]\d*)?|#L\d*(?:-L?\d*)?)$/u.exec(field)
+  return match && isFileReference(match[1]) ? match : null
+}
+
 /** A label or an assistant paragraph owns a bare reference even without a
  * wrapper. Recover its fixed-gutter continuations through a complete filename,
  * never through a second label/root/record. */
@@ -238,10 +246,20 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         const uniformField = !receipt && recordWidths[0] >= 24
           && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
         const newRoot = /^(?:\/|~\/|\.{1,2}\/)/u.test(body)
+        const nextLabel = /^([\p{L}\p{N}_.()[\]（）【】《》-]+)[:：]/u.exec(body)
+        // In a hanging file reference, "report.md：description" and
+        // "report.md:121" finish the filename; they are not new prose labels.
+        // Actual labels (文件：/来源：) still terminate this owned field.
+        const preceding = nextLabel ? logicalRecordText(mergeRenderedRows(groups, indent, false)).slice(start) : ''
+        const precedingName = preceding.slice(preceding.lastIndexOf('/') + 1)
+        const completesExtension = nextLabel && !isSupportedPreviewName(precedingName)
+          && isSupportedPreviewName(precedingName + nextLabel[1])
+        const completesLocation = nextLabel && /^-?\d+(?:-\d*)?$/u.test(nextLabel[1]) && partialSourceLocation(preceding)
+        const startsLabel = nextLabel && !isFileReference(nextLabel[1]) && !completesExtension && !completesLocation
         if (!part.rows.length || total + part.rows.length > 64 || !tail.startsWith(gutter) || !body || !receipt && /^\s/u.test(body)
           || /^(?:[•●⏺*-] +)/u.test(body)
           || !awaitingReceiptPath && !confirmedRootContinuation && !uniformField && newRoot
-          || /^[\p{L}\p{N}_.()[\]（）【】《》-]+[:：]/u.test(body)
+          || startsLabel
           || diffLineNumber(tail) !== undefined || EDIT_HEADER_RE.test(tail) || EDIT_TOOL_HEADER_RE.test(tail) || FILE_TOOL_RESULT_RE.test(tail)) break
         cuts.push(length); groups.push(part.rows)
         recordWidths.push(printedRecordWidth(buffer, next, part.rows.length))
@@ -252,13 +270,21 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         if (workLeft < 0) return undefined
         receiptField = receipt ? toolResultReference(text) : undefined
         const link = findTerminalFileLinks(text).find(link => link.start === (receiptField?.start ?? start))
-        const path = receipt ? receiptField?.value : opaque ? text.slice(start).split(/[\s（(，。；！？、]/u, 1)[0] : link?.path
+        const opaqueField = opaque ? text.slice(start).split(/[\s（(，。；！？、]/u, 1)[0] : ''
+        // Opaque URLs/templates still own their wrapped filename and its
+        // description boundary; otherwise a local-looking tail escapes them.
+        const opaqueDescription = opaque ? /^(.*\.[\p{L}\p{N}]{1,16})[:：]/u.exec(opaqueField) : null
+        const path = receipt ? receiptField?.value : opaque ? opaqueDescription?.[1] ?? opaqueField : link?.path
         const receiptPath = receiptField && normalizeTerminalPath(receiptField.gitQuoted ? decodeQuotedPath(receiptField.value) : receiptField.value)
         const incompleteKnownTarget = receiptPath && writeTarget && receiptPath !== writeTarget && writeTarget.startsWith(receiptPath)
         const afterReference = link ? text.slice(link.start + (link.displayLength ?? link.end - link.start + 1)) : ''
         const followingRecord = next < buffer.length ? logicalRecordText(softWrappedTerminalRows(buffer, next).rows) : ''
         const htmlReference = path ? splitLocalHtmlReference(path) : undefined
         const followingBody = followingRecord.startsWith(gutter) ? followingRecord.slice(indent) : ''
+        const locationFragment = /^(?::\d*(?:[-:]\d*)?|#L\d*(?:-L?\d*)?|[-:]?\d+(?:[-:]\d*)?)(?=$|[:：\s。！？，；])/u.exec(followingBody)
+        const field = text.slice(start)
+        if (uniformField && locationFragment && partialSourceLocation(field + locationFragment[0])
+          && (partialSourceLocation(field) || /^[:#]/u.test(locationFragment[0]))) continue
         // A complete .html filename can be followed by a hard-wrapped query.
         // Only its owned, uniformly printed field may absorb URL characters;
         // independent prose/roots still end the record.
@@ -267,10 +293,11 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
           && !isFileReference(followingBody.replace(/[。！？，；]$/u, ''))
           && (htmlReference.suffix ? /^[A-Za-z\d%&=+_.#?/~\-]+[。！？，；]?$/u : /^[?#][^\s。！？，；]+[。！？，；]?$/u).test(followingBody)) continue
         const separatedTerminator = !afterReference && followingRecord.startsWith(gutter)
-          && /^(?:[。！？，；]|[（(【《])/u.test(followingRecord.slice(indent))
+          && /^(?:[。！？，；:：]|[（(【《])/u.test(followingRecord.slice(indent))
           && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
-        const terminatedPath = link && (/^(?:[。！？，；]|[（(【《])/u.test(afterReference) || separatedTerminator
+        const terminatedPath = link && (/^(?:[。！？，；:：]|[（(【《])/u.test(afterReference) || separatedTerminator
           || htmlReference?.suffix && uniformField && !afterReference && !followingRecord.trim())
+          || opaqueDescription && uniformField
         if (path && (completeFile(path) || terminatedPath || receiptPath === writeTarget && !!writeTarget)
           && (!receipt || receiptField?.quotationClosed && !incompleteKnownTarget)
           && (!unconfirmedRoot || terminatedPath)
@@ -284,14 +311,17 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
               && path.startsWith(initial + '.') && isSupportedPreviewName(fileName(path))
             || !!initial && path.startsWith(initial) && !!htmlReference?.suffix
               && htmlReference.path === splitLocalHtmlReference(initial).path
-          if (initialFile && !extendsFilename) {
+          const extendsLocation = !!initial && path === initial && !!link?.lineStart
+          if (initialFile && !extendsFilename && !extendsLocation) {
             if (!path.startsWith(initial) || !/^[\p{L}\p{N}]+$/u.test(path.slice(initial.length))) break
           } else {
             const following = next < buffer.length ? logicalRecordText(softWrappedTerminalRows(buffer, next).rows) : ''
-            const extension = following.startsWith(gutter) ? /^(\.?[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}]+)?)(?=$|[\s（(。！？，；])/u.exec(following.slice(indent))?.[1] : undefined
+            const extension = following.startsWith(gutter) ? /^(\.?[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}]+)?)(?=$|[\s（(。！？，；:：])/u.exec(following.slice(indent))?.[1] : undefined
             const endsAtBoundary = receipt || (opaque ? text.slice(start) === path : link!.start + (link!.displayLength ?? link!.end - link!.start + 1) === text.length)
             const pendingDot = text.slice(start) === path + '.'
-            if (!((endsAtBoundary || pendingDot) && extension && isSupportedPreviewName(fileName(path + (pendingDot ? '.' : '') + extension)))) {
+            const extensionContinues = extension && (!isSupportedPreviewName(fileName(path)) || /^[\p{L}\p{N}]+$/u.test(extension))
+              && isSupportedPreviewName(fileName(path + (pendingDot ? '.' : '') + extension))
+            if (!((endsAtBoundary || pendingDot) && extensionContinues)) {
               if (current >= next) return recovered
               recovered = {rows, currentRow: current - first}
               if (receipt || labelled || /^\s*[•●⏺*-] +/u.test(head)) return recovered
