@@ -1,4 +1,5 @@
 import { isSupportedPreviewName } from './previewFormats'
+import { splitLocalHtmlReference } from './localHtmlReference'
 import { hasPathElision, normalizeTerminalPath, resolveDocumentPath } from './terminalPathResolver'
 
 export interface TerminalFileLink {
@@ -181,7 +182,7 @@ function paragraphOwnsBareReference(buffer: TerminalBufferLike, first: number, h
  * wrapper. Recover its fixed-gutter continuations through a complete filename,
  * never through a second label/root/record. */
 function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, original: {rows: WrappedTerminalRow[]; currentRow: number}): typeof original | undefined {
-  const fileName = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
+  const fileName = (path: string): string => { const disk = splitLocalHtmlReference(path).path; return disk.slice(disk.lastIndexOf('/') + 1) }
   const completeFile = (path: string): boolean => SPECIAL_FILE_NAMES.has(fileName(path))
     || fileName(path)[0] !== '.' && /\.[\p{L}\p{N}]{1,16}$/u.test(fileName(path))
   let first = current - original.currentRow, probe = original.rows
@@ -208,7 +209,7 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
       && priorToken.includes('/') && !completeFile(priorToken)
     if (receipt || value.includes('/') && !referenceDelimiters(value).open
       && (labelled || !suffix && paragraphOwnsBareReference(buffer, first, head, indent))) {
-      const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(value)
+      const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(splitLocalHtmlReference(value).path)
       const initial = findTerminalFileLinks(head).find(link => receipt ? receiptField && link.start === receiptField.start : link.start === start)?.path
       const initialFile = initial && (completeFile(initial) || initial === writeTarget)
       const gutter = ' '.repeat(indent)
@@ -220,6 +221,8 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         const part = softWrappedTerminalRows(buffer, next)
         const tail = logicalRecordText(part.rows)
         const body = tail.slice(indent)
+        // An address's query is not permission to concatenate the next file.
+        if (initial && splitLocalHtmlReference(initial).suffix && isFileReference(body)) break
         const awaitingReceiptPath = receipt && !receiptField?.value.replace(/^["'`]/u, '').trim()
         // A Referenced file tree item owns its wrapped path field. Uniform
         // printed columns distinguish a split slash/../ from a new short item.
@@ -254,10 +257,20 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         const incompleteKnownTarget = receiptPath && writeTarget && receiptPath !== writeTarget && writeTarget.startsWith(receiptPath)
         const afterReference = link ? text.slice(link.start + (link.displayLength ?? link.end - link.start + 1)) : ''
         const followingRecord = next < buffer.length ? logicalRecordText(softWrappedTerminalRows(buffer, next).rows) : ''
+        const htmlReference = path ? splitLocalHtmlReference(path) : undefined
+        const followingBody = followingRecord.startsWith(gutter) ? followingRecord.slice(indent) : ''
+        // A complete .html filename can be followed by a hard-wrapped query.
+        // Only its owned, uniformly printed field may absorb URL characters;
+        // independent prose/roots still end the record.
+        if (link && !afterReference && uniformField && htmlReference
+          && (htmlReference.suffix || /\.html?$/i.test(path!))
+          && !isFileReference(followingBody.replace(/[。！？，；]$/u, ''))
+          && (htmlReference.suffix ? /^[A-Za-z\d%&=+_.#?/~\-]+[。！？，；]?$/u : /^[?#][^\s。！？，；]+[。！？，；]?$/u).test(followingBody)) continue
         const separatedTerminator = !afterReference && followingRecord.startsWith(gutter)
           && /^(?:[。！？，；]|[（(【《])/u.test(followingRecord.slice(indent))
           && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
-        const terminatedPath = link && (/^(?:[。！？，；]|[（(【《])/u.test(afterReference) || separatedTerminator)
+        const terminatedPath = link && (/^(?:[。！？，；]|[（(【《])/u.test(afterReference) || separatedTerminator
+          || htmlReference?.suffix && uniformField && !afterReference && !followingRecord.trim())
         if (path && (completeFile(path) || terminatedPath || receiptPath === writeTarget && !!writeTarget)
           && (!receipt || receiptField?.quotationClosed && !incompleteKnownTarget)
           && (!unconfirmedRoot || terminatedPath)
@@ -269,6 +282,8 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
               || !isSupportedPreviewName(fileName(initial)) && /^[\p{L}\p{N}_-]+\.[\p{L}\p{N}]+$/u.test(path.slice(initial.length)))
             || !!initial && head.slice(start) === initial + '.' && !isSupportedPreviewName(fileName(initial))
               && path.startsWith(initial + '.') && isSupportedPreviewName(fileName(path))
+            || !!initial && path.startsWith(initial) && !!htmlReference?.suffix
+              && htmlReference.path === splitLocalHtmlReference(initial).path
           if (initialFile && !extendsFilename) {
             if (!path.startsWith(initial) || !/^[\p{L}\p{N}]+$/u.test(path.slice(initial.length))) break
           } else {
@@ -598,6 +613,8 @@ export function editedDiffLineLinkFromBuffer(buffer: TerminalBufferLike, current
 }
 
 function isFileReference(path: string): boolean {
+  const html = splitLocalHtmlReference(path)
+  if (html.suffix) return isFileReference(html.path)
   // These are expressions / foreign addresses, not local filesystem targets.
   if (!path || /[*?${}<>\r\n]/.test(path) || /^[A-Za-z][A-Za-z\d+.-]*:\/\//.test(path) || /^[A-Za-z]:[\\/]/.test(path)) return false
   if (/\\(?![ ()])/.test(path) || /:/.test(path)) return false
@@ -703,7 +720,7 @@ function bareFileReference(value: string, offset: number): { raw: string; start:
   // A whitespace-delimited token can stop inside that note. Prefer a complete
   // filename (including internal brackets / directory names) when one exists;
   // otherwise an opening bracket after a complete file ends the reference.
-  const location = raw.search(/(?::\d|#L\d)/)
+  const location = splitLocalHtmlReference(raw).suffix ? -1 : raw.search(/(?::\d|#L\d)/)
   const path = location < 0 ? raw : raw.slice(0, location)
   const unclosed = new Set(stack.map(part => part.at))
   const noteStart = topLevelOpenings.find(i => {
@@ -823,7 +840,7 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
   const links: TerminalFileLink[] = []
   const owned: Array<{ start: number; end: number }> = expressionRanges(line)
   const add = (raw: string, start: number, outsideSuffix = '', escaped = false, gitQuoted = false, markdown = false): void => {
-    const suffixStart = raw.search(/(?::\d|#L\d)/)
+    const suffixStart = splitLocalHtmlReference(raw).suffix ? -1 : raw.search(/(?::\d|#L\d)/)
     const rawPath = suffixStart < 0 ? raw : raw.slice(0, suffixStart)
     const suffix = suffixStart < 0 ? outsideSuffix : raw.slice(suffixStart)
     let target = gitQuoted ? decodeQuotedPath(rawPath) : rawPath
@@ -832,15 +849,16 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
       try {
         const uri = new URL(target)
         if (uri.hostname && uri.hostname !== 'localhost') return
-        target = decodeURIComponent(uri.pathname)
+        target = decodeURIComponent(uri.pathname) + uri.search + uri.hash
       } catch { return }
     }
     // Git's a/ and b/ are syntax only in explicit patch headers.
     if (/^(?:diff --git |--- |\+\+\+ )/.test(line) && /^[ab]\//.test(target)) target = target.slice(2)
     const path = normalizeTerminalPath(target)
+    const diskPath = splitLocalHtmlReference(path).path
     // Bare code / measurements are not filenames. Explicit quotes and
     // Markdown/file-tool targets retain literal '=' and other legal characters.
-    if (escaped && (/[=×÷]/.test(path) || (!isSupportedPreviewName(path.slice(path.lastIndexOf('/') + 1)) && /^[\w.]+\(/.test(path)))) return
+    if (escaped && (/[=×÷]/.test(diskPath) || (!isSupportedPreviewName(diskPath.slice(diskPath.lastIndexOf('/') + 1)) && /^[\w.]+\(/.test(diskPath)))) return
     if (!isFileReference(path)) return
     const location = parseFileLocationSuffix(suffix)
     const suffixMatch = LOCATION_SUFFIX_RE.exec(suffix)

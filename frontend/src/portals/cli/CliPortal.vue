@@ -73,7 +73,7 @@
       @session-exit="onTabSessionExit"
       @connection-change="onTabConnectionChange"
       @visible-sessions="onVisibleSessions"
-      @dw-toggle-overview="breakpoint.isMobile.value ? openQuickSwitcher() : toggleOverview()"
+      @dw-toggle-overview="toggleOverview"
       @split-ratio="setSplitRatio"
       @split-orientation="setSplitOrientation"
       @toggle-zoom="toggleZoom"
@@ -108,27 +108,13 @@
 
     <!-- Remote-terminal picker (mesh): add/select a peer, then open a tab connected to it. -->
     <RemoteTermDialog v-model:open="remoteDialogOpen" :on-connect="createRemoteTab" />
-    <TabQuickSwitcher :open="quickSwitcher.open.value" :query="quickSwitcher.query.value" :items="quickSwitcher.results.value" :selected-id="quickSwitcher.selectedId.value" :active-id="activeTab?.id" :binding="quickSwitchBinding" :binding-label="quickSwitchLabel" :message="quickSwitcher.message.value" :total="quickSwitcher.total.value" :status-kinds="quickSwitcher.statusKinds.value" :filter="quickSwitcher.filter.value" :filters="quickSwitcher.filters.value" :filter-stale="quickSwitcher.filterStale.value" @filter="quickSwitcher.setFilter" @refresh-filter="quickSwitcher.refreshFilter" @search="quickSwitcher.search" @move="quickSwitcher.move" @select="selectQuickTab" @close="quickSwitcher.close" @overview="openObservation" />
+    <TabQuickSwitcher :view="switcherView" :units="overviewUnits" :pane-total="allTabs.reduce((sum, tab) => sum + (tab.split ? 2 : 1), 0)" :is-mobile="breakpoint.isMobile.value" :open="quickSwitcher.open.value" :query="quickSwitcher.query.value" :items="quickSwitcher.results.value" :selected-id="quickSwitcher.selectedId.value" :active-id="activeTab?.id" :binding="quickSwitchBinding" :binding-label="quickSwitchLabel" :message="quickSwitcher.message.value" :total="quickSwitcher.total.value" :status-kinds="quickSwitcher.statusKinds.value" :filter="quickSwitcher.filter.value" :filters="quickSwitcher.filters.value" :filter-stale="quickSwitcher.filterStale.value" @filter="quickSwitcher.setFilter" @refresh-filter="quickSwitcher.refreshFilter" @search="quickSwitcher.search" @move="quickSwitcher.move" @select="selectQuickTab" @close="quickSwitcher.close" @view="switcherView = $event" @pane="selectQuickPane" />
 
     <!-- 一次性轻提示。用行内元素而不是 window.alert：原生弹窗在 headless 下阻塞 JS 线程，
          那条路就再也验收不了（见 useCliState 的 showNotice）。 -->
     <div v-if="notice" class="cli-notice" data-testid="cli-notice">{{ notice }}</div>
 
-    <!-- D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output.
-         One component, two data sources (tmux topology / sessions_overview frame). -->
-    <!-- 关闭只有一处实现（closeOverview）：遮罩、Esc、点中卡片走的是同一个动作，模板里不再各留
-         一份 `overviewOpen = false`。点中卡片时的「切过去 + 关掉」由 selectOverviewIndex 一起做。 -->
-    <div v-if="overviewOpen" class="cli-overview-scrim" data-testid="cli-overview" @click.self="closeOverview">
-      <div class="cli-overview-panel">
-        <AgentOverview
-          :groups="overviewGroups"
-          :rollup="overviewRollup"
-          :is-mobile="breakpoint.isMobile.value"
-          @select="selectOverviewUnit"
-          @close="closeOverview"
-        />
-      </div>
-    </div>
+
   </div>
 </template>
 
@@ -145,7 +131,7 @@ import { CliTabBar, CliTerminalView } from './adapters'
 import RemoteTermDialog from '@terminal/components/terminal-session/RemoteTermDialog.vue'
 import UsageChip from '@terminal/components/report/UsageChip.vue'
 import ShortcutsGuideBanner from '@terminal/components/terminal-session/ShortcutsGuideBanner.vue'
-import AgentOverview from '@terminal/components/terminal-session/AgentOverview.vue'
+import { overviewPaneTarget } from '@terminal/composables/cli/overviewSelection'
 import LeaderHintBar from '@terminal/components/terminal-session/LeaderHintBar.vue'
 import CliTabContextMenu from '@terminal/components/cli/CliTabContextMenu.vue'
 import DetachedTerminalCard from '@terminal/components/cli/DetachedTerminalCard.vue'
@@ -170,8 +156,8 @@ const {
   quickCreateTab,
   remoteDialogOpen, openRemoteDialog, createRemoteTab,
   tabPositions, tabStatuses, tabPaneStatuses, onVisibleSessions, tabLivenessMap, reopenedTabIds, detachedCard, detachedAction,
-  overviewOpen, toggleOverview, closeOverview, overviewGroups, overviewRollup,
-  selectOverviewIndex, openShortcutsSettings,
+  overviewOpen, toggleOverview, overviewRollup, overviewUnits, switcherView,
+  openShortcutsSettings,
   tabMenu, openTabMenu,
   notice,
   quickSwitcher, openQuickSwitcher, quickSwitchBinding, quickSwitchLabel,
@@ -185,13 +171,13 @@ const {
 } = useCliState(runtime)
 
 const terminalView = ref<InstanceType<typeof CliTerminalView>>()
-function openObservation(): void {
-  quickSwitcher.close()
-  toggleOverview()
-}
-async function selectOverviewUnit(index: number, key?: string): Promise<void> {
-  const target = selectOverviewIndex(index, key)
-  if (!target) return
+async function selectQuickPane(id: string, sessionId: string): Promise<void> {
+  const target = overviewPaneTarget(sessionId, allTabs.value)
+  if (!target || target.tabId !== id) {
+    quickSwitcher.message.value = '这个窗格已变更，请重新选择'
+    return
+  }
+  if (!quickSwitcher.select(id)) return
   await nextTick()
   terminalView.value?.revealPane(target.tabId, target.pane)
 }
@@ -291,26 +277,6 @@ watch(
   background: hsl(var(--accent));
   color: inherit;
   cursor: pointer;
-}
-/* Overview overlay — the card grid needs real estate (it shows live output), so it takes the
-   surface rather than floating as a small popover. Scrim click closes.
-
-   `align-items: stretch` + no max-height is load-bearing, not cosmetic. AgentOverview's `.is-fill`
-   rule is `min-height: 100%`, which needs a parent with a DEFINITE height to resolve against. The
-   panel used to be `align-items: flex-start` + `max-height: 100%`, i.e. height:auto — so
-   `min-height:100%` had nothing to measure, the fill never engaged, and the cards fell back to
-   their 300px floor. That is the whole of "非 tmux 的总览比 tmux 矮": the tmux one mounts in
-   `.terminal-overview-overlay { position:absolute; inset:0 }`, which HAS a definite height, so the
-   identical component stretched there and not here. Same component, different container, and the
-   container was the bug. */
-.cli-overview-scrim {
-  position: fixed; inset: 0; z-index: 2600; background: rgba(0, 0, 0, 0.55);
-  display: flex; align-items: stretch; justify-content: center; padding: 44px 16px 16px;
-}
-.cli-overview-panel {
-  width: 100%; max-width: 1200px; overflow-y: auto;
-  background: hsl(var(--card)); border: 1px solid hsl(var(--border));
-  border-radius: 12px; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
 }
 .cli-portal {
   display: flex;

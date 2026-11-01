@@ -5,18 +5,19 @@
     <button type="button" data-testid="cli-tab-sort-done" @click="finishSorting">完成</button>
   </div>
   <div class="cli-tab-bar dw-titlebar-blend" :class="{ 'is-sorting': sorting, 'is-dragging': draggedTabId }" data-testid="cli-portal-tab-bar">
-    <button v-if="quickSwitchLabel" type="button" class="cli-tab-bar__quick-switch" data-testid="cli-tab-quick-switch-trigger" :title="`快速切换标签（${quickSwitchLabel}）`" :disabled="sorting" @mousedown.prevent @click="emit('quick-switch')"><Search :size="14" /><span>切换</span><kbd>{{ quickSwitchLabel }}</kbd></button>
     <!-- D7 overview — LEADS the strip. It is the "zoom out to all terminals" control, so it
          belongs before the tabs it summarizes (the same reading order as a breadcrumb's root).
          It was in the far-right chrome cluster, where it read as one more utility icon next to
          refresh/version and was routinely missed. -->
     <button
-      class="cli-tab-bar__overview"
+      class="cli-tab-bar__overview cli-tab-bar__quick-switch"
       type="button"
-      data-testid="cli-portal-overview-trigger"
-      title="标签总览（所有终端的状态与实时预览）"
+      data-testid="cli-tab-quick-switch-trigger"
+      :title="`切换终端${quickSwitchLabel ? `（${quickSwitchLabel}）` : ''} · 状态个数按窗格统计；全空闲时显示标签数`"
+      :aria-label="`切换终端${quickSwitchLabel ? `（${quickSwitchLabel}）` : ''}`"
       :disabled="sorting"
-      @click="emit('toggle-overview')"
+      @mousedown.prevent
+      @click="emit('quick-switch')"
     >
       <LayoutGrid :size="14" />
       <!-- Global roll-up, merged INTO the toggle capsule — the same shape TmuxPaneBar's
@@ -26,6 +27,7 @@
       <span v-if="rollupSegs.length" class="cli-tab-bar__rollup" data-testid="cli-portal-rollup">
         <span v-for="s in rollupSegs" :key="s.status" class="ctb-seg" :class="`s-${s.status}`">{{ s.icon }}{{ s.count }}</span>
       </span>
+      <span v-else class="cli-tab-bar__switch-total">{{ groups.reduce((count, group) => count + group.tabs.length, 0) }}</span>
     </button>
 
     <!-- Only this region scrolls and accepts tab-reorder drops. The usage entry
@@ -218,7 +220,7 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { useTabReorder } from '@terminal/composables/cli/useTabReorder'
 import type { TabMove } from '@terminal/composables/cli/tabReorder'
-import { RefreshCw, Server, LayoutGrid, Search } from 'lucide-vue-next'
+import { RefreshCw, Server, LayoutGrid } from 'lucide-vue-next'
 import {
   agentSaidText,
   STATUS_COLOR,
@@ -735,7 +737,7 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
 
 <style scoped>
 @media (max-width: 600px) {
-  .cli-tab-bar__overview { display: none; }
+  .cli-tab-bar__overview { min-width: 40px; }
   .cli-tab-bar__tab-trailing { padding-inline: 4px; }
 }
 </style>

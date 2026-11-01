@@ -20,6 +20,7 @@ export interface QuickSwitchItem {
   collapsed: boolean
   status: QuickSwitchStatus
   panes?: readonly TabPaneStatus[]
+  orientation?: 'row' | 'column'
   reason?: string
 }
 
@@ -133,6 +134,7 @@ export function useTabQuickSwitch(adapter: {
     id: t.id, name: t.name, cwd: t.cwd, group: g.name, machine: adapter.machine(t),
     engine: t.engine, position: adapter.positions().get(t.id), collapsed: g.collapsed, status: adapter.status(t.id),
     panes: adapter.panes?.(t.id),
+    orientation: t.split?.orientation,
     reason: visibleReason(t.id),
   }))))
   watch(adapter.activeId, id => {

@@ -16,6 +16,7 @@
  * model here. The pieces it would reuse (PanelPane search, CanvasPane readonly) are
  * lighter to inline at this size, and keep the panel self-contained for the drawer.
  */
+import { splitLocalHtmlReference, appendHtmlPreviewSuffix } from './localHtmlReference'
 import { ref, reactive, computed, watch, onMounted, onUnmounted, onBeforeUnmount } from 'vue'
 import { useMediaQuery, useVirtualList } from '@vueuse/core'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -991,6 +992,7 @@ interface PathResolutionState {
   directoryBusy?: boolean
   directoryError?: string
   previousPreviewKey: string
+  htmlSuffix?: string
   lineStart?: number
   lineEnd?: number
   loading: boolean
@@ -1021,6 +1023,7 @@ interface Preview {
   lineEnd?: number
   /** A repeated click on the same source line is a new navigation intent. */
   jumpVersion: number
+  htmlSuffix?: string
   result: RawResult
   /** Successful reads survive a background reload; revisions also reload URL renderers. */
   loaded: boolean
@@ -1087,7 +1090,7 @@ function evictPreviewOverflow(): void {
   }
 }
 
-async function searchTerminalPath(query: string, requestedPath: string, lineStart?: number, lineEnd?: number, restorePreviewKey = activePreviewKey.value): Promise<void> {
+async function searchTerminalPath(query: string, requestedPath: string, lineStart?: number, lineEnd?: number, restorePreviewKey = activePreviewKey.value, htmlSuffix = ''): Promise<void> {
   if (!query) return
   pathSearchRequest?.abort()
   const request = new AbortController()
@@ -1100,7 +1103,7 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
   // Keep the request identity reactive from creation. Assigning a raw object to a ref wraps it
   // in a proxy: comparing ref.value to that raw object would discard EVERY response, and raw
   // mutations would not update the loading/candidate UI either.
-  const state = reactive<PathResolutionState>({ query, requestedPath, previousPreviewKey: restorePreviewKey, lineStart, lineEnd, loading: true, candidates: [], totalCandidates: 0, hasMore: false })
+  const state = reactive<PathResolutionState>({ query, requestedPath, previousPreviewKey: restorePreviewKey, lineStart, lineEnd, htmlSuffix, loading: true, candidates: [], totalCandidates: 0, hasMore: false })
   pathResolution.value = state
   activePreviewKey.value = ''
   setTreeCollapsed(false)
@@ -1141,7 +1144,7 @@ async function searchTerminalPath(query: string, requestedPath: string, lineStar
     if (!state.filenameFallback && state.candidates.length === 1 && state.candidates[0].exact && !state.hasMore && !result.incomplete && !result.truncated && result.indexState !== 'building') {
       const candidate = state.candidates[0]
       pathResolution.value = null
-      await previewRel(candidate.name, candidate.absPath, candidate.rel, lineStart, lineEnd)
+      await previewRel(candidate.name, candidate.absPath, candidate.rel, lineStart, lineEnd, undefined, undefined, htmlSuffix)
     }
   } catch {
     if (pathResolution.value === state && (timedOut || !request.signal.aborted)) {
@@ -1174,7 +1177,7 @@ async function changePathSearchDirectory(): Promise<void> {
     const root = result.cwd.replace(/\/+$/, '') + (result.rel && result.rel !== '.' ? '/' + result.rel : '')
     backStack.value.push(rememberLocation())
     selectFileScope(root || '/')
-    await searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd, state.previousPreviewKey)
+    await searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd, state.previousPreviewKey, state.htmlSuffix)
   } finally {
     state.directoryBusy = false
     if (pathSearchRequest === request) pathSearchRequest = null
@@ -1185,13 +1188,13 @@ function choosePathCandidate(candidate: TerminalPathCandidate): void {
   const state = pathResolution.value
   if (!state) return
   pathResolution.value = null
-  void previewRel(candidate.name, candidate.absPath, candidate.rel, state.lineStart, state.lineEnd)
+  void previewRel(candidate.name, candidate.absPath, candidate.rel, state.lineStart, state.lineEnd, undefined, undefined, state.htmlSuffix)
 }
 
 function retryPathResolution(): void {
   const state = pathResolution.value
   if (!state) return
-  void searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd, state.previousPreviewKey)
+  void searchTerminalPath(state.query, state.requestedPath, state.lineStart, state.lineEnd, state.previousPreviewKey, state.htmlSuffix)
 }
 
 function cancelPathResolution(): void {
@@ -1202,7 +1205,7 @@ function cancelPathResolution(): void {
   if (state?.previousPreviewKey) activatePreview(state.previousPreviewKey)
 }
 
-async function previewRel(name: string, absPath: string, rel: string, lineStart?: number, lineEnd?: number, fallbackQuery?: string, restorePreviewKey?: string): Promise<void> {
+async function previewRel(name: string, absPath: string, rel: string, lineStart?: number, lineEnd?: number, fallbackQuery?: string, restorePreviewKey?: string, htmlSuffix = ''): Promise<void> {
   cancelNavigationRequests()
   const previousPreviewKey = restorePreviewKey ?? activePreviewKey.value
   const key = previewKey(absPath, rel)
@@ -1211,6 +1214,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
     if (lineStart) existing.scrollTop = undefined
     existing.lineStart = lineStart
     existing.lineEnd = lineEnd
+    existing.htmlSuffix = htmlSuffix
     existing.jumpVersion++
     activatePreview(key)
     await loadPreview(existing, fallbackQuery, previousPreviewKey)
@@ -1218,7 +1222,7 @@ async function previewRel(name: string, absPath: string, rel: string, lineStart?
   }
 
   const entry: Preview = {
-    key, name, absPath, rel, cwd: treeCwd.value || props.cwd, lineStart, lineEnd, jumpVersion: 0,
+    key, name, absPath, rel, cwd: treeCwd.value || props.cwd, lineStart, lineEnd, htmlSuffix, jumpVersion: 0,
     result: { kind: 'text', text: '' }, loaded: false, revision: 0, loading: true, lastUsedAt: Date.now(),
   }
   previews.value.push(entry)
@@ -1282,7 +1286,7 @@ async function loadPreview(entry: Preview, fallbackQuery?: string, previousPrevi
       const staleIndex = previews.value.findIndex((p) => p.key === key)
       if (staleIndex >= 0) previews.value.splice(staleIndex, 1)
       if (activePreviewKey.value === key) activePreviewKey.value = ''
-      await searchTerminalPath(fallbackQuery, rel, lineStart, lineEnd, previousPreviewKey)
+      await searchTerminalPath(fallbackQuery, rel, lineStart, lineEnd, previousPreviewKey, entry.htmlSuffix)
       return
     }
     const current = previews.value.find((p) => p.key === key)
@@ -1375,7 +1379,7 @@ function clearPreviews(): void {
 function previewPath(path: string, lineStart?: number, lineEnd?: number, sourceCwd?: string, searchOnly = false): void {
   cancelPathResolution()
   cancelNavigationRequests()
-  const normalized = normalizeTerminalPath(path)
+  const { path: normalized, suffix: htmlSuffix } = splitLocalHtmlReference(normalizeTerminalPath(path))
   if (normalized.endsWith('/') && !searchOnly) {
     void browseTerminalDirectory(normalized, sourceCwd)
     return
@@ -1386,13 +1390,13 @@ function previewPath(path: string, lineStart?: number, lineEnd?: number, sourceC
   }
   const resolution = resolveTerminalPath(normalized, searchOnly)
   if (resolution.kind === 'search') {
-    void searchTerminalPath(resolution.query, normalized, lineStart, lineEnd)
+    void searchTerminalPath(resolution.query, normalized, lineStart, lineEnd, undefined, htmlSuffix)
     return
   }
   const slash = normalized.lastIndexOf('/')
   const name = slash >= 0 ? normalized.slice(slash + 1) : normalized
   if (!name) return
-  void previewRel(name, normalized, normalized, lineStart, lineEnd, resolution.fallbackQuery ?? normalized)
+  void previewRel(name, normalized, normalized, lineStart, lineEnd, resolution.fallbackQuery ?? normalized, undefined, htmlSuffix)
 }
 
 /** The parent owns the file scope; this view retains its navigation/cache state. */
@@ -1511,7 +1515,7 @@ onUnmounted(clearPreviews)
 const previewRenderSrc = computed(() => {
   const p = preview.value
   if (!p || p.result.kind !== 'text') return ''
-  return /\.html?$/i.test(p.name) ? filesRawRenderUrl(props.sessionId, p.rel, p.cwd) : ''
+  return /\.html?$/i.test(p.name) ? appendHtmlPreviewSuffix(filesRawRenderUrl(props.sessionId, p.rel, p.cwd), p.htmlSuffix ?? '') : ''
 })
 
 // previewErrorText turns a failed /files/raw into a human reason (the ask: "allow it to fail,
@@ -1561,8 +1565,9 @@ function searchPreviewFile(name: string): void {
 // safeResolve accepts an in-cwd absolute path as-is, and a failure now explains itself (403 →
 // "outside the workbench root"), so a cross-project link degrades to a clear reason, not a dead tap.
 function onDocNavigate(absPath: string): void {
-  const name = absPath.split('/').pop() || absPath
-  void previewRel(name, absPath, absPath)
+  const { path, suffix } = splitLocalHtmlReference(absPath)
+  const name = path.split('/').pop() || path
+  void previewRel(name, path, path, undefined, undefined, undefined, undefined, suffix)
 }
 
 // ── inject / compose bubbling ──

@@ -7,6 +7,8 @@
  * suffix path from a different working directory.
  */
 
+import { splitLocalHtmlReference } from './localHtmlReference'
+
 export interface TerminalPathDirectResolution {
   kind: 'direct'
   path: string
@@ -34,6 +36,11 @@ export function hasPathElision(path: string): boolean {
 /** A Markdown target belongs to its source document, which may itself be cwd
  * relative. Never turn that namespace into a filesystem-root absolute path. */
 export function resolveDocumentPath(sourcePath: string, reference: string): string | undefined {
+  const html = splitLocalHtmlReference(reference)
+  if (html.suffix) {
+    const resolved = resolveDocumentPath(sourcePath, html.path)
+    return resolved ? resolved + html.suffix : undefined
+  }
   if (!reference || /^[A-Za-z][A-Za-z\d+.-]*:/.test(reference)) return undefined
   if (reference.startsWith('/') || reference.startsWith('~/')) return reference
   if (!sourcePath) return undefined

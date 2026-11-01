@@ -19,6 +19,7 @@
  *   · per-code-block copy, image tap-to-zoom, font-size, soft-wrap toggle
  *   · in-app doc-to-doc navigation: [[wikilinks]] + relative .md links open the target in-place.
  */
+import { htmlPreviewRevision } from './localHtmlReference'
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import { WrapText, List, Search, X, ChevronUp, ChevronDown, ArrowUp, Minus, Plus, Sun, Moon, Eye, Code2, ExternalLink } from 'lucide-vue-next'
 import { copyTextToClipboard } from '@ce/utils/clipboard'
@@ -96,7 +97,7 @@ const htmlRendered = ref(false)
 watch(() => [props.name, props.renderSrc], () => { htmlRendered.value = false })
 const showHtmlFrame = computed(() => canRenderHtml.value && htmlRendered.value)
 const htmlFrameSrc = computed(() => props.renderSrc && props.contentVersion !== undefined
-  ? props.renderSrc + (props.renderSrc.includes('?') ? '&' : '?') + 'preview=' + props.contentVersion
+  ? htmlPreviewRevision(props.renderSrc, props.contentVersion)
   : props.renderSrc)
 function openHtmlInBrowser(): void {
   if (!props.renderSrc) return

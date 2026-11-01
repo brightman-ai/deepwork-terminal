@@ -237,14 +237,18 @@ export function useCliState(runtime: PortalRuntimeResult) {
   // D7: the SAME Agent Overview tmux users get — card grid with each terminal's live output —
   // fed by the pushed sessions_overview frame instead of tmux topology. Cards are keyed by PTY
   // session id; the visible tab order supplies the card number so it matches 终端N and Alt+N.
-  const overviewOpen = ref(false)
   const quickSwitcherOpen = ref(false)
+  const switcherView = ref<'list' | 'observe'>('list')
+  const overviewOpen = computed(() => quickSwitcherOpen.value && switcherView.value === 'observe')
   const visibleSessionIds = ref<string[]>([])
   function onVisibleSessions(ids: string[]): void { visibleSessionIds.value = ids }
-  function toggleOverview(): void { overviewOpen.value = !overviewOpen.value }
+  function toggleOverview(): void {
+    if (quickSwitcherOpen.value) quickSwitcherOpen.value = false
+    else openQuickSwitcher()
+  }
   /** 关掉总览。Esc / 点遮罩 / 点中一张卡片走的都是它——「关闭总览」只有一处实现，
    *  模板里不再各写一份 `overviewOpen = false`。 */
-  function closeOverview(): void { overviewOpen.value = false }
+  function closeOverview(): void { quickSwitcherOpen.value = false }
   /** 可见标签顺序 → 卡片编号的钥匙串。没有 session 的标签（进程已结束）占一个 `tab:` 占位号：
    *  卡片编号同时也是标签栏的「终端N」和 前缀+N 快捷键的目标，一旦跳号，三者就对不上了。占位 id
    *  不可能撞上真实 session id，useSessionsOverview 会把它当"没有对应 session"直接滤掉。 */
@@ -416,7 +420,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     },
   })
   function openQuickSwitcher(): void {
-    closeOverview()
+    switcherView.value = 'list'
     tabMenu.close()
     quickSwitcher.show()
   }
@@ -1173,6 +1177,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     tabPositions, tabDisplayName, tabStatuses, tabPaneStatuses, onVisibleSessions, leaderPending, leaderLabel,
     quickSwitcher, openQuickSwitcher, quickSwitchBinding, quickSwitchLabel,
     overviewOpen, toggleOverview, closeOverview, overviewGroups: overview.groups, overviewRollup: overview.rollup,
+    overviewUnits, switcherView,
     selectOverviewIndex,
     openShortcutsSettings,
     // tab context menu (right-click) — same action table as the shortcuts
