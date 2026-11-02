@@ -9,6 +9,28 @@ const collect=(rows:string[],columns=0)=>{
  return [...new Set(Array.from({length:buffer.length},(_,r)=>terminalFileLinksAtRow(buffer,r)).flat().map(l=>l.path))]
 }
 describe('Claude compacted Referenced file records',()=>{
+ it('keeps three hard path rows after a standalone label distinct from adjacent same-name files',()=>{
+  const expected=[
+   '../../../../tmp/agent-1001/-home-user-code-demo-project/00000000-1111-2222-3333-444444444444/scratchpad/experiment/v2/group-one/report.md',
+   '../../../../tmp/agent-1001/-home-user-code-demo-project/00000000-1111-2222-3333-444444444444/scratchpad/experiment/v2/group-two/report.md',
+  ]
+  for(const prefix of ['  └ ','  ⎿ \u00a0']) {
+   const gutter=' '.repeat(prefix.length)
+   const first=[prefix+'Referenced file',gutter+'../../../../tmp/agent-1001/-home-user-code-demo-',gutter+'project/00000000-1111-2222-3333-444444444444/scr',gutter+'atchpad/experiment/v2/group-one/report.md']
+   const second=[prefix+'Referenced file',gutter+'../../../../tmp/agent-1001/-home-user-code-demo-',gutter+'project/00000000-1111-2222-3333-444444444444/scr',gutter+'atchpad/experiment/v2/group-two/report.md']
+   for(const columns of [24,32,40,54,80,120]) {
+    const boundary=transcriptCellBuffer(first,columns).length
+    const buffer=transcriptCellBuffer([...first,...second],columns)
+    const links=Array.from({length:buffer.length},(_,row)=>terminalFileLinksAtRow(buffer,row)).flat()
+    expect([...new Set(links.map(link=>link.path))]).toEqual(expected)
+    expect(terminalFileLinksAtRow(buffer,0)).toEqual([])
+    expect(terminalFileLinksAtRow(buffer,boundary)).toEqual([])
+    for(const link of links)for(let col=link.cellStart-1;col<link.cellEnd;col++) {
+     expect(terminalFileLinkAtCell(buffer,link.bufferRow,col)?.path).toBe(expected[link.bufferRow<boundary?0:1])
+    }
+   }
+  }
+ })
  it('recovers the synthetic mid-directory break at every physical fragment and click cell',()=>{
   const rows=['  └ Referenced file ../sample-assets/skills/sampletool-t','    3/design/同文文文-文文文对文Codex-20300106.md']
   for(const columns of [32,40,56,100]) {
