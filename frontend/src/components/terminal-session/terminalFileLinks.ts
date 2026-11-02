@@ -215,8 +215,13 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
     const priorToken = /[^\s"'`|｜，。；！？、]+$/u.exec(prior)?.[0] ?? ''
     const suffix = !head.slice(0, start).trim() && !/^(?:\/|~\/|\.{1,2}\/)/u.test(value)
       && priorToken.includes('/') && !completeFile(priorToken)
-    if (receipt || value.includes('/') && !referenceDelimiters(value).open
-      && (labelled || !suffix && paragraphOwnsBareReference(buffer, first, head, indent))) {
+    const canContinue = value.includes('/') && !referenceDelimiters(value).open && (labelled || !suffix)
+    const paragraph = !receipt && canContinue && !labelled && paragraphOwnsBareReference(buffer, first, head, indent)
+    // Compacted assistant output can omit the paragraph bullet. Its path field
+    // still owns a fixed-column hanging continuation, but needs layout evidence
+    // in addition to a complete filename before it may borrow another record.
+    const unownedParagraph = !receipt && !labelled && !paragraph
+    if (receipt || canContinue) {
       const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(splitLocalHtmlReference(value).path)
       const initial = findTerminalFileLinks(head).find(link => receipt ? receiptField && link.start === receiptField.start : link.start === start)?.path
       const initialFile = initial && (completeFile(initial) || initial === writeTarget)
@@ -243,8 +248,9 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         // A CLI's fixed-column paragraph can put a directory slash at the
         // beginning of a hard continuation. Geometry alone isn't ownership:
         // require a labelled/paragraph field AND its eventual prose terminator.
-        const uniformField = !receipt && recordWidths[0] >= 24
+        const uniformField = !receipt && recordWidths[0] >= 23
           && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
+        if (unownedParagraph && !uniformField) break
         const newRoot = /^(?:\/|~\/|\.{1,2}\/)/u.test(body)
         const nextLabel = /^([\p{L}\p{N}_.()[\]（）【】《》-]+)[:：]/u.exec(body)
         // In a hanging file reference, "report.md：description" and
@@ -298,6 +304,7 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         const terminatedPath = link && (/^(?:[。！？，；:：]|[（(【《])/u.test(afterReference) || separatedTerminator
           || htmlReference?.suffix && uniformField && !afterReference && !followingRecord.trim())
           || opaqueDescription && uniformField
+          || opaque && uniformField && /^[。！？，；:：（(]/u.test(text.slice(start + opaqueField.length))
         if (path && (completeFile(path) || terminatedPath || receiptPath === writeTarget && !!writeTarget)
           && (!receipt || receiptField?.quotationClosed && !incompleteKnownTarget)
           && (!unconfirmedRoot || terminatedPath)
@@ -991,7 +998,11 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
     if (!value || /^\s|\s$/.test(value)) continue
     if (!value.includes('/') && /,\s/.test(value)) continue
     const count = links.length
-    const reference = /\s/.test(value) ? { raw: value, start: start + 1 } : bareFileReference(value, start + 1)
+    // A prose preposition before an explicit root is outside the target field.
+    // Quoted paths were handled above, so their literal spaces stay untouched.
+    const introduction = /^(?:在|位于|见)\s+(?=\/|~\/|\.{1,2}\/)/u.exec(value)?.[0] ?? ''
+    const field = value.slice(introduction.length), offset = start + 1 + introduction.length
+    const reference = /\s/.test(field) ? { raw: field, start: offset } : bareFileReference(field, offset)
     add(reference.raw, reference.start, line.slice(end))
     if (links.length > count) owned.push({start, end})
   }

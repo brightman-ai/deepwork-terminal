@@ -284,6 +284,9 @@ async function run(): Promise<void> {
     const prefix = 'topics/EX-0002-demo-文文路径文文文文文文与文果文文文文/文文文文文文/文文'
     const suffix = '文文文文-文文文文-v5-20300103.md'
     for (const prose of [
+      {text: '  文档已保存。文件在\r\n  /work/other-project/skills/example-tool/ev\r\n  als/读数/20300102-中文测试报告-两种情况.md，已完成。\r\n', path: '/work/other-project/skills/example-tool/evals/读数/20300102-中文测试报告-两种情况.md', selected: '/work/other-project/skills/example-tool/ev\n  als/读数/20300102-中文测试报告-两种情况.md'},
+      {text: '● 草稿已保存（在 /work/other-project/scratchpad/exper\r\n  iment/report/draft.md），可继续阅读。\r\n', path: '/work/other-project/scratchpad/experiment/report/draft.md', selected: '/work/other-project/scratchpad/exper\n  iment/report/draft.md'},
+      {text: '  文档在 ../other-project/reports/中文目录/long-\r\n  report.md，可继续阅读。\r\n', path: '../other-project/reports/中文目录/long-report.md', selected: '../other-project/reports/中文目录/long-\n  report.md'},
       {text: '● 文文，文文一文文文文文文文文文；文文文的结文文结一页在 \r\n  ~/code/sample-assets/skills/sampletool-tg2/design/sampl\r\n  etool-t3文文文文文-结文文结与文文文文-v1-20300105.md。\r\n  文和 Codex 说的\r\n', path: '~/code/sample-assets/skills/sampletool-tg2/design/sampletool-t3文文文文文-结文文结与文文文文-v1-20300105.md', selected: '~/code/sample-assets/skills/sampletool-tg2/design/sampl\n  etool-t3文文文文文-结文文结与文文文文-v1-20300105.md'},
       {text: '● 文文：结果在 ./docs/long-\r\n  report.html。\r\n', path: './docs/long-report.html', selected: './docs/long-\n  report.html'},
       {text: '● 已记录\r\n  docs/sampl\r\n  etool/design/long-repor\r\n  t.md。\r\n', path: 'docs/sampletool/design/long-report.md', selected: 'docs/sampl\n  etool/design/long-repor\n  t.md'},
