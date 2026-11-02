@@ -103,8 +103,15 @@ function printedRecordWidth(buffer: TerminalBufferLike, first: number, count: nu
 
 /** Write receipts and compacted Referenced file items own their final path field. Their
  * continuation gutter is the tree prefix, not the assistant bullet width. */
-function toolResultReference(text: string): { indent: number; start: number; value: string; gitQuoted: boolean; quotationClosed: boolean; reference: boolean } | undefined {
-  const match = /^([ \u00a0]*[⎿└├│][ \u00a0]+)(?:Wrote[ \u00a0]+\d+[ \u00a0]+lines?[ \u00a0]+to(?:[ \u00a0]+|(?=[/~.])|$)|Referenced file:?(?:[ \u00a0]+|$))(.*)$/iu.exec(text)
+function toolResultReference(text: string, hardCuts: readonly number[] = []): { indent: number; start: number; value: string; gitQuoted: boolean; quotationClosed: boolean; reference: boolean } | undefined {
+  let match: readonly string[] | null = /^([ \u00a0]*[⎿└├│][ \u00a0]+)(?:Wrote[ \u00a0]+\d+[ \u00a0]+lines?[ \u00a0]+to(?:[ \u00a0]+|(?=[/~.])|$)|Referenced file:?(?:[ \u00a0]+|$))(.*)$/iu.exec(text)
+  if (!match) {
+    // Removing a hard continuation gutter also removes the record separator
+    // after an otherwise empty label. Preserve that verified boundary instead
+    // of requiring whitespace that the CLI did not print on the label row.
+    const header = /^([ \u00a0]*[⎿└├│][ \u00a0]+)(?:Wrote[ \u00a0]+\d+[ \u00a0]+lines?[ \u00a0]+to|Referenced file:?)/iu.exec(text)
+    if (header && hardCuts.includes(header[0].length)) match = [header[0], header[1], text.slice(header[0].length)]
+  }
   if (!match) return undefined
   let value = match[2], start = text.length - value.length
   const quote = /^["'`]/u.test(value) ? value[0] : ''
@@ -242,7 +249,7 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         let confirmedRootContinuation = !!receiptField?.reference && !initialFile
           && recordWidths[0] >= 24 && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
         if (writeTarget && /^(?:\/|~\/|\.{1,2}\/)/u.test(body)) {
-          const candidate = toolResultReference(logicalRecordText(mergeRenderedRows([...groups, part.rows], indent, false)))
+          const candidate = toolResultReference(logicalRecordText(mergeRenderedRows([...groups, part.rows], indent, false)), [...cuts, length])
           if (candidate) confirmedRootContinuation = writeTarget.startsWith(normalizeTerminalPath(candidate.gitQuoted ? decodeQuotedPath(candidate.value) : candidate.value))
         }
         // A CLI's fixed-column paragraph can put a directory slash at the
@@ -274,8 +281,8 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         const rows = mergeRenderedRows(groups, indent, false), text = logicalRecordText(rows)
         workLeft -= text.length
         if (workLeft < 0) return undefined
-        receiptField = receipt ? toolResultReference(text) : undefined
-        const link = findTerminalFileLinks(text).find(link => link.start === (receiptField?.start ?? start))
+        receiptField = receipt ? toolResultReference(text, cuts) : undefined
+        const link = findTerminalFileLinks(text, cuts).find(link => link.start === (receiptField?.start ?? start))
         const opaqueField = opaque ? text.slice(start).split(/[\s（(，。；！？、]/u, 1)[0] : ''
         // Opaque URLs/templates still own their wrapped filename and its
         // description boundary; otherwise a local-looking tail escapes them.
@@ -873,7 +880,7 @@ function expressionRanges(line: string): Array<{ start: number; end: number }> {
 
 /** Extract whole references. A wrapper owns its contents even when unsupported,
  * so an unknown target can never expose a misleading clickable tail. */
-export function findTerminalFileLinks(line: string): TerminalFileLink[] {
+export function findTerminalFileLinks(line: string, hardCuts: readonly number[] = []): TerminalFileLink[] {
   const links: TerminalFileLink[] = []
   const owned: Array<{ start: number; end: number }> = expressionRanges(line)
   const add = (raw: string, start: number, outsideSuffix = '', escaped = false, gitQuoted = false, markdown = false): void => {
@@ -904,7 +911,7 @@ export function findTerminalFileLinks(line: string): TerminalFileLink[] {
       ...(displayLength !== path.length ? { displayLength } : {}), ...location,
       ...(markdown && !path.startsWith('/') && !path.startsWith('~/') ? { documentRelative: true as const } : {}) })
   }
-  const result = toolResultReference(line)
+  const result = toolResultReference(line, hardCuts)
   if (result) {
     owned.push({ start: 0, end: line.length })
     if (result.quotationClosed) add(result.value, result.start, '', false, result.gitQuoted)
@@ -1063,15 +1070,17 @@ export function findWrappedTerminalFileLinks(
 
   const logicalChars: Array<{ row: number; col: number }> = []
   const logical: string[] = []
+  const hardCuts: number[] = []
   for (let row = first; row <= last; row++) {
     const text = rows[row].text
+    if (row > first && rows[row].contentStart !== undefined) hardCuts.push(logical.length)
     for (let col = rows[row].contentStart ?? 0; col < (rows[row].contentEnd ?? text.length); col++) {
       logical.push(text[col])
       logicalChars.push({ row, col })
     }
   }
 
-  const links = findTerminalFileLinks(logical.join(''))
+  const links = findTerminalFileLinks(logical.join(''), hardCuts)
   const out: WrappedTerminalFileLink[] = []
   for (const link of links) {
     const length = link.displayLength ?? (link.end - link.start + 1)

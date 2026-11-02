@@ -31,6 +31,18 @@ describe('Claude compacted Referenced file records',()=>{
    }
   }
  })
+ it('uses the standalone receipt boundary even when its following hard rows have different widths',()=>{
+  const expected='../../../../tmp/agent-1001/-home-user-code-demo-project/00000000-1111-2222-3333-444444444444/scratchpad/experiment/v2/group-one/report.md'
+  const rows=['  ⎿ \u00a0Referenced file',
+   '     ../../../../tmp/agent-1001/-home-user-code-demo-project/00000000-1111-2222',
+   '     -3333-444444444444/scr',
+   '     atchpad/experiment/v2/group-one/report.md']
+  for(const columns of [24,32,40,54,80,120])expect(collect(rows,columns)).toEqual([expected])
+  expect(findTerminalFileLinks('  ⎿ \u00a0Referenced filedocs/report.md').map(link=>link.path)).toEqual(['filedocs/report.md'])
+  for(const title of ['  └ Referenced file','  └ Wrote 2 lines to']) {
+   expect(collect([title,'    docs/','    report.md'],32)).toEqual(['docs/report.md'])
+  }
+ })
  it('recovers the synthetic mid-directory break at every physical fragment and click cell',()=>{
   const rows=['  └ Referenced file ../sample-assets/skills/sampletool-t','    3/design/同文文文-文文文对文Codex-20300106.md']
   for(const columns of [32,40,56,100]) {
