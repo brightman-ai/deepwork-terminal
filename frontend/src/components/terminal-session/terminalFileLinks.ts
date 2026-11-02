@@ -1,6 +1,7 @@
 import { isSupportedPreviewName } from './previewFormats'
 import { splitLocalHtmlReference } from './localHtmlReference'
 import { hasPathElision, normalizeTerminalPath, resolveDocumentPath } from './terminalPathResolver'
+import { gitStatusWorkingDirectory } from './terminalCommandContext'
 
 export interface TerminalFileLink {
   path: string
@@ -85,6 +86,61 @@ function logicalRowText(row: WrappedTerminalRow): string {
 
 function logicalRecordText(rows: readonly WrappedTerminalRow[]): string {
   return rows.map(logicalRowText).join('')
+}
+
+/** Shell output uses the tree marker's hanging gutter even when its content is
+ * not a named file-tool receipt. Later records inherit the same gutter; blanks,
+ * unindented records and new assistant/tool headers end that ownership. */
+function renderedOutputIndent(buffer: TerminalBufferLike, first: number): number | undefined {
+  let minimum = Infinity, searched = 0
+  while (first >= 0 && searched < 64) {
+    const group = softWrappedTerminalRows(buffer, first)
+    if (!group.rows.length) return undefined
+    const text = logicalRecordText(group.rows)
+    const marker = /^([ \u00a0]*[⎿└├│][ \u00a0]+)/u.exec(text)
+    if (marker) return minimum >= marker[1].length ? marker[1].length : undefined
+    const indent = /^[ \u00a0]*/u.exec(text)![0].length
+    if (!text.trim() || !indent || /^\s*[•●⏺*-] +/u.test(text) || FILE_TOOL_HEADER_RE.test(text)) return undefined
+    minimum = Math.min(minimum, indent)
+    searched += group.rows.length
+    first -= group.currentRow + 1
+  }
+  return undefined
+}
+
+/** A relative Git status field belongs to the explicit directory of its Bash
+ * invocation. Keep that namespace tied to this output block, not the active
+ * terminal cwd or an unrelated earlier command. */
+function gitStatusOutputRoot(buffer: TerminalBufferLike, first: number): string | undefined {
+  let output = false, searched = 0, size = 0
+  const command: string[] = []
+  while (first >= 0 && searched < 128 && size < 32_000) {
+    const group = softWrappedTerminalRows(buffer, first)
+    if (!group.rows.length) return undefined
+    const text = logicalRecordText(group.rows)
+    searched += group.rows.length; size += text.length
+    const marker = /^[ \u00a0]*[⎿└├│][ \u00a0]+/u.test(text)
+    const bash = /^\s*(?:[●⏺•]\s*)?Bash\(/u.exec(text)
+    if (!output) {
+      if (marker) output = true
+      else if (bash || /^\s*[●⏺•] +/u.test(text)) return undefined
+    } else if (bash) {
+      const indent = bash[0].length - 1
+      const parts = command.reverse().map(row => row.startsWith(' '.repeat(indent)) ? row.slice(indent) : row.trim() ? undefined : '')
+      if (parts.some(part => part === undefined)) return undefined
+      const chunks = [text.slice(bash[0].length), ...(parts as string[])]
+      while (chunks.length > 1 && !chunks[chunks.length - 1].trim()) chunks.pop()
+      const last = chunks[chunks.length - 1].trimEnd()
+      if (!last.endsWith(')')) return undefined
+      chunks[chunks.length - 1] = last.slice(0, -1)
+      return gitStatusWorkingDirectory(chunks)
+    } else {
+      if (marker || /^\s*[●⏺•] +/u.test(text) || FILE_TOOL_HEADER_RE.test(text)) return undefined
+      command.push(text)
+    }
+    first -= group.currentRow + 1
+  }
+  return undefined
 }
 
 function printedRecordWidth(buffer: TerminalBufferLike, first: number, count: number): number {
@@ -214,7 +270,10 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
     const writeTarget = receipt && !receiptField?.reference ? precedingWriteTarget(buffer, first) : undefined
     const start = receiptField?.start ?? (token ? bareFileReference(token[0], token.index).start : -1)
     const value = receiptField?.value ?? (start >= 0 ? head.slice(start) : '')
-    const indent = receipt?.[1].length ?? (/^( *)(?:[•●⏺*-] +)?/u.exec(head)![0].length || 2)
+    const outputIndent = !receipt && value.includes('/') ? renderedOutputIndent(buffer, first) : undefined
+    const indent = receipt?.[1].length ?? outputIndent ?? (/^( *)(?:[•●⏺*-] +)?/u.exec(head)![0].length || 2)
+    const numberedOutput = outputIndent !== undefined && /^\d+[ \u00a0]+$/u.test(head.slice(outputIndent, start))
+    const outputRecord = outputIndent !== undefined && (start > indent || /^[ \u00a0]*[⎿└├│]/u.test(head))
     const labelled = /[:：]\s*$/u.test(head.slice(0, start))
     // A relative suffix containing '/' is not a new path start if the preceding
     // record is still inside an unfinished path. Keep looking for that owner.
@@ -223,11 +282,11 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
     const suffix = !head.slice(0, start).trim() && !/^(?:\/|~\/|\.{1,2}\/)/u.test(value)
       && priorToken.includes('/') && !completeFile(priorToken)
     const canContinue = value.includes('/') && !referenceDelimiters(value).open && (labelled || !suffix)
-    const paragraph = !receipt && canContinue && !labelled && paragraphOwnsBareReference(buffer, first, head, indent)
+    const paragraph = !receipt && outputIndent === undefined && canContinue && !labelled && paragraphOwnsBareReference(buffer, first, head, indent)
     // Compacted assistant output can omit the paragraph bullet. Its path field
     // still owns a fixed-column hanging continuation, but needs layout evidence
     // in addition to a complete filename before it may borrow another record.
-    const unownedParagraph = !receipt && !labelled && !paragraph
+    const unownedParagraph = !receipt && outputIndent === undefined && !labelled && !paragraph
     if (receipt || canContinue) {
       const opaque = NON_FILE_SCHEME_RE.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /[$*?{}<>]/.test(splitLocalHtmlReference(value).path)
       const initial = findTerminalFileLinks(head).find(link => receipt ? receiptField && link.start === receiptField.start : link.start === start)?.path
@@ -257,6 +316,7 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
         // require a labelled/paragraph field AND its eventual prose terminator.
         const uniformField = !receipt && recordWidths[0] >= 23
           && recordWidths.every(width => Math.abs(width - recordWidths[0]) <= 1)
+        if (numberedOutput && uniformField && !initialFile && !value.endsWith('/')) confirmedRootContinuation = true
         if (unownedParagraph && !uniformField) break
         const newRoot = /^(?:\/|~\/|\.{1,2}\/)/u.test(body)
         const nextLabel = /^([\p{L}\p{N}_.()[\]（）【】《》-]+)[:：]/u.exec(body)
@@ -338,7 +398,7 @@ function renderedBareReferenceRows(buffer: TerminalBufferLike, current: number, 
             if (!((endsAtBoundary || pendingDot) && extensionContinues)) {
               if (current >= next) return recovered
               recovered = {rows, currentRow: current - first}
-              if (receipt || labelled || /^\s*[•●⏺*-] +/u.test(head)) return recovered
+              if (receipt || outputRecord || labelled || /^\s*[•●⏺*-] +/u.test(head)) return recovered
               // A later directory fragment may look like a new relative path.
               // Continue to the paragraph's earlier owners before choosing it.
               break
@@ -378,7 +438,7 @@ function renderedProseReferenceRows(buffer: TerminalBufferLike, current: number,
       const cuts: number[] = []
       let next = first + probe.length, total = probe.length
       let logicalLength = head.length
-      let indent = prefix.length || 2
+      let indent = renderedOutputIndent(buffer, first) ?? (prefix.length || 2)
       while (next < buffer.length && total < 64) {
         const part = softWrappedTerminalRows(buffer, next)
         const tail = logicalRecordText(part.rows)
@@ -1122,6 +1182,15 @@ export function terminalFileLinksAtRow(buffer: TerminalBufferLike, row: number):
   if (!physical) return []
   const group = wrappedTerminalRows(buffer, row)
   let links = findWrappedTerminalFileLinks(group.rows, group.currentRow)
+  const record = logicalRecordText(group.rows).replace(/^[ \u00a0]*[⎿└├│][ \u00a0]+/u, '')
+  if (links.some(link => !/^(?:\/|~\/)/u.test(link.path)) && /^[ \u00a0]*(?:\?\?|!!|[MADRCU?!][ MADRCU?!]| [MADRCU?!])[ \u00a0]+/u.test(record)) {
+    const root = gitStatusOutputRoot(buffer, row - group.currentRow)
+    if (root) links = links.map(link => {
+      if (link.documentRelative || link.searchOnly || /^(?:\/|~\/)/u.test(link.path)) return link
+      const path = resolveDocumentPath(root + '/', link.path)
+      return path ? { ...link, path } : link
+    })
+  }
   const headerPath = editedFileHeader(logicalRecordText(group.rows))
   if (headerPath) {
     const line = editedHeaderFirstLine(buffer, row - group.currentRow + group.rows.length)
