@@ -2,6 +2,29 @@ import { describe, expect, test } from 'bun:test'
 import { createUploadScheduler, noteUploadRtt, uploadAttachment, uploadChunkSize, type UploadRequest } from '../uploadTransport'
 
 describe('upload transport: terminal bandwidth remains available', () => {
+  test('a rejected file cannot poison another file sharing its capacity probe', async () => {
+    const url = 'https://mixed.example/api/sessions/demo/paste-upload'
+    const rejected = new FormData()
+    rejected.set('name', 'too-large.bin')
+    rejected.set('size', '200000001')
+    const valid = new FormData()
+    valid.set('name', 'sample.bin')
+    valid.set('size', '20000')
+    const request: UploadRequest = async (target, body) => {
+      if (target.endsWith('probe=1')) return Number((body as FormData).get('size')) > 100_000_000
+        ? { status: 413, json: { limit_mb: 100 } }
+        : { status: 200, json: { probe: true } }
+      if (target.endsWith('/init')) return { status: 200, json: { uploadId: 'valid', chunkSize: 8192, totalChunks: 3 } }
+      return { status: 200, json: { path: '/work/tmp/files/sample.bin' } }
+    }
+    const blob = new Blob([new Uint8Array(20000)])
+    const results = await Promise.all([
+      uploadAttachment(url, blob, rejected, request, () => {}),
+      uploadAttachment(url, blob, valid, request, () => {}),
+    ])
+    expect(results.map(r => r.status)).toEqual([413, 200])
+  })
+
   test('concurrent callers share one sender and a failed request releases it', async () => {
     const lane = createUploadScheduler(async () => {})
     let active = 0

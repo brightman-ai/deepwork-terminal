@@ -65,8 +65,10 @@ export async function uploadAttachment(url: string, blob: Blob, metadata: FormDa
       onProgress(total > 0 ? Math.min(blob.size, Math.round(sent / total * blob.size)) : 0, blob.size)))
   }
   let probeResult: UploadResponse | undefined
+  let ownsMeasurement = true
   if (!rates.has(key)) {
     let measurement = measurements.get(key)
+    ownsMeasurement = !measurement
     if (!measurement) {
       measurement = scheduleUploadRequest(async () => {
         const probe = new FormData()
@@ -83,10 +85,16 @@ export async function uploadAttachment(url: string, blob: Blob, metadata: FormDa
       })
       measurements.set(key, measurement)
     }
-    try { probeResult = await measurement }
+    try {
+      const result = await measurement
+      if (ownsMeasurement) probeResult = result
+    }
     finally { if (measurements.get(key) === measurement) measurements.delete(key) }
   }
   if (!rates.has(key)) {
+    // Capacity is shared, validation/auth failures belong to the file/session
+    // that made the probe. Another file must get its own response.
+    if (!ownsMeasurement) return uploadAttachment(url, blob, metadata, request, onProgress)
     if (probeResult && ![404, 405].includes(probeResult.status)) return probeResult
     const form = new FormData()
     metadata.forEach((value, name) => form.append(name, value))
