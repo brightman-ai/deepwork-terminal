@@ -9,6 +9,7 @@ import type { WSConnectionStatus, WSControlMessage } from '@terminal/types/termi
 import { wsUrl } from '@ce/utils/runtimeBase'
 import { cliApi, peerApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { takePendingTerminalNotice, noteUserInput } from '@terminal/composables/cli/terminalNotice'
+import { noteUploadRtt } from '@terminal/composables/cli/uploadTransport'
 
 export interface WebSocketClientOptions {
   /** Auth code. Value or getter — a getter is read live on every (re)connect, so a peer/code
@@ -157,6 +158,7 @@ export function useWebSocketClient(sessionId: () => string, opts: WebSocketClien
             const sentAt = payload.sentAt as number
             if (sentAt) {
               netStats.rtt = Date.now() - sentAt
+              noteUploadRtt(getWsUrl(), netStats.rtt)
             }
           }
 

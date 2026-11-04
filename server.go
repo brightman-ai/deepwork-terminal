@@ -435,6 +435,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /sessions/{id}/input", wrap(s.handleInput))
 	s.mux.HandleFunc("GET /sessions/{id}/ws", wrap(s.handleWebSocket))
 	s.mux.HandleFunc("POST /sessions/{id}/paste-upload", wrap(s.handleClipboardPasteUpload))
+	s.mux.HandleFunc("POST /sessions/{id}/paste-upload/init", wrap(s.handleClipboardChunkInit))
 	// The zero-copy half of paste: the shared resolver asks for the file paths on the
 	// server's own clipboard BEFORE it uploads anything, and injects `@path` if it gets
 	// them. pro serves the same URL; without it here a local paste of local files went

@@ -45,6 +45,7 @@ import {
   type RawResult,
 } from '@terminal/api/files'
 import { useTreeUpload } from '@terminal/composables/cli/useTreeUpload'
+import { formatUploadSpeed, formatUploadEta } from '@terminal/composables/cli/uploadTelemetry'
 import { nextTick } from 'vue'
 import { fuzzyMatch } from '@terminal/utils/fuzzyMatch'
 import PreviewDocumentTabs from './PreviewDocumentTabs.vue'
@@ -2105,6 +2106,10 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
                   :class="j.status === 'error' ? 'bg-red-500/70' : j.status === 'done' ? 'bg-green-500' : 'bg-primary'"
                   :style="{ width: (j.status === 'done' ? 100 : uploadPct(j)) + '%' }"
                 ></div>
+              </div>
+              <div v-if="j.status === 'active'" class="mt-0.5 flex justify-between gap-2 text-[0.56rem] tabular-nums text-muted-foreground">
+                <span>{{ j.total === 0 ? '等待上传' : formatUploadSpeed(j.speedBps || 0) }}</span>
+                <span v-if="j.total > 0">{{ j.sent >= j.total ? '正在保存…' : formatUploadEta(j.etaSeconds ?? null) }}</span>
               </div>
               <div v-if="j.status === 'error'" class="mt-0.5 text-[0.54rem] text-red-500/90 truncate" :title="j.error">{{ j.error }}</div>
             </div>

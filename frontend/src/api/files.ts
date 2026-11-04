@@ -14,6 +14,8 @@
  */
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
+import { apiUrl } from '@ce/utils/runtimeBase'
+import { preferredUploadChunkSize, scheduleUploadRequest } from '@terminal/composables/cli/uploadTransport'
 
 /** One entry of GET /files/recent — a file an agent recently wrote/edited. */
 export interface RecentFileItem {
@@ -364,7 +366,8 @@ export async function chunkedUploadInit(
     form.append('dir', dir || '.')
     form.append('name', file.name)
     form.append('size', String(file.size))
-    const resp = await cliFetch(cliApi('/files/upload/init'), { method: 'POST', body: form })
+    form.append('chunkSize', String(preferredUploadChunkSize(apiUrl(cliApi('/files/upload/init')))))
+    const resp = await scheduleUploadRequest(() => cliFetch(cliApi('/files/upload/init'), { method: 'POST', body: form }))
     if (!resp.ok) {
       let limitMb: number | undefined
       try { limitMb = ((await resp.json()) as { limit_mb?: number }).limit_mb } catch { /* non-JSON */ }
@@ -379,10 +382,10 @@ export async function chunkedUploadInit(
 export async function chunkedUploadChunk(uploadId: string, index: number, blob: Blob): Promise<boolean> {
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await cliFetch(
-      cliApi(`/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}`),
+    const resp = await scheduleUploadRequest(() => cliFetch(
+      cliApi(`/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}&ack=index`),
       { method: 'POST', body: blob },
-    )
+    ))
     return resp.ok
   } catch {
     return false

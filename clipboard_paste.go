@@ -145,6 +145,15 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		mime = header.Header.Get("Content-Type")
 	}
 
+	r.Form.Set("session", id)
+	s.saveClipboardUpload(w, r, sess, file, header.Filename, mime, start)
+}
+
+// saveClipboardUpload preserves attachment naming, permissions, hash deduplication and
+// indexing for both multipart and bounded chunk transports. It never injects terminal input.
+func (s *Server) saveClipboardUpload(w http.ResponseWriter, r *http.Request, sess *Session, file io.Reader, originalName, mime string, start time.Time) bool {
+	id := sess.ID
+	logCtx := obs.WithStage(r.Context(), stgTerminalClipboard)
 	ext := extFromMIME(mime)
 	isImage := strings.HasPrefix(strings.ToLower(mime), "image/")
 
@@ -157,7 +166,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// not the session's static launch dir. For a non-tmux terminal (no client cwd),
 	// workbenchCWD probes the shell's live cwd; it only falls back to the launch dir as a
 	// last resort. This is the fix for "图片传飞" (uploads saved under home, not the agent cwd).
-	cwd, _ := s.workbenchCWD(r.Context(), id, r.FormValue("cwd"))
+	cwd, _ := s.requestWorkbenchCWD(r)
 	if cwd == "" {
 		cwd = sess.WorkingDir()
 	}
@@ -172,7 +181,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		resolved, derr := safeResolve(cwd, uploadDir)
 		if derr != nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "target dir not allowed"})
-			return
+			return false
 		}
 		sessionDir = resolved
 	} else {
@@ -191,7 +200,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 			"elapsed_ms", time.Since(start).Milliseconds(),
 			"error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot create clipboard dir"})
-		return
+		return false
 	}
 
 	// Lazy TTL cleanup applies ONLY to the tmp staging dir, never a user-chosen target dir.
@@ -210,11 +219,11 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 			"reason", "read_failed",
 			"session_id", id,
 			"mime", mime,
-			"filename", header.Filename,
+			"filename", originalName,
 			"elapsed_ms", time.Since(start).Milliseconds(),
 			"error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
-		return
+		return false
 	}
 	// Every path below either renames the staged file into place or is an error/dedup exit;
 	// this makes "we did not keep it" unconditional rather than one branch's responsibility.
@@ -253,7 +262,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 			"filename": filepath.Base(existing),
 			"dedup":    true,
 		})
-		return
+		return true
 	}
 
 	// Filename policy: preserve the ORIGINAL name whenever the user copied a real
@@ -263,7 +272,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 	// falls through to the synthetic {HHmm}{seq}-{hash} name, since there is no
 	// original to keep. Previously ALL images got the hash name, losing "foo.png".
 	var filename string
-	origName := sanitizeClipboardFilename(header.Filename)
+	origName := sanitizeClipboardFilename(originalName)
 	switch {
 	case !isGenericClipboardName(origName):
 		filename = uniqueClipboardFilename(sessionDir, origName, hashHex)
@@ -288,7 +297,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 			"elapsed_ms", time.Since(start).Milliseconds(),
 			"error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rename failed"})
-		return
+		return false
 	}
 
 	// Compute relative path from CWD for short @reference
@@ -323,6 +332,7 @@ func (s *Server) handleClipboardPasteUpload(w http.ResponseWriter, r *http.Reque
 		"size":     written,
 		"filename": filename,
 	})
+	return true
 }
 
 // extFromMIME maps a MIME to a fallback extension. Used ONLY when the upload carries no

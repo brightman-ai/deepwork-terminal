@@ -17,6 +17,7 @@
  * monotonic. One instance per FilesPanel (its own reactive queue), not a module singleton.
  */
 import { ref } from 'vue'
+import { createTransferMeter } from './uploadTelemetry'
 import {
   chunkedUploadInit,
   chunkedUploadChunk,
@@ -43,6 +44,8 @@ export interface UploadJob {
   status: UploadJobStatus
   /** Human reason when status==='error'. */
   error: string
+  speedBps?: number
+  etaSeconds?: number | null
 }
 
 const CHUNK_RETRIES = 3
@@ -97,17 +100,29 @@ export function useTreeUpload(opts: {
     job.total = totalChunks
     const have = new Set(received)
     job.sent = have.size
-    for (let i = 0; i < totalChunks; i++) {
+    const resumedBytes = received.reduce((n, i) => n + Math.min(chunkSize, Math.max(0, file.size - i * chunkSize)), 0)
+    let sentBytes = resumedBytes
+    const meter = createTransferMeter()
+    meter.sample(0)
+    const missing = Array.from({ length: totalChunks }, (_, i) => i).filter(i => !have.has(i))
+    for (let offset = 0; offset < missing.length; offset += 2) {
       if (canceled.has(job.id)) return
-      if (have.has(i)) continue
-      const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size))
-      if (!(await sendChunk(uploadId, i, blob))) {
+      const landed = await Promise.all(missing.slice(offset, offset + 2).map(async i => {
+        const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size))
+        if (!(await sendChunk(uploadId, i, blob))) return false
+        if (canceled.has(job.id)) return false
+        job.sent++
+        sentBytes += blob.size
+        job.speedBps = meter.sample(sentBytes - resumedBytes)
+        job.etaSeconds = job.speedBps > 0 ? Math.max(0, file.size - sentBytes) / job.speedBps : null
+        return true
+      }))
+      if (landed.some(ok => !ok)) {
         if (canceled.has(job.id)) return
         job.status = 'error'
         job.error = '网络中断，可点重试续传' // landed chunks persist server-side → retry resumes
         return
       }
-      job.sent++
     }
     if (canceled.has(job.id)) return
     const result = await chunkedUploadComplete(opts.sessionId(), uploadId)

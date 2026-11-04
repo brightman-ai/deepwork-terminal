@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,12 +115,14 @@ var chunkStoreMu sync.Mutex
 // by chunk/complete/status/abort. It is the ONLY record of an upload's shape — there is no
 // in-memory counterpart — so a server restart mid-upload reconstructs everything from it.
 type chunkMeta struct {
-	Name        string `json:"name"`        // sanitized single-segment target filename
-	Dir         string `json:"dir"`         // target dir, RELATIVE to CWD (as the client sent it)
-	CWD         string `json:"cwd"`         // resolved absolute workbench cwd the upload anchors to
-	Size        int64  `json:"size"`        // total byte length of the finished file
-	ChunkSize   int64  `json:"chunkSize"`   // fixed slice size (chunkUploadChunkSize)
-	TotalChunks int    `json:"totalChunks"` // ceil(size/chunkSize), min 1 (a 0-byte file is one empty chunk)
+	Name             string `json:"name"`        // sanitized single-segment target filename
+	Dir              string `json:"dir"`         // target dir, RELATIVE to CWD (as the client sent it)
+	CWD              string `json:"cwd"`         // resolved absolute workbench cwd the upload anchors to
+	Size             int64  `json:"size"`        // total byte length of the finished file
+	ChunkSize        int64  `json:"chunkSize"`   // fixed slice size (chunkUploadChunkSize)
+	TotalChunks      int    `json:"totalChunks"` // ceil(size/chunkSize), min 1 (a 0-byte file is one empty chunk)
+	ClipboardSession string `json:"clipboardSession,omitempty"`
+	MIME             string `json:"mime,omitempty"`
 }
 
 // validUploadID reports whether id is exactly the 16 lowercase-hex chars init mints. This
@@ -150,7 +154,11 @@ func (s *Server) chunkStagingDir(uploadID string) string {
 // writeChunkMeta atomically persists meta to <stagingDir>/meta.json (tmp+rename, the same
 // crash-safe pattern the rest of this package uses), creating the staging dir if needed.
 func writeChunkMeta(stagingDir string, meta chunkMeta) error {
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+	dirMode, fileMode := os.FileMode(0o755), os.FileMode(0o644)
+	if meta.ClipboardSession != "" {
+		dirMode, fileMode = 0o700, 0o600
+	}
+	if err := os.MkdirAll(stagingDir, dirMode); err != nil {
 		return err
 	}
 	data, err := json.Marshal(meta)
@@ -159,7 +167,7 @@ func writeChunkMeta(stagingDir string, meta chunkMeta) error {
 	}
 	path := filepath.Join(stagingDir, "meta.json")
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, fileMode); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -196,9 +204,14 @@ func expectedChunkSize(meta chunkMeta, index int) int64 {
 // from masquerading as received across a resume. This — meta.json + the N.part files — is
 // the entire persisted state of an in-flight upload.
 func scanReceivedChunks(stagingDir string, meta chunkMeta) []int {
-	received := make([]int, 0, meta.TotalChunks)
-	for i := 0; i < meta.TotalChunks; i++ {
-		info, err := os.Stat(filepath.Join(stagingDir, strconv.Itoa(i)+".part"))
+	received := make([]int, 0)
+	entries, _ := os.ReadDir(stagingDir)
+	for _, entry := range entries {
+		i, err := strconv.Atoi(strings.TrimSuffix(entry.Name(), ".part"))
+		if err != nil || i < 0 || i >= meta.TotalChunks || entry.Name() != strconv.Itoa(i)+".part" {
+			continue
+		}
+		info, err := entry.Info()
 		if err != nil || info.IsDir() {
 			continue
 		}
@@ -206,6 +219,7 @@ func scanReceivedChunks(stagingDir string, meta chunkMeta) []int {
 			received = append(received, i)
 		}
 	}
+	sort.Ints(received)
 	return received
 }
 
@@ -255,6 +269,22 @@ func sweepStaleStaging(root string) {
 // resuming client sends only the gap. Idempotent: re-init of the same file returns the same
 // uploadId and the current received set.
 func (s *Server) handleChunkUploadInit(w http.ResponseWriter, r *http.Request) {
+	s.initChunkUpload(w, r, false)
+}
+
+// Attachments use the same bounded transport, with independent identities even for
+// same-named, same-sized files. Their landing policy remains the clipboard policy.
+func (s *Server) handleClipboardChunkInit(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 96<<10)
+	if err := r.ParseMultipartForm(64 << 10); err != nil && !errors.Is(err, http.ErrNotMultipart) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid upload metadata"})
+		return
+	}
+	r.Form.Set("session", r.PathValue("id"))
+	s.initChunkUpload(w, r, true)
+}
+
+func (s *Server) initChunkUpload(w http.ResponseWriter, r *http.Request, clipboard bool) {
 	cwd, ok := s.requestWorkbenchCWD(r)
 	if !ok || cwd == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
@@ -290,8 +320,20 @@ func (s *Server) handleChunkUploadInit(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if clipboard && r.URL.Query().Get("probe") == "1" {
+		writeJSON(w, http.StatusOK, map[string]bool{"probe": true})
+		return
+	}
 
 	chunkSize := int64(chunkUploadChunkSize)
+	if requested := r.FormValue("chunkSize"); requested != "" {
+		value, err := strconv.ParseInt(requested, 10, 64)
+		if err != nil || value < 8<<10 || value > chunkUploadChunkSize {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid chunk size"})
+			return
+		}
+		chunkSize = value
+	}
 	totalChunks := int((size + chunkSize - 1) / chunkSize)
 	if totalChunks == 0 {
 		totalChunks = 1 // a 0-byte file is still one (empty) chunk
@@ -302,20 +344,46 @@ func (s *Server) handleChunkUploadInit(w http.ResponseWriter, r *http.Request) {
 	// four fields unambiguous so no concatenation collision is possible.
 	sum := sha256.Sum256([]byte(cwd + "\x00" + dir + "\x00" + name + "\x00" + strconv.FormatInt(size, 10)))
 	uploadID := hex.EncodeToString(sum[:])[:16]
+	if r.FormValue("chunkSize") != "" {
+		sum = sha256.Sum256([]byte(uploadID + ":bounded-v1"))
+		uploadID = hex.EncodeToString(sum[:])[:16]
+	}
+	if clipboard {
+		var token [8]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot create upload id"})
+			return
+		}
+		uploadID = hex.EncodeToString(token[:])
+	}
 	stagingDir := s.chunkStagingDir(uploadID)
 
 	// Lazy GC of abandoned uploads — under the lock so it can't collide with a concurrent
 	// reassemble, and BEFORE we (re)write this upload's meta so a fresh mtime protects it.
 	chunkStoreMu.Lock()
 	sweepStaleStaging(s.chunkStagingRoot())
-	err = writeChunkMeta(stagingDir, chunkMeta{
+	metadata := chunkMeta{
 		Name:        name,
 		Dir:         dir,
 		CWD:         cwd,
 		Size:        size,
 		ChunkSize:   chunkSize,
 		TotalChunks: totalChunks,
-	})
+	}
+	// A retry/reload can have a different bandwidth estimate. Preserve the first
+	// negotiated shape and its received parts, rather than silently losing resume.
+	if !clipboard && r.FormValue("chunkSize") != "" {
+		if existing, readErr := readChunkMeta(stagingDir); readErr == nil {
+			metadata = existing
+			chunkSize, totalChunks = existing.ChunkSize, existing.TotalChunks
+		}
+	}
+	if clipboard {
+		metadata.ClipboardSession = r.FormValue("session")
+		metadata.MIME = r.FormValue("mime")
+		metadata.Dir = "" // attachment destinations are server-owned time buckets
+	}
+	err = writeChunkMeta(stagingDir, metadata)
 	chunkStoreMu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot stage upload"})
@@ -372,18 +440,32 @@ func (s *Server) handleChunkUploadChunk(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot read chunk body"})
 		return
 	}
+	if int64(len(data)) != expectedChunkSize(meta, index) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "chunk size mismatch"})
+		return
+	}
 
 	// Atomic write: a dropped connection can leave a *.part.tmp behind but never a
 	// half-written N.part, so scanReceivedChunks only ever sees complete slices.
 	partPath := filepath.Join(stagingDir, strconv.Itoa(index)+".part")
 	tmpPath := partPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+	mode := os.FileMode(0o644)
+	if meta.ClipboardSession != "" {
+		mode = 0o600
+	}
+	if err := os.WriteFile(tmpPath, data, mode); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot write chunk"})
 		return
 	}
 	if err := os.Rename(tmpPath, partPath); err != nil {
 		os.Remove(tmpPath)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot commit chunk"})
+		return
+	}
+	// A bounded client already knows which index this response acknowledges.
+	// Avoid O(chunks²) directory scans when a large file uses small network slices.
+	if r.URL.Query().Get("ack") == "index" {
+		writeJSON(w, http.StatusOK, map[string]any{"index": index})
 		return
 	}
 
@@ -421,6 +503,23 @@ func (s *Server) handleChunkUploadComplete(w http.ResponseWriter, r *http.Reques
 			"error":   "upload incomplete",
 			"missing": missing,
 		})
+		return
+	}
+	if meta.ClipboardSession != "" {
+		sess, err := s.mgr.Get(meta.ClipboardSession)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+			return
+		}
+		reader := &chunkSequenceReader{dir: stagingDir, count: meta.TotalChunks}
+		defer reader.Close()
+		r.Form.Set("session", meta.ClipboardSession)
+		r.Form.Set("cwd", meta.CWD)
+		r.Form.Set("anchor", "explicit")
+		r.Form.Set("dir", "")
+		if s.saveClipboardUpload(w, r, sess, reader, meta.Name, meta.MIME, time.Now()) {
+			os.RemoveAll(stagingDir)
+		}
 		return
 	}
 

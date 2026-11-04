@@ -9,6 +9,36 @@ async function store() {
 }
 
 describe('useUploadProgress — delayed-reveal upload store', () => {
+  test('completed batch bytes remain visible until the other file settles', async () => {
+    const { createUploadProgressStore } = await store()
+    const s = createUploadProgressStore()
+    const first = s.register('small.bin', 1000, undefined, true)
+    const second = s.register('large.bin', 9000, undefined, true)
+    s.progress(first, 1000, 1000)
+    s.complete(first)
+    await sleep(1600)
+    expect(s.entries.value.map(e => e.status)).toEqual(['done', 'uploading'])
+    expect(s.entries.value.reduce((n, e) => n + e.sent, 0)).toBe(1000)
+    s.remove(first)
+    s.remove(second)
+  })
+
+  test('ETA uses acknowledged bytes and stops guessing when progress stalls', async () => {
+    const { createUploadProgressStore } = await store()
+    let time = 0
+    const s = createUploadProgressStore(() => time)
+    const id = s.register('sample.bin', 10000, undefined, true)
+    time = 1000
+    s.progress(id, 1000, 10000)
+    expect(s.entries.value[0].speedBps).toBe(1000)
+    expect(s.entries.value[0].etaSeconds).toBe(9)
+    time = 7000
+    s.progress(id, 1000, 10000)
+    expect(s.entries.value[0].speedBps).toBe(0)
+    expect(s.entries.value[0].etaSeconds).toBe(null)
+    s.remove(id)
+  })
+
   test('a fast upload that completes within the grace window is never revealed', async () => {
     const { createUploadProgressStore } = await store()
     const s = createUploadProgressStore()

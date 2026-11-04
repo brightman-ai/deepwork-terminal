@@ -1,84 +1,33 @@
 <template>
-  <!-- Non-blocking upload feedback. Renders NOTHING when `entries` is empty (the
-       common case: a fast paste-upload never crosses the 300ms delayed-reveal
-       threshold in useUploadProgress.ts, so this component never even gets an
-       entry to show) — zero space, zero flicker. A slow/large upload, or ANY
-       upload error, DOES cross that threshold and this becomes a tiny corner
-       pill: never covers the terminal or the compose bar. -->
-  <div
-    v-if="entries.length > 0"
-    class="upf-root"
-    :class="{ 'upf-mobile': isMobile }"
-    data-testid="upload-progress-float"
-  >
+  <div v-if="entries.length" class="upf-root" :class="{ 'upf-mobile': isMobile }" data-testid="upload-progress-float">
     <div class="upf-pill">
-      <!-- Single upload: full detail (name + live % + bar, or done/error state). -->
-      <template v-if="entries.length === 1">
-        <div class="upf-row" :class="rowClass(entries[0])">
-          <span class="upf-icon" aria-hidden="true">{{ icon(entries[0]) }}</span>
-          <span class="upf-name" :title="entries[0].name">{{ entries[0].name }}</span>
-          <span v-if="entries[0].status === 'uploading'" class="upf-pct">{{ pct(entries[0]) }}%</span>
-          <button
-            v-if="entries[0].status === 'error' && entries[0].retry"
-            type="button"
-            class="upf-retry"
-            data-testid="upload-progress-retry"
-            @click="entries[0].retry?.()"
-          >重试</button>
-          <!-- Every error is dismissable — a non-retryable failure (oversize, bad type) has NO
-               retry, so without this it was an unclosable pill (the reported bug). The left ✕ is
-               a status glyph; this right ✕ is the action, greyed to read differently. -->
-          <button
-            v-if="entries[0].status === 'error'"
-            type="button"
-            class="upf-dismiss"
-            title="关闭"
-            aria-label="关闭"
-            data-testid="upload-progress-dismiss"
-            @click="$emit('dismiss', entries[0].id)"
-          >✕</button>
-        </div>
-        <div v-if="entries[0].status === 'uploading'" class="upf-bar">
-          <div class="upf-bar-fill" :style="{ width: pct(entries[0]) + '%' }" />
-        </div>
-        <div v-if="entries[0].status === 'error'" class="upf-error-msg">{{ entries[0].error || '上传失败' }}</div>
-      </template>
-
-      <!-- Multiple concurrent uploads: one aggregate row + slim bar (省空间, no
-           per-file clutter) — EXCEPT errors, which always get their own row +
-           重试 since that failure needs a specific action, not a shared one. -->
-      <template v-else>
-        <div v-if="uploadingCount > 0" class="upf-row">
+      <template v-if="active.length">
+        <div class="upf-row">
           <span class="upf-icon upf-spin" aria-hidden="true">⟳</span>
-          <span class="upf-name">上传中 {{ uploadingCount }}/{{ entries.length }}</span>
+          <span class="upf-name" :title="active.length === 1 ? active[0].name : undefined">{{ entries.length === 1 ? active[0].name : `正在上传 ${active.length} 个文件` }}</span>
+          <span class="upf-pct">{{ aggregatePct }}%</span>
         </div>
-        <div v-else-if="doneCount > 0" class="upf-row upf-row--done">
-          <span class="upf-icon" aria-hidden="true">✓</span>
-          <span class="upf-name">已上传 {{ doneCount }}</span>
-        </div>
-        <div v-if="uploadingCount > 0" class="upf-bar">
+        <div class="upf-bar" role="progressbar" aria-label="上传进度" :aria-valuenow="aggregatePct" aria-valuemin="0" aria-valuemax="100">
           <div class="upf-bar-fill" :style="{ width: aggregatePct + '%' }" />
         </div>
-        <div v-for="e in erroredEntries" :key="e.id" class="upf-row upf-row--error">
-          <span class="upf-icon" aria-hidden="true">✕</span>
-          <span class="upf-name" :title="e.name">{{ e.name }}</span>
-          <button
-            v-if="e.retry"
-            type="button"
-            class="upf-retry"
-            data-testid="upload-progress-retry"
-            @click="e.retry?.()"
-          >重试</button>
-          <button
-            type="button"
-            class="upf-dismiss"
-            title="关闭"
-            aria-label="关闭"
-            data-testid="upload-progress-dismiss"
-            @click="$emit('dismiss', e.id)"
-          >✕</button>
+        <div class="upf-metrics" data-testid="upload-progress-metrics">
+          <span>{{ formatUploadSpeed(active[0].speedBps || 0) }}</span>
+          <span>{{ saving ? '正在保存…' : formatUploadEta(active[0].etaSeconds ?? null) }}</span>
         </div>
       </template>
+      <div v-else-if="done.length" class="upf-row upf-row--done">
+        <span class="upf-icon" aria-hidden="true">✓</span>
+        <span class="upf-name">{{ entries.length === 1 ? done[0].name : `已上传 ${done.length} 个文件` }}</span>
+      </div>
+      <div v-for="e in errors" :key="e.id">
+        <div class="upf-row upf-row--error">
+          <span class="upf-icon" aria-hidden="true">✕</span>
+          <span class="upf-name" :title="e.name">{{ e.name }}</span>
+          <button v-if="e.retry" type="button" class="upf-retry" data-testid="upload-progress-retry" @click="e.retry?.()">重试</button>
+          <button type="button" class="upf-dismiss" title="关闭" aria-label="关闭" data-testid="upload-progress-dismiss" @click="$emit('dismiss', e.id)">✕</button>
+        </div>
+        <div class="upf-error-msg" :title="e.error">{{ e.error || '上传失败' }}</div>
+      </div>
     </div>
   </div>
 </template>
@@ -87,42 +36,18 @@
 import { computed } from 'vue'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import type { UploadEntry } from '@terminal/composables/cli/useUploadProgress'
-
-const props = defineProps<{
-  entries: UploadEntry[]
-}>()
-// dismiss removes ONE errored entry from the store (the float is a pure reader; the host wires
-// this to useUploadProgress.remove — the single deletion authority). Only errors are dismissable:
-// uploading is in-flight, done auto-dismisses.
+import { formatUploadSpeed, formatUploadEta, uploadProgressPercent } from '@terminal/composables/cli/uploadTelemetry'
+const props = defineProps<{ entries: UploadEntry[] }>()
 defineEmits<{ (e: 'dismiss', id: string): void }>()
-
 const { isMobile } = useDeviceDetection()
-
-const uploadingCount = computed(() => props.entries.filter(e => e.status === 'uploading').length)
-const doneCount = computed(() => props.entries.filter(e => e.status === 'done').length)
-const erroredEntries = computed(() => props.entries.filter(e => e.status === 'error'))
-
+const active = computed(() => props.entries.filter(e => e.status === 'uploading'))
+const done = computed(() => props.entries.filter(e => e.status === 'done'))
+const errors = computed(() => props.entries.filter(e => e.status === 'error'))
+const saving = computed(() => active.value.every(e => e.sent >= e.total))
 const aggregatePct = computed(() => {
-  const active = props.entries.filter(e => e.status === 'uploading')
-  if (active.length === 0) return 0
-  const sum = active.reduce((acc, e) => acc + pct(e), 0)
-  return Math.round(sum / active.length)
+  const participating = props.entries.filter(e => e.status !== 'error')
+  return uploadProgressPercent(participating.reduce((n, e) => n + e.sent, 0), participating.reduce((n, e) => n + e.total, 0))
 })
-
-function pct(entry: UploadEntry): number {
-  if (entry.total <= 0) return 0
-  return Math.min(100, Math.round((entry.sent / entry.total) * 100))
-}
-
-function icon(entry: UploadEntry): string {
-  if (entry.status === 'done') return '✓'
-  if (entry.status === 'error') return '✕'
-  return '⟳'
-}
-
-function rowClass(entry: UploadEntry): string {
-  return `upf-row--${entry.status}`
-}
 </script>
 
 <style scoped>
@@ -136,10 +61,12 @@ function rowClass(entry: UploadEntry): string {
   right: 8px;
   z-index: 45;
   pointer-events: none;
-  max-width: 220px;
+  width: 236px;
+  max-width: calc(100% - 16px);
 }
 .upf-mobile {
-  max-width: 168px;
+  width: 220px;
+  max-width: calc(100% - 12px);
   top: 38px;
   right: 6px;
 }
@@ -246,4 +173,10 @@ function rowClass(entry: UploadEntry): string {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+</style>
+
+<style scoped>
+.upf-metrics { display: flex; justify-content: space-between; gap: 12px; margin-top: 5px; color: #a1a1b5; font-size: 0.66rem; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upf-metrics span:first-child { color: #c3c3d1; }
+@media (prefers-reduced-motion: reduce) { .upf-spin { animation: none; } .upf-bar-fill { transition: none; } }
 </style>

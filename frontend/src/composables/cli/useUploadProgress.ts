@@ -15,7 +15,8 @@
  *     here so the component stays dumb and there is exactly one place that can
  *     get the "should this show" rule wrong.
  */
-import { reactive, computed, type ComputedRef } from 'vue'
+import { reactive, computed, getCurrentScope, onScopeDispose, type ComputedRef } from 'vue'
+import { createTransferMeter } from './uploadTelemetry'
 
 export type UploadStatus = 'uploading' | 'done' | 'error'
 
@@ -28,6 +29,8 @@ export interface UploadEntry {
   status: UploadStatus
   startedAt: number
   revealed: boolean
+  speedBps?: number
+  etaSeconds?: number | null
   error?: string
   /** Re-runs this exact upload (and, on success, re-injects its path). Undefined
    * for call sites that never wired one — the float hides the button then. */
@@ -48,8 +51,36 @@ export interface UploadProgressStore {
 const REVEAL_DELAY_MS = 300
 const DISMISS_DELAY_MS = 1500
 
-export function createUploadProgressStore(): UploadProgressStore {
+export function createUploadProgressStore(now = () => performance.now()): UploadProgressStore {
   const byId = reactive(new Map<string, UploadEntry>())
+  const totalMeter = createTransferMeter(now)
+  let timer: ReturnType<typeof setInterval> | undefined
+  let settledTimer: ReturnType<typeof setTimeout> | undefined
+
+  function sample(): void {
+    const all = Array.from(byId.values())
+    const speed = totalMeter.sample(all.reduce((n, e) => n + e.sent, 0))
+    const active = all.filter(e => e.status === 'uploading')
+    const remaining = active.reduce((n, e) => n + Math.max(0, e.total - e.sent), 0)
+    for (const e of active) {
+      e.speedBps = speed
+      e.etaSeconds = speed > 0 ? remaining / speed : null
+    }
+    if (!active.length && timer) { clearInterval(timer); timer = undefined }
+  }
+
+  function dismissCompleted(): void {
+    if (Array.from(byId.values()).some(e => e.status === 'uploading')) return
+    if (settledTimer) clearTimeout(settledTimer)
+    settledTimer = setTimeout(() => {
+      for (const e of byId.values()) if (e.status === 'done') remove(e.id)
+    }, DISMISS_DELAY_MS)
+  }
+
+  if (getCurrentScope()) onScopeDispose(() => {
+    if (timer) clearInterval(timer)
+    if (settledTimer) clearTimeout(settledTimer)
+  })
 
   const entries = computed<UploadEntry[]>(() =>
     Array.from(byId.values())
@@ -58,6 +89,7 @@ export function createUploadProgressStore(): UploadProgressStore {
   )
 
   function register(name: string, size: number, retry?: () => void, revealImmediately = false): string {
+    if (settledTimer) { clearTimeout(settledTimer); settledTimer = undefined }
     const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `up-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -73,6 +105,8 @@ export function createUploadProgressStore(): UploadProgressStore {
       retry,
     }
     byId.set(id, entry)
+    totalMeter.sample(Array.from(byId.values()).reduce((n, e) => n + e.sent, 0))
+    if (!timer) timer = setInterval(sample, 250)
     if (!revealImmediately) {
       setTimeout(() => {
         const e = byId.get(id)
@@ -88,8 +122,9 @@ export function createUploadProgressStore(): UploadProgressStore {
   function progress(id: string, sent: number, total: number): void {
     const e = byId.get(id)
     if (!e) return
-    e.sent = sent
+    e.sent = Math.max(e.sent, Math.min(Math.max(0, sent), total > 0 ? total : e.total))
     if (total > 0) e.total = total
+    sample()
   }
 
   function complete(id: string): void {
@@ -99,11 +134,15 @@ export function createUploadProgressStore(): UploadProgressStore {
     e.sent = e.total
     if (e.revealed) {
       // Brief ✓ flash, then auto-dismiss.
-      setTimeout(() => byId.delete(id), DISMISS_DELAY_MS)
+      // Retain completed bytes while another file is active: aggregate percent
+      // must not jump backwards when the first file finishes.
+      dismissCompleted()
     } else {
       // Never shown (finished inside the grace window) — drop silently, no flicker.
-      byId.delete(id)
+      remove(id)
     }
+    sample()
+    dismissCompleted()
   }
 
   function fail(id: string, message: string, retryable = true): void {
@@ -120,10 +159,13 @@ export function createUploadProgressStore(): UploadProgressStore {
     // Errors always surface, even inside the 300ms grace window — this IS the
     // feedback that stops the user from blindly retrying into the PTY.
     e.revealed = true
+    sample()
+    dismissCompleted()
   }
 
   function remove(id: string): void {
     byId.delete(id)
+    sample()
   }
 
   return { entries, register, progress, complete, fail, remove }

@@ -14,6 +14,7 @@ import { classifyUploadFailure, type UploadErrorBody } from '@terminal/composabl
 import { pasteUploadHeaders, resolvePasteUploadTarget } from '@terminal/composables/cli/pasteUploadTarget'
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 import { apiUrl } from '@ce/utils/runtimeBase'
+import { uploadAttachment } from '@terminal/composables/cli/uploadTransport'
 
 export interface PasteResult {
   type: 'text' | 'image' | 'file' | 'none'
@@ -65,6 +66,7 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
     : targetOrSessionId
   const sessionId = target.sessionId
   const uploading = ref(false)
+  let inFlight = 0
   const lastError = ref('')
   const { getAuthCode, clearAuthCode, promptAuth } = useCliAuth()
   // Per-tab SSOT of in-flight uploads (see useUploadProgress.ts). One instance per
@@ -155,7 +157,7 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
 
   async function uploadFile(blob: Blob, mime: string, options: PasteUploadOptions = {}): Promise<PasteResult> {
     const local = detectIsLocal()
-    uploading.value = true
+    uploading.value = ++inFlight > 0
     lastError.value = ''
     const startedAt = performance.now()
     const uploadName = uploadFilename(blob, mime, options.filename)
@@ -172,7 +174,8 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
     }, options.revealImmediately)
     try {
       const formData = new FormData()
-      formData.append('file', blob, uploadName)
+      formData.append('name', uploadName)
+      formData.append('size', String(blob.size))
       formData.append('mime', mime)
       // Supplied by the terminal surface's live WS-backed tmux state. In particular,
       // a remote tab must not instantiate/fetch a same-origin tmux store just to route cwd.
@@ -196,7 +199,8 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
       // client-side logs still carry the trace locally. Local same-origin requests keep it.
       const headers = pasteUploadHeaders(uploadTarget, traceHeaders(options.trace))
       const url = apiUrl(uploadTarget.url)
-      const { status, json } = await xhrUploadFormData(url, formData, headers, (sent, total) => {
+      const { status, json } = await uploadAttachment(url, blob, formData,
+        (requestUrl, body, progress) => xhrUploadFormData(requestUrl, body, headers, progress), (sent, total) => {
         uploadProgress.progress(entryId, sent, total || blob.size)
       })
 
@@ -274,7 +278,7 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
       }, options.trace)
       return { type: 'none', textForPTY: '', isLocal: local }
     } finally {
-      uploading.value = false
+      uploading.value = --inFlight > 0
     }
   }
 
@@ -302,9 +306,9 @@ interface XhrUploadResult {
  * exposes `upload.onprogress` (real bytes-sent), which fetch cannot report. */
 function xhrUploadFormData(
   url: string,
-  formData: FormData,
+  formData: FormData | Blob,
   headers: Record<string, string>,
-  onProgress: (sent: number, total: number) => void,
+  onProgress?: (sent: number, total: number) => void,
 ): Promise<XhrUploadResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
@@ -313,7 +317,7 @@ function xhrUploadFormData(
       xhr.setRequestHeader(key, value)
     }
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(e.loaded, e.total)
+      if (e.lengthComputable) onProgress?.(e.loaded, e.total)
     }
     xhr.onload = () => {
       let json: unknown = null

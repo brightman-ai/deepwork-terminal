@@ -297,14 +297,18 @@ export function useCliPasteResolver(options: CliPasteResolverOptions) {
     }, trace)
 
     const paths: string[] = []
-    for (const file of uploadFiles) {
+    // Register every selected file immediately. The shared transport schedules
+    // bounded bodies fairly; Promise.all retains the selection's injection order.
+    const results = await Promise.all(uploadFiles.map(file => {
       const mime = file.type || 'application/octet-stream'
       const filename = file.name || uploadFallbackName(mime)
-      const result = await runUploadWithRetry(file, mime, filename, source, trace, sink)
+      return runUploadWithRetry(file, mime, filename, source, trace, sink)
+    }))
+    for (const [index, result] of results.entries()) {
       if (result.savedPath) {
         paths.push(result.textForPTY)
         metrics.uploadFiles++
-        metrics.uploadBytes += result.size || file.size
+        metrics.uploadBytes += result.size || uploadFiles[index].size
       } else {
         metrics.uploadErrors++
       }
