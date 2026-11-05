@@ -1,7 +1,38 @@
-import { describe, expect, test } from 'bun:test'
-import { createUploadScheduler, noteUploadRtt, uploadAttachment, uploadChunkSize, type UploadRequest } from '../uploadTransport'
+import { describe, expect, spyOn, test } from 'bun:test'
+import { createUploadScheduler, uploadAttachment, uploadChunkSize, type UploadRequest } from '../uploadTransport'
 
 describe('upload transport: terminal bandwidth remains available', () => {
+  for (const scenario of [
+    { host: 'cold-fast', timings: [150, 66, 82], expectedChunk: 98304 },
+    { host: 'cold-slow', timings: [250, 66, 197.072], expectedChunk: 8192 },
+  ]) test(`${scenario.host}: upload calibration excludes HTTP setup and response latency without a WebSocket sample`, async () => {
+    let clock = 0
+    const timing = spyOn(performance, 'now').mockImplementation(() => clock)
+    const probeSizes: number[] = []
+    const data = new Uint8Array(300000).map((_, i) => i % 251)
+    const parts: Blob[] = []
+    let negotiated = 0
+    const request: UploadRequest = async (url, body) => {
+      if (url.includes('probe=1')) {
+        probeSizes.push(((body as FormData).get('probe') as Blob).size)
+        clock += scenario.timings[probeSizes.length - 1]
+        return { status: 200, json: { probe: true } }
+      }
+      if (url.endsWith('/init')) {
+        negotiated = Number((body as FormData).get('chunkSize'))
+        return { status: 200, json: { uploadId: 'example', chunkSize: negotiated, totalChunks: Math.ceil(data.length / negotiated) } }
+      }
+      if (url.includes('/chunk?')) parts[Number(new URL(url).searchParams.get('index'))] = body as Blob
+      return { status: 200, json: {} }
+    }
+    try {
+      await uploadAttachment(`https://${scenario.host}.example/api/sessions/demo/paste-upload`, new Blob([data]), new FormData(), request, () => {})
+      expect(negotiated).toBe(scenario.expectedChunk)
+      expect(Math.max(...probeSizes)).toBe(16384)
+      expect(new Uint8Array(await new Blob(parts).arrayBuffer())).toEqual(data)
+    } finally { timing.mockRestore() }
+  })
+
   test('queued uploads continue even when background JavaScript timers cannot fire', async () => {
     const original = globalThis.setTimeout
     globalThis.setTimeout = (() => 0) as unknown as typeof setTimeout
@@ -121,7 +152,6 @@ describe('upload transport: terminal bandwidth remains available', () => {
 
   test('real payload slices reassemble exactly; embedded URL and acknowledgement progress survive', async () => {
     const url = 'https://upload.example/api/cli/sessions/demo/paste-upload'
-    noteUploadRtt(url, 50)
     const original = new Uint8Array(29_000).map((_, i) => i % 251)
     const chunks = new Map<number, Blob>()
     const progress: number[] = []

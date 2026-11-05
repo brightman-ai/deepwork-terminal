@@ -20,19 +20,11 @@ export function createUploadScheduler(concurrency = 1) {
 }
 
 export const scheduleUploadRequest = createUploadScheduler(2)
-const rtts = new Map<string, number>()
 const rates = new Map<string, number>()
 const measuredAt = new Map<string, number>()
 const legacyUploads = createUploadScheduler()
 const measurements = new Map<string, Promise<UploadResponse | undefined>>()
 const originOf = (url: string) => new URL(url, typeof location === 'undefined' ? 'http://localhost' : location.href).host
-
-export function noteUploadRtt(url: string, ms: number): void {
-  if (ms > 0 && Number.isFinite(ms)) {
-    const key = originOf(url)
-    rtts.set(key, Math.min(rtts.get(key) ?? ms, ms))
-  }
-}
 
 /** Request latency includes the response RTT. Remove the idle RTT before
  * estimating uplink capacity; keep a short target queue even on slow links. */
@@ -60,6 +52,34 @@ interface AttachmentResume {
 const resumable = new WeakMap<Blob, Map<string, AttachmentResume>>()
 
 
+/** Measure HTTP overhead on the upload route itself. A fresh page may not have
+ * received a WebSocket RTT yet, and the first HTTP request can include setup.
+ * Two empty requests warm the connection and bound the overhead before the
+ * small payload probe. All probes stay inside the shared request budget. */
+async function measureUpload(url: string, metadata: FormData, request: UploadRequest): Promise<UploadResponse> {
+  let idleMs = Infinity
+  let result: UploadResponse = { status: 0, json: null }
+  for (const bytes of [0, 0, PROBE_BYTES]) {
+    const sample = await scheduleUploadRequest(async () => {
+      const probe = new FormData()
+      metadata.forEach((value, name) => probe.append(name, value))
+      probe.append('probe', new Blob([new Uint8Array(bytes)]), 'probe.bin')
+      const start = performance.now()
+      const response = await request(url + '/init?probe=1', probe)
+      return { response, ms: performance.now() - start }
+    })
+    result = sample.response
+    if (result.status !== 200 || !(result.json as { probe?: boolean } | null)?.probe) return result
+    if (!bytes) idleMs = Math.min(idleMs, sample.ms)
+    else {
+      const key = originOf(url)
+      rates.set(key, PROBE_BYTES / Math.max(1, sample.ms - idleMs) * 1000)
+      measuredAt.set(key, Date.now())
+    }
+  }
+  return result
+}
+
 /** A bounded probe once per destination measures the actual uplink, rather than
  * guessing it from navigator.connection's download estimate. Old peers retain
  * their multipart route, serialized through the same lane. */
@@ -80,19 +100,7 @@ export async function uploadAttachment(url: string, blob: Blob, metadata: FormDa
     let measurement = measurements.get(key)
     ownsMeasurement = !measurement
     if (!measurement) {
-      measurement = scheduleUploadRequest(async () => {
-        const probe = new FormData()
-        metadata.forEach((value, name) => probe.append(name, value))
-        probe.append('probe', new Blob([new Uint8Array(PROBE_BYTES)]), 'probe.bin')
-        const start = performance.now()
-        const result = await request(url + '/init?probe=1', probe)
-        if (result.status === 200 && (result.json as { probe?: boolean } | null)?.probe) {
-          const duration = Math.max(1, performance.now() - start - (rtts.get(key) ?? 0))
-          rates.set(key, PROBE_BYTES / duration * 1000)
-          measuredAt.set(key, Date.now())
-        }
-        return result
-      })
+      measurement = measureUpload(url, metadata, request)
       measurements.set(key, measurement)
     }
     try {
