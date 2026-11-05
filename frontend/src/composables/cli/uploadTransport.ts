@@ -54,12 +54,14 @@ const resumable = new WeakMap<Blob, Map<string, AttachmentResume>>()
 
 /** Measure HTTP overhead on the upload route itself. A fresh page may not have
  * received a WebSocket RTT yet, and the first HTTP request can include setup.
- * Two empty requests warm the connection and bound the overhead before the
- * small payload probe. All probes stay inside the shared request budget. */
+ * Two empty requests measure overhead. The first body can still pay a TCP
+ * startup round trip, so use the fastest of three small body samples. All
+ * probes stay inside the shared request budget; none queues more than 16KiB. */
 async function measureUpload(url: string, metadata: FormData, request: UploadRequest): Promise<UploadResponse> {
   let idleMs = Infinity
+  let payloadMs = Infinity
   let result: UploadResponse = { status: 0, json: null }
-  for (const bytes of [0, 0, PROBE_BYTES]) {
+  for (const bytes of [0, 0, PROBE_BYTES, PROBE_BYTES, PROBE_BYTES]) {
     const sample = await scheduleUploadRequest(async () => {
       const probe = new FormData()
       metadata.forEach((value, name) => probe.append(name, value))
@@ -72,11 +74,12 @@ async function measureUpload(url: string, metadata: FormData, request: UploadReq
     if (result.status !== 200 || !(result.json as { probe?: boolean } | null)?.probe) return result
     if (!bytes) idleMs = Math.min(idleMs, sample.ms)
     else {
-      const key = originOf(url)
-      rates.set(key, PROBE_BYTES / Math.max(1, sample.ms - idleMs) * 1000)
-      measuredAt.set(key, Date.now())
+      payloadMs = Math.min(payloadMs, sample.ms)
     }
   }
+  const key = originOf(url)
+  rates.set(key, PROBE_BYTES / Math.max(1, payloadMs - idleMs) * 1000)
+  measuredAt.set(key, Date.now())
   return result
 }
 

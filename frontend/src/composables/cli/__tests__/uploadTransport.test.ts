@@ -3,8 +3,8 @@ import { createUploadScheduler, uploadAttachment, uploadChunkSize, type UploadRe
 
 describe('upload transport: terminal bandwidth remains available', () => {
   for (const scenario of [
-    { host: 'cold-fast', timings: [150, 66, 82], expectedChunk: 98304 },
-    { host: 'cold-slow', timings: [250, 66, 197.072], expectedChunk: 8192 },
+    { host: 'cold-fast', timings: [150, 66, 148, 82, 84], expectedChunk: 98304 },
+    { host: 'cold-slow', timings: [250, 66, 197.072, 205, 199], expectedChunk: 8192 },
   ]) test(`${scenario.host}: upload calibration excludes HTTP setup and response latency without a WebSocket sample`, async () => {
     let clock = 0
     const timing = spyOn(performance, 'now').mockImplementation(() => clock)
