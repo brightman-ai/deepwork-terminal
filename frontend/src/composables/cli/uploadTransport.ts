@@ -6,19 +6,20 @@ export const UPLOAD_MAX_CHUNK = 256 * 1024
 const PROBE_BYTES = 16 * 1024
 const TARGET_BODY_MS = 100
 
-export function createUploadScheduler(pause = (ms: number) => new Promise<void>(r => setTimeout(r, ms)), concurrency = 1) {
+export function createUploadScheduler(concurrency = 1) {
   const lanes: Promise<unknown>[] = Array.from({ length: concurrency }, () => Promise.resolve())
   let next = 0
   return function schedule<T>(operation: () => Promise<T>): Promise<T> {
     const lane = next++ % lanes.length
     const result = lanes[lane].then(operation)
     // Both success and failure release the lane; a failed file cannot strand a batch.
-    lanes[lane] = result.catch(() => {}).then(() => pause(4))
+    // The network callback already yields. Timers here get throttled in hidden pages.
+    lanes[lane] = result.catch(() => {})
     return result
   }
 }
 
-export const scheduleUploadRequest = createUploadScheduler(undefined, 2)
+export const scheduleUploadRequest = createUploadScheduler(2)
 const rtts = new Map<string, number>()
 const rates = new Map<string, number>()
 const measuredAt = new Map<string, number>()
@@ -49,12 +50,21 @@ export function preferredUploadChunkSize(url: string): number {
 export interface UploadResponse { status: number; json: unknown }
 export type UploadRequest = (url: string, body: FormData | Blob,
   onProgress?: (sent: number, total: number) => void) => Promise<UploadResponse>
+interface AttachmentResume {
+  uploadId: string
+  chunkSize: number
+  totalChunks: number
+  received?: number[]
+}
+// Only the same immutable Blob in the same session may reuse its failed token.
+const resumable = new WeakMap<Blob, Map<string, AttachmentResume>>()
+
 
 /** A bounded probe once per destination measures the actual uplink, rather than
  * guessing it from navigator.connection's download estimate. Old peers retain
  * their multipart route, serialized through the same lane. */
 export async function uploadAttachment(url: string, blob: Blob, metadata: FormData,
-  request: UploadRequest, onProgress: (sent: number, total: number) => void): Promise<UploadResponse> {
+  request: UploadRequest, onProgress: (sent: number, total: number, resumed?: number) => void): Promise<UploadResponse> {
   const key = originOf(url)
   if (Date.now() - (measuredAt.get(key) ?? 0) >= 60_000) rates.delete(key)
   if (blob.size <= UPLOAD_MIN_CHUNK) {
@@ -104,17 +114,29 @@ export async function uploadAttachment(url: string, blob: Blob, metadata: FormDa
   }
   const chunkSize = uploadChunkSize(rates.get(key)!)
   metadata.set('chunkSize', String(chunkSize))
-  const init = await scheduleUploadRequest(() => request(url + '/init', metadata))
+  const previous = resumable.get(blob)?.get(url)
+  if (previous) metadata.set('resumeId', previous.uploadId)
+  else metadata.delete('resumeId')
+  let init = await scheduleUploadRequest(() => request(url + '/init', metadata))
+  if (previous && [404, 409].includes(init.status)) {
+    resumable.get(blob)?.delete(url)
+    metadata.delete('resumeId')
+    init = await scheduleUploadRequest(() => request(url + '/init', metadata))
+  }
   if (init.status !== 200) return init
-  const info = init.json as { uploadId: string; chunkSize: number; totalChunks: number }
+  const info = init.json as AttachmentResume
   if (!info?.uploadId || !Number.isSafeInteger(info.chunkSize) || info.chunkSize < UPLOAD_MIN_CHUNK || info.chunkSize > UPLOAD_MAX_CHUNK
     || info.totalChunks !== Math.max(1, Math.ceil(blob.size / info.chunkSize))) {
     throw new Error('invalid upload initialization')
   }
   const base = url.replace(/\/sessions\/[^/]+\/paste-upload$/, '/files/upload')
+  let complete = false
   try {
     let nextIndex = 0
-    let sent = 0
+    const received = new Set((info.received || []).filter(i => Number.isInteger(i) && i >= 0 && i < info.totalChunks))
+    const resumed = [...received].reduce((n, i) => n + Math.min(info.chunkSize, blob.size - i * info.chunkSize), 0)
+    let sent = resumed
+    if (resumed) onProgress(sent, blob.size, resumed)
     let failure: UploadResponse | undefined
     let exception: unknown
     let stopped = false
@@ -122,13 +144,21 @@ export async function uploadAttachment(url: string, blob: Blob, metadata: FormDa
       try {
         while (!stopped && nextIndex < info.totalChunks) {
           const index = nextIndex++
+          if (received.has(index)) continue
           const part = blob.slice(index * info.chunkSize, Math.min(blob.size, (index + 1) * info.chunkSize))
-          const result = await scheduleUploadRequest(() => request(
-            `${base}/chunk?uploadId=${encodeURIComponent(info.uploadId)}&index=${index}&ack=index`, part))
+          let result: UploadResponse | undefined
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              result = await scheduleUploadRequest(() => request(
+                base + '/chunk?uploadId=' + encodeURIComponent(info.uploadId) + '&index=' + index + '&ack=index', part))
+              if (![408, 429, 500, 502, 503, 504].includes(result.status) || attempt === 2) break
+            } catch (error) { if (attempt === 2) throw error }
+          }
+          if (!result) throw new Error('upload failed')
           if (result.status !== 200) { failure = result; stopped = true; return }
           // ACKs can arrive out of order. Count payload bytes exactly once.
           sent += part.size
-          onProgress(sent, blob.size)
+          onProgress(sent, blob.size, resumed)
         }
       } catch (error) { exception = error; stopped = true }
     }
@@ -136,13 +166,18 @@ export async function uploadAttachment(url: string, blob: Blob, metadata: FormDa
     await Promise.all([worker(), worker()])
     if (exception) throw exception
     if (failure) return failure
-    const complete = new FormData()
-    complete.append('uploadId', info.uploadId)
-    return await scheduleUploadRequest(() => request(base + '/complete', complete))
+    const form = new FormData()
+    form.append('uploadId', info.uploadId)
+    const result = await scheduleUploadRequest(() => request(base + '/complete', form))
+    complete = result.status === 200
+    return result
   } finally {
-    // Complete removes staging on success; abort reclaims partial files on any exit.
-    const abort = new FormData()
-    abort.append('uploadId', info.uploadId)
-    void scheduleUploadRequest(() => request(base + '/abort', abort)).catch(() => {})
+    if (complete) resumable.get(blob)?.delete(url)
+    else {
+      let targets = resumable.get(blob)
+      if (!targets) { targets = new Map(); resumable.set(blob, targets) }
+      targets.set(url, info)
+      // Preserve ACKed parts for Retry; server TTL reclaims abandoned uploads.
+    }
   }
 }

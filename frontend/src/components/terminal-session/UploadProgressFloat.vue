@@ -1,5 +1,13 @@
 <template>
-  <div v-if="entries.length" class="upf-root" :class="{ 'upf-mobile': isMobile }" data-testid="upload-progress-float">
+  <div
+    v-if="entries.length"
+    class="upf-root"
+    :class="{ 'upf-mobile': isMobile }"
+    data-testid="upload-progress-float"
+    @touchstart.stop
+    @touchmove.stop
+    @touchend.stop
+  >
     <div class="upf-pill">
       <template v-if="active.length">
         <div class="upf-row">

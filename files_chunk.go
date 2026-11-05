@@ -324,6 +324,32 @@ func (s *Server) initChunkUpload(w http.ResponseWriter, r *http.Request, clipboa
 		writeJSON(w, http.StatusOK, map[string]bool{"probe": true})
 		return
 	}
+	if clipboard && r.FormValue("resumeId") != "" {
+		resumeID := r.FormValue("resumeId")
+		if !validUploadID(resumeID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid resume id"})
+			return
+		}
+		chunkStoreMu.Lock()
+		defer chunkStoreMu.Unlock()
+		stagingDir := s.chunkStagingDir(resumeID)
+		meta, err := readChunkMeta(stagingDir)
+		// The token belongs to this exact attachment/session, with cwd frozen at init.
+		if err != nil || meta.ClipboardSession != r.FormValue("session") ||
+			meta.Name != name || meta.Size != size || meta.MIME != r.FormValue("mime") {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "upload cannot be resumed"})
+			return
+		}
+		if err := writeChunkMeta(stagingDir, meta); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot renew upload"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"uploadId": resumeID, "chunkSize": meta.ChunkSize,
+			"totalChunks": meta.TotalChunks, "received": scanReceivedChunks(stagingDir, meta),
+		})
+		return
+	}
 
 	chunkSize := int64(chunkUploadChunkSize)
 	if requested := r.FormValue("chunkSize"); requested != "" {

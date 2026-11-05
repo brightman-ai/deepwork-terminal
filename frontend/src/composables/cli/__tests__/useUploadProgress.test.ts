@@ -9,6 +9,20 @@ async function store() {
 }
 
 describe('useUploadProgress — delayed-reveal upload store', () => {
+  test('resumed server bytes advance progress without inflating current upload speed', async () => {
+    const { createUploadProgressStore } = await store()
+    let time = 0
+    const s = createUploadProgressStore(() => time)
+    const id = s.register('recording.m4a', 10000, undefined, true)
+    time = 1000
+    s.progress(id, 8000, 10000, 8000)
+    expect(s.entries.value[0].sent).toBe(8000)
+    expect(s.entries.value[0].speedBps).toBe(0)
+    time = 2000
+    s.progress(id, 10000, 10000, 8000)
+    expect(s.entries.value[0].speedBps).toBe(1000)
+    s.remove(id)
+  })
   test('completed batch bytes remain visible until the other file settles', async () => {
     const { createUploadProgressStore } = await store()
     const s = createUploadProgressStore()

@@ -31,6 +31,7 @@ export interface UploadEntry {
   revealed: boolean
   speedBps?: number
   etaSeconds?: number | null
+  resumed?: number
   error?: string
   /** Re-runs this exact upload (and, on success, re-injects its path). Undefined
    * for call sites that never wired one — the float hides the button then. */
@@ -41,7 +42,7 @@ export interface UploadProgressStore {
   /** Visible entries only, oldest first (batch order). */
   entries: ComputedRef<UploadEntry[]>
   register: (name: string, size: number, retry?: () => void, revealImmediately?: boolean) => string
-  progress: (id: string, sent: number, total: number) => void
+  progress: (id: string, sent: number, total: number, resumed?: number) => void
   complete: (id: string) => void
   /** `retryable: false` drops the entry's retry action — see fail(). */
   fail: (id: string, message: string, retryable?: boolean) => void
@@ -59,7 +60,7 @@ export function createUploadProgressStore(now = () => performance.now()): Upload
 
   function sample(): void {
     const all = Array.from(byId.values())
-    const speed = totalMeter.sample(all.reduce((n, e) => n + e.sent, 0))
+    const speed = totalMeter.sample(all.reduce((n, e) => n + e.sent - (e.resumed || 0), 0))
     const active = all.filter(e => e.status === 'uploading')
     const remaining = active.reduce((n, e) => n + Math.max(0, e.total - e.sent), 0)
     for (const e of active) {
@@ -105,7 +106,7 @@ export function createUploadProgressStore(now = () => performance.now()): Upload
       retry,
     }
     byId.set(id, entry)
-    totalMeter.sample(Array.from(byId.values()).reduce((n, e) => n + e.sent, 0))
+    totalMeter.sample(Array.from(byId.values()).reduce((n, e) => n + e.sent - (e.resumed || 0), 0))
     if (!timer) timer = setInterval(sample, 250)
     if (!revealImmediately) {
       setTimeout(() => {
@@ -119,11 +120,12 @@ export function createUploadProgressStore(now = () => performance.now()): Upload
     return id
   }
 
-  function progress(id: string, sent: number, total: number): void {
+  function progress(id: string, sent: number, total: number, resumed = 0): void {
     const e = byId.get(id)
     if (!e) return
     e.sent = Math.max(e.sent, Math.min(Math.max(0, sent), total > 0 ? total : e.total))
     if (total > 0) e.total = total
+    e.resumed = Math.max(e.resumed || 0, Math.min(e.sent, resumed))
     sample()
   }
 

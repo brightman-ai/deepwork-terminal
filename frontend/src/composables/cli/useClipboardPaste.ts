@@ -15,6 +15,7 @@ import { pasteUploadHeaders, resolvePasteUploadTarget } from '@terminal/composab
 import { createLogger, traceHeaders, type TraceContext } from '@ce/utils/obs'
 import { apiUrl } from '@ce/utils/runtimeBase'
 import { uploadAttachment } from '@terminal/composables/cli/uploadTransport'
+import { xhrUploadFormData } from '@terminal/composables/cli/uploadHttp'
 
 export interface PasteResult {
   type: 'text' | 'image' | 'file' | 'none'
@@ -200,8 +201,8 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
       const headers = pasteUploadHeaders(uploadTarget, traceHeaders(options.trace))
       const url = apiUrl(uploadTarget.url)
       const { status, json } = await uploadAttachment(url, blob, formData,
-        (requestUrl, body, progress) => xhrUploadFormData(requestUrl, body, headers, progress), (sent, total) => {
-        uploadProgress.progress(entryId, sent, total || blob.size)
+        (requestUrl, body, progress) => xhrUploadFormData(requestUrl, body, headers, progress), (sent, total, resumed) => {
+        uploadProgress.progress(entryId, sent, total || blob.size, resumed)
       })
 
       // Mirror cliFetch's 401/429 handling (clear stale code + prompt / throttle
@@ -294,44 +295,6 @@ export function useClipboardPaste(targetOrSessionId: ClipboardPasteTarget | (() 
   // dismissUpload exposes the store's single deletion authority (remove) so the progress float
   // can close an errored pill — the only mutation the float triggers; everything else flows in.
   return { processPaste, uploadFile, uploadImage, uploading, lastError, uploads: uploadProgress.entries, dismissUpload: uploadProgress.remove }
-}
-
-interface XhrUploadResult {
-  status: number
-  json: unknown
-}
-
-/** POST a FormData body via XMLHttpRequest and resolve with {status, json}. The
- * only reason this exists instead of fetch(): XHR is the sole browser API that
- * exposes `upload.onprogress` (real bytes-sent), which fetch cannot report. */
-function xhrUploadFormData(
-  url: string,
-  formData: FormData | Blob,
-  headers: Record<string, string>,
-  onProgress?: (sent: number, total: number) => void,
-): Promise<XhrUploadResult> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', url, true)
-    for (const [key, value] of Object.entries(headers)) {
-      xhr.setRequestHeader(key, value)
-    }
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress?.(e.loaded, e.total)
-    }
-    xhr.onload = () => {
-      let json: unknown = null
-      try {
-        json = xhr.responseText ? JSON.parse(xhr.responseText) : null
-      } catch {
-        json = null
-      }
-      resolve({ status: xhr.status, json })
-    }
-    xhr.onerror = () => reject(new Error('network error'))
-    xhr.ontimeout = () => reject(new Error('upload timed out'))
-    xhr.send(formData)
-  })
 }
 
 function uploadFilename(blob: Blob, mime: string, explicit?: string): string {

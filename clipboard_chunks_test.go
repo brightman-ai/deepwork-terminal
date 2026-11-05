@@ -102,3 +102,58 @@ func TestChunkUploadNegotiatedSizeCannotReuseOldResume(t *testing.T) {
 	require.Equal(t, int64(8192), resume.ChunkSize)
 	require.Equal(t, []int{0}, resume.Received)
 }
+
+func TestClipboardChunkResumeKeepsPartsAndBindsSession(t *testing.T) {
+	server, sm, _ := newDrawerTestServer(t)
+	cwd := t.TempDir()
+	_, err := sm.CreateWithOptions(CreateOptions{Name: "resume-owner", CWD: cwd})
+	require.NoError(t, err)
+	sess := sessionByName(t, sm, "resume-owner")
+	form := url.Values{"name": {"recording.m4a"}, "mime": {"audio/mp4"}, "size": {"25000"}, "chunkSize": {"8192"}}
+	initURL := formatURL(server, "/sessions/%s/paste-upload/init", sess.ID)
+	resp, err := httpPostForm(initURL, form, "")
+	require.NoError(t, err)
+	var init chunkInitResp
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&init))
+	resp.Body.Close()
+	payload := makeChunkPayload(25000)
+	sendChunk(t, server, init.UploadID, 0, payload[:8192])
+	form.Set("resumeId", init.UploadID)
+	form.Set("chunkSize", "65536")
+	resp, err = httpPostForm(initURL, form, "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var resumed chunkInitResp
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&resumed))
+	resp.Body.Close()
+	require.Equal(t, init.UploadID, resumed.UploadID)
+	require.Equal(t, int64(8192), resumed.ChunkSize)
+	require.Equal(t, []int{0}, resumed.Received)
+	form.Set("size", "25001")
+	resp, err = httpPostForm(initURL, form, "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	resp.Body.Close()
+	form.Set("size", "25000")
+	_, err = sm.CreateWithOptions(CreateOptions{Name: "other-owner", CWD: cwd})
+	require.NoError(t, err)
+	other := sessionByName(t, sm, "other-owner")
+	resp, err = httpPostForm(formatURL(server, "/sessions/%s/paste-upload/init", other.ID), form, "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	resp.Body.Close()
+	// The refused attempt neither deletes nor corrupts the original valid upload.
+	for i := 1; i < init.TotalChunks; i++ {
+		start, end := i*8192, min((i+1)*8192, len(payload))
+		sendChunk(t, server, init.UploadID, i, payload[start:end])
+	}
+	resp, err = httpPostForm(formatURL(server, "/files/upload/complete"), url.Values{"uploadId": {init.UploadID}}, "")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var done struct{ Path string }
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&done))
+	data, err := os.ReadFile(done.Path)
+	require.NoError(t, err)
+	require.Equal(t, payload, data)
+}

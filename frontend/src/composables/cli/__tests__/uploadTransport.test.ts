@@ -2,6 +2,60 @@ import { describe, expect, test } from 'bun:test'
 import { createUploadScheduler, noteUploadRtt, uploadAttachment, uploadChunkSize, type UploadRequest } from '../uploadTransport'
 
 describe('upload transport: terminal bandwidth remains available', () => {
+  test('queued uploads continue even when background JavaScript timers cannot fire', async () => {
+    const original = globalThis.setTimeout
+    globalThis.setTimeout = (() => 0) as unknown as typeof setTimeout
+    try {
+      const schedule = createUploadScheduler()
+      const transfers = Promise.all([1, 2, 3, 4].map(n => schedule(async () => {
+        await Promise.resolve()
+        return n
+      })))
+      const outcome = await Promise.race([transfers, new Promise(r => original(() => r('stuck'), 100))])
+      expect(outcome).toEqual([1, 2, 3, 4])
+    } finally { globalThis.setTimeout = original }
+  })
+
+  test('retry of the same immutable file keeps acknowledged parts and resumes only the gap', async () => {
+    const url = 'https://resume.example/api/sessions/demo/paste-upload'
+    const data = new Uint8Array(40000).map((_, i) => i % 239)
+    const blob = new Blob([data])
+    const form = new FormData()
+    form.set('name', 'recording.m4a')
+    form.set('size', String(blob.size))
+    const parts = new Map<number, Blob>()
+    const initResumeIds: string[] = []
+    const posted: number[] = []
+    let fail = true
+    let aborts = 0
+    const request: UploadRequest = async (target, body) => {
+      if (target.includes('probe=1')) return { status: 200, json: { probe: true } }
+      if (target.endsWith('/init')) {
+        initResumeIds.push(String((body as FormData).get('resumeId') || ''))
+        return { status: 200, json: { uploadId: 'owned-upload', chunkSize: 8192, totalChunks: 5, received: [...parts.keys()] } }
+      }
+      if (target.includes('/chunk?')) {
+        const index = Number(new URL(target).searchParams.get('index'))
+        posted.push(index)
+        if (index === 2 && fail) return { status: 503, json: {} }
+        parts.set(index, body as Blob)
+        return { status: 200, json: {} }
+      }
+      if (target.endsWith('/abort')) { aborts++; parts.clear() }
+      if (target.endsWith('/complete')) expect(new Uint8Array(await new Blob([0, 1, 2, 3, 4].map(i => parts.get(i)!)).arrayBuffer())).toEqual(data)
+      return { status: 200, json: { path: '/work/tmp/files/recording.m4a' } }
+    }
+    expect((await uploadAttachment(url, blob, form, request, () => {})).status).toBe(503)
+    expect(aborts).toBe(0)
+    const acknowledged = [...parts.keys()]
+    expect(acknowledged).toContain(0)
+    fail = false
+    const offset = posted.length
+    expect((await uploadAttachment(url, blob, form, request, () => {})).status).toBe(200)
+    expect(initResumeIds).toEqual(['', 'owned-upload'])
+    expect(posted.slice(offset).every(i => !acknowledged.includes(i))).toBe(true)
+  })
+
   test('a rejected file cannot poison another file sharing its capacity probe', async () => {
     const url = 'https://mixed.example/api/sessions/demo/paste-upload'
     const rejected = new FormData()
@@ -26,7 +80,7 @@ describe('upload transport: terminal bandwidth remains available', () => {
   })
 
   test('concurrent callers share one sender and a failed request releases it', async () => {
-    const lane = createUploadScheduler(async () => {})
+    const lane = createUploadScheduler()
     let active = 0
     let maximum = 0
     const events: number[] = []
@@ -53,7 +107,7 @@ describe('upload transport: terminal bandwidth remains available', () => {
   })
 
   test('the shared two-request window bounds concurrent bulk sends', async () => {
-    const lane = createUploadScheduler(async () => {}, 2)
+    const lane = createUploadScheduler(2)
     let active = 0
     let maximum = 0
     await Promise.all(Array.from({ length: 12 }, () => lane(async () => {

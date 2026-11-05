@@ -16,6 +16,7 @@ import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { apiUrl } from '@ce/utils/runtimeBase'
 import { preferredUploadChunkSize, scheduleUploadRequest } from '@terminal/composables/cli/uploadTransport'
+import { withUploadDeadline } from '@terminal/composables/cli/uploadHttp'
 
 /** One entry of GET /files/recent — a file an agent recently wrote/edited. */
 export interface RecentFileItem {
@@ -367,7 +368,7 @@ export async function chunkedUploadInit(
     form.append('name', file.name)
     form.append('size', String(file.size))
     form.append('chunkSize', String(preferredUploadChunkSize(apiUrl(cliApi('/files/upload/init')))))
-    const resp = await scheduleUploadRequest(() => cliFetch(cliApi('/files/upload/init'), { method: 'POST', body: form }))
+    const resp = await scheduleUploadRequest(() => withUploadDeadline(signal => cliFetch(cliApi('/files/upload/init'), { method: 'POST', body: form, signal })))
     if (!resp.ok) {
       let limitMb: number | undefined
       try { limitMb = ((await resp.json()) as { limit_mb?: number }).limit_mb } catch { /* non-JSON */ }
@@ -382,10 +383,10 @@ export async function chunkedUploadInit(
 export async function chunkedUploadChunk(uploadId: string, index: number, blob: Blob): Promise<boolean> {
   const { cliFetch } = useCliAuth()
   try {
-    const resp = await scheduleUploadRequest(() => cliFetch(
+    const resp = await scheduleUploadRequest(() => withUploadDeadline(signal => cliFetch(
       cliApi(`/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${index}&ack=index`),
-      { method: 'POST', body: blob },
-    ))
+      { method: 'POST', body: blob, signal },
+    )))
     return resp.ok
   } catch {
     return false
@@ -399,7 +400,7 @@ export async function chunkedUploadComplete(sessionId: string, uploadId: string)
     const form = new FormData()
     form.append('session', sessionId)
     form.append('uploadId', uploadId)
-    const resp = await cliFetch(cliApi('/files/upload/complete'), { method: 'POST', body: form })
+    const resp = await withUploadDeadline(signal => cliFetch(cliApi('/files/upload/complete'), { method: 'POST', body: form, signal }))
     if (!resp.ok) return null
     return (await resp.json()) as ChunkCompleteResult
   } catch {
@@ -413,7 +414,7 @@ export async function chunkedUploadAbort(uploadId: string): Promise<void> {
   try {
     const form = new FormData()
     form.append('uploadId', uploadId)
-    await cliFetch(cliApi('/files/upload/abort'), { method: 'POST', body: form })
+    await withUploadDeadline(signal => cliFetch(cliApi('/files/upload/abort'), { method: 'POST', body: form, signal }))
   } catch { /* best-effort */ }
 }
 
