@@ -387,6 +387,23 @@ function currentPaneOf(tabId: string): PaneId {
   return layoutOf(tabId).solo ?? focusedPaneOf(tabId)
 }
 
+// A desktop tab click leaves DOM focus on the tab button. Merely showing its
+// terminal does not give xterm (or an existing compose draft) the keyboard back.
+// Wait for v-show and child initialization; a later selection owns the handoff.
+watch([
+  () => props.activeTabId,
+  () => props.tabsWithSession.find((item) => item.id === props.activeTabId)?.sessionId,
+], ([tabId, sessionId]) => {
+  if (!tabId || !sessionId || isMobile.value) return
+  void nextTick(() => requestAnimationFrame(() => {
+    if (props.activeTabId !== tabId || isMobile.value) return
+    const tab = props.tabsWithSession.find((item) => item.id === tabId)
+    if (tab?.sessionId !== sessionId) return
+    const pane = tab.split ? currentPaneOf(tabId) : 'first'
+    paneRefs[pane === 'first' ? tabId : `${tabId}__split2`]?.focusTaskInput()
+  }))
+})
+
 /** 当前格的常驻标记（状态行底边一道强调色）。只剩一格（放大 / 折叠）时不需要标。 */
 function isFocusedPane(tabId: string, pane: PaneId): boolean {
   return !layoutOf(tabId).solo && focusedPaneOf(tabId) === pane
