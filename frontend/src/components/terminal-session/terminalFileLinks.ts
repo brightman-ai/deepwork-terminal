@@ -461,7 +461,10 @@ function renderedProseReferenceRows(buffer: TerminalBufferLike, current: number,
         if (workLeft < 0) return undefined
         const delimiters = referenceDelimiters(text)
         const spansCuts = (start: number, end: number): boolean => cuts.every(cut => start < cut && cut < end)
-        const owners = delimiters.closed.filter(range => spansCuts(range.start, range.end))
+        // A sentence separator can finish the file before a later row closes
+        // the surrounding prose parentheses. Only join the file's own cuts.
+        const owners = [...delimiters.closed, ...parenthesisRanges(text, delimiters.closed)]
+          .filter(range => spansCuts(range.start, range.end))
         const links = owners.length ? findTerminalFileLinks(text) : []
         const owned = owners.some(range => {
           if (links.some(link => range.start < link.start && link.end < range.end
@@ -864,6 +867,34 @@ function bareFileReference(value: string, offset: number): { raw: string; start:
   return { raw, start }
 }
 
+/** Parentheses can contain a path followed by a sentence, not just a filename.
+ * Only a complete file/location or explicit directory before the punctuation
+ * establishes this boundary. Internal name commas and nested brackets survive;
+ * quoted, Markdown and file-tool fields are handled by their literal owners. */
+function proseFileSeparator(value: string): number {
+  if (NON_FILE_SCHEME_RE.test(value)) return -1
+  const stack: string[] = []
+  let quote = ''
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if (ch === '\\') { i++; continue }
+    if (quote) { if (ch === quote) quote = ''; continue }
+    if (/["'`]/u.test(ch)) { quote = ch; continue }
+    if (PATH_WRAPPERS[ch]) { stack.push(PATH_WRAPPERS[ch]); continue }
+    if (PATH_CLOSERS.has(ch)) { if (stack.pop() !== ch) return -1; continue }
+    if (stack.length || !/[，。；！？、,;]/u.test(ch)) continue
+    // Bound the cheap suffix check even for long punctuation-heavy records.
+    const tail = value.slice(Math.max(0, i - 80), i)
+    if (!/(?:\.[\p{L}\p{N}]{1,16}|\/)(?::\d+(?:[-:]\d+)?|#L\d+(?:-L?\d+)?)?$/u.test(tail)
+      && !Array.from(SPECIAL_FILE_NAMES).some(name => tail.endsWith(name))) continue
+    const prefix = value.slice(0, i)
+    if (splitLocalHtmlReference(prefix).suffix) continue
+    const location = prefix.search(/(?::\d|#L\d)/u)
+    if (isFileReference(location < 0 ? prefix : prefix.slice(0, location))) return i
+  }
+  return -1
+}
+
 /** Locate call wrappers without consuming their arguments. Quoted / Markdown /
  * file-tool ranges are opaque, so filename parentheses cannot close a call. */
 function parenthesisRanges(line: string, owned: readonly { start: number; end: number }[]): Array<{ start: number; end: number; call: boolean }> {
@@ -878,6 +909,16 @@ function parenthesisRanges(line: string, owned: readonly { start: number; end: n
     else if (')）》】'.includes(line[i])) {
       const opening = stack.pop()
       if (opening?.close === line[i]) pairs.push({start: opening.start, end: i + 1, call: opening.call})
+    }
+  }
+  // The reference itself may be complete at sentence punctuation while a
+  // formatter puts the rest of the parenthetical note on another hard row.
+  // The virtual end only lets the caller slice that existing text; it adds no
+  // characters to the target or to the source-cell coordinates.
+  for (const opening of stack) {
+    if (opening.call) break
+    if (proseFileSeparator(line.slice(opening.start + 1)) >= 0) {
+      pairs.push({start: opening.start, end: line.length + 1, call: false})
     }
   }
   return pairs.sort((a, b) => a.start - b.start)
@@ -1070,6 +1111,16 @@ export function findTerminalFileLinks(line: string, hardCuts: readonly number[] 
     const introduction = /^(?:在|位于|见)\s+(?=\/|~\/|\.{1,2}\/)/u.exec(value)?.[0] ?? ''
     const field = value.slice(introduction.length), offset = start + 1 + introduction.length
     const reference = /\s/.test(field) ? { raw: field, start: offset } : bareFileReference(field, offset)
+    const separator = proseFileSeparator(reference.raw)
+    if (separator >= 0) {
+      add(reference.raw.slice(0, separator), reference.start)
+      const tailStart = reference.start + separator + 1
+      for (const link of findTerminalFileLinks(reference.raw.slice(separator + 1))) {
+        links.push({...link, start: tailStart + link.start, end: tailStart + link.end})
+      }
+      owned.push({start, end})
+      continue
+    }
     add(reference.raw, reference.start, line.slice(end))
     if (links.length > count) owned.push({start, end})
   }
@@ -1104,7 +1155,15 @@ export function findTerminalFileLinks(line: string, hardCuts: readonly number[] 
         const option = inCall ? /^--[\w-]+=/.exec(token[0])?.[0] ?? '' : ''
         const reference = bareFileReference(token[0].slice(option.length), span.start + (token.index ?? 0) + option.length)
         if (reference.raw === 'Node.js' && /^\s+(?:\d+\s+actions?\b|runtime\b)/i.test(line.slice(reference.start + reference.raw.length))) continue
-        add(reference.raw, reference.start, '', true)
+        let value = reference.raw, offset = reference.start
+        while (value) {
+          const separator = proseFileSeparator(value)
+          const piece = bareFileReference(separator < 0 ? value : value.slice(0, separator), offset)
+          add(piece.raw, piece.start, '', true)
+          if (separator < 0) break
+          value = value.slice(separator + 1)
+          offset += separator + 1
+        }
       }
     }
   }

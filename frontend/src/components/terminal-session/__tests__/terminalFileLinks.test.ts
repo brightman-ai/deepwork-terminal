@@ -4,6 +4,58 @@ import { terminalPathScenarios } from './fixtures/terminalPathScenarios'
 import { diffLineNumber, editedDiffLineLink, editedDiffLineLinkFromBuffer, editedFileHeader, findTerminalFileLinks, findWrappedTerminalFileLinks, wrappedTerminalRows, parseFileLocationSuffix, terminalCellRange, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../terminalFileLinks'
 
 describe('findTerminalFileLinks', () => {
+  it('ends a parenthesized file before sentence punctuation and keeps later references independent', () => {
+    const path = '~/docs/example/设计方案.md'
+    for (const [open, close] of [['（', '）'], ['(', ')'], ['【', '】'], ['《', '》']]) {
+      for (const separator of ['，', ',', '；', ';', '。', '！', '？', '、']) {
+        const text = `● 已保存${open}${path}${separator}这里只更新方案，另见 README.md 的说明${close}。`
+        const links = findTerminalFileLinks(text)
+        expect(links.map(l => l.path)).toEqual([path, 'README.md'])
+        expect(text.slice(links[0].start, links[0].end + 1)).toBe(path)
+        expect(text.slice(links[1].start, links[1].end + 1)).toBe('README.md')
+      }
+    }
+  })
+
+  it('separates adjacent ASCII file-list punctuation without dropping parenthesized filename spaces or locations', () => {
+    expect(findTerminalFileLinks('(docs/my report.md，说明)').map(l => l.path)).toEqual(['docs/my report.md'])
+    expect(findTerminalFileLinks('(docs/app.ts:121，说明)')[0]).toMatchObject({path: 'docs/app.ts', lineStart: 121})
+    for (const text of ['(docs/a.md,docs/b.md)', 'docs/a.md,docs/b.md', '(docs/a.md;docs/b.md)']) {
+      const links = findTerminalFileLinks(text)
+      expect(links.map(l => l.path)).toEqual(['docs/a.md', 'docs/b.md'])
+      for (const link of links) expect(text.slice(link.start, link.end + 1)).toBe(link.path)
+    }
+    expect(findTerminalFileLinks('~/docs/a.md,这里只更新方案').map(l => l.path)).toEqual(['~/docs/a.md'])
+  })
+
+  it('preserves literal comma names in explicit targets and commas before a filename extension', () => {
+    for (const path of ['docs/report,final.md', 'docs/报告，终稿.md', 'docs/report.md，final copy.md']) {
+      for (const text of [`"${path}"`, `\`${path}\``, `[文档](<${path}>)`, `Read(${path})`, `● Write(${path})`, `  ⎿  Wrote 1 line to ${path}`]) {
+        expect(findTerminalFileLinks(text).map(l => l.path)).toEqual([path])
+      }
+    }
+    for (const path of ['docs/report,final.md', 'docs/报告，终稿.md', 'docs/report(final, copy).md']) {
+      expect(findTerminalFileLinks(`(${path})`).map(l => l.path)).toEqual([path])
+    }
+    expect(findTerminalFileLinks('docs/report,final.md').map(l => l.path)).toEqual(['docs/report,final.md'])
+    expect(findTerminalFileLinks('(docs/app.html?tags=one,two)').map(l => l.path)).toEqual(['docs/app.html?tags=one,two'])
+    expect(findTerminalFileLinks('https://example.com/a.md,docs/b.md')).toEqual([])
+  })
+
+  it('keeps the comma and prose outside both file selections at every soft-wrap cut', () => {
+    const path = '~/docs/example/中文方案.md'
+    const text = `● 已保存（${path}，这里只更新方案，另见 README.md 的说明）。`
+    for (let cut = 1; cut < text.length; cut++) {
+      const rows = [{text: text.slice(0, cut), isWrapped: false}, {text: text.slice(cut), isWrapped: true}]
+      const links = rows.flatMap((_, row) => findWrappedTerminalFileLinks(rows, row))
+      for (const target of [path, 'README.md']) {
+        const fragments = links.filter(link => link.path === target)
+        expect(fragments.length).toBeGreaterThan(0)
+        expect(fragments.map(link => rows[link.row].text.slice(link.rawStart, link.rawStart + link.rawLength)).join('')).toBe(target)
+      }
+    }
+  })
+
   it('links the whole review directory in the synthetic Chinese sentence', () => {
     const path = 'docs/.tg/work/20300000-asc-0.9.7-103/'
     const text = `⏺ 文件文文文文已文草文文文文文文，文文文文(${path}):`
