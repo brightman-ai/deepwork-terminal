@@ -52,9 +52,10 @@ const emit = defineEmits<{ (event: 'open'): void }>()
   background: hsl(var(--accent, 240 4% 22%));
 }
 .copy-mode-entry--toolbar {
+  width: 44px;
   min-width: 44px;
   min-height: 44px;
-  padding: 0 9px;
+  padding: 0;
   border: 1px solid var(--tb-btn-border, #333);
   border-bottom: 2px solid var(--tb-btn-depth, #111);
   border-radius: 6px;
@@ -63,6 +64,7 @@ const emit = defineEmits<{ (event: 'open'): void }>()
   font-size: 0.7rem;
   font-weight: 600;
 }
+.copy-mode-entry--toolbar span { display: none; }
 .copy-mode-entry--toolbar:hover:not(:disabled) { background: #303039; }
 .copy-mode-entry:focus-visible { outline: 2px solid hsl(var(--ring, 240 5% 64%)); outline-offset: 1px; }
 .copy-mode-entry:active:not(:disabled) { transform: translateY(1px) scale(0.96); }

@@ -1,179 +1,186 @@
 <template>
-  <div class="toolbar-strip" @mousedown.prevent>
-    <!-- 1. ESC -->
-    <button class="tb-btn" @click="$emit('sendKey', '\x1b')" title="Escape">
-      Esc
-    </button>
+  <div class="keyboard-toolbar" role="toolbar" aria-label="终端按键" @mousedown.prevent>
+    <div class="toolbar-strip">
+      <!-- 1. ESC -->
+      <button class="tb-btn" @click="$emit('sendKey', '\x1b')" title="Escape">
+        Esc
+      </button>
 
-    <!-- 2. TAB (icon-only to save width; title tooltip + the standard ⇥ glyph keep it clear) -->
-    <button class="tb-btn tb-btn--tab" @click="$emit('sendKey', '\t')" title="Tab">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="4,7 10,12 4,17" />
-        <line x1="10" y1="12" x2="20" y2="12" />
-        <line x1="20" y1="7" x2="20" y2="17" />
-      </svg>
-    </button>
+      <!-- 2. TAB (icon-only to save width; title tooltip + the standard ⇥ glyph keep it clear) -->
+      <button class="tb-btn tb-btn--tab" @click="$emit('sendKey', '\t')" title="Tab">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4,7 10,12 4,17" />
+          <line x1="10" y1="12" x2="20" y2="12" />
+          <line x1="20" y1="7" x2="20" y2="17" />
+        </svg>
+      </button>
 
-    <!-- 3. Numpad toggle -->
+      <!-- 3. Numpad toggle -->
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn--panel-numpad': activePanel === 'numpad' }"
+        @click="$emit('toggleNumpad')"
+        title="Numpad"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="5" cy="5" r="2" />
+          <circle cx="12" cy="5" r="2" />
+          <circle cx="19" cy="5" r="2" />
+          <circle cx="5" cy="12" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="19" cy="12" r="2" />
+          <circle cx="5" cy="19" r="2" />
+          <circle cx="12" cy="19" r="2" />
+          <circle cx="19" cy="19" r="2" />
+        </svg>
+      </button>
+
+      <!-- Application history Copy Mode is separate from tmux's native `cp` action. Keep it
+           beside compose so desktop and mobile use one predictable entry. -->
+      <CopyModeButton
+        placement="toolbar"
+        :disabled="copyModeDisabled"
+        @open="$emit('openCopyMode')"
+      />
+
+      <!-- 4. Chat / Compose toggle -->
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn--panel-compose': activePanel === 'compose' }"
+        @click="$emit('toggleCompose')"
+        title="Compose"
+      >
+        <svg width="15" height="14" viewBox="0 0 24 22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />
+        </svg>
+      </button>
+
+      <!-- 5. Shift (sticky modifier) -->
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn--sticky-active': stickyShift }"
+        @click="$emit('toggleShift')"
+        title="Shift"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3l-8 9h5v8h6v-8h5z" />
+        </svg>
+      </button>
+
+      <!-- 6. Ctrl (sticky modifier) -->
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn--sticky-active': stickyCtrl }"
+        @click="$emit('toggleCtrl')"
+        title="Ctrl"
+      >
+        Ctrl
+      </button>
+
+      <!-- 7. Alt (sticky modifier) -->
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn--sticky-active': stickyAlt }"
+        @click="$emit('toggleAlt')"
+        title="Alt"
+      >
+        Alt
+      </button>
+
+      <!-- 9. Toggle system keyboard -->
+      <button
+        class="tb-btn"
+        :class="{ 'tb-btn--active-blue': activePanel === 'none' && keyboardUp }"
+        @click="$emit('toggleKeyboard')"
+        title="Toggle keyboard"
+      >
+        <svg width="16" height="13" viewBox="0 0 24 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <rect x="1" y="1" width="22" height="16" rx="3"/>
+          <line x1="5" y1="6" x2="7" y2="6"/><line x1="10" y1="6" x2="12" y2="6"/><line x1="15" y1="6" x2="17" y2="6"/>
+          <line x1="5" y1="10" x2="7" y2="10"/><line x1="10" y1="10" x2="12" y2="10"/><line x1="15" y1="10" x2="17" y2="10"/>
+          <line x1="8" y1="14" x2="16" y2="14"/>
+        </svg>
+      </button>
+
+      <!-- 9.5. Attach file (📎) — mobile + remote upload -->
+      <button
+        class="tb-btn tb-btn--attach"
+        @click="$emit('attach')"
+        title="Upload file/image"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
+
+      <!-- Paste — low-frequency, in the scrollable tools. Pastes the OS clipboard
+           into the terminal via the robust paste path (handles iOS / HTTP-insecure fallback in the
+           host). Icon + caption "粘贴" so it reads as paste-into-terminal, not generic clipboard. -->
+      <button
+        class="tb-btn tb-btn--paste tb-btn--labeled"
+        @click="$emit('clipboard', 'paste')"
+        title="Paste from clipboard"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="8" y="2" width="8" height="4" rx="1" />
+          <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
+        </svg>
+        <span class="tb-cap">粘贴</span>
+      </button>
+
+      <!-- Page 2: quick-access keys (scroll right to see) -->
+      <div class="tb-divider" />
+      <!-- Backspace (delete-left, \x7f) — needed when tmux is absent and the TmuxQuickBar
+           ⌫ is hidden. Distinct from Del below, which is forward-delete (\x1b[3~). -->
+      <button class="tb-btn tb-btn--extra tb-btn--bksp" @click="$emit('sendKey', '\x7f')" title="Backspace">⌫</button>
+      <button class="tb-btn tb-btn--extra tb-btn--del" @click="$emit('sendKey', '\x1b[3~')" title="Delete (forward)">Del</button>
+      <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[5~')" title="Page Up">PgU</button>
+      <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[6~')" title="Page Down">PgD</button>
+      <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[A')" title="Arrow Up">↑</button>
+      <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[B')" title="Arrow Down">↓</button>
+      <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x03')" title="Ctrl+C">^C</button>
+      <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', ' ')" title="Space (tmux select)">Spc</button>
+      <!-- KeyCastr keystroke-display toggle (2nd-to-last). Reflects current on/off state;
+           emits toggle-keycast so the surface flips its keystrokeHudVisible (default ON).
+           Icon (a single keycap with a radiating "cast" arc) + caption "击键" so it is
+           not confused with the system-keyboard toggle (which is a full keyboard grid). -->
+      <button
+        class="tb-btn tb-btn--extra tb-btn--keycast tb-btn--labeled"
+        :class="{ 'tb-btn--keycast-on': keycastOn }"
+        @click="$emit('toggleKeycast')"
+        :title="keycastOn ? 'KeyCastr 击键显示: 开' : 'KeyCastr 击键显示: 关'"
+      >
+        <svg width="15" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <!-- a keycap -->
+          <rect x="3" y="9" width="11" height="11" rx="2"/>
+          <line x1="6.5" y1="14.5" x2="10.5" y2="14.5"/>
+          <!-- radiating "cast" arcs (keystroke broadcast) -->
+          <path d="M16 8a5 5 0 014 4"/>
+          <path d="M16 4a9 9 0 018 8"/>
+        </svg>
+        <span class="tb-cap">击键</span>
+      </button>
+      <button
+        class="tb-btn tb-btn--extra tb-btn--debug"
+        @click="$emit('toggleHud')"
+        title="Debug HUD"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9c.26.6.77 1.02 1.51 1.08H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+        </svg>
+      </button>
+    </div>
+    <!-- Submit stays outside the scroll viewport, including after visiting extra keys. -->
     <button
-      class="tb-btn"
-      :class="{ 'tb-btn--panel-numpad': activePanel === 'numpad' }"
-      @click="$emit('toggleNumpad')"
-      title="Numpad"
+      type="button"
+      class="tb-btn tb-btn--enter"
+      aria-label="回车 Enter"
+      title="Enter"
+      @click="$emit('sendKey', '\r')"
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-        <circle cx="5" cy="5" r="2" />
-        <circle cx="12" cy="5" r="2" />
-        <circle cx="19" cy="5" r="2" />
-        <circle cx="5" cy="12" r="2" />
-        <circle cx="12" cy="12" r="2" />
-        <circle cx="19" cy="12" r="2" />
-        <circle cx="5" cy="19" r="2" />
-        <circle cx="12" cy="19" r="2" />
-        <circle cx="19" cy="19" r="2" />
-      </svg>
-    </button>
-
-    <!-- Application history Copy Mode is separate from tmux's native `cp` action. Keep it
-         beside compose so desktop and mobile use one predictable entry. -->
-    <CopyModeButton
-      placement="toolbar"
-      :disabled="copyModeDisabled"
-      @open="$emit('openCopyMode')"
-    />
-
-    <!-- 4. Chat / Compose toggle -->
-    <button
-      class="tb-btn"
-      :class="{ 'tb-btn--panel-compose': activePanel === 'compose' }"
-      @click="$emit('toggleCompose')"
-      title="Compose"
-    >
-      <svg width="15" height="14" viewBox="0 0 24 22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" />
-      </svg>
-    </button>
-
-    <!-- 5. Shift (sticky modifier) -->
-    <button
-      class="tb-btn"
-      :class="{ 'tb-btn--sticky-active': stickyShift }"
-      @click="$emit('toggleShift')"
-      title="Shift"
-    >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 3l-8 9h5v8h6v-8h5z" />
-      </svg>
-    </button>
-
-    <!-- 6. Ctrl (sticky modifier) -->
-    <button
-      class="tb-btn"
-      :class="{ 'tb-btn--sticky-active': stickyCtrl }"
-      @click="$emit('toggleCtrl')"
-      title="Ctrl"
-    >
-      Ctrl
-    </button>
-
-    <!-- 7. Alt (sticky modifier) -->
-    <button
-      class="tb-btn"
-      :class="{ 'tb-btn--sticky-active': stickyAlt }"
-      @click="$emit('toggleAlt')"
-      title="Alt"
-    >
-      Alt
-    </button>
-
-    <!-- 9. Toggle system keyboard -->
-    <button
-      class="tb-btn"
-      :class="{ 'tb-btn--active-blue': activePanel === 'none' && keyboardUp }"
-      @click="$emit('toggleKeyboard')"
-      title="Toggle keyboard"
-    >
-      <svg width="16" height="13" viewBox="0 0 24 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-        <rect x="1" y="1" width="22" height="16" rx="3"/>
-        <line x1="5" y1="6" x2="7" y2="6"/><line x1="10" y1="6" x2="12" y2="6"/><line x1="15" y1="6" x2="17" y2="6"/>
-        <line x1="5" y1="10" x2="7" y2="10"/><line x1="10" y1="10" x2="12" y2="10"/><line x1="15" y1="10" x2="17" y2="10"/>
-        <line x1="8" y1="14" x2="16" y2="14"/>
-      </svg>
-    </button>
-
-    <!-- 9.5. Attach file (📎) — mobile + remote upload -->
-    <button
-      class="tb-btn tb-btn--attach"
-      @click="$emit('attach')"
-      title="Upload file/image"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
-      </svg>
-    </button>
-
-    <!-- 10. Enter (frequently used, kept in page 1) -->
-    <button class="tb-btn tb-btn--enter" @click="$emit('sendKey', '\r')" title="Enter">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="9,10 4,15 9,20"/><path d="M20 4v7a4 4 0 01-4 4H4"/>
-      </svg>
-    </button>
-
-    <!-- 11. Paste — low-frequency, so it trails Enter (was up front). Pastes the OS clipboard
-         into the terminal via the robust paste path (handles iOS / HTTP-insecure fallback in the
-         host). Icon + caption "粘贴" so it reads as paste-into-terminal, not generic clipboard. -->
-    <button
-      class="tb-btn tb-btn--paste tb-btn--labeled"
-      @click="$emit('clipboard', 'paste')"
-      title="Paste from clipboard"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="8" y="2" width="8" height="4" rx="1" />
-        <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
-      </svg>
-      <span class="tb-cap">粘贴</span>
-    </button>
-
-    <!-- Page 2: quick-access keys (scroll right to see) -->
-    <div class="tb-divider" />
-    <!-- Backspace (delete-left, \x7f) — needed when tmux is absent and the TmuxQuickBar
-         ⌫ is hidden. Distinct from Del below, which is forward-delete (\x1b[3~). -->
-    <button class="tb-btn tb-btn--extra tb-btn--bksp" @click="$emit('sendKey', '\x7f')" title="Backspace">⌫</button>
-    <button class="tb-btn tb-btn--extra tb-btn--del" @click="$emit('sendKey', '\x1b[3~')" title="Delete (forward)">Del</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[5~')" title="Page Up">PgU</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[6~')" title="Page Down">PgD</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[A')" title="Arrow Up">↑</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x1b[B')" title="Arrow Down">↓</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', '\x03')" title="Ctrl+C">^C</button>
-    <button class="tb-btn tb-btn--extra" @click="$emit('sendKey', ' ')" title="Space (tmux select)">Spc</button>
-    <!-- KeyCastr keystroke-display toggle (2nd-to-last). Reflects current on/off state;
-         emits toggle-keycast so the surface flips its keystrokeHudVisible (default ON).
-         Icon (a single keycap with a radiating "cast" arc) + caption "击键" so it is
-         not confused with the system-keyboard toggle (which is a full keyboard grid). -->
-    <button
-      class="tb-btn tb-btn--extra tb-btn--keycast tb-btn--labeled"
-      :class="{ 'tb-btn--keycast-on': keycastOn }"
-      @click="$emit('toggleKeycast')"
-      :title="keycastOn ? 'KeyCastr 击键显示: 开' : 'KeyCastr 击键显示: 关'"
-    >
-      <svg width="15" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <!-- a keycap -->
-        <rect x="3" y="9" width="11" height="11" rx="2"/>
-        <line x1="6.5" y1="14.5" x2="10.5" y2="14.5"/>
-        <!-- radiating "cast" arcs (keystroke broadcast) -->
-        <path d="M16 8a5 5 0 014 4"/>
-        <path d="M16 4a9 9 0 018 8"/>
-      </svg>
-      <span class="tb-cap">击键</span>
-    </button>
-    <button
-      class="tb-btn tb-btn--extra tb-btn--debug"
-      @click="$emit('toggleHud')"
-      title="Debug HUD"
-    >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9c.26.6.77 1.02 1.51 1.08H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
       </svg>
     </button>
   </div>
@@ -210,7 +217,7 @@ defineEmits<{
 </script>
 
 <style scoped>
-.toolbar-strip {
+.keyboard-toolbar {
   --tb-bg: #1c1c1e;
   --tb-btn-bg: #2c2c2e;
   --tb-btn-border: #3a3a3c;
@@ -220,10 +227,20 @@ defineEmits<{
 
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
   padding: 4px 6px;
   background: var(--tb-bg);
   border-top: 1px solid var(--tb-btn-border);
+}
+.toolbar-strip {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
@@ -361,7 +378,15 @@ defineEmits<{
   padding: 0 8px;
 }
 .tb-btn--extra:active { background: #162840; }
-.tb-btn--enter { color: #80c880; border-color: #2a4a2a; background: #0e1e0e; }
+.tb-btn--enter {
+  flex: 0 0 48px;
+  min-width: 48px;
+  height: 44px;
+  padding: 0;
+  color: #80c880;
+  border-color: #2a4a2a;
+  background: #0e1e0e;
+}
 /* Backspace (delete-left) — neutral tone, keeps the red reserved for forward-delete. */
 .tb-btn--bksp { color: #d0b0ff; border-color: #3a2a5a; background: #170e28; font-size: 0.82rem; }
 .tb-btn--del { color: #ff8080; border-color: #4a2020; background: #1e0e0e; }
