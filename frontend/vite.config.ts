@@ -39,15 +39,22 @@ const ceToolchain = [
 export default defineConfig({
   plugins: [vue()],
   resolve: {
-    alias: {
-      '@terminal': fileURLToPath(new URL('./src', import.meta.url)),
-      '@ce': fileURLToPath(new URL('../../deepwork/frontend/src', import.meta.url)),
-      ...Object.fromEntries(
-        ceToolchain.map((pkg) => [pkg, fileURLToPath(new URL(`./node_modules/${pkg}`, import.meta.url))])
-      ),
-      // runtime wants the real package; the tsconfig maps it to @types for checking
-      qrcode: fileURLToPath(new URL('./node_modules/qrcode', import.meta.url))
-    }
+    alias: [
+      // Re-minifying xterm 6.0.0's ESM entry leaves an undeclared enum variable in requestMode.
+      // Any DECRQM query (e.g. agy's CSI ?2026$p) then stops the parser and all later output.
+      // Use the same release's UMD entry, which survives the production build. Match only it
+      // so imports such as @xterm/xterm/css/xterm.css still resolve to their own files.
+      { find: /^@xterm\/xterm$/, replacement: fileURLToPath(new URL('./node_modules/@xterm/xterm/lib/xterm.js', import.meta.url)) },
+      ...Object.entries({
+        '@terminal': fileURLToPath(new URL('./src', import.meta.url)),
+        '@ce': fileURLToPath(new URL('../../deepwork/frontend/src', import.meta.url)),
+        ...Object.fromEntries(
+          ceToolchain.map((pkg) => [pkg, fileURLToPath(new URL(`./node_modules/${pkg}`, import.meta.url))])
+        ),
+        // runtime wants the real package; the tsconfig maps it to @types for checking
+        qrcode: fileURLToPath(new URL('./node_modules/qrcode', import.meta.url))
+      }).map(([find, replacement]) => ({ find, replacement }))
+    ]
   },
   server: {
     port: 9001,
