@@ -87,7 +87,7 @@ describe('page focus ownership', () => {
     } finally { h.guard.dispose() }
   })
   it('keeps only bundle positions from stacks, dropping origins, query strings and function names', () => {
-    expect(focusCallerLocations('Error\n at privateName (http://private:123/assets/index-Ab3.js:2:81?auth=secret)\n at http://host/src/composables/cli/pageFocus.ts:77:8')).toEqual([
+    expect(focusCallerLocations('Error\n at exampleCaller (http://localhost/assets/index-Ab3.js:2:81?example=synthetic-demo)\n at http://localhost/src/composables/cli/pageFocus.ts:77:8')).toEqual([
       'index-Ab3.js:2:81', 'pageFocus.ts:77:8',
     ])
   })
