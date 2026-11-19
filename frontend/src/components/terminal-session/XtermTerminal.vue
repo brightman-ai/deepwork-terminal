@@ -47,6 +47,7 @@ import {
 } from '@terminal/composables/cli/useCliInputDiagnostics'
 import { useXtermKeyboardFallback } from '@terminal/composables/cli/useXtermKeyboardFallback'
 import { clearXtermHelperTextareaValue } from '@terminal/composables/cli/useXtermHelperTextarea'
+import { guardTerminalElementFocus, terminalFocusBoundary } from '@terminal/composables/cli/terminalFocus'
 import { captureTerminalViewport, restoreTerminalViewport } from '@terminal/composables/cli/terminalViewportRestore'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
 import { createLogger } from '@ce/utils/obs'
@@ -626,9 +627,12 @@ function initTerminal() {
     noteRenderMetrics(summary)
   })
   const helperTextarea = configureInputAnchor()
+  // Includes xterm's internal keyup/Linux-selection focus, not just our public focus calls.
+  diagnosticCleanups.push(guardTerminalElementFocus(helperTextarea, 'xterm-helper'))
   // keydown only: keypress / keyup of a consumed key never reach this textarea (the host moved focus
   // away), and returning false for them would only suppress xterm's own refocus-on-keyup.
-  terminal.attachCustomKeyEventHandler((ev) => !(ev.type === 'keydown' && props.keyIntercept?.(ev) === true))
+  terminal.attachCustomKeyEventHandler((ev) => terminalFocusBoundary().keyEvent(ev)
+    && !(ev.type === 'keydown' && props.keyIntercept?.(ev) === true))
   diagnosticCleanups.push(attachXtermKeydownFallback(helperTextarea))
   diagnosticCleanups.push(
     attachCliInputDiagnostics(helperTextarea, 'xterm-helper', { disableProxy: props.disableProxy }),

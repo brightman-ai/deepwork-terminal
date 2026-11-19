@@ -131,6 +131,9 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
 export function reportServerEvent(msg: string, ext: Record<string, unknown> = {}): void {
   _pushEvent(msg, ext)
 }
+
+/** Window blur may not hide a visible tab; send its last ownership events immediately. */
+export function flushServerEvents(): void { void _flush(true) }
 const OUTPUT_AFTER_SUBMIT_WINDOW_MS = 2_000
 const MAX_OUTPUT_AFTER_SUBMIT_LOGS = 8
 const OUTPUT_AFTER_SUBMIT_MIN_LOG_INTERVAL_MS = 250

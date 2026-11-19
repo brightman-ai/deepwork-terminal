@@ -136,6 +136,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { Copy, Check, Trash2, RotateCcw } from 'lucide-vue-next'
 import { useComposeBox } from '@terminal/composables/cli/useComposeBox'
 import { composerKeyAction } from '@terminal/composables/cli/composeKeys'
+import { guardTerminalElementFocus } from '@terminal/composables/cli/terminalFocus'
 import {
   clampPlacement,
   defaultPlacement,
@@ -314,7 +315,9 @@ function resetPlacement(): void {
   layout()
 }
 
+let releaseFocusGuard: (() => void) | undefined
 onMounted(() => {
+  releaseFocusGuard = guardTerminalElementFocus(textareaRef.value, 'compose-desktop')
   saved = readSaved()
   layout() // 同步：在第一次绘制之前就位，不闪一下
   const el = rootRef.value
@@ -325,6 +328,7 @@ onMounted(() => {
   }
 })
 onUnmounted(() => {
+  releaseFocusGuard?.()
   resizeObserver?.disconnect()
   resizeObserver = null
 })

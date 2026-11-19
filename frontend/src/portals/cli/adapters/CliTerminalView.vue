@@ -239,6 +239,7 @@ import {
 } from '@terminal/components/terminal-session/splitCollapse'
 import type { EffectiveStatus } from '@terminal/composables/cli/useAgentOverview'
 import { useDeviceDetection } from '@terminal/composables/cli/useDeviceDetection'
+import { terminalFocusBoundary } from '@terminal/composables/cli/terminalFocus'
 import type { AgentState, WSConnectionStatus } from '@terminal/types/terminal'
 import type { SessionHudSnapshot } from '@terminal/composables/cli/useSessionHud'
 import type { TabSplit } from '@terminal/types/workbench'
@@ -395,12 +396,16 @@ watch([
   () => props.tabsWithSession.find((item) => item.id === props.activeTabId)?.sessionId,
 ], ([tabId, sessionId]) => {
   if (!tabId || !sessionId || isMobile.value) return
+  const focusBoundary = terminalFocusBoundary()
+  const focusToken = focusBoundary.token()
   void nextTick(() => requestAnimationFrame(() => {
     if (props.activeTabId !== tabId || isMobile.value) return
     const tab = props.tabsWithSession.find((item) => item.id === tabId)
     if (tab?.sessionId !== sessionId) return
     const pane = tab.split ? currentPaneOf(tabId) : 'first'
-    paneRefs[pane === 'first' ? tabId : `${tabId}__split2`]?.focusTaskInput()
+    focusBoundary.run('tab-input-handoff', () => {
+      paneRefs[pane === 'first' ? tabId : `${tabId}__split2`]?.focusTaskInput()
+    }, focusToken)
   }))
 })
 

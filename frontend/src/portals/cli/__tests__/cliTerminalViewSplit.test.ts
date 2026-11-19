@@ -23,7 +23,8 @@ beforeAll(async () => {
 
 // ── 环境：纯 bun 里没有 window / ResizeObserver / requestAnimationFrame，按需补，用完还原 ──────────────
 const g = globalThis as unknown as Record<string, unknown>
-const SAVED = { window: g.window, ResizeObserver: g.ResizeObserver, requestAnimationFrame: g.requestAnimationFrame }
+const SAVED = { window: g.window, document: g.document, ResizeObserver: g.ResizeObserver, requestAnimationFrame: g.requestAnimationFrame }
+let windowFocused = true
 let resizeCallbacks: Array<() => void> = []
 let windowListeners: Record<string, Array<(e: unknown) => void>> = {}
 let cleanups: Array<() => void> = []
@@ -32,6 +33,8 @@ function setEnv(width: number, height: number, mobile: boolean): void {
   windowListeners = {}
   resizeCallbacks = []
   focusCalls.length = 0
+  windowFocused = true
+  g.document = { visibilityState: 'visible', hasFocus: () => windowFocused, addEventListener: () => {} }
   g.window = {
     innerWidth: width,
     innerHeight: height,
@@ -379,6 +382,36 @@ for (const orientation of ['row', 'column'] as const) {
 
 // A tab selection is a desktop keyboard handoff, including remote tabs.
 describe('desktop tab input handoff', () => {
+  it('leaving the browser cancels queued input recovery, including a quick return', async () => {
+    const { props } = mount({ width: 1200, height: 800, mobile: false, split: row(), splitAllowed: true })
+    props.tabsWithSession.push({ id: 't2', name: 'second', sessionId: 'OTHER', split: row() })
+    await settle()
+    const frames: Array<() => void> = []
+    g.requestAnimationFrame = (cb: () => void) => { frames.push(cb); return frames.length }
+    props.activeTabId = 't2'
+    await settle()
+    windowFocused = false
+    windowListeners.blur?.forEach(fn => fn({}))
+    windowFocused = true
+    windowListeners.focus?.forEach(fn => fn({}))
+    frames.splice(0).forEach(cb => cb())
+    expect(focusCalls).toEqual([])
+    props.activeTabId = 't1'
+    await settle()
+    frames.splice(0).forEach(cb => cb())
+    expect(focusCalls).toEqual(['S1'])
+  })
+  it('a session becoming ready cannot reclaim focus from another application', async () => {
+    const { props } = mount({ width: 1200, height: 800, mobile: false, split: row(), splitAllowed: true })
+    props.tabsWithSession.push({ id: 't2', name: 'second', sessionId: '', split: row() })
+    props.activeTabId = 't2'
+    await settle()
+    windowFocused = false
+    windowListeners.blur?.forEach(fn => fn({}))
+    props.tabsWithSession[1]!.sessionId = 'OTHER'
+    await settle()
+    expect(focusCalls).toEqual([])
+  })
   it('switching to a remote tab hands input to its current pane', async () => {
     const { props } = mount({ width: 1200, height: 800, mobile: false, split: row(), splitAllowed: true })
     const remoteTab = { id: 't2', name: 'remote', sessionId: 'REMOTE', split: row(), isRemote: true, httpBase: 'http://other-machine:18074/api/cli', wsBase: 'ws://other-machine:18074/api/cli' }

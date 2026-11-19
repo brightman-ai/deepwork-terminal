@@ -29,6 +29,7 @@ import { ref, watch, nextTick } from 'vue'
 import { useCliAuth } from '@terminal/composables/cli/useCliAuth'
 import { cliApi } from '@terminal/composables/cli/useCliApiPrefix'
 import { apiUrl } from '@ce/utils/runtimeBase'
+import { focusInForeground } from '@terminal/composables/cli/terminalFocus'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -51,7 +52,7 @@ watch(() => props.visible, async (v) => {
     error.value = ''
     code.value = ''
     await nextTick()
-    inputRef.value?.focus()
+    focusInForeground(inputRef.value, 'terminal-auth-open')
   }
 })
 

@@ -21,6 +21,7 @@
 import { ref, nextTick, watch } from 'vue'
 import { Search, X, ChevronUp, ChevronDown, CaseSensitive, WholeWord, Regex } from 'lucide-vue-next'
 import type { TerminalFindOptions } from './terminalSearchOptions'
+import { focusInForeground } from '@terminal/composables/cli/terminalFocus'
 
 const props = defineProps<{
   /** 0-based index of the currently active match, -1 = none (see XtermTerminal's searchResultIndex). */
@@ -51,7 +52,7 @@ function options(): TerminalFindOptions {
 
 // Autofocus the moment the bar mounts (it is v-if'd in by the host, so `onMounted`-time is
 // "just opened"). nextTick because the <input> is only in the DOM after this component renders.
-void nextTick(() => inputEl.value?.focus())
+void nextTick(() => focusInForeground(inputEl.value, 'terminal-search-open'))
 
 function onInput(): void {
   emit('search', query.value, options(), true)
@@ -71,7 +72,7 @@ function toggleRegex(): void { regex.value = !regex.value; rerunSearch() }
 function clearQuery(): void {
   query.value = ''
   emit('search', '', options(), false)
-  inputEl.value?.focus()
+  focusInForeground(inputEl.value, 'terminal-search-clear')
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -102,7 +103,7 @@ defineExpose({
   focus: (selectAll = false) => {
     const el = inputEl.value
     if (!el) return
-    el.focus()
+    focusInForeground(el, 'terminal-search-refocus')
     if (selectAll) el.select()
   },
 })
