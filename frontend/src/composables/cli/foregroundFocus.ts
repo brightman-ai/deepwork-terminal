@@ -13,31 +13,37 @@ export function createForegroundFocusBoundary(env: FocusEnvironment) {
   let reported = 0
   let suppressed = 0
 
-  function report(event: string, fields: Record<string, unknown>) {
+  function report(event: string, fields: Record<string, unknown>, details?: () => Record<string, unknown>) {
     const now = env.now()
     if (now - windowStart >= 10_000) { windowStart = now; reported = 0 }
-    if (event !== 'cli.focus.window' && reported++ >= 24) { suppressed++; return }
-    env.report(event, { ...fields, epoch, focused: env.focused(), visible: env.visible(),
+    if (event !== 'cli.focus.window' && event !== 'cli.focus.activation' && reported++ >= 24) { suppressed++; return }
+    env.report(event, { ...fields, ...details?.(), epoch, focused: env.focused(), visible: env.visible(),
       ...(blurredAt === undefined ? {} : { sinceBlurMs: Math.round(now - blurredAt) }), suppressed })
     suppressed = 0
   }
 
-  function permit(source: string, requestedEpoch = epoch): boolean {
+  function permit(source: string, requestedEpoch = epoch, details?: () => Record<string, unknown>): boolean {
     const reason = requestedEpoch !== epoch ? 'stale-request'
       : !env.visible() ? 'hidden' : !env.focused() ? 'window-unfocused' : ''
     if (!reason) return true
-    report('cli.focus.blocked', { source, reason })
+    report('cli.focus.blocked', { source, reason }, details)
     return false
   }
 
   return {
     token: () => epoch,
-    blur() { epoch++; blurredAt = env.now(); report('cli.focus.window', { event: 'blur' }) },
-    focus() { report('cli.focus.window', { event: 'focus' }) },
-    visibility() { if (!env.visible()) epoch++; report('cli.focus.window', { event: 'visibility' }) },
-    run(source: string, action: () => void, requestedEpoch = epoch): boolean {
-      if (!permit(source, requestedEpoch)) return false
-      report('cli.focus.request', { source })
+    blur(fields: Record<string, unknown> = {}) {
+      epoch++; blurredAt = env.now()
+      // Foreground typing must not consume the evidence budget for the first background call.
+      windowStart = env.now(); reported = 0
+      report('cli.focus.window', { ...fields, event: 'blur' })
+    },
+    focus(fields: Record<string, unknown> = {}) { report('cli.focus.window', { ...fields, event: 'focus' }) },
+    visibility(fields: Record<string, unknown> = {}) { if (!env.visible()) epoch++; report('cli.focus.window', { ...fields, event: 'visibility' }) },
+    observe(event: string, fields: Record<string, unknown>) { report(event, fields) },
+    run(source: string, action: () => void, requestedEpoch = epoch, details?: () => Record<string, unknown>): boolean {
+      if (!permit(source, requestedEpoch, details)) return false
+      report('cli.focus.request', { source }, details)
       action()
       return true
     },

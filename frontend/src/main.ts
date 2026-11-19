@@ -7,6 +7,7 @@ import router from './router'
 import App from './App.vue'
 import { configureRemoteSink, createLogger } from '@ce/utils/obs'
 import { reportCliInputDiagnostic } from '@terminal/composables/cli/useCliInputDiagnostics'
+import { installTerminalFocusGuard } from '@terminal/composables/cli/terminalFocus'
 
 // Import Tailwind CSS
 import '@ce/assets/main.css'
@@ -40,6 +41,7 @@ configureRemoteSink({
 })
 const log = createLogger('main')
 const inputLog = createLogger('input-hit-test')
+installTerminalFocusGuard()
 
 // ── Phase 3: Global error capture — window.onerror + unhandledrejection ────────
 // Installed at the earliest possible moment so any error during Vue init is caught.

@@ -22,6 +22,7 @@ import { watch, onUnmounted } from 'vue'
 import type { TmuxState } from '@terminal/types/terminal'
 import { useTmuxState } from '@terminal/composables/cli/useTmuxState'
 import { createStatusEdgeDetector } from '@terminal/composables/cli/statusEdgeDetector'
+import { focusFromNotification } from './terminalFocus'
 
 interface PaneKey { window: number; pane: number }
 function keyOf(k: PaneKey): string { return `${k.window}:${k.pane}` }
@@ -63,7 +64,7 @@ export function useForegroundAgentNotify(sessionId: () => string): void {
         // enough here (the tab is already on the right session).
         icon: '/pwa-192.png',
       })
-      n.onclick = () => { window.focus(); n.close() }
+      n.onclick = event => { focusFromNotification(event); n.close() }
     } catch { /* permission revoked mid-session / quota — ignore */ }
   }
 

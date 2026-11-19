@@ -1,12 +1,16 @@
 import { createForegroundFocusBoundary, guardElementFocus } from './foregroundFocus'
 import { reportServerEvent, flushServerEvents } from './useCliInputDiagnostics'
+import { installPageFocusGuard } from './pageFocus'
 
 let boundary: ReturnType<typeof createForegroundFocusBoundary> | undefined
 let boundaryWindow: Window | undefined
+let pageGuard: ReturnType<typeof installPageFocusGuard> | undefined
 
 export function terminalFocusBoundary() {
   const currentWindow = typeof window === 'undefined' ? undefined : window
   if (boundary && boundaryWindow === currentWindow) return boundary
+  pageGuard?.dispose()
+  pageGuard = undefined
   boundaryWindow = currentWindow
   const page = Math.random().toString(36).slice(2, 10)
   boundary = createForegroundFocusBoundary({
@@ -18,12 +22,19 @@ export function terminalFocusBoundary() {
   })
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const current = boundary
-    window.addEventListener('blur', () => { current.blur(); flushServerEvents() })
-    window.addEventListener('focus', () => current.focus())
-    document.addEventListener('visibilitychange', () => current.visibility())
-    reportServerEvent('cli.focus.boundary', { page, platform: navigator.platform, userAgent: navigator.userAgent })
+    pageGuard = installPageFocusGuard(window, document, current)
+    window.addEventListener('blur', () => { flushServerEvents() })
+    reportServerEvent('cli.focus.boundary', { page, coverage: 'page-v2', platform: navigator.platform, userAgent: navigator.userAgent })
   }
   return boundary
+}
+
+/** Early installation also covers autofocus performed by third-party components at mount. */
+export function installTerminalFocusGuard(): void { terminalFocusBoundary() }
+
+export function focusFromNotification(event: Event): void {
+  terminalFocusBoundary()
+  pageGuard?.activateFromNotification(event)
 }
 
 export function guardTerminalElementFocus(element: HTMLElement | null | undefined, source: string): () => void {

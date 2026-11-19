@@ -34,8 +34,13 @@ function setEnv(width: number, height: number, mobile: boolean): void {
   resizeCallbacks = []
   focusCalls.length = 0
   windowFocused = true
-  g.document = { visibilityState: 'visible', hasFocus: () => windowFocused, addEventListener: () => {} }
+  g.document = { visibilityState: 'visible', hasFocus: () => windowFocused, addEventListener: () => {}, removeEventListener: () => {} }
   g.window = {
+    HTMLElement: class { focus(): void {} },
+    HTMLInputElement: class { select(): void {} },
+    HTMLTextAreaElement: class { select(): void {} },
+    focus(): void {},
+    performance,
     innerWidth: width,
     innerHeight: height,
     // 真的 useDeviceDetection 靠"有触屏事件 && 窗口 < 1024"判定手机（useCliRuntimeMode.ts）。
@@ -391,9 +396,9 @@ describe('desktop tab input handoff', () => {
     props.activeTabId = 't2'
     await settle()
     windowFocused = false
-    windowListeners.blur?.forEach(fn => fn({}))
+    windowListeners.blur?.forEach(fn => fn({ target: g.window }))
     windowFocused = true
-    windowListeners.focus?.forEach(fn => fn({}))
+    windowListeners.focus?.forEach(fn => fn({ target: g.window }))
     frames.splice(0).forEach(cb => cb())
     expect(focusCalls).toEqual([])
     props.activeTabId = 't1'
@@ -407,7 +412,7 @@ describe('desktop tab input handoff', () => {
     props.activeTabId = 't2'
     await settle()
     windowFocused = false
-    windowListeners.blur?.forEach(fn => fn({}))
+    windowListeners.blur?.forEach(fn => fn({ target: g.window }))
     props.tabsWithSession[1]!.sessionId = 'OTHER'
     await settle()
     expect(focusCalls).toEqual([])
