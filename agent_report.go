@@ -50,6 +50,9 @@ func pricingSnapshot() string {
 // service_tier a thread inherited from its ancestors and carried a defaulted provider, and a
 // projection is only recomputed when its file changes — so without a bump the fix would have
 // reached nobody whose rollouts had gone quiet, while looking applied.
+// v14 (current): AGY transcripts (`AGYBrainRoot`) are disjoint paths never present in earlier
+// shards, and `AGYCursor` is additive (`omitempty`), so existing Claude/Codex/Deepwork shards stay
+// valid without evicting multi-GB `agent-index.v14` caches.
 const (
 	agentReportIndexVersion = "v14"
 	agentReportIndexSchema  = "agent-report-index." + agentReportIndexVersion
@@ -75,6 +78,7 @@ type agentFileProjection struct {
 	codexCursor    transcript.CodexRequestCursor
 	claudeCursor   transcript.ClaudeRequestCursor
 	deepworkCursor transcript.DeepworkRequestCursor
+	agyCursor      transcript.AGYRequestCursor
 	dataset        agentanalytics.ActivityDataset
 }
 
@@ -533,6 +537,7 @@ type persistedAgentFileProjection struct {
 	CodexCursor    transcript.CodexRequestCursor    `json:"codex_cursor"`
 	ClaudeCursor   transcript.ClaudeRequestCursor   `json:"claude_cursor"`
 	DeepworkCursor transcript.DeepworkRequestCursor `json:"deepwork_cursor"`
+	AGYCursor      transcript.AGYRequestCursor      `json:"agy_cursor"`
 	Dataset        agentanalytics.ActivityDataset   `json:"dataset"`
 }
 
@@ -547,6 +552,10 @@ func appendUniqueString(values []string, value string) []string {
 
 func recentAgentTranscriptFiles(cutoff time.Time, deepworkRoot string) []string {
 	roots := []string{transcript.ClaudeProjectsRoot(), transcript.CodexSessionsRoot()}
+	agyRoot := transcript.AGYBrainRoot()
+	if strings.TrimSpace(agyRoot) != "" {
+		roots = append(roots, agyRoot)
+	}
 	if strings.TrimSpace(deepworkRoot) != "" {
 		roots = append(roots, deepworkRoot)
 	}
@@ -557,6 +566,9 @@ func recentAgentTranscriptFiles(cutoff time.Time, deepworkRoot string) []string 
 				return nil
 			}
 			if root == deepworkRoot && !strings.HasPrefix(filepath.Base(path), "dw-") {
+				return nil
+			}
+			if agyRoot != "" && root == agyRoot && filepath.Base(path) != "transcript.jsonl" {
 				return nil
 			}
 			if info, statErr := entry.Info(); statErr == nil && !info.ModTime().Before(cutoff) {
@@ -578,6 +590,18 @@ type agentFileIdentity struct {
 }
 
 func inspectAgentFile(path string) (agentFileIdentity, error) {
+	if agyRoot := transcript.AGYBrainRoot(); agyRoot != "" && pathWithinRoot(path, agyRoot) {
+		ident, err := transcript.InspectAGYConversation(path)
+		if err != nil {
+			return agentFileIdentity{}, err
+		}
+		return agentFileIdentity{
+			runtime:   transcript.KindAGY,
+			sessionID: ident.SessionID,
+			project:   ident.Project,
+			root:      ident.Root,
+		}, nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return agentFileIdentity{}, err
@@ -840,13 +864,15 @@ func projectAgentFileProjection(ctx context.Context, path string, identity agent
 		facts, projection.claudeCursor, err = transcript.ScanClaudeRequestUsageIncremental(path, transcript.ClaudeRequestCursor{})
 	case transcript.KindDeepwork:
 		facts, projection.deepworkCursor, err = transcript.ScanDeepworkRequestUsageIncremental(path, transcript.DeepworkRequestCursor{})
+	case transcript.KindAGY:
+		facts, projection.agyCursor, err = transcript.ScanAGYRequestUsageIncremental(path, transcript.AGYRequestCursor{})
 	}
 	if err != nil {
 		return agentFileProjection{}, err
 	}
 	projection.dataset = projectAgentDataset(identity, path, runs)
 	projection.dataset.RequestFacts = facts
-	if projection.codexCursor.MalformedLines > 0 || projection.claudeCursor.MalformedLines > 0 || projection.deepworkCursor.MalformedLines > 0 {
+	if projection.codexCursor.MalformedLines > 0 || projection.claudeCursor.MalformedLines > 0 || projection.deepworkCursor.MalformedLines > 0 || projection.agyCursor.MalformedLines > 0 {
 		projection.dataset.IngestDiagnostics = append(projection.dataset.IngestDiagnostics, "transcript_malformed:"+filepath.Base(path))
 	}
 	projection.reprice()
@@ -878,6 +904,8 @@ func appendAgentFileProjection(ctx context.Context, path string, identity agentF
 		appended, updated.claudeCursor, err = transcript.ScanClaudeRequestUsageIncremental(path, cached.claudeCursor)
 	case transcript.KindDeepwork:
 		appended, updated.deepworkCursor, err = transcript.ScanDeepworkRequestUsageIncremental(path, cached.deepworkCursor)
+	case transcript.KindAGY:
+		appended, updated.agyCursor, err = transcript.ScanAGYRequestUsageIncremental(path, cached.agyCursor)
 	}
 	if err != nil {
 		return agentFileProjection{}, false, err
@@ -888,7 +916,7 @@ func appendAgentFileProjection(ctx context.Context, path string, identity agentF
 	if err != nil {
 		return agentFileProjection{}, false, err
 	}
-	if updated.codexCursor.MalformedLines > cached.codexCursor.MalformedLines || updated.claudeCursor.MalformedLines > cached.claudeCursor.MalformedLines || updated.deepworkCursor.MalformedLines > cached.deepworkCursor.MalformedLines {
+	if updated.codexCursor.MalformedLines > cached.codexCursor.MalformedLines || updated.claudeCursor.MalformedLines > cached.claudeCursor.MalformedLines || updated.deepworkCursor.MalformedLines > cached.deepworkCursor.MalformedLines || updated.agyCursor.MalformedLines > cached.agyCursor.MalformedLines {
 		updated.dataset.IngestDiagnostics = appendUniqueString(updated.dataset.IngestDiagnostics, "transcript_malformed:"+filepath.Base(path))
 	}
 	updated.reprice()
@@ -926,6 +954,8 @@ func loadAgentRunTail(ctx context.Context, path string, identity agentFileIdenti
 			window, err = transcript.NewCodexSource().LoadTranscriptFileWindow(ctx, path, identity.sessionID, req)
 		case transcript.KindClaude:
 			window, err = transcript.NewClaudeSource().LoadTranscriptFileWindow(ctx, path, identity.sessionID, req)
+		case transcript.KindAGY:
+			window, err = transcript.NewAGYSource().LoadTranscriptFileWindow(ctx, path, identity.sessionID, req)
 		default:
 			return nil, "", false, os.ErrInvalid
 		}
@@ -1070,7 +1100,7 @@ func projectArtifactDeltas(workItemID, sourceToolID string, block transcript.Blo
 			return projectApplyPatchArtifacts(workItemID, sourceToolID, patch, toolBlockTime(block))
 		}
 	}
-	path := firstToolInputString(block.ToolInput, "file_path", "path")
+	path := firstToolInputString(block.ToolInput, "file_path", "path", "Path")
 	if path == "" {
 		return nil
 	}
@@ -1082,8 +1112,8 @@ func projectArtifactDeltas(workItemID, sourceToolID string, block transcript.Blo
 	}
 	switch name {
 	case "edit", "editfile", "edit_file":
-		oldText, oldOK := block.ToolInput["old_string"].(string)
-		newText, newOK := block.ToolInput["new_string"].(string)
+		oldText, oldOK := firstToolInputRawString(block.ToolInput, "old_string", "Target")
+		newText, newOK := firstToolInputRawString(block.ToolInput, "new_string", "Replacement")
 		if !oldOK || !newOK || oldText == "" {
 			return nil
 		}
@@ -1098,13 +1128,14 @@ func projectArtifactDeltas(workItemID, sourceToolID string, block transcript.Blo
 		}
 		return []agentanalytics.ArtifactDelta{delta}
 	case "write", "writefile", "write_file":
-		content, ok := block.ToolInput["content"].(string)
+		content, ok := firstToolInputRawString(block.ToolInput, "content", "Content")
 		if !ok {
 			return nil
 		}
 		delta.WrittenLines = agentanalytics.ContentLineCount(content)
 		result := strings.ToLower(block.ToolResult)
-		if strings.Contains(result, "file created successfully") {
+		overwrite, _ := block.ToolInput["Overwrite"].(bool)
+		if strings.Contains(result, "file created successfully") || (strings.Contains(result, "created file") && !overwrite) {
 			delta.Operation = "create"
 			delta.Additions = delta.WrittenLines
 			delta.ChangeCoverage = "complete"
@@ -1209,6 +1240,15 @@ func firstToolInputString(input map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstToolInputRawString(input map[string]interface{}, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if value, ok := input[key].(string); ok {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func toolBlockTime(block transcript.Block) time.Time {

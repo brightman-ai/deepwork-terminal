@@ -146,7 +146,7 @@ export interface FacadeNote {
 type AttributionEvidence = Pick<
   UsageProviderRow,
   'attribution_basis' | 'runtime_provider' | 'top_model' | 'requests' | 'priced_requests'
->
+> & { runtime?: string }
 
 /**
  * How much this row's heading can be trusted, when the answer is anything less than "fully".
@@ -183,6 +183,17 @@ export function facadeNote(provider: AttributionEvidence): FacadeNote | null {
   const priced = provider.priced_requests ?? 0
   const unpriced = Math.max(0, requests - priced)
   const partial = priced > 0 && unpriced > 0
+  if (provider.runtime === 'agy' && provider.runtime_provider === 'google') {
+    const rawTop = provider.top_model?.trim() ?? ''
+    const isGeminiTop = rawTop.toLowerCase().startsWith('gemini')
+    const model = rawTop && !isGeminiTop ? `「${rawTop}」` : '三方模型'
+    return {
+      label: partial ? '含托管三方模型' : '托管三方模型',
+      title: `这些请求在 Antigravity 内调用了 Google 官方托管的 ${model}，额度扣减自 AGY 订阅池，`
+        + `不套用模型原厂直连 API 标价估算。`
+        + (partial ? '其余有公开标价的请求已正常折算。' : ''),
+    }
+  }
   const endpoint = provider.runtime_provider
   const where = endpoint ? `「${endpoint}」` : '一个中转端点'
   const model = provider.top_model ? `「${provider.top_model}」` : '上游的 model id'

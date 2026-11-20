@@ -16,6 +16,8 @@ export function quotaGroupsFor(q: RuntimeQuota): QuotaGroup[] {
     const groups = [...q.quota_groups]
     if (q.runtime === 'codex' && (!q.vendor || q.vendor === 'openai')) {
       groups.sort((a, b) => Number(b.family === 'codex') - Number(a.family === 'codex'))
+    } else if (q.runtime === 'agy') {
+      groups.sort((a, b) => Number(!!b.account_wide) - Number(!!a.account_wide))
     }
     return groups
   }

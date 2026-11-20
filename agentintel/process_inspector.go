@@ -185,6 +185,7 @@ func toolFromCommand(cmd string) AgentTool {
 	}{
 		{"claude", ToolClaude},
 		{"codex", ToolCodex},
+		{"agy", ToolAGY},
 		{"gemini", ToolGemini},
 		{"opencode", ToolOpenCode},
 	} {

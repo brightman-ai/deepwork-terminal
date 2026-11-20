@@ -22,7 +22,7 @@ const savingOutcome = ref<'human_accepted' | 'human_rework' | ''>('')
 const outcomeErrorFor = ref('')
 const outcomeError = ref('')
 
-const runtimeLabel = (runtime: string) => runtime === 'claude' ? 'Claude' : runtime === 'codex' ? 'Codex' : runtime
+const runtimeLabel = (runtime: string) => runtime === 'claude' ? 'Claude' : runtime === 'codex' ? 'Codex' : runtime === 'agy' ? 'AGY' : runtime
 const duration = (seconds?: number) => {
   if (typeof seconds !== 'number') return '—'
   const minutes = Math.round(seconds / 60)

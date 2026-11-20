@@ -947,3 +947,80 @@ func TestAgentReporterRejectsCrossCursorDeepworkConflictAndPreservesLastGood(t *
 		t.Fatalf("conflict was not observable: %+v", after.IngestDiagnostics)
 	}
 }
+
+func TestAgentReporterIngestsAGYTranscriptUsageAndArtifactsWithoutFullDuplicate(t *testing.T) {
+	dataDir := t.TempDir()
+	agyHome := filepath.Join(dataDir, "antigravity-cli")
+	t.Setenv("DW_CODEX_HOME", filepath.Join(dataDir, ".codex"))
+	t.Setenv("DW_CLAUDE_PROJECTS", filepath.Join(dataDir, ".claude", "projects"))
+	t.Setenv("DW_AGY_HOME", agyHome)
+
+	convRoot := "conv-root-1"
+	convSub := "conv-internal-1"
+	rootLogDir := filepath.Join(agyHome, "brain", convRoot, ".system_generated", "logs")
+	subLogDir := filepath.Join(agyHome, "brain", convSub, ".system_generated", "logs")
+	cacheDir := filepath.Join(agyHome, "cache")
+	for _, d := range []string{rootLogDir, subLogDir, cacheDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metaJSON := `{"conversations":{` +
+		`"` + convRoot + `":{"is_internal":false,"summary":{"ID":"` + convRoot + `","WorkspaceURIs":["file:///workspace/deepwork-terminal"]}},` +
+		`"` + convSub + `":{"is_internal":true}` +
+		`}}`
+	if err := os.WriteFile(filepath.Join(cacheDir, "conversation_metadata.json"), []byte(metaJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	rootTranscript := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T11:58:00Z","content":"<USER_REQUEST>\nsupport agy quota\n</USER_REQUEST>"}` + "\n" +
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T11:58:01Z","model":"gemini-4-carbon-high","input_tokens":10000,"cache_read_tokens":5000,"output_tokens":600,"tool_calls":[{"name":"edit_file","args":{"Path":"/workspace/deepwork-terminal/usage.go","Target":"old\n","Replacement":"new1\nnew2\n"}},{"name":"write_file","args":{"Path":"/workspace/deepwork-terminal/docs/spec.md","Content":"line1\nline2\nline3\n"}}]}` + "\n" +
+		`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-20T11:58:11Z","content":"Created At: 2026-11-20T11:58:11Z\nCompleted At: 2026-11-20T11:58:12Z\nMade 1 replacement"}` + "\n" +
+		`{"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-20T11:58:11Z","content":"Created At: 2026-11-20T11:58:11Z\nCompleted At: 2026-11-20T11:58:12Z\nCreated file."}` + "\n" +
+		`{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T11:58:12Z","model":"gemini-4-carbon-high","input_tokens":3000,"cache_read_tokens":15000,"output_tokens":400,"content":"Done."}` + "\n"
+	rootPath := filepath.Join(rootLogDir, "transcript.jsonl")
+	if err := os.WriteFile(rootPath, []byte(rootTranscript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate transcript_full.jsonl must be ignored by recentAgentTranscriptFiles.
+	if err := os.WriteFile(filepath.Join(rootLogDir, "transcript_full.jsonl"), []byte(rootTranscript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Internal subagent trajectory contributes token facts without adding a root human WorkItem.
+	subTranscript := `{"step_index":0,"source":"SYSTEM","type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T11:59:00Z","content":"internal monitor"}` + "\n" +
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T11:59:01Z","model":"gemini-2.5-flash","input_tokens":1000,"cache_read_tokens":0,"output_tokens":100,"content":"ok"}` + "\n"
+	subPath := filepath.Join(subLogDir, "transcript.jsonl")
+	if err := os.WriteFile(subPath, []byte(subTranscript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{rootPath, filepath.Join(rootLogDir, "transcript_full.jsonl"), subPath} {
+		if err := os.Chtimes(p, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reporter := newAgentReporter(dataDir)
+	reporter.now = func() time.Time { return now }
+
+	usageRep := reporter.UsageReport(context.Background(), "24h", "UTC")
+	if len(usageRep.Providers) != 1 {
+		t.Fatalf("expected 1 aggregated Google/agy provider row, got %+v", usageRep.Providers)
+	}
+	prov := usageRep.Providers[0]
+	if prov.Vendor != "google" || prov.Runtime != "agy" || prov.InputTokens != 14000 || prov.CacheReadTokens != 20000 || prov.OutputTokens != 1100 {
+		t.Fatalf("unexpected AGY usage row: %+v", prov)
+	}
+	// gemini-2.5-flash (1 req) has an exact snapshot price; gemini-4-carbon-high (2 reqs) stays honestly unpriced.
+	if prov.Requests != 3 || prov.PricedRequests != 1 {
+		t.Fatalf("expected 3 requests with 1 priced (gemini-2.5-flash), got requests=%d priced=%d", prov.Requests, prov.PricedRequests)
+	}
+
+	actRep := reporter.Report(context.Background(), "24h", "UTC", true)
+	if actRep.Summary.WorkItems != 1 || actRep.Summary.Completed != 1 || actRep.Summary.ModelRequests != 3 {
+		t.Fatalf("unexpected AGY activity summary: %+v", actRep.Summary)
+	}
+	if actRep.Artifacts.ByKind["code"].ModifiedFiles != 1 || actRep.Artifacts.ByKind["doc"].CreatedFiles != 1 {
+		t.Fatalf("expected AGY PascalCase edit_file/write_file artifacts to be counted, got %+v", actRep.Artifacts.ByKind)
+	}
+}

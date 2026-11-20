@@ -53,6 +53,7 @@ func newUsageReporter() *usageReporter {
 			Sources: []usage.ModelScanSource{
 				usage.NewJSONLTokenSource(),
 				usage.NewCodexModelScanSource(),
+				usage.NewAGYModelScanSource(),
 			},
 		}),
 		ttl:     60 * time.Second,

@@ -21,6 +21,8 @@ func TestToolFromCommand(t *testing.T) {
 		{"/tmp/claude-1001/project/worker", ToolNone},
 		{"/usr/bin/gemini", ToolGemini},
 		{"gemini --model pro", ToolGemini},
+		{"/home/user/.local/bin/agy", ToolAGY},
+		{"agy --continue", ToolAGY},
 		{"/usr/local/bin/opencode", ToolOpenCode},
 		{"opencode --dir /tmp", ToolOpenCode},
 		{"/bin/bash tool-wrapper.sh claude", ToolNone}, // wrapper skipped

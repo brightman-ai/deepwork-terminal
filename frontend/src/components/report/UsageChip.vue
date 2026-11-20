@@ -58,7 +58,7 @@ let placementObserver: ResizeObserver | null = null
 // The CALLER's name. Deliberately a lookup with a passthrough default, NOT an enum: a runtime we
 // have never heard of (pro's whale, tomorrow's agent) renders under its own id rather than being
 // dropped or shown as「其他」. The axis is data-driven; only the prettier spellings are listed.
-const runtimeLabel = (r: string) => (r === 'claude' ? 'Claude' : r === 'codex' ? 'Codex' : r === 'gemini' ? 'Gemini' : r)
+const runtimeLabel = (r: string) => (r === 'claude' ? 'Claude' : r === 'codex' ? 'Codex' : r === 'agy' ? 'AGY' : r === 'gemini' ? 'Gemini' : r)
 // The ACCOUNT's name, served by the backend. It is not derived from the runtime any more: the
 // same CLI can bill two vendors, so「Codex」names a program while「Codex 官方」and「Kimi For
 // Coding」name the two bills — and only the latter answers "whose money is this?".
@@ -293,6 +293,7 @@ const groupFacadeNote = (g: UsageVendorGroup) => {
   if (!hit) return null
   if (hit.attribution_basis !== 'endpoint') return facadeNote(hit)
   return facadeNote({
+    runtime: hit.runtime,
     attribution_basis: 'endpoint',
     runtime_provider: hit.runtime_provider,
     top_model: hit.top_model,
@@ -539,9 +540,14 @@ function visibleGroups(q: RuntimeQuota): QuotaGroup[] {
 }
 function additionalGroups(q: RuntimeQuota): QuotaGroup[] {
   const groups = quotaGroupsFor(q)
-  return q.runtime === 'codex' && q.vendor === 'openai' && groups[0]?.family === 'codex' ? groups.slice(1) : []
+  if (q.runtime === 'codex' && q.vendor === 'openai' && groups[0]?.family === 'codex') return groups.slice(1)
+  if (q.runtime === 'agy') return groups.slice(1).filter((group) => !(group.windows ?? []).some((w) => w.used_percent > 0))
+  return []
 }
 const familyLabelOf = (group: QuotaGroup) => group.family_label || group.family || ''
+const showsGroupFamily = (q: RuntimeQuota, groupIndex: number, group: QuotaGroup): boolean =>
+  Boolean(familyLabelOf(group))
+  && (groupIndex > 0 || visibleGroups(q).length > 1 || (q.runtime === 'agy' && additionalGroups(q).length > 0))
 
 // ── credits：厂商自己的消耗单位 ──────────────────────────────────────────────────────────────
 //
@@ -946,8 +952,8 @@ onUnmounted(() => {
             >
               <!-- 主组（账号池）不再挂 family 标签：它就是这一行的主语，重复一遍只是噪音。
                    子限额才需要自报家门，且用厂商给的名字（GPT-5.3-Codex-Spark），不是合并用的 id。 -->
-              <div v-if="(groupIndex > 0 && familyLabelOf(group)) || staleOf(q, group).badge" class="uchip-group-head">
-                <span v-if="groupIndex > 0" class="uchip-plan uchip-family" :title="familyHint(group)">{{ familyLabelOf(group) }}</span>
+              <div v-if="showsGroupFamily(q, groupIndex, group) || staleOf(q, group).badge" class="uchip-group-head">
+                <span v-if="showsGroupFamily(q, groupIndex, group)" class="uchip-plan uchip-family" :title="familyHint(group)">{{ familyLabelOf(group) }}</span>
                 <!-- 「数据已过期」本身就是动作：点它直接向账号查询（probe，与 codex /status 同源）。
                      只说问题不给出路，等于把诊断丢回给用户。 -->
                 <button
@@ -1089,6 +1095,7 @@ onUnmounted(() => {
                 <span class="uchip-prov-cost">{{ fmtCost(row.cost, row.currency, rowIncomplete(row)) }}</span>
                 <!-- 「—」旁边必须有一句解释，否则用户只会当成面板坏了。 -->
                 <span v-if="facadeNote(row)" class="uchip-prov-noprice" :title="facadeNote(row)!.title">{{ facadeNote(row)!.label }}</span>
+                <span v-else-if="(row.priced_requests ?? 0) === 0" class="uchip-prov-noprice" title="这些 model 不在内置价表里。宁可不给数字，也不拿同厂商的近似单价蒙一个——静默错数比空值糟。">无价表</span>
                 <span class="uchip-prov-tok">{{ fmtTokens(row.total_tokens) }} tok</span>
                 <span class="uchip-prov-hit">缓存命中 {{ cacheHitRate(row.cache_read_tokens, row.input_tokens) }}</span>
               </div>
@@ -1298,7 +1305,7 @@ onUnmounted(() => {
           <button
             type="button"
             :disabled="tab === 'agent' ? agentLoading : loading"
-            :title="tab === 'agent' ? '重新读取本地 Agent 事实' : '向 Codex 实时查询账号额度（一次真实请求）。Claude 的额度只能由它自己上报，无法主动查询。'"
+            :title="tab === 'agent' ? '重新读取本地 Agent 事实' : '向支持主动查询的订阅账号（Codex / AGY / Kimi / GLM）实时查询当前额度；Claude 的额度由 statusLine hook 上报。'"
             @click="tab === 'agent' ? refreshAgent() : refresh()"
           >{{ (tab === 'agent' ? agentLoading : loading) ? '查询中…' : '⟳ 刷新' }}</button>
         </div>

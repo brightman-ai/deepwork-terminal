@@ -84,7 +84,7 @@ func (s *agentIndexStore) adoptLegacyIndex(path, schema string) {
 			size: file.Size, modUnixNano: file.ModUnixNano, pricedWith: file.PricedWith,
 			generation: file.Generation, runtime: file.Runtime, sessionID: file.SessionID,
 			codexCursor: file.CodexCursor, claudeCursor: file.ClaudeCursor,
-			deepworkCursor: file.DeepworkCursor, dataset: file.Dataset,
+			deepworkCursor: file.DeepworkCursor, agyCursor: file.AGYCursor, dataset: file.Dataset,
 		})
 	}
 }
@@ -148,7 +148,7 @@ func (s *agentIndexStore) load() map[string]agentFileProjection {
 					pricedWith: projection.PricedWith, generation: projection.Generation,
 					runtime: projection.Runtime, sessionID: projection.SessionID,
 					codexCursor: projection.CodexCursor, claudeCursor: projection.ClaudeCursor,
-					deepworkCursor: projection.DeepworkCursor, dataset: projection.Dataset,
+					deepworkCursor: projection.DeepworkCursor, agyCursor: projection.AGYCursor, dataset: projection.Dataset,
 				}
 				mu.Unlock()
 			}
@@ -184,7 +184,7 @@ func (s *agentIndexStore) save(transcriptPath string, file agentFileProjection) 
 			Size: file.size, ModUnixNano: file.modUnixNano, PricedWith: file.pricedWith,
 			Generation: file.generation, Runtime: file.runtime, SessionID: file.sessionID,
 			CodexCursor: file.codexCursor, ClaudeCursor: file.claudeCursor,
-			DeepworkCursor: file.deepworkCursor, Dataset: file.dataset,
+			DeepworkCursor: file.deepworkCursor, AGYCursor: file.agyCursor, Dataset: file.dataset,
 		},
 	})
 	if err != nil {

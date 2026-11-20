@@ -120,4 +120,18 @@ describe('one account, main limit plus additional limits', () => {
     expect(groups[1].windows?.[0].remaining_percent).toBe(100)
     expect(q.quota_groups?.[0].family).toBe('base_model_inference')
   })
+
+  test('AGY keeps Gemini account-wide pool first while surfacing tighter 3P pool in headline', () => {
+    const agy: RuntimeQuota = {
+      runtime: 'agy', vendor: 'google', display: 'AGY 官方', present: true, billing: 'subscription', health,
+      attribution: { active: true, vendor: 'google', display: 'AGY 官方' },
+      quota_groups: [
+        { family: '3p', family_label: 'Claude / GPT', account_wide: false, snapshot: { age_seconds: 10, source: 'probe', stale: false }, windows: [{ kind: '5h', window_minutes: 300, used_percent: 85, remaining_percent: 15 }] },
+        { family: 'gemini', family_label: 'Gemini Models', account_wide: true, snapshot: { age_seconds: 10, source: 'probe', stale: false }, windows: [{ kind: '5h', window_minutes: 300, used_percent: 29, remaining_percent: 71 }] },
+      ],
+    }
+    expect(quotaGroupsFor(agy).map(g => g.family)).toEqual(['gemini', '3p'])
+    expect(accountTightestRemaining(agy)).toBe(15)
+    expect(findHeadlineQuota([agy], new Set(['google']))?.window.remaining_percent).toBe(15)
+  })
 })

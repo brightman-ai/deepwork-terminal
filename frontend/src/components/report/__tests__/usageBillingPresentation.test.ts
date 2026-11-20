@@ -211,6 +211,30 @@ describe('why a row carries no money', () => {
     const bare: UsageProviderRow = { ...row('moonshot', 'codex'), attribution_basis: 'endpoint' }
     expect(facadeNote(bare)?.title.length ?? 0).toBeGreaterThan(10)
   })
+
+  test('AGY-hosted 3P models explain official Google hosting rather than claiming a relay facade', () => {
+    const agy3p: UsageProviderRow = {
+      ...row('google', 'agy'),
+      attribution_basis: 'endpoint',
+      runtime_provider: 'google',
+      top_model: 'claude-opus-5-5-high',
+      requests: 3,
+      priced_requests: 0,
+    }
+    const note = facadeNote(agy3p)
+    expect(note?.label).toBe('托管三方模型')
+    expect(note?.title).toContain('Antigravity')
+  })
+
+  test('AGY Google subscription covers AGY traffic in 官方订阅 tab', () => {
+    const accounts = [{ vendor: 'google' }]
+    const agyRow: UsageProviderRow = { ...row('google', 'agy'), runtime_provider: 'google' }
+    expect(subscriptionCovers(agyRow, accounts)).toBe(true)
+    expect(usageMoneyPresentation(agyRow, accounts)).toMatchObject({
+      tab: 'sub',
+      semantics: 'api_equivalent',
+    })
+  })
 })
 
 describe('api session row billing label (UB-34)', () => {

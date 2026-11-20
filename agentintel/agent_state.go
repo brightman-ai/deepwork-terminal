@@ -9,6 +9,7 @@ const (
 	ToolNone     AgentTool = ""
 	ToolClaude   AgentTool = "claude"
 	ToolCodex    AgentTool = "codex"
+	ToolAGY      AgentTool = "agy"
 	ToolGemini   AgentTool = "gemini"
 	ToolOpenCode AgentTool = "opencode"
 )
