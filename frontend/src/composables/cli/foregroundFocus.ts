@@ -16,8 +16,8 @@ export function createForegroundFocusBoundary(env: FocusEnvironment) {
   function report(event: string, fields: Record<string, unknown>, details?: () => Record<string, unknown>) {
     const now = env.now()
     if (now - windowStart >= 10_000) { windowStart = now; reported = 0 }
-    if (event !== 'cli.focus.window' && event !== 'cli.focus.activation' && reported++ >= 24) { suppressed++; return }
-    env.report(event, { ...fields, ...details?.(), epoch, focused: env.focused(), visible: env.visible(),
+    if (event !== 'cli.focus.window' && event !== 'cli.focus.activation' && reported++ >= 80) { suppressed++; return }
+    env.report(event, { ...fields, ...details?.(), perfMs: Math.round(now * 10) / 10, epoch, focused: env.focused(), visible: env.visible(),
       ...(blurredAt === undefined ? {} : { sinceBlurMs: Math.round(now - blurredAt) }), suppressed })
     suppressed = 0
   }
@@ -32,6 +32,8 @@ export function createForegroundFocusBoundary(env: FocusEnvironment) {
 
   return {
     token: () => epoch,
+    focused: () => env.focused(),
+    visible: () => env.visible(),
     blur(fields: Record<string, unknown> = {}) {
       epoch++; blurredAt = env.now()
       // Foreground typing must not consume the evidence budget for the first background call.
@@ -48,9 +50,9 @@ export function createForegroundFocusBoundary(env: FocusEnvironment) {
       return true
     },
     keyEvent(event: Pick<KeyboardEvent, 'type' | 'key' | 'metaKey' | 'altKey'>): boolean {
-      // xterm refocuses on keyup, including Meta. A system app-switch release is not a
-      // request to reclaim input. Never preventDefault the OS/browser shortcut here.
-      if (event.type === 'keyup' && (event.key === 'Meta' || event.key === 'Tab' && (event.metaKey || event.altKey))) {
+      // xterm refocuses on keyup, including Meta and Alt (e.g. macOS Contexts Option+Tab).
+      // A system app-switch release is not a request to reclaim input. Never preventDefault here.
+      if (event.type === 'keyup' && (event.key === 'Meta' || event.key === 'Alt' || event.key === 'Tab' && (event.metaKey || event.altKey))) {
         report('cli.focus.blocked', { source: 'xterm-keyup', reason: 'system-key-release' })
         return false
       }

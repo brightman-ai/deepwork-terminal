@@ -96,8 +96,20 @@ function _pushEvent(msg: string, ext: Record<string, unknown>): void {
 // Leaving or hiding the page: hand the queue over with keepalive, which outlives the page and is
 // not subject to the background-tab timer throttling that delays the 2s interval to once a minute.
 if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  let hiddenFlushTimer: ReturnType<typeof setTimeout> | null = null
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') void _flush(true)
+    if (hiddenFlushTimer !== null) {
+      clearTimeout(hiddenFlushTimer)
+      hiddenFlushTimer = null
+    }
+    if (document.visibilityState === 'hidden') {
+      // Defer past macOS Space / Contexts transition (~500ms) so hidden keepalive fetches never
+      // fire synchronously during Space handoff; pagehide below still flushes immediately on unload.
+      hiddenFlushTimer = setTimeout(() => {
+        hiddenFlushTimer = null
+        void _flush(true)
+      }, 1_200)
+    }
   })
   window.addEventListener('pagehide', () => { void _flush(true) })
   // How this page came to be: a reload the user asked for, or Chrome bringing back a page it

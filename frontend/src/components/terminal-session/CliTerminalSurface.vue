@@ -1832,15 +1832,39 @@ watch(() => props.active, (isActive) => {
 // Going to the background flows through the same call so `wasViewer` drops to false; the next
 // return is then recognised as an edge rather than as "nothing happened".
 
+// macOS Space / Contexts (`Option+Tab`) 切离桌面静默期：
+// 切走 Space 后的前 ~500ms 处于 Mission Control 动画与 Contexts 面板回收竞争期；若在 `visibility -> hidden`
+// 瞬间同步发 WS `presentation(false)` / `resize(0,0)` 并改写 HUD DOM，会与浏览器同文档导航/网络活动叠加诱发
+// Chromium `NSWindow` 重抢 key focus 把桌面拉回。因此隐藏侧撤回延后 1200ms 执行；回到前台仍立即声明。
+const HIDDEN_WITHDRAW_DELAY_MS = 1_200
+let hiddenWithdrawTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearHiddenWithdrawTimer() {
+  if (hiddenWithdrawTimer !== null) {
+    clearTimeout(hiddenWithdrawTimer)
+    hiddenWithdrawTimer = null
+  }
+}
+
 function onVisibilityChange() {
   const visible = document.visibilityState === 'visible'
+  clearHiddenWithdrawTimer()
+  if (!visible) {
+    // Defer WS withdraw + HUD update past macOS Space / Contexts transition (~500ms) so leaving a
+    // Space stays completely silent; if still hidden after 1.2s, withdraw viewer vote as usual.
+    hiddenWithdrawTimer = setTimeout(() => {
+      hiddenWithdrawTimer = null
+      if (surfaceDisposed || document.visibilityState === 'visible') return
+      declarePresentation()
+      declareViewport({ geometryChanged: false })
+    }, HIDDEN_WITHDRAW_DELAY_MS)
+    return
+  }
   declarePresentation()
   declareViewport({ geometryChanged: false })
-  if (visible) {
-    if (ghostRefreshOwed) scheduleGhostRefresh()
-    const term = xtermRef.value?.terminal?.()
-    if (term) term.refresh(0, term.rows - 1)
-  }
+  if (ghostRefreshOwed) scheduleGhostRefresh()
+  const term = xtermRef.value?.terminal?.()
+  if (term) term.refresh(0, term.rows - 1)
 }
 
 // ─── 窗口焦点：visibilityState 看不见的那半边 ─────────────────────────────────
@@ -1866,6 +1890,7 @@ function onWindowBlur() {
 }
 
 function onWindowFocus() {
+  if (document.visibilityState !== 'visible') return
   declareViewport({ geometryChanged: false })
 }
 
@@ -2082,6 +2107,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   terminalConnection.dispose()
+  clearHiddenWithdrawTimer()
   if (viewportScrollLockRaf) window.cancelAnimationFrame(viewportScrollLockRaf)
   surfaceDisposed = true
   if (ghostRefreshTimer) clearTimeout(ghostRefreshTimer)

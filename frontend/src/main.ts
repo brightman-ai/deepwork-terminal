@@ -93,8 +93,12 @@ window.addEventListener('resize', () => syncAppVisualViewport('window.resize'))
 window.addEventListener('orientationchange', () => syncAppVisualViewportSettled('orientationchange'))
 window.visualViewport?.addEventListener('resize', () => syncAppVisualViewport('visual.resize'))
 window.visualViewport?.addEventListener('scroll', () => syncAppVisualViewport('visual.scroll'))
-document.addEventListener('focusin', () => syncAppVisualViewportSettled('focusin'))
-document.addEventListener('focusout', () => syncAppVisualViewportSettled('focusout'))
+document.addEventListener('focusin', () => {
+  if (document.visibilityState === 'visible' && document.hasFocus()) syncAppVisualViewportSettled('focusin')
+})
+document.addEventListener('focusout', () => {
+  if (document.visibilityState === 'visible' && document.hasFocus()) syncAppVisualViewportSettled('focusout')
+})
 
 // ── TS-OBS: global input hit-test diagnostics ────────────────────────────────
 // Logs only discrete control activations. It does not prevent/modify events, but

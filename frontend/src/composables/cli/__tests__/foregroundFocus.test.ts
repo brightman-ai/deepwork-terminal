@@ -72,6 +72,7 @@ describe('foreground input ownership', () => {
       core._keyUp({ type: 'keyup', key, keyCode, metaKey, altKey } as KeyboardEvent)
     try {
       release('Meta', 91)
+      release('Alt', 18)
       release('Tab', 9, true)
       release('Tab', 9, false, true)
       expect(calls).toBe(0)
@@ -87,13 +88,13 @@ describe('foreground input ownership', () => {
     const { state, gate, logs } = harness()
     state.focused = false
     for (let i = 0; i < 100; i++) gate.run('xterm-helper', () => {})
-    expect(logs).toHaveLength(24)
+    expect(logs).toHaveLength(80)
     gate.blur()
-    expect(logs).toHaveLength(25)
-    expect(logs.at(-1)?.fields.suppressed).toBe(76)
+    expect(logs).toHaveLength(81)
+    expect(logs.at(-1)?.fields.suppressed).toBe(20)
     expect(JSON.stringify(logs)).not.toMatch(/"(?:value|text|url|key|sessionId)":/)
     state.now = 10_001
     gate.run('xterm-helper', () => {})
-    expect(logs).toHaveLength(26)
+    expect(logs).toHaveLength(82)
   })
 })

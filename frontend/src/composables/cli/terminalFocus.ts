@@ -23,8 +23,18 @@ export function terminalFocusBoundary() {
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const current = boundary
     pageGuard = installPageFocusGuard(window, document, current)
-    window.addEventListener('blur', () => { flushServerEvents() })
-    reportServerEvent('cli.focus.boundary', { page, coverage: 'page-v2', platform: navigator.platform, userAgent: navigator.userAgent })
+    let blurFlushTimer: ReturnType<typeof setTimeout> | null = null
+    window.addEventListener('blur', () => {
+      if (blurFlushTimer !== null) clearTimeout(blurFlushTimer)
+      blurFlushTimer = setTimeout(() => { blurFlushTimer = null; flushServerEvents() }, 1200)
+    })
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        if (blurFlushTimer !== null) { clearTimeout(blurFlushTimer); blurFlushTimer = null }
+        setTimeout(() => { flushServerEvents() }, 350)
+      }
+    })
+    reportServerEvent('cli.focus.boundary', { page, coverage: 'page-v5', platform: navigator.platform, userAgent: navigator.userAgent })
   }
   return boundary
 }
