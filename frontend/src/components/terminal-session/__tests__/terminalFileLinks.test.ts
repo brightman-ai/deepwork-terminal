@@ -1,7 +1,7 @@
 // Synthetic width-preserving grammar fixtures; names and prose are invented.
 import { describe, expect, it } from 'bun:test'
 import { terminalPathScenarios } from './fixtures/terminalPathScenarios'
-import { diffLineNumber, editedDiffLineLink, editedDiffLineLinkFromBuffer, editedFileHeader, findTerminalFileLinks, findWrappedTerminalFileLinks, wrappedTerminalRows, parseFileLocationSuffix, terminalCellRange, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../terminalFileLinks'
+import { diffLineNumber, editedDiffLineLink, editedDiffLineLinkFromBuffer, editedFileHeader, findTerminalFileLinks, findWrappedTerminalFileLinks, wrappedTerminalRows, parseFileLocationSuffix, parseOscTerminalLink, terminalCellRange, terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from '../terminalFileLinks'
 
 describe('findTerminalFileLinks', () => {
   it('ends a parenthesized file before sentence punctuation and keeps later references independent', () => {
@@ -1061,5 +1061,126 @@ describe('shared path scenario catalog: independent identities across record fam
       expect(terminalFileSelectionAtCell(buffer, row, link.cellStart - 1, 120)?.path).toBe(link.path)
     }
     expect([...seen].sort()).toEqual([...scenario.paths].sort())
+  })
+})
+
+describe('AGY TUI prose, parenthetical source annotations, and OSC 8 hyperlinks', () => {
+  const wideBuffer = (rows: string[], cols = 290) => {
+    const lines = rows.map(text => {
+      const cells: Array<{ chars: string; width: number }> = []
+      for (const ch of text) {
+        const cp = ch.codePointAt(0)!
+        const wide = (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xff00 && cp <= 0xff60) || cp >= 0x1f300
+        cells.push({ chars: ch, width: wide ? 2 : 1 })
+        if (wide) cells.push({ chars: '', width: 0 })
+      }
+      while (cells.length < cols) cells.push({ chars: '', width: 1 })
+      return {
+        isWrapped: false,
+        length: cells.length,
+        getCell: (i: number) => cells[i] && ({ getChars: () => cells[i].chars, getWidth: () => cells[i].width }),
+      }
+    })
+    return { length: lines.length, getLine: (i: number) => lines[i] }
+  }
+
+  it('extracts both the preview path and adjacent fullwidth parenthetical source path without whitespace', () => {
+    const line1 = '  1. 原版复刻（已补全原生目录树与多格式标签）：tmp/preview-demo-authentic.html（源件：docs/product/task-workbench/ui/prototype/demo-authentic-v1.html）'
+    const links1 = findTerminalFileLinks(line1)
+    expect(links1.map(l => l.path)).toEqual([
+      'tmp/preview-demo-authentic.html',
+      'docs/product/task-workbench/ui/prototype/demo-authentic-v1.html',
+    ])
+    for (const link of links1) expect(line1.slice(link.start, link.end + 1)).toBe(link.path)
+
+    const line2 = '  2. 终稿原型 v6（同步更新了 v5 链接）：tmp/preview-task-workbench-v6.html / tmp/preview-task-workbench-v5.html（源件：docs/product/task-workbench/ui/prototype/task-workbench-v6.html）'
+    const links2 = findTerminalFileLinks(line2)
+    expect(links2.map(l => l.path)).toEqual([
+      'tmp/preview-task-workbench-v6.html',
+      'tmp/preview-task-workbench-v5.html',
+      'docs/product/task-workbench/ui/prototype/task-workbench-v6.html',
+    ])
+    for (const link of links2) expect(line2.slice(link.start, link.end + 1)).toBe(link.path)
+  })
+
+  it('strips unspaced Chinese prose before ~/ and ./ inside wrapped parentheticals without polluting row 0', () => {
+    const b = wideBuffer([
+      '  frontend/src/components/terminal-session/FilesPanel.vue、frontend/src/components/terminal-session/FilePreview.vue，并通过工具逐项点击验证（实测截图已更新至',
+      '  ~/.gemini/antigravity-cli/brain/demo-session/benchmark_report.md）：',
+    ])
+    expect(terminalFileLinksAtRow(b, 0).map(l => l.path)).toEqual([
+      'frontend/src/components/terminal-session/FilesPanel.vue',
+      'frontend/src/components/terminal-session/FilePreview.vue',
+    ])
+    const row1Links = terminalFileLinksAtRow(b, 1)
+    expect(row1Links.map(l => l.path)).toEqual([
+      '~/.gemini/antigravity-cli/brain/demo-session/benchmark_report.md',
+    ])
+    expect(row1Links[0].cellStart).toBe(3)
+    for (let col = row1Links[0].cellStart - 1; col < row1Links[0].cellEnd; col++) {
+      expect(terminalFileLinkAtCell(b, 1, col)?.path).toBe('~/.gemini/antigravity-cli/brain/demo-session/benchmark_report.md')
+    }
+  })
+
+  it('keeps shell commands, line-located prose inside parentheses, @basename:line, and sub-bullet continuations accurate', () => {
+    const ran = '● Ran (cp /home/tester/.gemini/brain/demo/report.md /home/tester/work/tmp/comparison-report.md) failed (ctrl+o to expand)'
+    expect(findTerminalFileLinks(ran).map(l => l.path)).toEqual([
+      '/home/tester/.gemini/brain/demo/report.md',
+      '/home/tester/work/tmp/comparison-report.md',
+    ])
+
+    const proseLoc = '  • 搜索本地文件（支持 validators.ts:8 行号直达与分屏打开）。'
+    expect(findTerminalFileLinks(proseLoc)).toEqual([
+      expect.objectContaining({ path: 'validators.ts', lineStart: 8, lineEnd: 8 }),
+    ])
+
+    const atMention = '  • 点阅读器上的 ＋ @scan.ts:142 入输入框，精准插入光标处。'
+    expect(findTerminalFileLinks(atMention)).toEqual([
+      expect.objectContaining({ path: 'scan.ts', lineStart: 142, lineEnd: 142, displayLength: 12 }),
+    ])
+
+    const subBullet = wideBuffer([
+      '      • 主区多格式查看器：支持代码视图（AddressForm.tsx）与本地网页渲染页（checkout-preview.',
+      '      html）。',
+    ])
+    expect(terminalFileLinksAtRow(subBullet, 0).map(l => l.path)).toEqual(['AddressForm.tsx', 'checkout-preview.html'])
+    expect(terminalFileLinksAtRow(subBullet, 1).map(l => l.path)).toEqual(['checkout-preview.html'])
+  })
+
+  it('classifies OSC 8 file:// and http(s):// hyperlinks while rejecting unsafe or foreign targets', () => {
+    expect(parseOscTerminalLink('file:///home/tester/work/src/FileExplorer.tsx')).toEqual({
+      kind: 'file',
+      path: '/home/tester/work/src/FileExplorer.tsx',
+    })
+    expect(parseOscTerminalLink('file:///home/tester/work/src/FileExplorer.tsx#L123-L145')).toEqual({
+      kind: 'file',
+      path: '/home/tester/work/src/FileExplorer.tsx',
+      lineStart: 123,
+      lineEnd: 145,
+    })
+    expect(parseOscTerminalLink('file:///home/tester/work/src/FileExplorer.tsx#L123-145')).toEqual({
+      kind: 'file',
+      path: '/home/tester/work/src/FileExplorer.tsx',
+      lineStart: 123,
+      lineEnd: 145,
+    })
+    expect(parseOscTerminalLink('file:///home/tester/work/tmp/preview.html?mode=dark#tab-2')).toEqual({
+      kind: 'file',
+      path: '/home/tester/work/tmp/preview.html?mode=dark#tab-2',
+    })
+    expect(parseOscTerminalLink('https://example.com/docs/report.md')).toEqual({
+      kind: 'web',
+      url: 'https://example.com/docs/report.md',
+    })
+    for (const rejected of [
+      '',
+      'file:///',
+      'file://foreign-host/work/report.md',
+      'javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'conversation://7180324f-0618-4bf4-8ab5-85535e499ba5',
+    ]) {
+      expect(parseOscTerminalLink(rejected)).toBeUndefined()
+    }
   })
 })

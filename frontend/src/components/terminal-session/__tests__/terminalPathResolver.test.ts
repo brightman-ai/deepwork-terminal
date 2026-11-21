@@ -4,7 +4,11 @@ import { filePathCandidates, normalizeTerminalPath, resolveTerminalPath, resolve
 describe('terminalPathResolver', () => {
   it('normalizes the visible Codex @ marker before resolving', () => {
     expect(normalizeTerminalPath('@./src/app.ts')).toBe('./src/app.ts')
+    expect(normalizeTerminalPath('@../src/app.ts')).toBe('../src/app.ts')
+    expect(normalizeTerminalPath('@~/docs/report.md')).toBe('~/docs/report.md')
     expect(normalizeTerminalPath('@/src/app.ts')).toBe('/src/app.ts')
+    expect(normalizeTerminalPath('@scan.ts')).toBe('scan.ts')
+    expect(normalizeTerminalPath('@terminal/components/App.vue')).toBe('@terminal/components/App.vue')
   })
 
   it('searches basenames instead of guessing the current directory', () => {

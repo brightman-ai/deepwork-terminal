@@ -62,7 +62,12 @@ import {
   type RendererKind,
 } from '@terminal/composables/cli/terminalRenderer'
 import type { RendererCause } from '@terminal/composables/cli/renderHealth'
-import { terminalFileLinksAtRow, terminalFileLinkAtCell, terminalFileSelectionAtCell } from './terminalFileLinks'
+import {
+  parseOscTerminalLink,
+  terminalFileLinksAtRow,
+  terminalFileLinkAtCell,
+  terminalFileSelectionAtCell,
+} from './terminalFileLinks'
 import { terminalCellAtPoint } from '@terminal/composables/cli/useTerminalCoordMapper'
 import '@xterm/xterm/css/xterm.css'
 
@@ -128,6 +133,79 @@ function filePoint(x: number, y: number) {
   return { target, rect, col: cell.col, viewportRow: cell.row, row: target.buffer.active.viewportY + cell.row }
 }
 
+interface OscExtendedCell {
+  hasExtendedAttrs?: () => boolean
+  extended?: { urlId?: number }
+  getWidth?: () => number
+}
+
+interface OscLinkCapableTerminal {
+  _core?: {
+    _oscLinkService?: {
+      getLinkData?: (id: number) => { uri?: string } | undefined
+    }
+  }
+}
+
+function openExternalWebLink(url: string): void {
+  if (typeof window === 'undefined') return
+  const opened = window.open()
+  if (opened) {
+    try { opened.opener = null } catch { /* ignore cross-origin opener guard */ }
+    opened.location.href = url
+  }
+}
+
+function oscTerminalLinkAtCell(target: Terminal, row: number, col: number) {
+  try {
+    const line = target.buffer.active.getLine(row)
+    if (!line || col < 0 || col >= line.length) return undefined
+    const readUrlId = (x: number): number => {
+      const cell = line.getCell(x) as unknown as OscExtendedCell | undefined
+      return cell?.hasExtendedAttrs?.() && cell.extended?.urlId ? cell.extended.urlId : 0
+    }
+    let probeCol = col
+    const cellAtCol = line.getCell(col)
+    if (cellAtCol && cellAtCol.getWidth() === 0 && col > 0) probeCol = col - 1
+    const urlId = readUrlId(probeCol)
+    if (!urlId) return undefined
+    const uri = (target as unknown as OscLinkCapableTerminal)._core?._oscLinkService?.getLinkData?.(urlId)?.uri
+    if (!uri) return undefined
+    const parsed = parseOscTerminalLink(uri)
+    if (!parsed) return undefined
+    let startCol = probeCol
+    while (startCol > 0 && readUrlId(startCol - 1) === urlId) startCol--
+    let endCol = probeCol
+    while (endCol + 1 < line.length) {
+      const nextCell = line.getCell(endCol + 1)
+      if (readUrlId(endCol + 1) === urlId || (nextCell?.getWidth() === 0 && readUrlId(endCol) === urlId)) {
+        endCol++
+      } else {
+        break
+      }
+    }
+    return { parsed, cellStart: startCol + 1, cellEnd: endCol + 1 }
+  } catch {
+    return undefined
+  }
+}
+
+function resolveTerminalCellFileLink(target: Terminal, row: number, col: number) {
+  const oscHit = oscTerminalLinkAtCell(target, row, col)
+  if (oscHit) {
+    if (oscHit.parsed.kind === 'web') return undefined
+    return {
+      path: oscHit.parsed.path,
+      lineStart: oscHit.parsed.lineStart,
+      lineEnd: oscHit.parsed.lineEnd,
+      searchOnly: undefined,
+      cellStart: oscHit.cellStart,
+      cellEnd: oscHit.cellEnd,
+    }
+  }
+  return terminalFileLinkAtCell(target.buffer.active, row, col)
+}
+
 function hoverFileLinkAt(x?: number, y?: number): void {
   virtualFileHover.value = null
   virtualPointerPoint = undefined
@@ -137,7 +215,7 @@ function hoverFileLinkAt(x?: number, y?: number): void {
   if (!point) return
   virtualPointerPoint = { x, y }
   virtualPointerRow = point.viewportRow
-  const link = terminalFileLinkAtCell(point.target.buffer.active, point.row, point.col)
+  const link = resolveTerminalCellFileLink(point.target, point.row, point.col)
   const root = terminalContainer.value?.parentElement?.getBoundingClientRect()
   if (!link || !root) return
   const cw = point.rect.width / point.target.cols, ch = point.rect.height / point.target.rows
@@ -156,7 +234,7 @@ function onTerminalClick(event: MouseEvent): void {
 
 function activateFileLinkAt(x: number, y: number): boolean {
   const point = filePoint(x, y)
-  const link = point && terminalFileLinkAtCell(point.target.buffer.active, point.row, point.col)
+  const link = point && resolveTerminalCellFileLink(point.target, point.row, point.col)
   if (!link) return false
   virtualFileHover.value = null
   virtualPointerPoint = undefined
@@ -571,6 +649,19 @@ function initTerminal() {
     },
     scrollback: 5000,
     convertEol: true,
+    linkHandler: {
+      allowNonHttpProtocols: true,
+      activate: (_event, text) => {
+        const parsed = parseOscTerminalLink(text)
+        if (!parsed) return
+        fileClickGate.claim()
+        if (parsed.kind === 'file') {
+          emit('file-path', parsed.path, parsed.lineStart, parsed.lineEnd)
+        } else {
+          openExternalWebLink(parsed.url)
+        }
+      },
+    },
   })
   // Clipboard delivery belongs to the server-backed application store, including hidden tabs.
   terminal.parser.registerOscHandler(52, () => true)

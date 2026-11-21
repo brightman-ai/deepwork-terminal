@@ -446,7 +446,12 @@ function renderedProseReferenceRows(buffer: TerminalBufferLike, current: number,
         // Update=8, Read/Edit=6 with a bullet. Preserve spaces beyond it and
         // retain the older paragraph-gutter form; soft wraps never lose spaces.
         const toolIndent = toolHeader ? toolHeader[0].length - 1 : 0
+        const outerBulletIndent = !toolHeader ? /^( +)[•●⏺*-] +/u.exec(head)?.[1].length ?? 0 : 0
         if (groups.length === 1 && toolHeader && tail.startsWith(' '.repeat(toolIndent))) indent = toolIndent
+        else if (groups.length === 1 && outerBulletIndent >= 2 && !tail.startsWith(' '.repeat(indent))
+          && tail.startsWith(' '.repeat(outerBulletIndent)) && !/^\s|^[•●⏺*-] +/u.test(tail.slice(outerBulletIndent))) {
+          indent = outerBulletIndent
+        }
         if (!part.rows.length || total + part.rows.length > 64 || !tail.slice(indent).trim()
           || !tail.startsWith(' '.repeat(indent)) || /^\s*[•●⏺*-] +/u.test(tail)
           || diffLineNumber(tail) !== undefined || EDIT_HEADER_RE.test(tail) || FILE_TOOL_HEADER_RE.test(tail) || FILE_TOOL_RESULT_RE.test(tail)) break
@@ -608,7 +613,7 @@ const FILE_TOKEN_RE = /(?:\\[ \t()]|[^\s<>"'`|｜，。；！？、])+/gu
 const NON_FILE_SCHEME_RE = /^(?:https?|wss?|s?ftp|ssh|git|mailto|data|javascript|tel|urn|about|blob|vscode(?:-insiders)?):/i
 const INLINE_COMMAND_RE = /^(?:python(?:\d+(?:\.\d+)*)?|node|bun|npx|npm|pnpm|yarn|deno|ruby|perl|bash|sh|zsh|cat|head|tail|sed|awk|rg|grep|git|go|cargo|rustc|tsc|uv|pip\d*|pytest|chmod|cp|mv|ls|find|test|diff|wc|curl|wget|sudo)\s/
 const SCRIPT_COMMAND_RE = /^[^\s"'`]+\.(?:py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl)\s+\S/i
-const LOCATION_SUFFIX_RE = /^(?::(\d+)(?:(:|-)(\d+))?|#L(\d+)(?:-L(\d+))?)(?![\p{L}\p{N}_])/u
+const LOCATION_SUFFIX_RE = /^(?::(\d+)(?:(:|-)(\d+))?|#L(\d+)(?:-L?(\d+))?)(?![\p{L}\p{N}_])/u
 const EDIT_STATS_RE = /\(\s*\+\d+(?:\s*,?\s*[-−]\s*\d+)?\s*\)/
 const EDIT_STATS_TAIL_RE = new RegExp(EDIT_STATS_RE.source + '\\s*$')
 const EDIT_HEADER_RE = /^\s*(?:[•●]\s*)?(?:Added|Edited|Updated|Update|Wrote|Write)\s+/i
@@ -810,6 +815,12 @@ function bareFileReference(value: string, offset: number): { raw: string; start:
       start++
       continue
     }
+    const hanAnchor = /^[\p{Script=Han}]+(?=~\/|\.{1,2}\/)/u.exec(raw)
+    if (hanAnchor) {
+      raw = raw.slice(hanAnchor[0].length)
+      start += hanAnchor[0].length
+      continue
+    }
     break
   }
   const stack: Array<{ at: number; close: string }> = []
@@ -979,11 +990,107 @@ function expressionRanges(line: string): Array<{ start: number; end: number }> {
   return ranges
 }
 
+function parenthesisIntroduction(value: string): string {
+  return /^(?:[\p{Script=Han}]+\s+(?=\/|~\/|\.{1,2}\/)|[\p{Script=Han}]+\s*(?=~\/|\.{1,2}\/)|(?:在|位于|详见|见|[\p{Script=Han}]{0,12}(?:更新至|保存至|输出至|写入至|导出至|同步至|落盘至|存放于|保存在))\s*(?=\/))/u.exec(value)?.[0] ?? ''
+}
+
+function hasParentheticalLabel(value: string): boolean {
+  const colon = unwrappedColon(value)
+  if (colon <= 0) return false
+  const prefix = value.slice(0, colon)
+  return !isFileReference(prefix) && /^[\p{L}\p{N}_.()[\]（）【】《》〔〕-]+$/u.test(prefix)
+}
+
+function stripParentheticalLabels(value: string, offset: number): { raw: string; start: number } {
+  let raw = value
+  let start = offset
+  while (raw) {
+    if (/^[:：]\s*/u.test(raw)) {
+      const m = /^[:：]\s*/u.exec(raw)![0]
+      raw = raw.slice(m.length)
+      start += m.length
+      continue
+    }
+    if (!hasParentheticalLabel(raw)) break
+    const colon = unwrappedColon(raw)
+    const rest = raw.slice(colon + 1)
+    const ws = /^\s*/u.exec(rest)![0]
+    raw = rest.slice(ws.length)
+    start += colon + 1 + ws.length
+  }
+  return { raw, start }
+}
+
+function canOpenAdjacentParenthesis(
+  line: string,
+  start: number,
+  value: string,
+  introduction: string,
+  owned: readonly { start: number; end: number }[],
+): boolean {
+  if (!'（【《('.includes(line[start])) return false
+  if (owned.some(range => start >= range.start && start <= range.end)) return false
+  let tokenStart = start
+  while (tokenStart > 0 && !/[\s<>"'`|｜，。；！？、]/u.test(line[tokenStart - 1])) {
+    if (owned.some(range => tokenStart - 1 >= range.start && tokenStart - 1 < range.end)) break
+    tokenStart--
+  }
+  if (tokenStart >= start) return false
+  const before = bareFileReference(line.slice(tokenStart, start), tokenStart)
+  const suffixStart = splitLocalHtmlReference(before.raw).suffix ? -1 : before.raw.search(/(?::\d|#L\d)/)
+  const beforePath = normalizeTerminalPath(suffixStart < 0 ? before.raw : before.raw.slice(0, suffixStart))
+  if (!isFileReference(beforePath)) return false
+  return introduction.length > 0 || hasParentheticalLabel(value) || value.includes('/')
+}
+
+export type ParsedOscTerminalLink =
+  | { kind: 'file'; path: string; lineStart?: number; lineEnd?: number }
+  | { kind: 'web'; url: string }
+
+/** Validate and classify an OSC 8 hyperlink target without allowing unsafe schemes or foreign hosts. */
+export function parseOscTerminalLink(uri: string): ParsedOscTerminalLink | undefined {
+  const trimmed = uri.trim()
+  if (!trimmed) return undefined
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return undefined
+  }
+  const protocol = parsed.protocol.toLowerCase()
+  if (protocol === 'http:' || protocol === 'https:') {
+    return { kind: 'web', url: trimmed }
+  }
+  if (protocol !== 'file:') return undefined
+  if (parsed.hostname && parsed.hostname !== 'localhost') return undefined
+  let decodedPath: string
+  try {
+    decodedPath = decodeURIComponent(parsed.pathname)
+  } catch {
+    return undefined
+  }
+  if (!decodedPath || decodedPath === '/' || /^\/[A-Za-z]:[\\/]/.test(decodedPath) || /[\r\n\0]/.test(decodedPath)) {
+    return undefined
+  }
+  const full = decodedPath + parsed.search + parsed.hash
+  const suffixStart = splitLocalHtmlReference(full).suffix ? -1 : full.search(/(?::\d|#L\d)/)
+  const rawPath = suffixStart < 0 ? full : full.slice(0, suffixStart)
+  const suffix = suffixStart < 0 ? '' : full.slice(suffixStart)
+  if (suffix) {
+    const locMatch = LOCATION_SUFFIX_RE.exec(suffix)
+    if (!locMatch || locMatch[0].length !== suffix.length) return undefined
+  }
+  const path = normalizeTerminalPath(rawPath)
+  if (!isFileReference(path)) return undefined
+  return { kind: 'file', path, ...parseFileLocationSuffix(suffix) }
+}
+
 /** Extract whole references. A wrapper owns its contents even when unsupported,
  * so an unknown target can never expose a misleading clickable tail. */
 export function findTerminalFileLinks(line: string, hardCuts: readonly number[] = []): TerminalFileLink[] {
   const links: TerminalFileLink[] = []
   const owned: Array<{ start: number; end: number }> = expressionRanges(line)
+  const parenthesisOwned: Array<{ start: number; end: number }> = []
   const add = (raw: string, start: number, outsideSuffix = '', escaped = false, gitQuoted = false, markdown = false): void => {
     const suffixStart = splitLocalHtmlReference(raw).suffix ? -1 : raw.search(/(?::\d|#L\d)/)
     const rawPath = suffixStart < 0 ? raw : raw.slice(0, suffixStart)
@@ -1099,17 +1206,22 @@ export function findTerminalFileLinks(line: string, hardCuts: readonly number[] 
   for (const { start, end } of parentheses) {
     if (calls.some(range => start >= range.start && start < range.end)) continue
     if (owned.some(range => start < range.end && end > range.start)) continue
+    if (parenthesisOwned.some(range => start >= range.start && end <= range.end)) continue
     // These brackets can also be literal parts of a larger filename.
     if (/^(?:\/|\.[\p{L}\p{N}_-])/u.test(line.slice(end))) continue
-    if (start > 0 && !/[\s:：(\[（【\p{Script=Han}]/u.test(line[start - 1])) continue
     const value = line.slice(start + 1, end - 1)
     if (!value || /^\s|\s$/.test(value)) continue
+    const introduction = parenthesisIntroduction(value)
+    const adjacent = start > 0 && !/[\s:：(\[（【\p{Script=Han}]/u.test(line[start - 1])
+    if (adjacent && !canOpenAdjacentParenthesis(line, start, value, introduction, owned)) continue
     if (!value.includes('/') && /,\s/.test(value)) continue
     const count = links.length
     // A prose preposition before an explicit root is outside the target field.
     // Quoted paths were handled above, so their literal spaces stay untouched.
-    const introduction = /^(?:在|位于|见)\s+(?=\/|~\/|\.{1,2}\/)/u.exec(value)?.[0] ?? ''
-    const field = value.slice(introduction.length), offset = start + 1 + introduction.length
+    const introStripped = value.slice(introduction.length), introOffset = start + 1 + introduction.length
+    if (INLINE_COMMAND_RE.test(introStripped) || SCRIPT_COMMAND_RE.test(introStripped) && !isFileReference(introStripped)) continue
+    const stripped = /\s/.test(introStripped) ? stripParentheticalLabels(introStripped, introOffset) : { raw: introStripped, start: introOffset }
+    const field = stripped.raw, offset = stripped.start
     const reference = /\s/.test(field) ? { raw: field, start: offset } : bareFileReference(field, offset)
     const separator = proseFileSeparator(reference.raw)
     if (separator >= 0) {
@@ -1118,11 +1230,25 @@ export function findTerminalFileLinks(line: string, hardCuts: readonly number[] 
       for (const link of findTerminalFileLinks(reference.raw.slice(separator + 1))) {
         links.push({...link, start: tailStart + link.start, end: tailStart + link.end})
       }
-      owned.push({start, end})
+      parenthesisOwned.push({start, end})
       continue
     }
-    add(reference.raw, reference.start, line.slice(end))
-    if (links.length > count) owned.push({start, end})
+    const spacedSuffixIdx = /\s/.test(reference.raw) && !splitLocalHtmlReference(reference.raw).suffix
+      ? reference.raw.search(/(?::\d|#L\d)/) : -1
+    const hasTrailingProseAfterLocation = spacedSuffixIdx >= 0 && (() => {
+      const tail = reference.raw.slice(spacedSuffixIdx)
+      const m = LOCATION_SUFFIX_RE.exec(tail)
+      return !m || m[0].length < tail.length
+    })()
+    if (!hasTrailingProseAfterLocation && !/\s\/\s/.test(reference.raw)) {
+      add(reference.raw, reference.start, line.slice(end))
+    }
+    if (links.length === count && adjacent && /\s/.test(field)) {
+      for (const link of findTerminalFileLinks(field)) {
+        links.push({ ...link, start: offset + link.start, end: offset + link.end })
+      }
+    }
+    if (links.length > count) parenthesisOwned.push({start, end})
   }
   // A template is one opaque lexeme. '<name>' within a path/URL must not
   // expose a made-up clickable basename or local absolute tail after '>'.
@@ -1134,7 +1260,7 @@ export function findTerminalFileLinks(line: string, hardCuts: readonly number[] 
     if (start === opening && end === closing || isFileReference(match[1])) continue
     owned.push({ start, end })
   }
-  const syntax: Array<{ start: number; end: number }> = []
+  const syntax: Array<{ start: number; end: number }> = [...parenthesisOwned]
   for (const match of line.matchAll(/(\*\*|__|~~)(?=\S)([^\r\n]*?\S)\1/gu)) {
     const start = match.index ?? 0, end = start + match[0].length
     if (/[\p{L}\p{N}_]/u.test(line[start - 1] ?? '') || /^[./]/.test(line.slice(end))) continue

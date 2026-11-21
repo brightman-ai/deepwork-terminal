@@ -24,7 +24,7 @@ export interface TerminalPathSearchResolution {
 export type TerminalPathResolution = TerminalPathDirectResolution | TerminalPathSearchResolution
 
 export function normalizeTerminalPath(path: string): string {
-  return path.trim().replace(/^@(?=(?:\.\/|\/))/, '')
+  return path.trim().replace(/^@(?=(?:\.{1,2}\/|~\/|\/|[^/\s]+$))/, '')
 }
 
 const ELISION_RE = /\.{3,}|[…⋯]+/g
