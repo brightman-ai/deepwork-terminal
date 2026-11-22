@@ -142,28 +142,35 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 // handleCreateSession handles POST /sessions.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name   string `json:"name"`
-		Title  string `json:"title"`
-		Engine string `json:"engine"`
-		Shell  string `json:"shell"`
-		CWD    string `json:"cwd"`
+		Name      string `json:"name"`
+		Title     string `json:"title"`
+		Engine    string `json:"engine"`
+		Shell     string `json:"shell"`
+		CWD       string `json:"cwd"`
+		ProfileID string `json:"profileId"`
 	}
 	// Allow empty body — use defaults.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	sess, err := s.mgr.CreateWithOptions(CreateOptions{
+	opts := CreateOptions{
 		Name:   req.Name,
 		Title:  req.Title,
 		Engine: req.Engine,
 		Shell:  req.Shell,
 		CWD:    req.CWD,
-	})
+	}
+	if req.ProfileID != "" {
+		opts.EnvOverride = func(base []string) []string {
+			return s.resolveProfileEnv(req.ProfileID, base)
+		}
+	}
+	sess, err := s.mgr.CreateWithOptions(opts)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
+	resp := map[string]any{
 		"id":          sess.ID,
 		"session_id":  sess.ID,
 		"name":        sess.Name,
@@ -174,7 +181,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		"status_icon": statusIcon(sess.Status),
 		"created_at":  formatCLITime(sess.CreatedAt),
 		"last_seen":   formatCLITime(sess.LastActive),
-	})
+	}
+	if req.ProfileID != "" {
+		resp["profileId"] = req.ProfileID
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 // handleGetSession handles GET /sessions/{id}.

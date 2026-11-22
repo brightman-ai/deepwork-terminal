@@ -45,6 +45,7 @@ type Server struct {
 	fileSearchIndexes  map[string]*fileSearchIndex
 	workbenchCWDMu     sync.Mutex
 	workbenchCWDProbes map[int]*workbenchCWDProbe
+	botLiveCache       botLiveCache
 
 	mux          *http.ServeMux
 	mgr          *SessionManager
@@ -424,6 +425,8 @@ func (s *Server) Close() error {
 // registerRoutes sets up the API mux with net/http handlers.
 func (s *Server) registerRoutes() {
 	wrap := s.authWrap
+	s.registerWorktreeAndProfileRoutes(wrap)
+	s.registerBotAndTranscriptRoutes(wrap)
 
 	s.mux.HandleFunc("GET /sessions", wrap(s.handleListSessions))
 	s.mux.HandleFunc("POST /sessions", wrap(s.handleCreateSession))

@@ -26,11 +26,12 @@ var logger = log.Module("terminal")
 // CreateOptions describes the product-level terminal session metadata and runtime
 // options supplied by the WebUI.
 type CreateOptions struct {
-	Name   string
-	Title  string
-	Engine string
-	Shell  string
-	CWD    string
+	Name        string
+	Title       string
+	Engine      string
+	Shell       string
+	CWD         string
+	EnvOverride func([]string) []string
 }
 
 // PTYFactory is the daemon's PTY constructor, re-exported so test fixtures can inject a
@@ -238,10 +239,7 @@ func (m *SessionManager) CreateWithOptions(opts CreateOptions) (*Session, error)
 		Origin:    m.origin,
 	}
 	prog, args := muxd.SplitShell(shellPath)
-	// The daemon assigns the id. That is what makes it survive a restart unchanged: an
-	// id minted here would be gone the moment this process is, and the tab would come
-	// back as a stranger.
-	id, shellPID, err := client.Create(muxd.CreateReq{
+	spawn := muxd.CreateReq{
 		Argv: append([]string{prog}, args...),
 		Cwd:  cwd,
 		// THIS server's environment, not the daemon's.
@@ -267,7 +265,16 @@ func (m *SessionManager) CreateWithOptions(opts CreateOptions) (*Session, error)
 		Cols: muxd.DefaultCols,
 		Rows: muxd.DefaultRows,
 		Meta: meta.encode(),
-	})
+	}
+	if opts.EnvOverride != nil {
+		if env := opts.EnvOverride(spawn.Env); len(env) != 0 {
+			spawn.Env = env
+		}
+	}
+	// The daemon assigns the id. That is what makes it survive a restart unchanged: an
+	// id minted here would be gone the moment this process is, and the tab would come
+	// back as a stranger.
+	id, shellPID, err := client.Create(spawn)
 	if err != nil {
 		return nil, fmt.Errorf("start pty: %w", err)
 	}
