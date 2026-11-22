@@ -89,6 +89,7 @@
                  wins over the host's viewport auto-detect. 双栏 is greyed on a narrow viewport
                  (splitDisabled) since the terminal has no room for it there. -->
             <div
+              v-if="!isMobile"
               class="rd-layout-toggle"
               role="group"
               aria-label="布局模式"
@@ -189,10 +190,15 @@
               :active="open && isActive && topTab === 'tree'"
               :session-id="sessionId"
               :cwd="filesCwd"
+              :prefer-center-preview="preferCenterPreview"
               @preview-location="lockPreviewLocation"
               @directory-location="selectDirectoryLocation"
+              @preview-count-change="onTreePreviewCountChange"
+              @preview-open-change="onTreePreviewOpenChange"
               @inject="onChildInject"
               @compose-draft="onChildComposeDraft"
+              @open-center-preview="onChildOpenCenterPreview"
+              @split-file="emit('split-file', $event)"
             />
           </div>
 
@@ -203,9 +209,12 @@
               :active="open && isActive && topTab === 'recent'"
               :session-id="sessionId"
               :cwd="filesCwd"
+              :prefer-center-preview="preferCenterPreview"
               @open-file="openFilePreview"
               @inject="onChildInject"
               @compose-draft="onChildComposeDraft"
+              @open-center-preview="onChildOpenCenterPreview"
+              @split-file="emit('split-file', $event)"
             />
           </div>
 
@@ -340,7 +349,14 @@
 
           <!-- ════ TOP TAB · 审核 (git diff of the anchored cwd's repo — read-only) ════ -->
           <div v-show="topTab === 'review'" class="rd-toppane">
-            <ReviewPanel :session-id="sessionId" :cwd="effectiveCwd" :active="open && isActive && topTab === 'review'" />
+            <ReviewPanel
+              :session-id="sessionId"
+              :cwd="effectiveCwd"
+              :active="open && isActive && topTab === 'review'"
+              @open-file="openFilePreview"
+              @open-center-preview="onChildOpenCenterPreview"
+              @split-file="emit('split-file', $event)"
+            />
           </div>
 
           <!-- ════ TOP TAB 4 · 会话总览 (@ce shared SSOT pane, terminal fetch wrapper) ════ -->
@@ -348,7 +364,7 @@
             <SessionOverviewTab :session-id="sessionId" :cwd="effectiveCwd" :tool="effectiveTool" :active="open && isActive && topTab === 'overview'" />
           </div>
 
-          <div class="rd-dock-footer">
+          <div v-if="isMobile" class="rd-dock-footer">
           <button
             class="rd-dock-fab"
             type="button"
@@ -482,12 +498,14 @@ const props = withDefaults(defineProps<{
   layoutMode?: 'auto' | 'split' | 'overlay' | 'floating'
   splitDisabled?: boolean
   composeReserve?: number
+  preferCenterPreview?: boolean
 }>(), {
   isActive: true,
   layout: 'overlay',
   layoutMode: 'auto',
   splitDisabled: false,
   composeReserve: 0,
+  preferCenterPreview: false,
 })
 const emit = defineEmits<{
   (e: 'update:open', v: boolean): void
@@ -498,6 +516,9 @@ const emit = defineEmits<{
   (e: 'compose-draft', text: string): void
   // update:layout-mode: user toggled 双栏/浮层 in the header — host persists + re-derives `layout`.
   (e: 'update:layout-mode', mode: 'auto' | 'split' | 'overlay' | 'floating'): void
+  // Task Workbench v11: PC center italic Preview Tab & side-by-side split-file comparison.
+  (e: 'open-center-preview', path: string): void
+  (e: 'split-file', path: string): void
 }>()
 
 const { isMobile } = useDeviceDetection()
@@ -660,7 +681,7 @@ watch(activeTab, (v) => { localStorage.setItem(SUB_TAB_KEY, v) })
 const WIDTH_KEY_BASE = 'dw.rd.width'
 const MIN_W = 300
 const TAB_DEFAULT_W: Record<TopKey, number> = {
-  clipboard: 470, tree: 340, recent: 340, history: 360, review: 560, overview: 620,
+  clipboard: 470, tree: 300, recent: 300, history: 360, review: 560, overview: 620,
 }
 function maxW(): number {
   // Up to 92vw — near-fullscreen on a PC (the old 720px hard cap was too small for desktop);
@@ -676,11 +697,25 @@ function loadWidthFor(tab: TopKey): number {
   return Number.isFinite(v) && v > 0 ? clampW(v) : TAB_DEFAULT_W[tab]
 }
 const panelWidth = ref<number>(loadWidthFor(topTab.value))
+const autoExpandedFromWidth = ref<number | null>(null)
+const treePreviewCount = ref(0)
+const treePreviewOpen = ref(false)
 // Switching tabs saves the current width to the OLD tab's slot, then loads the NEW tab's remembered
 // (or default) width — so the tree stays narrow even right after you read a file wide.
 watch(topTab, (nv, ov) => {
-  localStorage.setItem(widthKey(ov), String(panelWidth.value))
+  // 目录树 ⇄ 最近修改 are one file-reading surface: while the reader holds documents, hopping
+  // between them must not collapse the auto-widened workbench back to the narrow list width.
+  const fileTabs: TopKey[] = ['tree', 'recent']
+  if (fileTabs.includes(nv) && fileTabs.includes(ov) && autoExpandedFromWidth.value !== null && treePreviewCount.value > 0) return
+  const widthToSave = ov === 'tree' && autoExpandedFromWidth.value !== null
+    ? autoExpandedFromWidth.value
+    : panelWidth.value
+  autoExpandedFromWidth.value = null
+  localStorage.setItem(widthKey(ov), String(widthToSave))
   panelWidth.value = loadWidthFor(nv)
+  if (nv === 'tree' && treePreviewOpen.value) {
+    maybeAutoExpandForPreview()
+  }
 })
 // Fullscreen toggle: expand the panel to the whole viewport (for reading long files /
 // the overview), independent of the persisted drag-width which it restores on exit.
@@ -757,6 +792,63 @@ const effectivePanelWidthPx = computed(() => (isFull.value ? winWidth.value : pa
 // out and re-applies it on the way back in; see CliTerminalSurface's saveSelectionFor/restore).
 const panelRootEl = ref<HTMLElement>()
 const treeFilesPanelRef = ref<InstanceType<typeof FilesPanel>>()
+
+function maybeAutoExpandForPreview(): void {
+  if (isMobile.value || isFull.value) return
+  if (props.layout === 'floating') {
+    if (floatRect.value.w < 760) {
+      const nextW = Math.min(900, Math.round(window.innerWidth * 0.62))
+      const nextH = Math.max(floatRect.value.h, Math.min(760, Math.round(window.innerHeight * 0.78)))
+      const nextX = Math.min(floatRect.value.x, window.innerWidth - nextW - 20)
+      floatRect.value = clampFloatRect({ ...floatRect.value, w: nextW, h: nextH, x: nextX })
+    }
+    return
+  }
+  if (panelWidth.value < 760) {
+    if (autoExpandedFromWidth.value === null) {
+      autoExpandedFromWidth.value = panelWidth.value
+    }
+    panelWidth.value = clampW(Math.min(900, Math.round(window.innerWidth * 0.6)))
+  }
+}
+
+function maybeRestoreAutoExpandedWidth(): void {
+  if (autoExpandedFromWidth.value === null) return
+  if (props.layout === 'floating' || isMobile.value || isFull.value) {
+    autoExpandedFromWidth.value = null
+    return
+  }
+  panelWidth.value = clampW(autoExpandedFromWidth.value)
+  autoExpandedFromWidth.value = null
+}
+
+function onTreePreviewCountChange(count: number): void {
+  treePreviewCount.value = count
+  if (count === 0 && !treePreviewOpen.value) {
+    maybeRestoreAutoExpandedWidth()
+  }
+}
+// Switching to 浮窗 / leaving 全屏 while documents are open re-applies the comfortable reading size.
+watch(() => [props.layout, isFull.value] as const, () => {
+  if (treePreviewOpen.value && topTab.value === 'tree') maybeAutoExpandForPreview()
+})
+
+function onTreePreviewOpenChange(open: boolean): void {
+  treePreviewOpen.value = open
+  if (open) {
+    maybeAutoExpandForPreview()
+  } else if (treePreviewCount.value === 0) {
+    maybeRestoreAutoExpandedWidth()
+  }
+}
+
+function onChildOpenCenterPreview(path: string): void {
+  if (isFull.value) {
+    isFull.value = false
+    emit('update:open', false)
+  }
+  emit('open-center-preview', path)
+}
 
 function openFilePreview(path: string, lineStart?: number, lineEnd?: number, searchOnly?: boolean): void {
   topTab.value = 'tree'
@@ -876,6 +968,7 @@ function onResizeStart(e: PointerEvent): void {
 function onResizeMove(e: PointerEvent): void {
   if (!resizing) return
   e.preventDefault()
+  autoExpandedFromWidth.value = null
   // The resize handle is on the panel's INNER edge, which flips with the dock: right-docked, the
   // handle is on the left, so dragging left (smaller clientX) grows it (start − current);
   // left-docked, the handle is on the right, so dragging right grows it (current − start).
@@ -1404,6 +1497,11 @@ function glyphClass(name: string): string {
   /* Keep the header clear of the status bar / notch (Safari + standalone PWA): without
      this the 工作台 title + tabs sit UNDER the Dynamic Island and are unreadable. */
   padding-top: env(safe-area-inset-top, 0px);
+  transition: width 0.18s ease;
+}
+:global(html.dw-resizing) .rd-panel,
+.is-floating .rd-panel {
+  transition: none;
 }
 .rd-panel :deep(button), .rd-panel :deep(summary), .rd-header {
   user-select: none;
@@ -1420,8 +1518,10 @@ function glyphClass(name: string): string {
 .is-split .rd-panel { height: 100%; }
 .is-floating .rd-panel { max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); border: 1px solid #3a2860; border-radius: 10px; box-shadow: 0 18px 60px rgba(0,0,0,.62); }
 .is-mobile .rd-panel {
-  max-width: calc(100vw - 24px);
+  width: 100vw;
+  max-width: 100vw;
   height: 100%;
+  border-left: 0;
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 .is-mobile .rd-resize { display: none; }

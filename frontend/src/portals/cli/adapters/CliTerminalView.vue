@@ -45,6 +45,7 @@
             :dw-rollup="dwRollup"
             :dw-overview-open="dwOverviewOpen"
             :session-hud="tab.sessionId === sessionHud?.sessionId ? sessionHud : null"
+            :prefer-center-preview="preferCenterPreview"
             :ref="(el) => onSurfaceRef(tab.id, el)"
             :data-testid="`cli-portal-surface-${tab.id}`"
             @agent-state="(s) => emit('agent-state', tab.id, s)"
@@ -52,6 +53,8 @@
             @session-exit="(code) => emit('session-exit', tab.id, code)"
             @connection-change="(s) => emit('connection-change', tab.id, s)"
             @dw-toggle-overview="emit('dw-toggle-overview')"
+            @open-center-preview="(p) => emit('open-center-preview', p)"
+            @split-file="(p) => emit('split-file', p)"
           >
             <template v-if="splitAllowed" #status-extra>
               <SplitControlBar
@@ -98,6 +101,7 @@
               :dw-rollup="dwRollup"
               :dw-overview-open="dwOverviewOpen"
               :session-hud="tab.sessionId === sessionHud?.sessionId ? sessionHud : null"
+              :prefer-center-preview="preferCenterPreview"
               :ref="(el) => onSurfaceRef(tab.id, el)"
               :data-testid="`cli-portal-surface-${tab.id}`"
               :class="{ 'is-focused-pane': isFocusedPane(tab.id, 'first') }"
@@ -109,6 +113,8 @@
               @session-exit="(code) => emit('session-exit', tab.id, code)"
               @connection-change="(s) => emit('connection-change', tab.id, s)"
               @dw-toggle-overview="emit('dw-toggle-overview')"
+              @open-center-preview="(p) => emit('open-center-preview', p)"
+              @split-file="(p) => emit('split-file', p)"
             >
               <!-- 主格：分屏方向（高亮那个 = 切换焦点）+ 放大本格。主格被藏起来（副格放大 / 折叠只显示
                    副格）时方向按钮由副格接手，见下。折叠时多一个面板切换器——手机上 splitAllowed 为
@@ -169,6 +175,7 @@
                 :dw-rollup="dwRollup"
                 :dw-overview-open="dwOverviewOpen"
                 :session-hud="tab.sessionId === sessionHud?.sessionId ? sessionHud : null"
+                :prefer-center-preview="preferCenterPreview"
                 :ref="(el) => onSurfaceRef(`${tab.id}__split2`, el)"
                 :data-testid="`cli-portal-surface-${tab.id}__split2`"
                 class="is-second-pane"
@@ -178,6 +185,8 @@
                 @pointerdown.capture.passive="(e: PointerEvent) => onPanePointerDown(tab.id, 'second', e)"
                 @agent-state="(s) => emit('agent-state', `${tab.id}__split2`, s)"
                 @connection-change="(s) => emit('connection-change', `${tab.id}__split2`, s)"
+                @open-center-preview="(p) => emit('open-center-preview', p)"
+                @split-file="(p) => emit('split-file', p)"
               >
                 <template v-if="splitAllowed || switcherOn(tab.id, 'second')" #status-extra>
                   <SplitPaneSwitcher
@@ -275,6 +284,8 @@ const props = defineProps<{
   splitAllowed?: boolean
   /** Snapshot for the currently visible local session; hidden tabs do not poll. */
   sessionHud?: SessionHudSnapshot | null
+  /** Task Workbench v11: on PC, clicking a file in FilesPanel opens the center italic Preview Tab. */
+  preferCenterPreview?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -294,6 +305,8 @@ const emit = defineEmits<{
   (e: 'toggle-zoom', tabId: string, which: 'first' | 'second'): void
   /** 已确认（点了两次）的"关闭第二格"——会结束那格的 session。 */
   (e: 'close-split', tabId: string): void
+  (e: 'open-center-preview', payload: { path: string; sessionId: string; cwd?: string }): void
+  (e: 'split-file', payload: { path: string; sessionId: string; cwd?: string }): void
 }>()
 
 // ── 分屏折叠（split-narrow）：容器放不下两个可用面板 → 只显示当前格 ──────────────────────────────

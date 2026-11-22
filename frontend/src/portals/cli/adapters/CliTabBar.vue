@@ -5,6 +5,20 @@
     <button type="button" data-testid="cli-tab-sort-done" @click="finishSorting">完成</button>
   </div>
   <div class="cli-tab-bar dw-titlebar-blend" :class="{ 'is-sorting': sorting, 'is-dragging': draggedTabId }" data-testid="cli-portal-tab-bar">
+    <!-- Left sidebar toggle button: shown when left TaskSidebar is collapsed or on mobile. -->
+    <button
+      v-if="!sidebarOpen || isMobile"
+      class="cli-tab-bar__nav-toggle"
+      type="button"
+      data-testid="btn-nav-toggle"
+      title="展开或收起工作空间导航栏"
+      aria-label="展开或收起工作空间导航栏"
+      @mousedown.prevent
+      @click="emit('toggle-sidebar')"
+    >
+      <PanelLeft :size="14" />
+    </button>
+
     <!-- D7 overview — LEADS the strip. It is the "zoom out to all terminals" control, so it
          belongs before the tabs it summarizes (the same reading order as a breadcrumb's root).
          It was in the far-right chrome cluster, where it read as one more utility icon next to
@@ -54,7 +68,7 @@
           :key="tab.id"
           class="cli-tab-bar__tab"
           :class="{
-            'is-active': tab.id === activeTabId,
+            'is-active': tab.id === activeTabId && activeSpaceKind === 'task' && !centerPreviewActive,
             'needs-input': tabStatus(tab.id) === 'waiting',
             'not-live': wholeTabNotLive(tab),
             'is-drag-source': draggedTabId === tab.id,
@@ -167,6 +181,7 @@
 
     <!-- Spacer pushes the top-right chrome cluster hard against the right edge. -->
     <div class="cli-tab-bar__spacer" />
+
     <!-- SSOT top-right chrome cluster. ONE flex row owns this corner so nothing here can overlap
          another (the old viewport-fixed help fab used to float over — and swallow the taps of — the
          usage chip). Order: version · #dw-topbar-right outlet (? ⌨) · 刷新 · 远端 —— 与 pro 顶栏
@@ -207,6 +222,69 @@
     </div>
     </div>
     </div>
+
+    <!-- Pinned outside .cli-tab-bar__tabs so 30+ scrolling tabs NEVER push Preview Tab or v11 tools off-screen! -->
+    <button
+      v-if="centerPreviewFile && !isMobile"
+      type="button"
+      class="cli-tab-bar__tab cli-tab-bar__tab--preview"
+      :class="{ 'is-active': centerPreviewActive && activeSpaceKind === 'task' }"
+      :title="`预览标签页：${centerPreviewFile.path}（单击目录树文件复用此槽位）`"
+      data-testid="cli-preview-file-tab"
+      style="flex-shrink: 0; border-left: 1px solid hsl(var(--border));"
+      @click="emit('select-preview')"
+    >
+      <span class="tab-preview-ico" aria-hidden="true">{{ previewFileIcon }}</span>
+      <span class="tab-name">{{ previewFileName }}</span>
+      <span
+        class="tab-preview-close"
+        role="button"
+        tabindex="0"
+        title="关闭文件预览"
+        data-testid="cli-preview-file-tab-close"
+        @click.stop="emit('close-preview')"
+        @keydown.enter.stop.prevent="emit('close-preview')"
+      >✕</span>
+    </button>
+
+    <div v-if="activeSpaceKind === 'task'" class="cli-tab-bar__wb-tools" data-testid="cli-tab-wb-tools" style="border-left: 1px solid hsl(var(--border));">
+      <div class="ctb-vmode-seg" role="group" aria-label="Chat 与 CLI 切换">
+        <button
+          type="button"
+          class="ctb-vmode-btn"
+          :class="{ 'is-active': viewMode === 'transcript' && !centerPreviewActive }"
+          data-testid="vmode-transcript"
+          title="切换到结构化对话视图 (💬 Chat)"
+          aria-label="切换到 Chat 对话视图"
+          @click="emit('update:view-mode', 'transcript')"
+        >{{ isMobile ? '💬' : '💬 Chat' }}</button>
+        <button
+          type="button"
+          class="ctb-vmode-btn"
+          :class="{ 'is-active': viewMode === 'terminal' && !centerPreviewActive }"
+          data-testid="vmode-terminal"
+          title="切换到实时终端视图 (>_ CLI)"
+          aria-label="切换到 CLI 终端视图"
+          @click="emit('update:view-mode', 'terminal')"
+        >{{ isMobile ? '>_' : '>_ CLI' }}</button>
+      </div>
+      <button
+        type="button"
+        class="ctb-dispatch-btn"
+        data-testid="btn-open-dispatch"
+        title="拉起多模型并发会审"
+        @click="emit('open-dispatch')"
+      >{{ isMobile ? '⚡' : '⚡ 派审' }}</button>
+      <button
+        type="button"
+        class="ctb-drawer-btn"
+        :class="{ 'is-active': drawerOpen }"
+        data-testid="toggle-right-drawer"
+        title="展开或收起右侧文件树与 Diff 边栏"
+        @click="emit('toggle-right-drawer')"
+      >◨<span v-if="!isMobile"> 边栏</span></button>
+    </div>
+
     <div v-if="$slots['tab-trailing']" class="cli-tab-bar__tab-trailing" data-testid="cli-tab-pinned-status">
       <slot name="tab-trailing" :compact="compactTrailing" />
     </div>
@@ -220,7 +298,7 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { useTabReorder } from '@terminal/composables/cli/useTabReorder'
 import type { TabMove } from '@terminal/composables/cli/tabReorder'
-import { RefreshCw, Server, LayoutGrid } from 'lucide-vue-next'
+import { RefreshCw, Server, LayoutGrid, PanelLeft } from 'lucide-vue-next'
 import {
   agentSaidText,
   STATUS_COLOR,
@@ -253,7 +331,7 @@ import { PANE_STATUS_LABEL, type TabPaneStatus } from '@terminal/composables/cli
 // owns the shared clear-and-reload used by the pill + PWA refresh button + HelpCenter.
 const { updateAvailable, applyUpdate } = useAppUpdate()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   groups: WorkbenchGroup[]
   activeTabId: string | undefined
   showGroupHeaders: boolean
@@ -276,7 +354,26 @@ const props = defineProps<{
   /** Incremented by the host menu's 调整顺序 command. */
   reorderRequest?: number
   quickSwitchLabel?: string
-}>()
+  /** Task Workbench v11: collapsible left TaskSidebar state. */
+  sidebarOpen?: boolean
+  isMobile?: boolean
+  activeSpaceKind?: 'task' | 'bot'
+  /** Task Workbench v11: single reused center italic Preview Tab file descriptor. */
+  centerPreviewFile?: { path: string; line?: number } | null
+  centerPreviewActive?: boolean
+  /** Task Workbench v11: active tab view mode (Chat vs CLI). */
+  viewMode?: 'terminal' | 'transcript'
+  /** Task Workbench v11: right ResourceDrawer open state for active tab. */
+  drawerOpen?: boolean
+}>(), {
+  sidebarOpen: true,
+  isMobile: false,
+  activeSpaceKind: 'task',
+  centerPreviewFile: null,
+  centerPreviewActive: false,
+  viewMode: 'terminal',
+  drawerOpen: false,
+})
 
 const emit = defineEmits<{
   (e: 'quick-switch'): void
@@ -295,7 +392,27 @@ const emit = defineEmits<{
   (e: 'context-menu', event: MouseEvent, tabId: string): void
   (e: 'reorder', moves: TabMove[]): void
   (e: 'reorder-notice', text: string): void
+  (e: 'toggle-sidebar'): void
+  (e: 'select-preview'): void
+  (e: 'close-preview'): void
+  (e: 'update:view-mode', mode: 'terminal' | 'transcript'): void
+  (e: 'open-dispatch'): void
+  (e: 'toggle-right-drawer'): void
 }>()
+
+const previewFileName = computed(() => {
+  const raw = props.centerPreviewFile?.path ?? ''
+  const clean = raw.split(/[?#]/)[0] || raw
+  return clean.split('/').pop() || clean || 'preview'
+})
+
+const previewFileIcon = computed(() => {
+  const lower = previewFileName.value.toLowerCase()
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return '🌐'
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return '📖'
+  if (lower.endsWith('.csv') || lower.endsWith('.tsv')) return '📊'
+  return '📄'
+})
 
 watch(() => props.activeTabId, async id => {
   await nextTick()
@@ -732,6 +849,123 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
   gap: 8px;
 }
 
+/* Task Workbench v11: left sidebar toggle, italic preview tab, and top-right tools */
+.cli-tab-bar__nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-right: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+}
+.cli-tab-bar__nav-toggle:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--accent));
+}
+.cli-tab-bar__tab--preview {
+  font-style: italic;
+  max-width: 170px;
+  border-left: 1px dashed rgba(110, 168, 254, 0.35);
+  border-right: 1px dashed rgba(110, 168, 254, 0.35);
+  color: #a8c7fa;
+}
+.cli-tab-bar__tab--preview.is-active {
+  border-bottom-color: #6ea8fe;
+  background: rgba(37, 48, 68, 0.85);
+  color: #eef4ff;
+}
+.tab-preview-ico {
+  font-style: normal;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.tab-preview-close {
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 3px;
+  color: hsl(var(--muted-foreground));
+  flex-shrink: 0;
+}
+.tab-preview-close:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+.cli-tab-bar__wb-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 6px;
+}
+.ctb-vmode-seg {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid hsl(var(--border));
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+}
+.ctb-vmode-btn {
+  height: 22px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ctb-vmode-btn:hover {
+  color: hsl(var(--foreground));
+}
+.ctb-vmode-btn.is-active {
+  background: rgba(110, 168, 254, 0.22);
+  color: #eef4ff;
+  font-weight: 600;
+}
+.ctb-dispatch-btn {
+  height: 23px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(180, 142, 255, 0.45);
+  background: rgba(180, 142, 255, 0.14);
+  color: #e4d4ff;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ctb-dispatch-btn:hover {
+  background: rgba(180, 142, 255, 0.26);
+  color: #fff;
+}
+.ctb-drawer-btn {
+  height: 23px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid hsl(var(--border));
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ctb-drawer-btn:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--accent));
+}
+.ctb-drawer-btn.is-active {
+  border-color: rgba(110, 168, 254, 0.5);
+  background: rgba(110, 168, 254, 0.16);
+  color: #eef4ff;
+}
+
 
 </style>
 
@@ -739,5 +973,8 @@ const rollupSegs = computed(() => rollupSegments(props.rollup))
 @media (max-width: 600px) {
   .cli-tab-bar__overview { min-width: 40px; }
   .cli-tab-bar__tab-trailing { padding-inline: 4px; }
+  .cli-tab-bar__wb-tools { gap: 4px; padding: 0 3px; }
+  .ctb-vmode-btn { padding: 0 5px; }
+  .ctb-dispatch-btn, .ctb-drawer-btn { padding: 0 6px; }
 }
 </style>

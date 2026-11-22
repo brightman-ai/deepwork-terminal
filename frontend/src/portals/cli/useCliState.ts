@@ -187,6 +187,23 @@ export function useCliState(runtime: PortalRuntimeResult) {
     if (activeTab.value) surfaceRefs[activeTab.value.id]?.openInstallGuide?.()
   }
 
+  // Right ResourceDrawer open state, live docked squeeze width & controls routed to the active tab's primary surface.
+  const activeDrawerOpen = computed<boolean>(() =>
+    activeTab.value ? Boolean(surfaceRefs[activeTab.value.id]?.drawerOpen) : false,
+  )
+  const activeDrawerSqueezePx = computed<number>(() =>
+    activeTab.value ? (surfaceRefs[activeTab.value.id]?.drawerSqueezePx ?? 0) : 0,
+  )
+  const activeDrawerDock = computed<'left' | 'right'>(() =>
+    activeTab.value ? (surfaceRefs[activeTab.value.id]?.drawerDock ?? 'right') : 'right',
+  )
+  function toggleActiveDrawer(): void {
+    if (activeTab.value) surfaceRefs[activeTab.value.id]?.toggleDrawer?.()
+  }
+  function setActiveDrawerOpen(open: boolean): void {
+    if (activeTab.value) surfaceRefs[activeTab.value.id]?.setDrawerOpen?.(open)
+  }
+
   const stripTabs = computed(() =>
     allTabsWithSession.value.map(t => ({
       tabId: t.id,
@@ -573,7 +590,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     const tab = allTabs.value.find(t => t.id === tabId)
     if (!tab || tab.split) return // 已分屏——菜单本该已经隐藏这个入口，这里是最后一道防线
     setTabSplit(tabId, { orientation, ratio: 0.5 })
-    const sessionId = await createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~' })
+    const sessionId = await createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~', profileId: tab.profileId })
     if (!sessionId) {
       setTabSplit(tabId, undefined)
       showNotice('分屏失败：新终端没能起来')
@@ -816,7 +833,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
         },
       )
       await reopenDetachedTabs(reopenCandidates(settled), {
-        createSession: (tab) => createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~' }),
+        createSession: (tab) => createSessionOn(tab, { name: tab.name, cwd: tab.cwd || '~', profileId: tab.profileId }),
         adopt: adoptReopened,
       })
     }
@@ -857,6 +874,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
       name: t.name,
       cwd: t.cwd,
       remotePeerId: t.remotePeerId,
+      profileId: t.profileId,
       liveness: livenessOf(t.id),
     }))
   }
@@ -865,14 +883,17 @@ export function useCliState(runtime: PortalRuntimeResult) {
    *  自动重开与卡片上的手动新建共用它——同一件事只能有一处 HTTP 细节。 */
   async function createSessionOn(
     tab: { remotePeerId?: string },
-    body: { name: string; cwd: string },
+    body: { name: string; cwd: string; engine?: string; profileId?: string },
   ): Promise<string | null> {
     const conn = remotePeers.resolveTabConnection(tab)
+    const payload: Record<string, string> = { name: body.name, cwd: body.cwd }
+    if (body.engine) payload.engine = body.engine
+    if (body.profileId) payload.profileId = body.profileId
     try {
       const resp = await tabFetch(conn, '/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       })
       if (!resp.ok) return null
       const data = await resp.json() as { id?: string; session_id?: string }
@@ -1000,10 +1021,12 @@ export function useCliState(runtime: PortalRuntimeResult) {
       if (!conn.authToken) return { ok: false, error: '缺少该远程的认证码' }
     }
     try {
+      const restoreBody: Record<string, string> = { name: tab.name, cwd: tab.cwd || '~' }
+      if (tab.profileId) restoreBody.profileId = tab.profileId
       const resp = await tabFetch(conn, '/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: tab.name, cwd: tab.cwd || '~' }),
+        body: JSON.stringify(restoreBody),
       })
       if (!resp.ok) return { ok: false, error: `新建终端失败 (HTTP ${resp.status})` }
       const data = await resp.json() as { id?: string; session_id?: string }
@@ -1059,24 +1082,43 @@ export function useCliState(runtime: PortalRuntimeResult) {
     }
   }
 
-  async function createTabSilent(opts?: { name?: string; cwd?: string }) {
+  async function createTabSilent(opts?: {
+    name?: string
+    cwd?: string
+    engine?: string
+    profileId?: string
+    activate?: boolean
+  }): Promise<WorkbenchTab | null> {
     const gid = groups.value[0]?.id
-    if (!gid) return
-    const tab = addTab(gid, { name: opts?.name, cwd: opts?.cwd || '~' })
+    if (!gid) return null
+    const tab = addTab(gid, {
+      name: opts?.name,
+      cwd: opts?.cwd || '~',
+      engine: opts?.engine,
+      profileId: opts?.profileId,
+      activate: opts?.activate,
+    })
     try {
+      const payload: Record<string, string> = { name: tab.name, cwd: tab.cwd }
+      if (opts?.engine && opts.engine !== 'shell') payload.engine = opts.engine
+      if (tab.profileId) payload.profileId = tab.profileId
       const resp = await cliFetch(cliApi('/sessions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: tab.name, cwd: tab.cwd }),
+        body: JSON.stringify(payload),
       })
-      if (!resp.ok) { removeTab(tab.id); return }
+      if (!resp.ok) { removeTab(tab.id); return null }
       const data = await resp.json() as { id?: string; session_id?: string }
       const sessionId = data.id || data.session_id
-      if (!sessionId) { removeTab(tab.id); return }
+      if (!sessionId) { removeTab(tab.id); return null }
       bindSession(tab.id, sessionId)
       ensureRuntime(tab.id)
       setTabLiveness(tab.id, 'live')
-    } catch { removeTab(tab.id) }
+      return tab
+    } catch {
+      removeTab(tab.id)
+      return null
+    }
   }
 
   // ─── Detached surface (the honest replacement for the silent rebuild) ──────────
@@ -1156,6 +1198,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     tabRuntimes, registerSurface,
     activeWsStatus, activeAgentState, activeAgentNotifications, activeRtt, activeNetStats,
     activeSessionId, activeSendKey, activeOpenInstallGuide, activeTabSplitAllowed,
+    activeDrawerOpen, activeDrawerSqueezePx, activeDrawerDock, toggleActiveDrawer, setActiveDrawerOpen,
     // pane（tmux window）深链：当前聚焦 window index + 由 URL 驱动切换
     activeTmuxWindowIndex, selectActiveTabWindow,
     allTabsWithSession, stripTabs, surfaceTabs,
@@ -1166,7 +1209,7 @@ export function useCliState(runtime: PortalRuntimeResult) {
     // setTabSplit 落盘点，互不冲突）。切换焦点是纯前端（CliTerminalView），不经过这里。
     setSplitRatio, setSplitOrientation, toggleZoom, closeSplitPane,
     renamingTabId, renameValue, startRenameTab, commitRename, cancelRename,
-    quickCreateTab,
+    quickCreateTab, createTabSilent,
     // remote-terminal (mesh)
     remoteDialogOpen, openRemoteDialog, createRemoteTab,
     // 存活态（进程还在不在）——和 tabStatuses（agent 在干嘛）是两个轴

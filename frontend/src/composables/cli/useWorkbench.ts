@@ -247,7 +247,7 @@ export function useWorkbench() {
   function addTab(
     groupId: string,
     opts?: {
-      name?: string; cwd?: string; engine?: string; remotePeerId?: string
+      name?: string; cwd?: string; engine?: string; remotePeerId?: string; profileId?: string
       /** 新标签是否同时抢占焦点。默认 true —— 人点"新建终端"就是想去那儿。
        *
        *  唯一传 false 的是**孤儿认领**（见 useCliState adoptOrphanSessions）：那是后台对账顺手

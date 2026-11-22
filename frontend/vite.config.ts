@@ -47,7 +47,7 @@ export default defineConfig({
       { find: /^@xterm\/xterm$/, replacement: fileURLToPath(new URL('./node_modules/@xterm/xterm/lib/xterm.js', import.meta.url)) },
       ...Object.entries({
         '@terminal': fileURLToPath(new URL('./src', import.meta.url)),
-        '@ce': fileURLToPath(new URL('../../deepwork/frontend/src', import.meta.url)),
+        '@ce': process.env.CE_SHELL_SRC || fileURLToPath(new URL('../../deepwork/frontend/src', import.meta.url)),
         ...Object.fromEntries(
           ceToolchain.map((pkg) => [pkg, fileURLToPath(new URL(`./node_modules/${pkg}`, import.meta.url))])
         ),

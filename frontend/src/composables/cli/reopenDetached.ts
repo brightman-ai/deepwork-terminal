@@ -27,6 +27,8 @@ export interface ReopenCandidate {
   cwd?: string
   /** 有值 = 这个标签的进程长在别的机器上。远程一律不自动重开，见 shouldAutoReopen。 */
   remotePeerId?: string
+  /** 绑定的隔离 CLI Profile ID（自动重开时原样延续，保证环境一致）。 */
+  profileId?: string
   /** 对账结论（见 tabLiveness.ts）。 */
   liveness: TabLiveness
 }

@@ -37,7 +37,7 @@ import { replayTabMoves, type TabMove } from './tabReorder'
 /** 参与字段级合并的标签字段。显式列出而不是 `Object.keys`：漏一个字段会静默丢一次用户改动，
  *  而多写一个不存在的 key 只是无害的 undefined 比较。改 WorkbenchTab 时这里要跟着改。 */
 const TAB_FIELDS: readonly (keyof WorkbenchTab)[] = [
-  'groupId', 'name', 'cwd', 'engine', 'sessionId', 'remotePeerId', 'split',
+  'groupId', 'name', 'cwd', 'engine', 'sessionId', 'remotePeerId', 'profileId', 'split',
 ]
 
 /** 参与字段级合并的分组字段（`tabs` 不在内——它由标签级合并单独重建）。 */

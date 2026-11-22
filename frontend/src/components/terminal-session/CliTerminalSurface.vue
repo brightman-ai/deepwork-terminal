@@ -448,11 +448,14 @@
       :layout-mode="drawerLayoutMode"
       :split-disabled="splitDisabled"
       :compose-reserve="composeReserve"
+      :prefer-center-preview="preferCenterPreview"
       :open="paneOpenMap[paneKey] ?? false"
       @update:open="(v: boolean) => { paneOpenMap[paneKey] = v }"
       @inject="onDrawerInject"
       @compose-draft="onDrawerComposeDraft"
       @update:layout-mode="drawerLayoutMode = $event"
+      @open-center-preview="(path: string) => { if (!isMobile) paneOpenMap[paneKey] = false; emit('open-center-preview', { path, sessionId, cwd: paneCwdFor(paneKey) }) }"
+      @split-file="(path: string) => { if (!isMobile) paneOpenMap[paneKey] = false; emit('split-file', { path, sessionId, cwd: paneCwdFor(paneKey) }) }"
     />
 
     <!-- Quick notify-provider config sheet — same /api/notify/config SSOT as the
@@ -651,6 +654,8 @@ const props = defineProps<{
   pasteFallback?: boolean
   /** Active local-session snapshot; the host leaves this null for hidden/remote tabs. */
   sessionHud?: SessionHudSnapshot | null
+  /** Task Workbench v11: on PC, clicking a file in FilesPanel opens the center italic Preview Tab. */
+  preferCenterPreview?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -660,6 +665,8 @@ const emit = defineEmits<{
   (e: 'connection-change', status: WSConnectionStatus): void
   /** 底栏那个总览胶囊 —— 非 tmux 的总览挂在宿主上（它才拥有标签），这里只转达。 */
   (e: 'dw-toggle-overview'): void
+  (e: 'open-center-preview', payload: { path: string; sessionId: string; cwd?: string }): void
+  (e: 'split-file', payload: { path: string; sessionId: string; cwd?: string }): void
 }>()
 
 // 终端英文文案 (仅非连接态内联显示; connected 无内联文本)。覆盖 @ce ConnectionChip 默认中文。
@@ -1267,7 +1274,7 @@ const LAYOUT_MODE_KEY = 'dw.drawerLayoutMode'
 type DrawerLayoutMode = 'auto' | 'split' | 'overlay' | 'floating'
 function loadLayoutMode(): DrawerLayoutMode {
   const v = localStorage.getItem(LAYOUT_MODE_KEY)
-  return v === 'split' || v === 'overlay' || v === 'floating' ? v : 'floating'
+  return v === 'split' || v === 'overlay' || v === 'floating' ? v : 'split'
 }
 const drawerLayoutMode = ref<DrawerLayoutMode>(loadLayoutMode())
 watch(drawerLayoutMode, (v) => localStorage.setItem(LAYOUT_MODE_KEY, v))
@@ -3103,7 +3110,10 @@ function focusTaskInput(): void {
   else focusTerminal()
 }
 
-defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, focusTaskInput, copyModeOpen })
+function toggleDrawer(): void { currentPaneOpen.value = !currentPaneOpen.value }
+function setDrawerOpen(open: boolean): void { currentPaneOpen.value = open }
+
+defineExpose({ wsStatus, agentState, notifications, netStats: displayNetStats, onSendKey, openInstallGuide, tmuxAttached, tmuxActiveWindowIndex, selectTmuxWindow, openCopyMode, focusTerminal, focusTaskInput, drawerOpen: currentPaneOpen, drawerSqueezePx, drawerDock: dock, toggleDrawer, setDrawerOpen, copyModeOpen })
 </script>
 
 <style scoped>

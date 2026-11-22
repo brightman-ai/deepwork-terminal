@@ -39,6 +39,8 @@ export interface WorkbenchTab {
   remotePeerId?: string // when set, this tab connects to a registered remote peer (mesh
                         // direct-connect) instead of the same-origin host. Optional →
                         // backward compatible (a tab without it is local). See useRemotePeers.
+  profileId?: string    // optional isolated CLI profile ID (~/.dw-terminal/profiles/<id>/).
+                        // Optional → backward compatible; preserved across 3-way workbenchMerge.
   split?: TabSplit    // undefined = 未分屏（今天的全部行为，一字节不改）
 }
 
@@ -69,6 +71,7 @@ export function createTab(opts: {
   engine?: string
   groupId: string
   remotePeerId?: string
+  profileId?: string
 }): WorkbenchTab {
   const tab: WorkbenchTab = {
     id: genId(),
@@ -80,6 +83,7 @@ export function createTab(opts: {
   // Set at creation (not post-assigned) so the tab's FIRST persist already carries it — a remote
   // tab must never round-trip through storage as a local one (it would get a local session).
   if (opts.remotePeerId) tab.remotePeerId = opts.remotePeerId
+  if (opts.profileId) tab.profileId = opts.profileId
   return tab
 }
 

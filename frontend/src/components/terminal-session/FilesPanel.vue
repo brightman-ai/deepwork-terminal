@@ -74,7 +74,16 @@ import { searchTerminalPathCandidates, terminalPathFilename } from './terminalPa
 // '' → server falls back to the session cwd.
 // mode fixes this instance to ONE view. The drawer's top-level tabs (目录树 / 最近修改) each mount
 // their own FilesPanel, so the panel no longer owns a sub-tab switcher — one mode in, one view out.
-const props = withDefaults(defineProps<{ sessionId: string; cwd: string; mode: 'recent' | 'tree'; active?: boolean }>(), { active: true })
+const props = withDefaults(
+  defineProps<{
+    sessionId: string
+    cwd: string
+    mode: 'recent' | 'tree'
+    active?: boolean
+    preferCenterPreview?: boolean
+  }>(),
+  { active: true, preferCenterPreview: false },
+)
 
 const emit = defineEmits<{
   (e: 'inject', path: string): void
@@ -82,6 +91,10 @@ const emit = defineEmits<{
   (e: 'preview-location', location: { cwd: string; path: string }): void
   (e: 'directory-location', location: { cwd: string }): void
   (e: 'open-file', path: string): void
+  (e: 'open-center-preview', path: string): void
+  (e: 'split-file', path: string): void
+  (e: 'preview-count-change', count: number): void
+  (e: 'preview-open-change', open: boolean): void
 }>()
 
 // ── 最近文件 ──
@@ -156,6 +169,35 @@ const treeCollapsed = ref(localStorage.getItem(TREE_COLLAPSED_KEY) === '1')
 // One responsive fact drives both the overlay CSS and the tree action. Merely
 // expanding the tree behind an absolute reader leaves mobile users trapped.
 const compactWorkspace = useMediaQuery('(max-width: 768px)')
+const fpRootEl = ref<HTMLElement | null>(null)
+const fpContainerWidth = ref(0)
+let fpResizeObserver: ResizeObserver | null = null
+function measureFpWidth(): void {
+  const el = fpRootEl.value
+  if (!el) return
+  const w = Math.round(el.clientWidth || el.getBoundingClientRect?.().width || 0)
+  if (w > 0) fpContainerWidth.value = w
+}
+onMounted(() => {
+  measureFpWidth()
+  if (typeof ResizeObserver !== 'undefined' && fpRootEl.value) {
+    fpResizeObserver = new ResizeObserver((entries) => {
+      const w = Math.round(entries[0]?.contentRect?.width ?? fpRootEl.value?.clientWidth ?? 0)
+      if (w > 0) fpContainerWidth.value = w
+    })
+    fpResizeObserver.observe(fpRootEl.value)
+  }
+})
+onBeforeUnmount(() => {
+  fpResizeObserver?.disconnect()
+  fpResizeObserver = null
+})
+// clientWidth === 0 (SSR / testRenderer / hidden) stays false so existing tests keep desktop split mode.
+const isNarrowPanel = computed(() => fpContainerWidth.value > 0 && fpContainerWidth.value < 520)
+const compactPanel = computed(() => compactWorkspace.value || isNarrowPanel.value)
+// Reader header quick actions (@ 引用 / ◫) need room beside the filename; below this panel width
+// they move into the ⋮ menu so the title never collides with them.
+const readerTight = computed(() => fpContainerWidth.value > 0 && fpContainerWidth.value < 700)
 function setTreeCollapsed(value: boolean): void {
   treeCollapsed.value = value
   localStorage.setItem(TREE_COLLAPSED_KEY, value ? '1' : '0')
@@ -979,7 +1021,12 @@ function onSearchHit(entry: SearchEntry): void {
   if (entry.isDir) {
     drillTo(entry.rel)
   } else {
-    void previewRel(entry.name, searchAbsPath(entry), entry.rel)
+    const abs = searchAbsPath(entry)
+    if (props.preferCenterPreview && !compactPanel.value) {
+      emit('open-center-preview', abs)
+      return
+    }
+    void previewRel(entry.name, abs, entry.rel)
   }
 }
 
@@ -1037,7 +1084,7 @@ interface Preview {
   loading: boolean
   lastUsedAt: number
 }
-const MAX_OPEN_PREVIEWS = 8
+const MAX_OPEN_PREVIEWS = 12
 const previews = ref<Preview[]>([])
 const previewRequests = new Map<string, AbortController>()
 const activePreviewKey = ref('')
@@ -1335,20 +1382,33 @@ function refreshPreview(): void {
 // the backend resolves session→cwd, so we send the absolute path's cwd-relative tail.
 // Recent items already carry an absolute path; derive a best-effort rel from dir+name.
 async function previewRecent(f: RecentFileItem): Promise<void> {
+  if (props.preferCenterPreview && !compactPanel.value) {
+    emit('open-center-preview', f.path)
+    return
+  }
   if (props.mode === 'recent') { emit('open-file', f.path); return }
   // The server anchors on session cwd; pass the absolute path and let safeResolve
   // collapse it (an absolute path is anchored into cwd, matching the contract).
   await previewRel(f.name, f.path, f.path)
 }
 async function previewTreeFile(node: TreeNode): Promise<void> {
-  await previewRel(node.entry.name, nodeAbsPath(node), node.rel)
+  const abs = nodeAbsPath(node)
+  if (props.preferCenterPreview && !compactPanel.value) {
+    emit('open-center-preview', abs)
+    return
+  }
+  await previewRel(node.entry.name, abs, node.rel)
+}
+function splitPreviewFile(path: string): void {
+  if (!path) return
+  emit('split-file', path)
 }
 function browseFiles(): void {
   activePreviewKey.value = ''
   setTreeCollapsed(false)
 }
 function togglePreviewTree(): void {
-  if (compactWorkspace.value) browseFiles()
+  if (compactPanel.value) browseFiles()
   else setTreeCollapsed(!treeCollapsed.value)
 }
 function closePreview(): void {
@@ -1365,6 +1425,15 @@ function closePreviewTab(key: string): void {
   if (next) activatePreview(next.key)
   else activePreviewKey.value = ''
 }
+function closeOtherPreviewTabs(keepKey: string): void {
+  const keep = previews.value.find((p) => p.key === keepKey)
+  if (!keep) return
+  for (const p of previews.value) {
+    if (p.key !== keepKey) revokePreviewUrl(p)
+  }
+  previews.value = [keep]
+  activePreviewKey.value = keep.key
+}
 function clearPreviews(): void {
   markdownConvertRequest?.abort()
   markdownConvertRequest = null
@@ -1375,6 +1444,15 @@ function clearPreviews(): void {
   previews.value = []
   activePreviewKey.value = ''
 }
+function clearAllPreviewTabs(): void {
+  clearPreviews()
+}
+watch(() => previews.value.length, (count) => {
+  emit('preview-count-change', count)
+})
+watch(() => Boolean(preview.value), (open) => {
+  emit('preview-open-change', open)
+})
 
 /** Open a path supplied by the terminal link provider. */
 function previewPath(path: string, lineStart?: number, lineEnd?: number, sourceCwd?: string, searchOnly = false): void {
@@ -1480,7 +1558,7 @@ async function locatePreviewInTree(manual: boolean, seq = ++previewLocationSeq):
   const cwd = treeCwd.value || props.cwd
   if (manual) {
     setTreeCollapsed(false)
-    if (compactWorkspace.value) activePreviewKey.value = ''
+    if (compactPanel.value) activePreviewKey.value = ''
   } else {
     emit('preview-location', { cwd, path: p.absPath })
   }
@@ -1805,7 +1883,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 </script>
 
 <template>
-  <div class="fp flex flex-col h-full bg-background text-foreground" :data-testid="`files-panel-${mode}`">
+  <div ref="fpRootEl" class="fp flex flex-col h-full bg-background text-foreground" :data-testid="`files-panel-${mode}`">
     <!-- ── 最近修改 (mode='recent') ── -->
     <div v-if="mode === 'recent'" class="flex-1 flex flex-col overflow-hidden">
       <!-- Quick filter (client-side, instant) — composes with the category chips below. -->
@@ -1852,6 +1930,14 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           </button>
           <div class="flex shrink-0 items-center gap-1">
             <button
+              v-if="!compactWorkspace"
+              class="px-1.5 py-1 rounded text-[0.6rem] text-muted-foreground border border-border hover:text-foreground hover:bg-muted/50 transition-colors"
+              type="button"
+              title="左右分屏边聊边看"
+              :data-testid="`fp-recent-split-${f.name}`"
+              @click.stop="splitPreviewFile(f.path)"
+            >◫</button>
+            <button
               class="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
               type="button" title="复制路径"
               :data-testid="`fp-copy-${f.name}`"
@@ -1875,7 +1961,7 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
          The tree remains the source surface while a document is open. Desktop uses a stable
          two-column workspace; narrow/mobile drawers keep the reader as a sheet and expose the
          same browse button, so the navigation model does not change with the viewport. -->
-    <div v-else class="fp-workspace relative flex flex-1 min-h-0 overflow-hidden" :class="{ 'is-tree-collapsed': treeCollapsed, 'is-compact': compactWorkspace }">
+    <div v-else class="fp-workspace relative flex flex-1 min-h-0 overflow-hidden" :class="{ 'is-tree-collapsed': treeCollapsed, 'is-compact': compactPanel, 'is-single-pane': !preview || (preferCenterPreview && !compactPanel) }">
     <div v-if="pathResolution" class="absolute inset-0 z-30 flex flex-col bg-background" data-testid="fp-path-resolution">
       <div class="shrink-0 flex items-center gap-2 border-b border-border px-3 py-2">
         <FileText class="size-4 shrink-0 text-primary/80" />
@@ -1941,7 +2027,15 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
       <button type="button" class="fp-tree-expand" title="展开目录树" data-testid="fp-tree-expand" @click="setTreeCollapsed(false)"><PanelLeft :size="14" /><span>目录</span></button>
     </div>
     <div v-show="!treeCollapsed" class="fp-browser-pane flex flex-col min-h-0 overflow-hidden">
-      <PreviewDocumentTabs v-if="!preview && previews.length" :tabs="previews" :active-key="activePreviewKey" @select="activatePreview" @close="closePreviewTab" />
+      <PreviewDocumentTabs
+        v-if="!preview && previews.length"
+        :tabs="previews"
+        :active-key="activePreviewKey"
+        @select="activatePreview"
+        @close="closePreviewTab"
+        @close-others="closeOtherPreviewTabs"
+        @close-all="clearAllPreviewTabs"
+      />
       <div v-if="directoryLinkError" class="shrink-0 border-b border-border px-3 py-2 text-xs text-destructive" role="alert" data-testid="fp-directory-link-error">
         <p class="break-words [overflow-wrap:anywhere]">{{ directoryLinkError.path }}：{{ directoryLinkError.message }}</p>
         <button type="button" class="min-h-11 px-2 underline" @click="browseTerminalDirectory(directoryLinkError.path, directoryLinkError.sourceCwd)">重试</button>
@@ -2182,13 +2276,13 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
         <ul v-else class="flex flex-col gap-1">
           <li v-for="e in searchRows" :key="e.rel"
             class="group rounded-md px-2 py-1 hover:bg-muted/40 transition-colors"
-            :style="{ paddingLeft: e.grouped ? '24px' : '8px' }"
+            :style="{ paddingLeft: e.grouped ? '20px' : '10px' }"
             :data-testid="`fp-search-${e.rel}`" :data-search-directory="e.isDir ? e.rel : undefined">
-            <div class="flex items-start gap-2 min-w-0">
+            <div class="flex items-start gap-1.5 min-w-0">
               <Folder v-if="e.isDir" class="size-4 mt-3 shrink-0 text-primary/80" />
               <ImageIcon v-else-if="isImage(e.name)" class="size-4 mt-3 shrink-0 text-violet-500" />
               <FileText v-else class="size-4 mt-3 shrink-0" :class="catTextClass(e.name)" />
-              <button class="min-w-0 flex-1 text-left py-2 min-h-11" type="button" :title="e.rel" @click="onSearchHit(e)">
+              <button class="min-w-0 flex-1 text-left py-2 pl-0.5 min-h-11" type="button" :title="e.rel" @click="onSearchHit(e)">
                 <span class="block text-xs text-foreground select-text cursor-text" :class="{ 'font-medium': e.isDir }"><MidTruncatedName :name="e.name" :tooltip="e.rel" /></span>
                 <span v-if="e.isDir && searchContexts.get(e.label)" class="block mt-1 text-xs text-foreground/80 break-words [overflow-wrap:anywhere]" :data-testid="`fp-search-context-${e.rel}`">{{ searchContexts.get(e.label) }}</span>
                 <span class="block mt-1 text-[0.65rem] text-muted-foreground tabular-nums">
@@ -2197,10 +2291,19 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
                 </span>
               </button>
               <span v-if="!e.isDir" class="shrink-0 self-center rounded px-1 py-px text-[0.54rem] font-medium uppercase" :class="catBadgeClass(e.name)" :data-testid="`fp-search-type-${e.rel}`">{{ fileExt(e.name) || '?' }}</span>
+              <button
+                v-if="!e.isDir && !compactWorkspace"
+                class="shrink-0 self-center px-1.5 py-0.5 rounded border border-border/70 text-[0.62rem] text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                type="button"
+                title="左右分屏边聊边看"
+                :data-testid="`fp-search-split-${e.rel}`"
+                @click.stop="splitPreviewFile(searchAbsPath(e))"
+              >◫</button>
               <button v-if="e.isDir" class="shrink-0 min-h-11 min-w-11 text-xs text-muted-foreground hover:text-foreground" type="button"
                 :title="expandedSearchPaths.has(e.rel) ? '收起完整路径' : '展开完整路径'" :aria-expanded="expandedSearchPaths.has(e.rel)"
                 :data-testid="`fp-search-path-${e.rel}`" @click="toggleSearchPath(e.rel)">路径</button>
-              <button class="min-h-11 min-w-11 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+              <button class="self-center flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 shrink-0"
+                :class="compactWorkspace ? 'min-h-11 min-w-11' : 'min-h-7 min-w-7'"
                 type="button" title="复制路径" @click="copyText(searchAbsPath(e), 's:' + e.rel)">
                 <Check v-if="copiedKey === 's:' + e.rel" class="size-3 text-green-500" /><Copy v-else class="size-3" />
               </button>
@@ -2294,6 +2397,14 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
                 </button>
               </div>
               <span v-if="recentEditedAt(n)" class="shrink-0 px-1 text-[0.56rem] text-primary/80" title="agent 最近修改">●</span>
+              <button
+                v-if="!n.entry.isDir && !compactWorkspace"
+                type="button"
+                class="shrink-0 px-1.5 py-0.5 rounded text-[0.62rem] text-muted-foreground hover:text-foreground hover:bg-muted/60 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                title="左右分屏边聊边看"
+                :data-testid="`fp-tree-split-${n.rel}`"
+                @click.stop="splitPreviewFile(nodeAbsPath(n))"
+              >◫</button>
               <!-- 更多操作（⋮）——与右键/长按同款菜单，给桌面一个可见入口 -->
               <button
                 type="button"
@@ -2310,9 +2421,16 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 
     <!-- ── Preview reader ── -->
     <Transition name="fp-fade">
-      <div v-if="preview" class="fp-preview fp-preview-pane flex min-h-0 flex-1 flex-col bg-background z-10" data-testid="fp-preview">
-        <PreviewDocumentTabs :tabs="previews" :active-key="activePreviewKey" @select="activatePreview" @close="closePreviewTab" />
-        <div class="shrink-0 flex items-center gap-2 border-b border-border bg-card px-3 py-2">
+      <div v-if="preview && !(preferCenterPreview && !compactPanel)" class="fp-preview fp-preview-pane flex min-h-0 flex-1 flex-col bg-background z-10" data-testid="fp-preview">
+        <PreviewDocumentTabs
+          :tabs="previews"
+          :active-key="activePreviewKey"
+          @select="activatePreview"
+          @close="closePreviewTab"
+          @close-others="closeOtherPreviewTabs"
+          @close-all="clearAllPreviewTabs"
+        />
+        <div class="shrink-0 flex items-center gap-1.5 border-b border-border bg-card px-3 py-2">
           <button
             class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground touch-manipulation"
             type="button"
@@ -2332,6 +2450,22 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
           <ImageIcon v-if="isImage(preview.name)" class="size-4 shrink-0 text-muted-foreground" />
           <FileText v-else class="size-4 shrink-0 text-muted-foreground" />
           <span class="min-w-0 flex-1 text-xs font-medium text-foreground select-text cursor-text" :title="preview.absPath" data-testid="fp-preview-title"><MidTruncatedName :name="preview.name" tooltip="" /></span>
+          <button
+            v-if="!compactWorkspace && !readerTight && !preview.generatedDocx"
+            type="button"
+            class="fp-preview-quick-btn shrink-0"
+            title="插入文件路径到对话"
+            data-testid="fp-preview-cite"
+            @click="injectPath(preview.absPath)"
+          >@ 引用</button>
+          <button
+            v-if="!compactWorkspace && !readerTight && !preview.generatedDocx"
+            type="button"
+            class="fp-preview-quick-btn shrink-0"
+            title="左右分屏对照（自动收起工作台）"
+            data-testid="fp-preview-split"
+            @click="splitPreviewFile(preview.absPath)"
+          >◫</button>
           <button v-if="!preview.generatedDocx" type="button" class="shrink-0 min-h-11 min-w-11 rounded text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:opacity-50 touch-manipulation" :disabled="preview.loading" :aria-busy="preview.loading" title="重新读取文件内容" aria-label="刷新文档" data-testid="fp-preview-refresh" @click="refreshPreview"><RefreshCw class="mx-auto size-4" :class="{ 'animate-spin': preview.loading }" /></button>
           <details :key="preview.key" ref="fileActionsMenu" class="fp-file-actions relative shrink-0" @keydown.esc.stop.prevent="closeFileActions">
             <summary class="min-h-11 min-w-11 flex items-center justify-center rounded cursor-pointer text-muted-foreground hover:bg-muted/50" aria-label="文件操作" title="文件操作" data-testid="fp-preview-actions"><MoreVertical class="size-4" /></summary>
@@ -2341,6 +2475,8 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
               <button type="button" data-testid="fp-preview-download" @click="doDownload"><Download class="size-3.5" />下载文件</button>
               <button v-if="preview.result.kind === 'text' && isMarkdownPreview(preview.name)" type="button" data-testid="fp-preview-convert-docx" :disabled="markdownConvertBusy" @click="void convertMarkdownToDocx()"><FileText class="size-3.5" />{{ markdownConvertBusy ? '转换中…' : '转 DOCX' }}</button>
               <button v-if="!preview.generatedDocx" type="button" data-testid="fp-preview-reveal-tree" @click="void revealPreviewInTree()"><Folder class="size-3.5" />在目录树中定位</button>
+              <button v-if="!preview.generatedDocx" type="button" data-testid="fp-preview-open-center" @click="emit('open-center-preview', preview.absPath)"><span class="inline-flex size-3.5 items-center justify-center text-xs leading-none">↗</span>在主窗口打开</button>
+              <button v-if="!compactWorkspace && !preview.generatedDocx" type="button" data-testid="fp-preview-split-menu" @click="splitPreviewFile(preview.absPath)"><span class="inline-flex size-3.5 items-center justify-center text-xs leading-none">◫</span>左右分屏对照</button>
               <button v-if="!preview.generatedDocx" type="button" @click="injectPath(preview.absPath)"><Link2 class="size-3.5" />插入到对话</button>
             </div>
           </details>
@@ -2501,7 +2637,28 @@ defineExpose({ loadRecent, refreshRoot: () => refreshDir(null), previewPath })
 .fp { position: relative; }
 .fp-workspace { position: relative; }
 .fp-browser-pane { flex: 0 0 min(38%, 320px); min-width: 220px; border-right: 1px solid hsl(var(--border) / 0.7); }
+.fp-workspace.is-single-pane .fp-browser-pane { flex: 1 1 auto; max-width: none; width: 100%; border-right: 0; }
 .fp-preview-pane { min-width: 0; }
+.fp-preview-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid hsl(var(--border));
+  background: rgba(139, 92, 246, 0.08);
+  color: hsl(var(--foreground));
+  font-size: 0.64rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.fp-preview-quick-btn:hover {
+  background: rgba(168, 85, 247, 0.2);
+  border-color: rgba(168, 85, 247, 0.55);
+}
 .fp-file-actions summary { list-style: none; }
 .fp-file-actions summary::-webkit-details-marker { display: none; }
 .fp-file-actions-panel > button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 8px 10px; border-radius: 4px; font-size: 12px; text-align: left; }
