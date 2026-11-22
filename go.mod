@@ -3,7 +3,7 @@ module github.com/brightman-ai/deepwork-terminal
 go 1.26
 
 require (
-	github.com/brightman-ai/kit v0.22.1
+	github.com/brightman-ai/kit v0.23.0
 	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.0
