@@ -31,3 +31,9 @@ tmp/
 
 # 32M 的发布二进制不是源码
 /.release-bin/
+
+# local-only artifacts: old binaries, browser evidence/screenshots, third-party reference clones, scratch dumps
+/dw-terminal.old-*
+/evidence/
+/refs/
+/json
